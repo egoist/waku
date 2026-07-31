@@ -8,8 +8,8 @@ import {
   cp,
   mkdir,
   mkdtemp,
+  readlink,
   rm,
-  symlink,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, extname, join, resolve } from "node:path";
@@ -18,6 +18,8 @@ import { parseArgs } from "node:util";
 const appName = "Waku";
 const executableName = "Waku";
 const packageName = "waku";
+const defaultSigningIdentity = "GJE9R5VE87";
+const defaultNotaryProfile = "NOTARY";
 const projectRoot = resolve(import.meta.dir, "..");
 
 const help = `Create a production macOS DMG for Waku.
@@ -27,10 +29,10 @@ Usage:
 
 Options:
   --output <path>               Output path (default: dist/Waku-<version>.dmg)
-  --signing-identity <name>     Developer ID Application identity
-                                (or WAKU_SIGNING_IDENTITY)
+  --signing-identity <name>     Developer ID Application identity selector
+                                (default: GJE9R5VE87; or WAKU_SIGNING_IDENTITY)
   --notary-profile <name>       notarytool keychain profile
-                                (or WAKU_NOTARY_PROFILE)
+                                (default: NOTARY; or WAKU_NOTARY_PROFILE)
   --build-number <number>       CFBundleVersion override
                                 (or WAKU_BUILD_NUMBER)
   --volume-name <name>          Mounted DMG name (default: Waku)
@@ -40,12 +42,10 @@ Options:
   --help                        Show this help
 
 Production example:
-  WAKU_SIGNING_IDENTITY="Developer ID Application: Example (TEAMID)" \\
-  WAKU_NOTARY_PROFILE="waku-notary" \\
   bun scripts/package-dmg.ts
 
 Before the first production build, create the keychain profile with:
-  xcrun notarytool store-credentials waku-notary
+  xcrun notarytool store-credentials NOTARY
 `;
 
 const { values } = parseArgs({
@@ -92,27 +92,19 @@ type CargoMetadata = {
 
 const adhoc = values.adhoc ?? false;
 const skipNotarize = values["skip-notarize"] ?? false;
-const signingIdentity =
+const configuredSigningIdentity =
   values["signing-identity"] ?? process.env.WAKU_SIGNING_IDENTITY;
+const signingIdentity =
+  configuredSigningIdentity ?? defaultSigningIdentity;
 const notaryProfile =
-  values["notary-profile"] ?? process.env.WAKU_NOTARY_PROFILE;
+  values["notary-profile"] ??
+  process.env.WAKU_NOTARY_PROFILE ??
+  defaultNotaryProfile;
 const buildNumber =
   values["build-number"] ?? process.env.WAKU_BUILD_NUMBER;
 
-if (adhoc && signingIdentity) {
+if (adhoc && configuredSigningIdentity) {
   throw new Error("Use either --adhoc or --signing-identity, not both.");
-}
-if (!adhoc && !signingIdentity) {
-  throw new Error(
-    "A Developer ID identity is required. Set WAKU_SIGNING_IDENTITY, " +
-      "pass --signing-identity, or use --adhoc for a local test build.",
-  );
-}
-if (!adhoc && !skipNotarize && !notaryProfile) {
-  throw new Error(
-    "A notarytool profile is required. Set WAKU_NOTARY_PROFILE, " +
-      "pass --notary-profile, or explicitly use --skip-notarize.",
-  );
 }
 if (buildNumber && !/^\d+(?:\.\d+){0,2}$/.test(buildNumber)) {
   throw new Error(
@@ -120,7 +112,14 @@ if (buildNumber && !/^\d+(?:\.\d+){0,2}$/.test(buildNumber)) {
   );
 }
 
-for (const tool of ["cargo", "codesign", "hdiutil", "plutil", "xattr"]) {
+for (const tool of [
+  "cargo",
+  "codesign",
+  "create-dmg",
+  "diskutil",
+  "plutil",
+  "xattr",
+]) {
   requireTool(tool);
 }
 if (!adhoc && !skipNotarize) {
@@ -159,11 +158,19 @@ const contentsDirectory = join(appBundle, "Contents");
 if (extname(outputPath).toLowerCase() !== ".dmg") {
   throw new Error(`Output path must end in .dmg: ${outputPath}`);
 }
-if (!volumeName.trim() || volumeName.includes("/")) {
-  throw new Error("--volume-name must be non-empty and cannot contain '/'.");
+if (
+  !volumeName.trim() ||
+  volumeName.includes("/") ||
+  volumeName.length > 27
+) {
+  throw new Error(
+    "--volume-name must be non-empty, at most 27 characters, and cannot contain '/'.",
+  );
 }
 
 let temporaryDirectory: string | undefined;
+let mountedDmg = false;
+let mountDirectory: string | undefined;
 
 try {
   if (!values["skip-build"]) {
@@ -210,16 +217,17 @@ try {
 
   temporaryDirectory = await mkdtemp(join(tmpdir(), "waku-dmg-"));
   const stagingDirectory = join(temporaryDirectory, "root");
+  mountDirectory = join(temporaryDirectory, "mount");
   await mkdir(stagingDirectory);
   await cp(appBundle, join(stagingDirectory, `${appName}.app`), {
     preserveTimestamps: true,
     recursive: true,
   });
-  await symlink("/Applications", join(stagingDirectory, "Applications"));
   await mkdir(dirname(outputPath), { recursive: true });
+  await rm(outputPath, { force: true });
 
-  logStep(`Creating ${outputPath}`);
-  await $`hdiutil create -volname ${volumeName} -srcfolder ${stagingDirectory} -format UDZO -ov ${outputPath}`;
+  logStep(`Creating the styled DMG at ${outputPath}`);
+  await $`create-dmg --volname ${volumeName} --window-pos 200 120 --window-size 660 400 --text-size 13 --icon-size 128 --icon ${`${appName}.app`} 180 178 --hide-extension ${`${appName}.app`} --app-drop-link 480 178 --filesystem APFS --format ULFO --no-internet-enable --overwrite ${outputPath} ${stagingDirectory}`;
 
   logStep(adhoc ? "Ad-hoc signing the DMG" : "Signing the DMG");
   if (adhoc) {
@@ -228,6 +236,26 @@ try {
     await $`codesign --force --timestamp --sign ${identity} ${outputPath}`;
   }
   await $`codesign --verify --verbose=2 ${outputPath}`;
+
+  logStep("Verifying the DMG contents");
+  await mkdir(mountDirectory);
+  await $`diskutil image attach --readOnly --mountOptions nobrowse --mountPoint ${mountDirectory} ${outputPath}`;
+  mountedDmg = true;
+  await access(
+    join(mountDirectory, `${appName}.app`, "Contents", "MacOS", executableName),
+  );
+  await access(join(mountDirectory, ".DS_Store"));
+  const applicationsTarget = await readlink(
+    join(mountDirectory, "Applications"),
+  );
+  if (applicationsTarget !== "/Applications") {
+    throw new Error(
+      `DMG Applications link points to "${applicationsTarget}", expected "/Applications".`,
+    );
+  }
+  await $`codesign --verify --deep --strict --verbose=2 ${join(mountDirectory, `${appName}.app`)}`;
+  await $`diskutil eject ${mountDirectory}`;
+  mountedDmg = false;
 
   if (!adhoc && !skipNotarize) {
     logStep("Submitting the DMG for Apple notarization");
@@ -265,7 +293,17 @@ try {
 
   console.log(`\nDMG ready: ${outputPath}`);
 } finally {
-  if (temporaryDirectory) {
+  if (mountedDmg && mountDirectory) {
+    const result = await $`diskutil eject ${mountDirectory}`.quiet().nothrow();
+    if (result.exitCode === 0) {
+      mountedDmg = false;
+    } else {
+      console.warn(`Unable to detach temporary mount at ${mountDirectory}.`);
+    }
+  }
+  if (temporaryDirectory && !mountedDmg) {
     await rm(temporaryDirectory, { force: true, recursive: true });
+  } else if (temporaryDirectory) {
+    console.warn(`Temporary files retained at ${temporaryDirectory}.`);
   }
 }
