@@ -52,6 +52,31 @@ scripts/bundle.sh release
 open target/release/Waku.app
 ```
 
+### Production DMG
+
+The Bun TypeScript packager builds the release executable, assembles and signs
+`Waku.app`, creates a compressed DMG with an Applications shortcut, submits it
+for notarization, and staples the accepted ticket:
+
+```sh
+xcrun notarytool store-credentials waku-notary
+
+WAKU_SIGNING_IDENTITY="Developer ID Application: Example (TEAMID)" \
+WAKU_NOTARY_PROFILE="waku-notary" \
+bun scripts/package-dmg.ts
+```
+
+The default artifact is `dist/Waku-<version>.dmg`. Use an ad-hoc signature to
+exercise the complete local build and disk-image flow without Apple
+distribution credentials:
+
+```sh
+bun scripts/package-dmg.ts --adhoc
+```
+
+Run `bun scripts/package-dmg.ts --help` for output, version, build-number, and
+notarization options.
+
 ## Interaction model
 
 - Add local project folders from the sidebar.

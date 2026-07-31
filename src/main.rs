@@ -6,6 +6,7 @@ mod input;
 mod model;
 mod model_catalog;
 mod persistence;
+mod platform;
 mod theme;
 mod ui;
 

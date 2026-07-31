@@ -7,8 +7,8 @@ use crossbeam_channel::{Receiver, unbounded};
 use gpui::{
     Animation, AnimationExt, AnyElement, App, BoxShadow, ClipboardItem, Context, Corner, Div,
     Entity, FocusHandle, Focusable, FontWeight, Hsla, IntoElement, ListAlignment, ListState,
-    PathPromptOptions, Render, SharedString, StyleRefinement, Timer, Window, div, hsla, list,
-    point, prelude::*, pulsating_between, px, rems,
+    MouseButton, PathPromptOptions, Render, SharedString, StyleRefinement, Timer, Window, div,
+    hsla, list, point, prelude::*, pulsating_between, px, rems,
 };
 use uuid::Uuid;
 
@@ -167,6 +167,7 @@ pub struct Waku {
     expanded_activity_items: HashSet<Uuid>,
     pending_permission: Option<PendingPermission>,
     sidebar_visible: bool,
+    header_drag_armed: bool,
     branch: Option<String>,
     toast: Option<String>,
     pending_revert: Option<(Uuid, usize)>,
@@ -322,6 +323,7 @@ impl Waku {
                 expanded_activity_items: HashSet::new(),
                 pending_permission: None,
                 sidebar_visible: true,
+                header_drag_armed: false,
                 branch,
                 toast: None,
                 pending_revert: None,
@@ -1780,12 +1782,13 @@ impl Waku {
 
     // ── Header ─────────────────────────────────────────────────────────────
 
-    fn render_header(&self, cx: &mut Context<Self>) -> Div {
+    fn render_header(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::dark();
         let session = self.selected_session();
         let provider = session.map(|session| session.provider).unwrap_or_default();
         let status = session.map(|session| session.status).unwrap_or_default();
         div()
+            .id("window-header")
             .h(px(46.0))
             .flex_none()
             .flex()
@@ -1799,6 +1802,32 @@ impl Waku {
             .pr(px(14.0))
             .border_b_1()
             .border_color(theme.border)
+            .on_click(|event, window, _| {
+                if event.click_count() == 2 {
+                    window.titlebar_double_click();
+                }
+            })
+            .on_mouse_down_out(cx.listener(|this, _, _, _| {
+                this.header_drag_armed = false;
+            }))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _, _, _| {
+                    this.header_drag_armed = true;
+                }),
+            )
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|this, _, _, _| {
+                    this.header_drag_armed = false;
+                }),
+            )
+            .on_mouse_move(cx.listener(|this, _, window, _| {
+                if this.header_drag_armed {
+                    this.header_drag_armed = false;
+                    crate::platform::start_window_move(window);
+                }
+            }))
             .child(
                 div()
                     .id("toggle-sidebar")
@@ -1813,7 +1842,11 @@ impl Waku {
                     .hover(|element| element.bg(theme.overlay))
                     .active(|element| element.bg(theme.overlay_strong))
                     .child(icon("icons/panel-left.svg", 14.0, theme.text_tertiary))
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                        cx.stop_propagation();
+                    })
                     .on_click(cx.listener(|this, _, _, cx| {
+                        cx.stop_propagation();
                         this.sidebar_visible = !this.sidebar_visible;
                         cx.notify();
                     })),

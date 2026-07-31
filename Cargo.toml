@@ -19,6 +19,18 @@ serde_json = "1.0"
 unicode-segmentation = "1.12"
 uuid = { version = "1.18", features = ["v4", "serde"] }
 
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-app-kit = { version = "0.3", default-features = false, features = [
+    "std",
+    "NSApplication",
+    "NSEvent",
+    "NSResponder",
+    "NSView",
+    "NSWindow",
+] }
+raw-window-handle = "0.6"
+
 [profile.release]
 lto = "thin"
 codegen-units = 1
