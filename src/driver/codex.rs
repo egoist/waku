@@ -74,7 +74,42 @@ impl CodexDriver {
         let computer_use_server_path = computer_use::mcp_server_command()?;
         let computer_use_server = toml_string(&computer_use_server_path.display().to_string());
         let computer_use_client_path = computer_use::node_repl_client_path()?;
+        let computer_use_client = toml_string(&computer_use_client_path.display().to_string());
         let computer_use_skill_root = computer_use::skill_root_path()?;
+        let computer_use_resources = computer_use_client_path
+            .parent()
+            .ok_or_else(|| anyhow!("Waku Computer Use client has no resource directory"))?;
+        let codex_home = std::env::var_os("CODEX_HOME")
+            .map(std::path::PathBuf::from)
+            .or_else(|| dirs::home_dir().map(|home| home.join(".codex")));
+        let trusted_code_paths = codex_home
+            .into_iter()
+            .chain(std::iter::once(computer_use_resources.to_path_buf()))
+            .map(|path| path.display().to_string())
+            .collect::<Vec<_>>()
+            .join(":");
+        let trusted_code_paths = toml_string(&trusted_code_paths);
+        let node_repl_env_allowlist = toml_string(
+            &[
+                "BROWSER_USE_AVAILABLE_BACKENDS",
+                "BROWSER_USE_CODEX_APP_BUILD_FLAVOR",
+                "BROWSER_USE_CODEX_APP_VERSION",
+                "CODEX_CLI_PATH",
+                "CODEX_HOME",
+                "NODE_REPL_INSTRUCTIONS_USE_CASE_BROWSER",
+                "NODE_REPL_INSTRUCTIONS_USE_CASE_CHROME",
+                "NODE_REPL_INSTRUCTIONS_USE_CASE_COMPUTER_USE",
+                "NODE_REPL_NATIVE_PIPE_CONNECT_TIMEOUT_MS",
+                "NODE_REPL_NODE_MODULE_DIRS",
+                "NODE_REPL_NODE_PATH",
+                "NODE_REPL_TRUSTED_BROWSER_CLIENT_SHA256S",
+                "NODE_REPL_TRUSTED_CODE_PATHS",
+                "SKY_CUA_SERVICE_PATH",
+                "WAKU_COMPUTER_USE_CLIENT",
+                "WAKU_COMPUTER_USE_SERVER",
+            ]
+            .join(","),
+        );
         let mut command = crate::command_env::command(binary);
         command.env("WAKU_COMPUTER_USE_SERVER", &computer_use_server_path);
         command.env("WAKU_COMPUTER_USE_CLIENT", &computer_use_client_path);
@@ -88,6 +123,22 @@ impl CodexDriver {
             .arg(DISABLE_EXTERNAL_COMPUTER_USE_MCP)
             .arg("-c")
             .arg(DISABLE_EXTERNAL_COMPUTER_USE_SKILL)
+            .arg("-c")
+            .arg(format!(
+                "mcp_servers.node_repl.env.WAKU_COMPUTER_USE_SERVER={computer_use_server}"
+            ))
+            .arg("-c")
+            .arg(format!(
+                "mcp_servers.node_repl.env.WAKU_COMPUTER_USE_CLIENT={computer_use_client}"
+            ))
+            .arg("-c")
+            .arg(format!(
+                "mcp_servers.node_repl.env.NODE_REPL_UNTRUSTED_ENV_ALLOWLIST={node_repl_env_allowlist}"
+            ))
+            .arg("-c")
+            .arg(format!(
+                "mcp_servers.node_repl.env.NODE_REPL_TRUSTED_CODE_PATHS={trusted_code_paths}"
+            ))
             .arg("-c")
             .arg(format!(
                 "mcp_servers.waku_computer_use.command={computer_use_server}"
