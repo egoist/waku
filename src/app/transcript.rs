@@ -78,7 +78,9 @@ impl Waku {
                                         activity_disclosure_text(activity).map_or(
                                             Pixels::ZERO,
                                             |detail| {
-                                                px(14.0) + estimated_text_height(&detail, 76, 17.0)
+                                                px(14.0)
+                                                    + estimated_text_height(&detail, 76, 17.0)
+                                                    + activity_image_height(activity)
                                             },
                                         )
                                     } else {
@@ -915,6 +917,13 @@ pub(super) fn estimated_text_height(
         .sum::<f32>()
         .max(1.0);
     px(visual_lines * line_height)
+}
+
+pub(super) const ACTIVITY_IMAGE_WIDTH: f32 = 300.0;
+pub(super) const ACTIVITY_IMAGE_HEIGHT: f32 = 200.0;
+
+pub(super) fn activity_image_height(activity: &ActivityItem) -> Pixels {
+    px(ACTIVITY_IMAGE_HEIGHT * activity.image_urls.len() as f32)
 }
 
 pub(super) fn markdown_estimation_source(text: &str) -> (String, Pixels) {

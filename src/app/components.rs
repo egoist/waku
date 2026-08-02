@@ -659,6 +659,9 @@ pub(super) fn activity_disclosure_text(activity: &ActivityItem) -> Option<String
     {
         sections.push(format!("Output\n{output}"));
     }
+    if !activity.image_urls.is_empty() && activity.output.is_none() {
+        sections.push("Output".to_owned());
+    }
     if !sections.is_empty() {
         return Some(sections.join("\n\n"));
     }
@@ -677,6 +680,11 @@ pub(super) fn activity_preview(activity: &ActivityItem) -> String {
         && let Some(first_line) = output.lines().find(|line| !line.trim().is_empty())
     {
         return first_line.trim().to_owned();
+    }
+    if (detail.is_empty() || detail.eq_ignore_ascii_case("failed"))
+        && !activity.image_urls.is_empty()
+    {
+        return "Image output".to_owned();
     }
     detail.to_owned()
 }
@@ -778,5 +786,19 @@ mod message_time_tests {
             activity_preview(&activity),
             "Computer Use helper closed its session"
         );
+
+        let image_only = ActivityItem::new(
+            Some("tool-2".into()),
+            crate::model::ActivityKind::Tool,
+            "Screenshot",
+            None,
+            true,
+        )
+        .with_image_urls(vec!["data:image/png;base64,aGVsbG8=".into()]);
+        assert_eq!(
+            activity_disclosure_text(&image_only).as_deref(),
+            Some("Output")
+        );
+        assert_eq!(activity_preview(&image_only), "Image output");
     }
 }

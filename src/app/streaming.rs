@@ -114,6 +114,9 @@ impl Waku {
                     if item.output.is_some() {
                         activity.output = item.output;
                     }
+                    if !item.image_urls.is_empty() {
+                        activity.image_urls = item.image_urls;
+                    }
                     session.updated_at = unix_time();
                     runtime.stream_phase = Some(StreamPhase::Activity);
                     return;

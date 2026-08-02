@@ -933,6 +933,10 @@ pub struct ActivityItem {
     pub arguments: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output: Option<String>,
+    /// Images returned by a tool, kept separate from text so large data URLs
+    /// are never truncated or treated as literal activity output.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub image_urls: Vec<String>,
     #[serde(default)]
     pub failed: bool,
     pub complete: bool,
@@ -954,6 +958,7 @@ impl ActivityItem {
             detail,
             arguments: None,
             output: None,
+            image_urls: Vec::new(),
             failed: false,
             complete,
         }
@@ -966,6 +971,11 @@ impl ActivityItem {
 
     pub fn with_output(mut self, output: Option<String>) -> Self {
         self.output = output;
+        self
+    }
+
+    pub fn with_image_urls(mut self, image_urls: Vec<String>) -> Self {
+        self.image_urls = image_urls;
         self
     }
 

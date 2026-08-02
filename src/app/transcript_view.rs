@@ -1,4 +1,5 @@
 use super::*;
+use base64::Engine as _;
 
 #[derive(Clone, Debug, PartialEq)]
 struct ConversationNavigationRailSnapshot {
@@ -971,46 +972,52 @@ impl Waku {
             .get(&block_index)
             .copied()
             .unwrap_or(live_turn);
-        let cluster = div().flex().flex_col().gap(px(2.0)).child(
-            div()
-                .id(SharedString::from(format!("activity-toggle-{block_index}")))
-                .h(px(22.0))
-                .flex()
-                .items_center()
-                .gap(px(6.0))
-                .text_size(px(11.0))
-                .line_height(px(14.0))
-                .cursor_default()
-                .child(icon(
-                    if expanded {
-                        "icons/chevron-down.svg"
-                    } else {
-                        "icons/chevron-right.svg"
-                    },
-                    9.0,
-                    theme.text_ghost,
-                ))
-                .when(running, |element| {
-                    element.child(pulse_dot(
-                        format!("activity-running-{block_index}"),
-                        5.0,
-                        theme.accent,
+        let cluster = div()
+            .w_full()
+            .min_w_0()
+            .flex()
+            .flex_col()
+            .gap(px(2.0))
+            .child(
+                div()
+                    .id(SharedString::from(format!("activity-toggle-{block_index}")))
+                    .h(px(22.0))
+                    .flex()
+                    .items_center()
+                    .gap(px(6.0))
+                    .text_size(px(11.0))
+                    .line_height(px(14.0))
+                    .cursor_default()
+                    .child(icon(
+                        if expanded {
+                            "icons/chevron-down.svg"
+                        } else {
+                            "icons/chevron-right.svg"
+                        },
+                        9.0,
+                        theme.text_ghost,
                     ))
-                })
-                .child(
-                    div()
-                        .font_weight(FontWeight::MEDIUM)
-                        .text_color(theme.text_tertiary)
-                        .child(SharedString::from(activity_summary(activities))),
-                )
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    this.toggle_activities(block_index, expanded, cx);
-                })),
-        );
+                    .when(running, |element| {
+                        element.child(pulse_dot(
+                            format!("activity-running-{block_index}"),
+                            5.0,
+                            theme.accent,
+                        ))
+                    })
+                    .child(
+                        div()
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(theme.text_tertiary)
+                            .child(SharedString::from(activity_summary(activities))),
+                    )
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.toggle_activities(block_index, expanded, cx);
+                    })),
+            );
         if !expanded {
             return cluster.into_any_element();
         }
-        let mut items = div().flex().flex_col().pl(px(15.0));
+        let mut items = div().w_full().min_w_0().flex().flex_col().pl(px(15.0));
         for activity in activities {
             let id = activity.id;
             let detail = activity_disclosure_text(activity);
@@ -1086,26 +1093,61 @@ impl Waku {
                     })),
             );
             if let Some(detail) = detail.filter(|_| item_expanded) {
-                item = item.child(
-                    div()
-                        .ml(px(21.0))
-                        .mt(px(2.0))
-                        .mb(px(4.0))
-                        .p(px(8.0))
-                        .rounded(px(7.0))
-                        .bg(theme.inset)
-                        .border_1()
-                        .border_color(theme.border)
-                        .font_family("SF Mono")
-                        .text_size(px(10.5))
-                        .line_height(px(16.0))
-                        .text_color(theme.text_secondary)
-                        .whitespace_normal()
-                        .child(SharedString::from(detail)),
-                );
+                let mut detail_card = div()
+                    .ml(px(21.0))
+                    .w_full()
+                    .max_w(gpui::relative(1.0))
+                    .min_w_0()
+                    .mt(px(2.0))
+                    .mb(px(4.0))
+                    .p(px(8.0))
+                    .rounded(px(7.0))
+                    .bg(theme.inset)
+                    .border_1()
+                    .border_color(theme.border)
+                    .font_family("SF Mono")
+                    .text_size(px(10.5))
+                    .line_height(px(16.0))
+                    .text_color(theme.text_secondary)
+                    .whitespace_normal()
+                    .overflow_hidden()
+                    .child(SharedString::from(detail));
+                for (image_index, image_url) in activity.image_urls.iter().enumerate() {
+                    detail_card =
+                        detail_card.child(render_activity_image(image_url, id, image_index));
+                }
+                item = item.child(detail_card);
             }
             items = items.child(item);
         }
         cluster.child(items).into_any_element()
     }
+}
+
+fn render_activity_image(image_url: &str, activity_id: Uuid, image_index: usize) -> AnyElement {
+    let element = match decode_activity_image(image_url) {
+        Some(image) => img(image),
+        None => img(image_url.to_owned()),
+    };
+    element
+        .id(SharedString::from(format!(
+            "activity-image-{activity_id}-{image_index}"
+        )))
+        .w(px(ACTIVITY_IMAGE_WIDTH))
+        .max_w(gpui::relative(1.0))
+        .max_h(px(ACTIVITY_IMAGE_HEIGHT))
+        .mt(px(8.0))
+        .rounded(px(4.0))
+        .object_fit(ObjectFit::Contain)
+        .into_any_element()
+}
+
+fn decode_activity_image(image_url: &str) -> Option<std::sync::Arc<gpui::Image>> {
+    let (header, encoded) = image_url.split_once(",")?;
+    let mime_type = header.strip_prefix("data:")?.split(';').next()?;
+    let format = gpui::ImageFormat::from_mime_type(mime_type)?;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(encoded)
+        .ok()?;
+    (!bytes.is_empty()).then(|| std::sync::Arc::new(gpui::Image::from_bytes(format, bytes)))
 }

@@ -906,6 +906,7 @@ fn handle_codex_message(
                 if let Some(kind) = kind {
                     let title = codex_item_title(item);
                     let output = codex_item_output(item);
+                    let image_urls = codex_item_image_urls(item);
                     let detail = codex_item_detail(item, output.as_deref());
                     let activity = ActivityItem::new(
                         item.get("id").and_then(Value::as_str).map(str::to_owned),
@@ -916,6 +917,7 @@ fn handle_codex_message(
                     )
                     .with_arguments(codex_item_arguments(item))
                     .with_output(output)
+                    .with_image_urls(image_urls)
                     .with_failed(codex_item_failed(item));
                     let _ = events.send(DriverEvent::RichActivity(activity));
                 }
@@ -1137,7 +1139,7 @@ fn codex_item_output(item: &Value) -> Option<String> {
                     Some("inputText") => {
                         item.get("text").and_then(Value::as_str).map(str::to_owned)
                     }
-                    Some("inputImage") => Some("[Image output]".into()),
+                    Some("inputImage") => None,
                     Some("inputAudio") => Some("[Audio output]".into()),
                     _ => format_activity_json(item),
                 })
@@ -1159,7 +1161,23 @@ fn codex_item_output(item: &Value) -> Option<String> {
             result
                 .get("content")
                 .filter(|value| !value.is_null())
-                .and_then(format_activity_json)
+                .and_then(|content| {
+                    let text_items = content
+                        .as_array()?
+                        .iter()
+                        .filter(|item| !is_image_content_item(item));
+                    let output = text_items
+                        .filter_map(|item| {
+                            if item.get("type").and_then(Value::as_str) == Some("text") {
+                                item.get("text").and_then(Value::as_str).map(str::to_owned)
+                            } else {
+                                format_activity_json(item)
+                            }
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n\n");
+                    non_empty_activity_text(output)
+                })
         }
         Some("commandExecution") => {
             let output = item
@@ -1177,6 +1195,48 @@ fn codex_item_output(item: &Value) -> Option<String> {
         }
         _ => None,
     }
+}
+
+fn codex_item_image_urls(item: &Value) -> Vec<String> {
+    let content = match item.get("type").and_then(Value::as_str) {
+        Some("dynamicToolCall") => item.get("contentItems"),
+        Some("mcpToolCall") => item.pointer("/result/content"),
+        _ => None,
+    };
+    content
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(image_content_url)
+        .collect()
+}
+
+fn image_content_url(item: &Value) -> Option<String> {
+    let item_type = item.get("type").and_then(Value::as_str);
+    if !matches!(item_type, Some("inputImage" | "image")) {
+        return None;
+    }
+    item.get("imageUrl")
+        .or_else(|| item.get("image_url"))
+        .or_else(|| item.get("url"))
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+        .or_else(|| {
+            let data = item.get("data").and_then(Value::as_str)?;
+            let mime_type = item
+                .get("mimeType")
+                .or_else(|| item.get("mime_type"))
+                .and_then(Value::as_str)
+                .unwrap_or("image/png");
+            Some(format!("data:{mime_type};base64,{data}"))
+        })
+}
+
+fn is_image_content_item(item: &Value) -> bool {
+    matches!(
+        item.get("type").and_then(Value::as_str),
+        Some("inputImage" | "image")
+    )
 }
 
 fn codex_item_failed(item: &Value) -> bool {
@@ -1623,5 +1683,46 @@ mod tests {
         );
         assert!(activity.failed);
         assert!(activity.complete);
+    }
+
+    #[test]
+    fn dynamic_tool_image_output_is_preserved_for_native_rendering() {
+        let image_url = "data:image/png;base64,aGVsbG8=";
+        let item = json!({
+            "type": "dynamicToolCall",
+            "contentItems": [
+                {"type": "inputText", "text": "Completed 1 action."},
+                {"type": "inputImage", "imageUrl": image_url}
+            ]
+        });
+
+        assert_eq!(
+            codex_item_output(&item).as_deref(),
+            Some("Completed 1 action.")
+        );
+        assert_eq!(codex_item_image_urls(&item), vec![image_url]);
+        assert!(!codex_item_output(&item).unwrap().contains("[Image output]"));
+    }
+
+    #[test]
+    fn mcp_image_content_is_removed_from_text_and_kept_as_an_image() {
+        let item = json!({
+            "type": "mcpToolCall",
+            "result": {
+                "content": [
+                    {"type": "text", "text": "Screenshot captured."},
+                    {"type": "image", "mimeType": "image/png", "data": "aGVsbG8="}
+                ]
+            }
+        });
+
+        assert_eq!(
+            codex_item_output(&item).as_deref(),
+            Some("Screenshot captured.")
+        );
+        assert_eq!(
+            codex_item_image_urls(&item),
+            vec!["data:image/png;base64,aGVsbG8=".to_owned()]
+        );
     }
 }
