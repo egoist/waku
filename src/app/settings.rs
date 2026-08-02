@@ -420,7 +420,7 @@ impl Waku {
                                     .text_size(px(13.5))
                                     .font_weight(FontWeight::MEDIUM)
                                     .text_color(theme.text)
-                                    .child("Let Codex use apps"),
+                                    .child("Let Waku use apps"),
                             )
                             .child(
                                 div()
@@ -428,7 +428,9 @@ impl Waku {
                                     .text_size(px(12.0))
                                     .line_height(px(18.0))
                                     .text_color(theme.text_secondary)
-                                    .child("Codex can inspect and control only the app window you approve. Window screenshots are shared with the active model; full workspace access never bypasses these grants."),
+                                    .child(
+                                        "Only the Codex provider supports Computer Use for now.",
+                                    ),
                             ),
                     )
                     .child(
@@ -549,17 +551,6 @@ impl Waku {
 
     fn set_computer_use_enabled(&mut self, enabled: bool, cx: &mut Context<Self>) {
         self.state.computer_use_enabled = enabled;
-        if !enabled {
-            for runtime in self.runtimes.values_mut() {
-                if let Some(pending) = runtime.pending_computer_approval.take() {
-                    runtime.driver.reject_computer_tool(
-                        pending.request,
-                        "Computer Use was disabled in Waku Settings.".into(),
-                    );
-                }
-                runtime.computer_session_grants.clear();
-            }
-        }
         self.save();
         if enabled {
             self.request_computer_permissions(true, cx);

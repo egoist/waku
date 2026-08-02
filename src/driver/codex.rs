@@ -4,7 +4,7 @@ use std::fs;
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::ffi::OsStringExt as _;
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
+use std::process::{Command, Stdio};
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
@@ -52,61 +52,53 @@ enum CommandMessage {
 
 pub struct CodexDriver {
     commands: Sender<CommandMessage>,
-    computer_use_process_directory: PathBuf,
-    computer_use_server_path: PathBuf,
+    computer_use_process_directory: Option<PathBuf>,
+    computer_use_server_path: Option<PathBuf>,
 }
 
-impl CodexDriver {
-    pub fn start(options: DriverStartOptions, events: Sender<DriverEvent>) -> anyhow::Result<Self> {
-        let DriverStartOptions {
-            binary,
-            cwd,
-            mode,
-            interaction_mode,
-            model,
-            reasoning_effort,
-            service_tier,
-            provider_cursor,
-        } = options;
-        let provider_session_id = match provider_cursor {
-            Some(ProviderResumeCursor::Codex { thread_id }) => Some(thread_id),
-            Some(cursor) => {
-                return Err(anyhow!(
-                    "cannot resume Codex from a {} cursor",
-                    cursor.provider().display_name()
-                ));
-            }
-            None => None,
-        };
-        let computer_use_server_path = computer_use::mcp_server_command()?;
-        let computer_use_process_directory = std::env::temp_dir()
-            .join("waku-computer-use")
-            .join(Uuid::new_v4().simple().to_string());
-        fs::create_dir_all(&computer_use_process_directory).with_context(|| {
-            format!(
-                "could not create Computer Use process directory {}",
-                computer_use_process_directory.display()
-            )
-        })?;
-        let computer_use_server = toml_string(&computer_use_server_path.display().to_string());
-        let computer_use_process_directory_config =
-            toml_string(&computer_use_process_directory.display().to_string());
-        let computer_use_client_path = computer_use::node_repl_client_path()?;
-        let computer_use_client = toml_string(&computer_use_client_path.display().to_string());
-        let computer_use_skill_root = computer_use::skill_root_path()?;
-        let computer_use_resources = computer_use_client_path
+struct CodexComputerUseConfig {
+    server_path: PathBuf,
+    server: String,
+    client_path: PathBuf,
+    client: String,
+    skill_root: PathBuf,
+    process_directory: PathBuf,
+    process_directory_config: String,
+    node_repl_env_allowlist: String,
+    trusted_code_paths: String,
+}
+
+impl CodexComputerUseConfig {
+    fn load() -> anyhow::Result<Self> {
+        let server_path = computer_use::mcp_server_command()?;
+        let server = toml_string(&server_path.display().to_string());
+        let client_path = computer_use::node_repl_client_path()?;
+        let client = toml_string(&client_path.display().to_string());
+        let skill_root = computer_use::skill_root_path()?;
+        let resources = client_path
             .parent()
             .ok_or_else(|| anyhow!("Waku Computer Use client has no resource directory"))?;
+        let process_directory = std::env::temp_dir()
+            .join("waku-computer-use")
+            .join(Uuid::new_v4().simple().to_string());
+        fs::create_dir_all(&process_directory).with_context(|| {
+            format!(
+                "could not create Computer Use process directory {}",
+                process_directory.display()
+            )
+        })?;
+        let process_directory_config = toml_string(&process_directory.display().to_string());
         let codex_home = std::env::var_os("CODEX_HOME")
-            .map(std::path::PathBuf::from)
+            .map(PathBuf::from)
             .or_else(|| dirs::home_dir().map(|home| home.join(".codex")));
-        let trusted_code_paths = codex_home
-            .into_iter()
-            .chain(std::iter::once(computer_use_resources.to_path_buf()))
-            .map(|path| path.display().to_string())
-            .collect::<Vec<_>>()
-            .join(":");
-        let trusted_code_paths = toml_string(&trusted_code_paths);
+        let trusted_code_paths = toml_string(
+            &codex_home
+                .into_iter()
+                .chain(std::iter::once(resources.to_path_buf()))
+                .map(|path| path.display().to_string())
+                .collect::<Vec<_>>()
+                .join(":"),
+        );
         let node_repl_env_allowlist = toml_string(
             &[
                 "BROWSER_USE_AVAILABLE_BACKENDS",
@@ -129,14 +121,107 @@ impl CodexDriver {
             ]
             .join(","),
         );
+        Ok(Self {
+            server_path,
+            server,
+            client_path,
+            client,
+            skill_root,
+            process_directory,
+            process_directory_config,
+            node_repl_env_allowlist,
+            trusted_code_paths,
+        })
+    }
+}
+
+fn configure_computer_use_command(command: &mut Command, config: Option<&CodexComputerUseConfig>) {
+    if let Some(config) = config {
+        command
+            .env("WAKU_COMPUTER_USE_SERVER", &config.server_path)
+            .env("WAKU_COMPUTER_USE_CLIENT", &config.client_path)
+            .env(
+                "WAKU_COMPUTER_USE_PROCESS_DIRECTORY",
+                &config.process_directory,
+            )
+            .arg("-c")
+            .arg(format!(
+                "mcp_servers.node_repl.env.WAKU_COMPUTER_USE_SERVER={}",
+                config.server
+            ))
+            .arg("-c")
+            .arg(format!(
+                "mcp_servers.node_repl.env.WAKU_COMPUTER_USE_CLIENT={}",
+                config.client
+            ))
+            .arg("-c")
+            .arg(format!(
+                "mcp_servers.node_repl.env.WAKU_COMPUTER_USE_PROCESS_DIRECTORY={}",
+                config.process_directory_config
+            ))
+            .arg("-c")
+            .arg(format!(
+                "mcp_servers.node_repl.env.NODE_REPL_UNTRUSTED_ENV_ALLOWLIST={}",
+                config.node_repl_env_allowlist
+            ))
+            .arg("-c")
+            .arg(format!(
+                "mcp_servers.node_repl.env.NODE_REPL_TRUSTED_CODE_PATHS={}",
+                config.trusted_code_paths
+            ))
+            .arg("-c")
+            .arg(format!(
+                "mcp_servers.waku_computer_use.command={}",
+                config.server
+            ))
+            .arg("-c")
+            .arg("mcp_servers.waku_computer_use.args=[\"mcp\"]")
+            .arg("-c")
+            .arg("mcp_servers.waku_computer_use.enabled=true");
+    } else {
+        command
+            .arg("-c")
+            .arg("mcp_servers.waku_computer_use.enabled=false");
+    }
+}
+
+impl CodexDriver {
+    pub fn start(options: DriverStartOptions, events: Sender<DriverEvent>) -> anyhow::Result<Self> {
+        let DriverStartOptions {
+            binary,
+            cwd,
+            mode,
+            interaction_mode,
+            model,
+            reasoning_effort,
+            service_tier,
+            computer_use_enabled,
+            provider_cursor,
+        } = options;
+        let provider_session_id = match provider_cursor {
+            Some(ProviderResumeCursor::Codex { thread_id }) => Some(thread_id),
+            Some(cursor) => {
+                return Err(anyhow!(
+                    "cannot resume Codex from a {} cursor",
+                    cursor.provider().display_name()
+                ));
+            }
+            None => None,
+        };
+        let computer_use = computer_use_enabled
+            .then(CodexComputerUseConfig::load)
+            .transpose()?;
+        let computer_use_skill_root = computer_use
+            .as_ref()
+            .map(|config| config.skill_root.clone());
+        let computer_use_process_directory = computer_use
+            .as_ref()
+            .map(|config| config.process_directory.clone());
+        let computer_use_server_path = computer_use
+            .as_ref()
+            .map(|config| config.server_path.clone());
         let mut command = crate::command_env::command(binary);
-        command.env("WAKU_COMPUTER_USE_SERVER", &computer_use_server_path);
-        command.env("WAKU_COMPUTER_USE_CLIENT", &computer_use_client_path);
-        command.env(
-            "WAKU_COMPUTER_USE_PROCESS_DIRECTORY",
-            &computer_use_process_directory,
-        );
-        let mut child = command
+        command
             .args(["app-server", "--stdio"])
             .arg("-c")
             .arg(DISABLE_EXTERNAL_COMPUTER_USE_PLUGIN)
@@ -145,35 +230,9 @@ impl CodexDriver {
             .arg("-c")
             .arg(DISABLE_EXTERNAL_COMPUTER_USE_MCP)
             .arg("-c")
-            .arg(DISABLE_EXTERNAL_COMPUTER_USE_SKILL)
-            .arg("-c")
-            .arg(format!(
-                "mcp_servers.node_repl.env.WAKU_COMPUTER_USE_SERVER={computer_use_server}"
-            ))
-            .arg("-c")
-            .arg(format!(
-                "mcp_servers.node_repl.env.WAKU_COMPUTER_USE_CLIENT={computer_use_client}"
-            ))
-            .arg("-c")
-            .arg(format!(
-                "mcp_servers.node_repl.env.WAKU_COMPUTER_USE_PROCESS_DIRECTORY={computer_use_process_directory_config}"
-            ))
-            .arg("-c")
-            .arg(format!(
-                "mcp_servers.node_repl.env.NODE_REPL_UNTRUSTED_ENV_ALLOWLIST={node_repl_env_allowlist}"
-            ))
-            .arg("-c")
-            .arg(format!(
-                "mcp_servers.node_repl.env.NODE_REPL_TRUSTED_CODE_PATHS={trusted_code_paths}"
-            ))
-            .arg("-c")
-            .arg(format!(
-                "mcp_servers.waku_computer_use.command={computer_use_server}"
-            ))
-            .arg("-c")
-            .arg("mcp_servers.waku_computer_use.args=[\"mcp\"]")
-            .arg("-c")
-            .arg("mcp_servers.waku_computer_use.enabled=true")
+            .arg(DISABLE_EXTERNAL_COMPUTER_USE_SKILL);
+        configure_computer_use_command(&mut command, computer_use.as_ref());
+        let mut child = command
             .current_dir(&cwd)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -246,25 +305,27 @@ impl CodexDriver {
                     return;
                 }
 
-                // Register Waku's bundled skill through Codex's discoverable-skill
-                // mechanism. Keep the skill out of developerInstructions so it is
-                // loaded and displayed like Codex's own bundled skills.
-                if write_json_line(
-                    &mut stdin,
-                    &json!({
-                        "method": "skills/extraRoots/set",
-                        "id": "waku-computer-use-skill",
-                        "params": {
-                            "extraRoots": [computer_use_skill_root.display().to_string()]
-                        }
-                    }),
-                )
-                .is_err()
-                {
-                    let _ = writer_events.send(DriverEvent::Error(
-                        "Failed to register Waku Computer Use skill with Codex".into(),
-                    ));
-                    return;
+                if let Some(computer_use_skill_root) = computer_use_skill_root {
+                    // Register Waku's bundled skill through Codex's discoverable-skill
+                    // mechanism. Keep the skill out of developerInstructions so it is
+                    // loaded and displayed like Codex's own bundled skills.
+                    if write_json_line(
+                        &mut stdin,
+                        &json!({
+                            "method": "skills/extraRoots/set",
+                            "id": "waku-computer-use-skill",
+                            "params": {
+                                "extraRoots": [computer_use_skill_root.display().to_string()]
+                            }
+                        }),
+                    )
+                    .is_err()
+                    {
+                        let _ = writer_events.send(DriverEvent::Error(
+                            "Failed to register Waku Computer Use skill with Codex".into(),
+                        ));
+                        return;
+                    }
                 }
 
                 let (approval_policy, sandbox, approvals_reviewer) =
@@ -570,10 +631,12 @@ impl DriverControl for CodexDriver {
     }
 
     fn cancel_computer_use(&self) {
-        stop_registered_computer_use_processes(
-            &self.computer_use_process_directory,
-            &self.computer_use_server_path,
-        );
+        if let (Some(directory), Some(server_path)) = (
+            self.computer_use_process_directory.as_deref(),
+            self.computer_use_server_path.as_deref(),
+        ) {
+            stop_registered_computer_use_processes(directory, server_path);
+        }
     }
 
     fn respond(&self, request_id: String, option_id: String) {
@@ -620,7 +683,9 @@ impl DriverControl for CodexDriver {
 impl Drop for CodexDriver {
     fn drop(&mut self) {
         self.cancel_computer_use();
-        let _ = fs::remove_dir_all(&self.computer_use_process_directory);
+        if let Some(directory) = self.computer_use_process_directory.as_deref() {
+            let _ = fs::remove_dir_all(directory);
+        }
         let _ = self.commands.send(CommandMessage::Shutdown);
     }
 }
@@ -1384,6 +1449,54 @@ mod tests {
         assert!(is_visible_stderr_notice(
             "Error: error loading default config after config error: invalid transport"
         ));
+    }
+
+    #[test]
+    fn computer_use_command_configuration_follows_the_setting() {
+        let mut disabled = Command::new("/usr/bin/true");
+        configure_computer_use_command(&mut disabled, None);
+        let disabled_arguments = disabled
+            .get_args()
+            .map(|argument| argument.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        assert!(
+            disabled_arguments
+                .iter()
+                .any(|argument| argument == "mcp_servers.waku_computer_use.enabled=false")
+        );
+        assert!(
+            disabled
+                .get_envs()
+                .all(|(name, _)| { !name.to_string_lossy().starts_with("WAKU_COMPUTER_USE_") })
+        );
+
+        let config = CodexComputerUseConfig {
+            server_path: PathBuf::from("/tmp/waku-computer-use-server"),
+            server: toml_string("/tmp/waku-computer-use-server"),
+            client_path: PathBuf::from("/tmp/waku-computer-use-client.mjs"),
+            client: toml_string("/tmp/waku-computer-use-client.mjs"),
+            skill_root: PathBuf::from("/tmp/waku-computer-use-skill"),
+            process_directory: PathBuf::from("/tmp/waku-computer-use-processes"),
+            process_directory_config: toml_string("/tmp/waku-computer-use-processes"),
+            node_repl_env_allowlist: toml_string("WAKU_COMPUTER_USE_SERVER"),
+            trusted_code_paths: toml_string("/tmp"),
+        };
+        let mut enabled = Command::new("/usr/bin/true");
+        configure_computer_use_command(&mut enabled, Some(&config));
+        let enabled_arguments = enabled
+            .get_args()
+            .map(|argument| argument.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        assert!(
+            enabled_arguments
+                .iter()
+                .any(|argument| argument == "mcp_servers.waku_computer_use.enabled=true")
+        );
+        assert!(
+            enabled
+                .get_envs()
+                .any(|(name, _)| { name.to_string_lossy() == "WAKU_COMPUTER_USE_SERVER" })
+        );
     }
 
     #[test]

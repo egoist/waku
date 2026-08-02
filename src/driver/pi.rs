@@ -47,6 +47,7 @@ impl PiDriver {
             model,
             reasoning_effort,
             service_tier: _,
+            computer_use_enabled: _,
             provider_cursor,
         } = options;
         if mode != RuntimeMode::FullAccess || interaction_mode != InteractionMode::Build {

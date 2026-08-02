@@ -934,6 +934,7 @@ impl Waku {
                 model,
                 reasoning_effort,
                 service_tier,
+                computer_use_enabled: self.state.computer_use_enabled,
                 provider_cursor: session.provider_cursor.clone(),
             },
             event_tx,

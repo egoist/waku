@@ -40,6 +40,7 @@ impl HeadlessDriver {
             model,
             reasoning_effort,
             service_tier,
+            computer_use_enabled: _,
             provider_cursor: existing_cursor,
         } = options;
         if provider == ProviderKind::Amp
