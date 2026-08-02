@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -259,6 +260,7 @@ impl StateStore {
         for session in &mut state.sessions {
             session.migrate_legacy_state();
         }
+        normalize_computer_app_grants(&mut state.computer_use_allowed_apps);
         if let Some(session) = state
             .selected_session
             .and_then(|selected_session| {
@@ -292,6 +294,13 @@ impl StateStore {
         fs::write(&temporary_path, data)?;
         fs::rename(temporary_path, &self.path)
     }
+}
+
+fn normalize_computer_app_grants(grants: &mut Vec<ComputerAppGrant>) {
+    let mut seen_bundle_ids = HashSet::new();
+    grants.retain(|grant| {
+        !grant.bundle_id.trim().is_empty() && seen_bundle_ids.insert(grant.bundle_id.clone())
+    });
 }
 
 fn temporary_path(path: &Path) -> PathBuf {
@@ -343,7 +352,6 @@ mod tests {
         state.computer_use_enabled = false;
         state.computer_use_allowed_apps.push(ComputerAppGrant {
             bundle_id: "com.apple.Safari".into(),
-            team_id: "APPLECOMPUTER".into(),
             app_name: "Safari".into(),
         });
         state.sessions[0].begin_turn("Persist this session");
@@ -405,6 +413,39 @@ mod tests {
                 if reasoning.content == "Checking the source"
         ));
         fs::remove_dir_all(directory).ok();
+    }
+
+    #[test]
+    fn legacy_signed_computer_grants_migrate_to_bundle_ids() {
+        let legacy = serde_json::json!({
+            "bundleId": "net.imput.helium",
+            "teamId": "S4Q33XPHB4",
+            "appName": "Helium"
+        });
+        let grant: ComputerAppGrant = serde_json::from_value(legacy).unwrap();
+        assert_eq!(grant.key(), "net.imput.helium");
+
+        let mut grants = vec![
+            grant,
+            ComputerAppGrant {
+                bundle_id: "net.imput.helium".into(),
+                app_name: "Helium Preview".into(),
+            },
+            ComputerAppGrant {
+                bundle_id: String::new(),
+                app_name: "Missing identity".into(),
+            },
+        ];
+        normalize_computer_app_grants(&mut grants);
+        assert_eq!(grants.len(), 1);
+        assert_eq!(grants[0].app_name, "Helium");
+
+        let saved = serde_json::to_value(&grants[0]).unwrap();
+        assert_eq!(
+            saved.get("bundleId").and_then(|value| value.as_str()),
+            Some("net.imput.helium")
+        );
+        assert!(saved.get("teamId").is_none());
     }
 
     #[test]

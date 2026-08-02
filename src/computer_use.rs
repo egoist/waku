@@ -51,16 +51,11 @@ pub struct ComputerTarget {
 
 impl ComputerTarget {
     pub fn grant_key(&self) -> String {
-        match self.team_id.as_deref() {
-            Some(team_id) if !team_id.is_empty() => format!("{}:{team_id}", self.bundle_id),
-            _ => self.bundle_id.clone(),
-        }
+        self.bundle_id.clone()
     }
 
     pub fn persistable(&self) -> bool {
-        self.team_id
-            .as_ref()
-            .is_some_and(|team_id| !team_id.is_empty())
+        !self.bundle_id.trim().is_empty()
     }
 }
 
@@ -68,13 +63,12 @@ impl ComputerTarget {
 #[serde(rename_all = "camelCase")]
 pub struct ComputerAppGrant {
     pub bundle_id: String,
-    pub team_id: String,
     pub app_name: String,
 }
 
 impl ComputerAppGrant {
     pub fn key(&self) -> String {
-        format!("{}:{}", self.bundle_id, self.team_id)
+        self.bundle_id.clone()
     }
 }
 
@@ -1030,7 +1024,7 @@ mod tests {
     }
 
     #[test]
-    fn always_allowed_signed_app_does_not_prompt_again_for_keyboard_actions() {
+    fn always_allowed_bundle_id_does_not_prompt_again_for_keyboard_actions() {
         let target = ComputerTarget {
             window_id: 42,
             bundle_id: "net.imput.helium".into(),
@@ -1053,11 +1047,30 @@ mod tests {
 
         let allowed_apps = vec![ComputerAppGrant {
             bundle_id: "net.imput.helium".into(),
-            team_id: "S4Q33XPHB4".into(),
             app_name: "Helium".into(),
         }];
         assert!(!requires_app_approval(
             request.target().as_ref().unwrap(),
+            &allowed_apps,
+            &HashSet::new(),
+        ));
+
+        let rebuilt_target = ComputerTarget {
+            team_id: Some("DIFFERENTTEAM".into()),
+            ..request.target().unwrap()
+        };
+        assert!(!requires_app_approval(
+            &rebuilt_target,
+            &allowed_apps,
+            &HashSet::new(),
+        ));
+
+        let different_bundle = ComputerTarget {
+            bundle_id: "net.imput.helium.preview".into(),
+            ..rebuilt_target
+        };
+        assert!(requires_app_approval(
+            &different_bundle,
             &allowed_apps,
             &HashSet::new(),
         ));

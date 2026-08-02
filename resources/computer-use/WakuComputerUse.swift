@@ -405,7 +405,10 @@ private func currentPermissions() -> Permissions {
 }
 
 private func availableContent() async throws -> SCShareableContent {
-    try await SCShareableContent.excludingDesktopWindows(true, onScreenWindowsOnly: true)
+    try await SCShareableContent.excludingDesktopWindows(
+        true,
+        onScreenWindowsOnly: false
+    )
 }
 
 private func availableWindows(in content: SCShareableContent) -> [SCWindow] {

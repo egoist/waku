@@ -307,16 +307,29 @@ impl Waku {
                     .child("No apps are always allowed. Task-scoped grants stay in memory only."),
             );
         } else {
-            for grant in &self.state.computer_use_allowed_apps {
+            for (index, grant) in self.state.computer_use_allowed_apps.iter().enumerate() {
                 let key = grant.key();
+                let is_last = index + 1 == self.state.computer_use_allowed_apps.len();
+                let app_icon = self.computer_use_app_icon(&grant.bundle_id, cx);
                 allowed_apps = allowed_apps.child(
                     div()
                         .py(px(9.0))
                         .flex()
                         .items_center()
                         .gap(px(10.0))
-                        .border_b_1()
-                        .border_color(theme.border)
+                        .when(!is_last, |element| {
+                            element.border_b_1().border_color(theme.border)
+                        })
+                        .child(
+                            div()
+                                .w(px(32.0))
+                                .h(px(32.0))
+                                .flex_none()
+                                .rounded(px(7.0))
+                                .when_some(app_icon, |element, app_icon| {
+                                    element.child(img(app_icon).size_full().rounded(px(7.0)))
+                                }),
+                        )
                         .child(
                             div()
                                 .flex_1()
@@ -470,31 +483,6 @@ impl Waku {
                             .gap(px(8.0))
                             .child(
                                 div()
-                                    .id("request-computer-permissions")
-                                    .h(px(28.0))
-                                    .px(px(11.0))
-                                    .rounded(px(7.0))
-                                    .bg(theme.inverse)
-                                    .text_color(theme.on_inverse)
-                                    .flex()
-                                    .items_center()
-                                    .cursor_default()
-                                    .text_size(px(10.5))
-                                    .font_weight(FontWeight::MEDIUM)
-                                    .opacity(if pending { 0.6 } else { 1.0 })
-                                    .child(if pending {
-                                        "Checking…"
-                                    } else if access_ready {
-                                        "Access granted"
-                                    } else {
-                                        "Request access"
-                                    })
-                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                        this.request_computer_permissions(!access_ready, cx);
-                                    })),
-                            )
-                            .child(
-                                div()
                                     .id("recheck-computer-permissions")
                                     .h(px(28.0))
                                     .px(px(11.0))
@@ -506,7 +494,8 @@ impl Waku {
                                     .items_center()
                                     .cursor_default()
                                     .text_size(px(10.5))
-                                    .child("Recheck")
+                                    .opacity(if pending { 0.6 } else { 1.0 })
+                                    .child(if pending { "Checking…" } else { "Recheck" })
                                     .on_click(cx.listener(|this, _, _, cx| {
                                         this.request_computer_permissions(false, cx);
                                     })),
@@ -587,6 +576,44 @@ impl Waku {
             .retain(|grant| grant.key() != key);
         self.save();
         cx.notify();
+    }
+
+    fn computer_use_app_icon(
+        &self,
+        bundle_id: &str,
+        cx: &mut Context<Self>,
+    ) -> Option<std::sync::Arc<gpui::Image>> {
+        if let Some(icon) = self.computer_use_app_icons.borrow().get(bundle_id) {
+            return icon.clone();
+        }
+
+        let bundle_id = bundle_id.to_owned();
+        if self
+            .computer_use_app_icon_loads
+            .borrow_mut()
+            .insert(bundle_id.clone())
+        {
+            cx.spawn(async move |this, cx| {
+                let load_bundle_id = bundle_id.clone();
+                let icon =
+                    cx.background_executor()
+                        .spawn(async move {
+                            crate::platform::load_app_icon_for_bundle_id(&load_bundle_id)
+                        })
+                        .await;
+                let _ = this.update(cx, |this, cx| {
+                    this.computer_use_app_icon_loads
+                        .borrow_mut()
+                        .remove(&bundle_id);
+                    this.computer_use_app_icons
+                        .borrow_mut()
+                        .insert(bundle_id, icon);
+                    cx.notify();
+                });
+            })
+            .detach();
+        }
+        None
     }
 
     fn open_privacy_settings(pane: &'static str) {
@@ -688,17 +715,6 @@ fn permission_status_row(
         )
         .child(
             div()
-                .text_size(px(10.0))
-                .font_weight(FontWeight::MEDIUM)
-                .text_color(if granted {
-                    theme.text_secondary
-                } else {
-                    theme.warning
-                })
-                .child(if granted { "Granted" } else { "Needs access" }),
-        )
-        .child(
-            div()
                 .id(id)
                 .h(px(25.0))
                 .px(px(9.0))
@@ -711,7 +727,15 @@ fn permission_status_row(
                 .text_size(px(10.0))
                 .text_color(theme.text_secondary)
                 .hover(|element| element.bg(theme.overlay).text_color(theme.text))
-                .child("Open Settings")
-                .on_click(move |_, _, _| Waku::open_privacy_settings(pane)),
+                .child(if granted {
+                    "Access Granted"
+                } else {
+                    "Grant Access"
+                })
+                .on_click(move |_, _, _| {
+                    if !granted {
+                        Waku::open_privacy_settings(pane);
+                    }
+                }),
         )
 }

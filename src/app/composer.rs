@@ -214,9 +214,9 @@ impl Waku {
                         .text_size(px(10.0))
                         .text_color(theme.text_tertiary)
                         .child(if target.persistable() {
-                            format!("Signed app: {}", target.bundle_id)
+                            format!("Bundle ID: {}", target.bundle_id)
                         } else {
-                            "This app has no stable signing identity, so it cannot be always allowed."
+                            "This app has no bundle identifier, so it cannot be always allowed."
                                 .into()
                         }),
                 )

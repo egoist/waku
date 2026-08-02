@@ -12,6 +12,37 @@ pub fn reduce_motion_enabled() -> bool {
     false
 }
 
+#[cfg(target_os = "macos")]
+pub fn load_app_icon_for_bundle_id(bundle_id: &str) -> Option<std::sync::Arc<gpui::Image>> {
+    use objc2_app_kit::{NSBitmapImageFileType, NSBitmapImageRep, NSWorkspace};
+    use objc2_foundation::{NSDictionary, NSSize, NSString};
+
+    let bundle_id = NSString::from_str(bundle_id);
+    let workspace = NSWorkspace::sharedWorkspace();
+    let application_url = workspace.URLForApplicationWithBundleIdentifier(&bundle_id)?;
+    let application_path = application_url.path()?;
+    let image = workspace.iconForFile(&application_path);
+    image.setSize(NSSize::new(32.0, 32.0));
+    let tiff_data = image.TIFFRepresentation()?;
+    let bitmap_rep = NSBitmapImageRep::imageRepWithData(&tiff_data)?;
+    let properties = NSDictionary::new();
+    let png_data = unsafe {
+        bitmap_rep.representationUsingType_properties(NSBitmapImageFileType::PNG, &properties)
+    }?;
+    let bytes = unsafe { png_data.as_bytes_unchecked() };
+    (!bytes.is_empty()).then(|| {
+        std::sync::Arc::new(gpui::Image::from_bytes(
+            gpui::ImageFormat::Png,
+            bytes.to_vec(),
+        ))
+    })
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn load_app_icon_for_bundle_id(_: &str) -> Option<std::sync::Arc<gpui::Image>> {
+    None
+}
+
 /// Keep Waku's single main window alive when the user closes it. This preserves
 /// the current session and lets a Dock activation reveal the same GPUI window.
 #[cfg(target_os = "macos")]

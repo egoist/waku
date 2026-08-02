@@ -659,10 +659,8 @@ impl Waku {
             let key = pending.target.grant_key();
             runtime.computer_session_grants.insert(key);
             if decision == "always" && pending.target.persistable() {
-                let team_id = pending.target.team_id.clone().unwrap_or_default();
                 let grant = crate::computer_use::ComputerAppGrant {
                     bundle_id: pending.target.bundle_id.clone(),
-                    team_id,
                     app_name: pending.target.app_name.clone(),
                 };
                 if !self

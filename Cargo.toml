@@ -28,8 +28,11 @@ objc2-app-kit = { version = "0.3", default-features = false, features = [
     "std",
     "NSAccessibility",
     "NSAppearance",
+    "NSBitmapImageRep",
     "NSColor",
     "NSGraphics",
+    "NSImage",
+    "NSImageRep",
     "NSResponder",
     "NSView",
     "NSVisualEffectView",
@@ -37,6 +40,14 @@ objc2-app-kit = { version = "0.3", default-features = false, features = [
     "NSWorkspace",
     "objc2-core-graphics",
     "objc2-quartz-core",
+] }
+objc2-foundation = { version = "0.3", default-features = false, features = [
+    "std",
+    "NSData",
+    "NSDictionary",
+    "NSGeometry",
+    "NSString",
+    "NSURL",
 ] }
 objc2-quartz-core = { version = "0.3", default-features = false, features = ["std", "CALayer", "objc2-core-graphics"] }
 raw-window-handle = "0.6"
