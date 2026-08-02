@@ -641,6 +641,21 @@ pub(super) fn activity_summary(activities: &[ActivityItem]) -> String {
     )
 }
 
+pub(super) fn activity_display_title(activity: &ActivityItem) -> String {
+    if activity.kind == crate::model::ActivityKind::Tool
+        && let Some(arguments) = activity.arguments.as_deref()
+        && let Ok(arguments) = serde_json::from_str::<serde_json::Value>(arguments)
+        && let Some(title) = arguments
+            .get("title")
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|title| !title.is_empty())
+    {
+        return title.to_owned();
+    }
+    activity.title.clone()
+}
+
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub(super) enum ActivityDisclosureSectionKind {
     Arguments,
@@ -875,5 +890,30 @@ mod message_time_tests {
             Some("Output")
         );
         assert_eq!(activity_preview(&image_only), "Image output");
+    }
+
+    #[test]
+    fn activity_display_title_prefers_the_human_facing_tool_argument() {
+        let titled = ActivityItem::new(
+            Some("tool-1".into()),
+            crate::model::ActivityKind::Tool,
+            "Js",
+            None,
+            true,
+        )
+        .with_arguments(Some(
+            r#"{"title":"Inspect Helium browser","code":"sky.get_app_state()"}"#.into(),
+        ));
+        let untitled = ActivityItem::new(
+            Some("tool-2".into()),
+            crate::model::ActivityKind::Tool,
+            "Js",
+            None,
+            true,
+        )
+        .with_arguments(Some(r#"{"code":"sky.list_apps()"}"#.into()));
+
+        assert_eq!(activity_display_title(&titled), "Inspect Helium browser");
+        assert_eq!(activity_display_title(&untitled), "Js");
     }
 }

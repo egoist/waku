@@ -1095,7 +1095,7 @@ impl Waku {
                             .max_w(px(300.0))
                             .truncate()
                             .text_color(theme.text_secondary)
-                            .child(SharedString::from(activity.title.clone())),
+                            .child(SharedString::from(activity_display_title(activity))),
                     )
                     .child(
                         div()

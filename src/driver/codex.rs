@@ -1167,6 +1167,15 @@ fn codex_item_title(item: &Value) -> String {
         return codex_web_search_title(item);
     }
     if item.get("type").and_then(Value::as_str) == Some("mcpToolCall")
+        && let Some(title) = item
+            .pointer("/arguments/title")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|title| !title.is_empty())
+    {
+        return title.to_owned();
+    }
+    if item.get("type").and_then(Value::as_str) == Some("mcpToolCall")
         && item
             .get("server")
             .or_else(|| item.get("serverName"))
@@ -1735,6 +1744,28 @@ mod tests {
             codex_item_title(&find),
             "Find pricing in https://openai.com"
         );
+    }
+
+    #[test]
+    fn mcp_tool_title_prefers_the_human_facing_argument() {
+        let titled = json!({
+            "type": "mcpToolCall",
+            "server": "waku_computer_use",
+            "tool": "js",
+            "arguments": {
+                "title": "Inspect Helium browser",
+                "code": "sky.get_app_state({ app: 'Helium' })"
+            }
+        });
+        let untitled = json!({
+            "type": "mcpToolCall",
+            "server": "waku_computer_use",
+            "tool": "js",
+            "arguments": { "code": "sky.list_apps()" }
+        });
+
+        assert_eq!(codex_item_title(&titled), "Inspect Helium browser");
+        assert_eq!(codex_item_title(&untitled), "Js");
     }
 
     #[test]
