@@ -26,9 +26,9 @@ use crate::computer_use::{
 use crate::driver::{self, DriverHandle, DriverStartOptions};
 use crate::input::{ComposerEvent, ComposerInput, preserve_composer_focus_for_context_menu};
 use crate::model::{
-    ActivityItem, ActivityKind, AgentSession, Checkpoint, CheckpointStatus, DriverEvent,
-    FavoriteModel, InteractionMode, Message, MessageRole, PendingPermission, Project, ProviderKind,
-    ProviderModel, ProviderProbe, ProviderResumeCursor, ReasoningBlock, RuntimeMode, SessionStatus,
+    ActivityItem, AgentSession, Checkpoint, CheckpointStatus, DriverEvent, FavoriteModel,
+    InteractionMode, Message, MessageRole, PendingPermission, Project, ProviderKind, ProviderModel,
+    ProviderProbe, ProviderResumeCursor, ReasoningBlock, RuntimeMode, SessionStatus,
     TranscriptBlock, TranscriptBlockContent, TurnStatus, compact_path, unix_time, unix_time_millis,
 };
 use gpui_component::highlighter::Language;
@@ -562,6 +562,7 @@ struct SessionRuntime {
     /// Back-to-front stack of window previews captured during the active turn.
     computer_use_previews: Vec<ComputerUseState>,
     computer_session_grants: HashSet<String>,
+    last_driver_error: Option<String>,
 }
 
 #[derive(Debug, Default)]

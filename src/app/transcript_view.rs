@@ -958,11 +958,19 @@ impl Waku {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let running = activities.iter().any(|activity| !activity.complete);
+        let live_turn = self
+            .selected_session()
+            .and_then(AgentSession::active_turn_id)
+            .is_some_and(|turn_id| {
+                self.selected_transcript_blocks()
+                    .get(block_index)
+                    .is_some_and(|block| block.turn_id == Some(turn_id))
+            });
         let expanded = self
             .activities_expanded
             .get(&block_index)
             .copied()
-            .unwrap_or(running);
+            .unwrap_or(live_turn);
         let cluster = div().flex().flex_col().gap(px(2.0)).child(
             div()
                 .id(SharedString::from(format!("activity-toggle-{block_index}")))
@@ -1005,10 +1013,8 @@ impl Waku {
         let mut items = div().flex().flex_col().pl(px(15.0));
         for activity in activities {
             let id = activity.id;
-            let detail = activity
-                .detail
-                .clone()
-                .filter(|detail| !detail.trim().is_empty());
+            let detail = activity_disclosure_text(activity);
+            let preview = activity_preview(activity);
             let has_detail = detail.is_some();
             let item_expanded = has_detail && self.expanded_activity_items.contains(&id);
             let mut item = div().flex().flex_col().child(
@@ -1064,9 +1070,11 @@ impl Waku {
                             .text_size(px(11.0))
                             .text_color(theme.text_ghost)
                             .when(item_expanded, |element| element.invisible())
-                            .child(SharedString::from(detail.clone().unwrap_or_default())),
+                            .child(SharedString::from(preview)),
                     )
-                    .child(if activity.complete {
+                    .child(if activity.failed {
+                        icon("icons/x.svg", 10.0, theme.danger).into_any_element()
+                    } else if activity.complete {
                         icon("icons/check.svg", 10.0, theme.text_ghost).into_any_element()
                     } else {
                         pulse_dot(format!("activity-pulse-{id}"), 5.0, theme.accent)

@@ -60,26 +60,30 @@ impl Waku {
                             }
                     }
                     TranscriptBlockContent::Activities(activities) => {
-                        let running = activities.iter().any(|activity| !activity.complete);
+                        let live_turn = self
+                            .selected_session()
+                            .and_then(AgentSession::active_turn_id)
+                            .is_some_and(|turn_id| block.turn_id == Some(turn_id));
                         let expanded = self
                             .activities_expanded
                             .get(&block_index)
                             .copied()
-                            .unwrap_or(running);
+                            .unwrap_or(live_turn);
                         if !expanded {
                             px(22.0)
                         } else {
                             activities.iter().fold(px(22.0), |height, activity| {
-                                let detail_height = activity
-                                    .detail
-                                    .as_deref()
-                                    .filter(|detail| {
-                                        self.expanded_activity_items.contains(&activity.id)
-                                            && !detail.trim().is_empty()
-                                    })
-                                    .map_or(Pixels::ZERO, |detail| {
-                                        px(14.0) + estimated_text_height(detail, 76, 17.0)
-                                    });
+                                let detail_height =
+                                    if self.expanded_activity_items.contains(&activity.id) {
+                                        activity_disclosure_text(activity).map_or(
+                                            Pixels::ZERO,
+                                            |detail| {
+                                                px(14.0) + estimated_text_height(&detail, 76, 17.0)
+                                            },
+                                        )
+                                    } else {
+                                        Pixels::ZERO
+                                    };
                                 height + px(24.0) + detail_height
                             })
                         }

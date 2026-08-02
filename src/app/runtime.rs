@@ -950,6 +950,7 @@ impl Waku {
                 pending_computer_approval: None,
                 computer_use_previews: Vec::new(),
                 computer_session_grants: HashSet::new(),
+                last_driver_error: None,
             },
         );
         Ok(handle)

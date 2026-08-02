@@ -166,7 +166,7 @@ impl Waku {
                                 .text_size(px(12.5))
                                 .font_weight(FontWeight::MEDIUM)
                                 .text_color(theme.text)
-                                .child(format!("Allow Codex to control {}?", target.app_name)),
+                                .child(format!("Allow Waku to control {}?", target.app_name)),
                         ),
                 )
                 .child(

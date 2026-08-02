@@ -65,7 +65,7 @@ pub fn status_label(status: SessionStatus) -> &'static str {
         SessionStatus::Connecting => "Connecting",
         SessionStatus::Working => "Working",
         SessionStatus::Waiting => "Needs input",
-        SessionStatus::Failed => "Stopped",
+        SessionStatus::Failed => "Failed",
     }
 }
 
@@ -324,5 +324,10 @@ mod tests {
                 "missing embedded icon: {path}"
             );
         }
+    }
+
+    #[test]
+    fn failed_sessions_are_not_labeled_as_user_stops() {
+        assert_eq!(status_label(SessionStatus::Failed), "Failed");
     }
 }

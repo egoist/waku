@@ -641,6 +641,46 @@ pub(super) fn activity_summary(activities: &[ActivityItem]) -> String {
     )
 }
 
+pub(super) fn activity_disclosure_text(activity: &ActivityItem) -> Option<String> {
+    let mut sections = Vec::new();
+    if let Some(arguments) = activity
+        .arguments
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        sections.push(format!("Arguments\n{arguments}"));
+    }
+    if let Some(output) = activity
+        .output
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        sections.push(format!("Output\n{output}"));
+    }
+    if !sections.is_empty() {
+        return Some(sections.join("\n\n"));
+    }
+    activity
+        .detail
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+}
+
+pub(super) fn activity_preview(activity: &ActivityItem) -> String {
+    let detail = activity.detail.as_deref().unwrap_or_default().trim();
+    if detail.eq_ignore_ascii_case("failed")
+        && let Some(output) = activity.output.as_deref()
+        && let Some(first_line) = output.lines().find(|line| !line.trim().is_empty())
+    {
+        return first_line.trim().to_owned();
+    }
+    detail.to_owned()
+}
+
 pub(super) fn git_branch(path: &std::path::Path) -> Option<String> {
     let output = Command::new("git")
         .args(["branch", "--show-current"])
@@ -713,5 +753,30 @@ mod message_time_tests {
                 format_message_time_at(unix_seconds(local_datetime(2026, 5, day, 9, 0)), now);
             assert!(formatted.starts_with(&format!("May {day}{suffix},")));
         }
+    }
+
+    #[test]
+    fn activity_disclosure_keeps_arguments_and_output() {
+        let activity = ActivityItem::new(
+            Some("tool-1".into()),
+            crate::model::ActivityKind::Tool,
+            "Use Helium",
+            Some("failed".into()),
+            true,
+        )
+        .with_arguments(Some("{\n  \"actions\": []\n}".into()))
+        .with_output(Some("Computer Use helper closed its session".into()))
+        .with_failed(true);
+
+        assert_eq!(
+            activity_disclosure_text(&activity).as_deref(),
+            Some(
+                "Arguments\n{\n  \"actions\": []\n}\n\nOutput\nComputer Use helper closed its session"
+            )
+        );
+        assert_eq!(
+            activity_preview(&activity),
+            "Computer Use helper closed its session"
+        );
     }
 }

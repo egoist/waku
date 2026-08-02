@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
 use std::process::Stdio;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::Duration;
 
@@ -11,11 +11,22 @@ use crossbeam_channel::{Sender, bounded, unbounded};
 use parking_lot::Mutex;
 use serde_json::{Value, json};
 
-use crate::computer_use::{self, ComputerToolRequest, ComputerUsePhase, ComputerUseState};
+use crate::computer_use::{
+    self, ComputerToolRequest, ComputerUsePhase, ComputerUseSession, ComputerUseState,
+};
 use crate::driver::{DriverControl, DriverStartOptions};
 use crate::model::{
-    ActivityKind, DriverEvent, InteractionMode, PermissionOption, ProviderResumeCursor, RuntimeMode,
+    ActivityItem, ActivityKind, DriverEvent, InteractionMode, PermissionOption,
+    ProviderResumeCursor, RuntimeMode,
 };
+
+const DISABLE_EXTERNAL_COMPUTER_USE_PLUGIN: &str =
+    "plugins.computer-use@openai-bundled.enabled=false";
+// Codex 0.146 only resolves plugin enablement from user/profile config layers, so a
+// process-local `-c` plugin override does not yet suppress its bundled capabilities.
+const DISABLE_EXTERNAL_COMPUTER_USE_MCP: &str = "mcp_servers.computer-use.enabled=false";
+const DISABLE_EXTERNAL_COMPUTER_USE_SKILL: &str =
+    r#"skills.config=[{name="computer-use:computer-use",enabled=false}]"#;
 
 enum CommandMessage {
     Prompt(String),
@@ -47,7 +58,7 @@ enum CommandMessage {
 
 pub struct CodexDriver {
     commands: Sender<CommandMessage>,
-    active_helper_pid: Arc<AtomicU32>,
+    computer_use_session: Arc<ComputerUseSession>,
 }
 
 impl CodexDriver {
@@ -73,7 +84,16 @@ impl CodexDriver {
             None => None,
         };
         let mut child = crate::command_env::command(binary)
-            .args(["app-server", "--stdio"])
+            .args([
+                "app-server",
+                "--stdio",
+                "-c",
+                DISABLE_EXTERNAL_COMPUTER_USE_PLUGIN,
+                "-c",
+                DISABLE_EXTERNAL_COMPUTER_USE_MCP,
+                "-c",
+                DISABLE_EXTERNAL_COMPUTER_USE_SKILL,
+            ])
             .current_dir(&cwd)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -94,7 +114,7 @@ impl CodexDriver {
             .take()
             .ok_or_else(|| anyhow!("Codex stderr unavailable"))?;
         let (commands, command_rx) = unbounded();
-        let active_helper_pid = Arc::new(AtomicU32::new(0));
+        let computer_use_session = Arc::new(ComputerUseSession::new());
         let computer_tool_in_flight = Arc::new(AtomicBool::new(false));
         let thread_id = Arc::new(Mutex::new(None::<String>));
         let turn_id = Arc::new(Mutex::new(None::<String>));
@@ -114,7 +134,7 @@ impl CodexDriver {
         let writer_pending_forks = pending_forks.clone();
         let writer_events = events.clone();
         let writer_commands = commands.clone();
-        let writer_active_helper_pid = active_helper_pid.clone();
+        let writer_computer_use_session = computer_use_session.clone();
         let writer_computer_tool_in_flight = computer_tool_in_flight.clone();
         let cwd_string = cwd.display().to_string();
         thread::Builder::new()
@@ -257,13 +277,10 @@ impl CodexDriver {
                                 let reason = "Another computer-use call is still running. Retry after it completes.".to_owned();
                                 let _ = writer_events.send(DriverEvent::ComputerUseUpdated(
                                     ComputerUseState {
-                                        call_id: request.call_id.clone(),
                                         target: request.target(),
-                                        summary: request.summary(),
                                         phase: ComputerUsePhase::Failed,
                                         visible: request.tool == "use",
                                         screenshot: None,
-                                        error: Some(reason.clone()),
                                     },
                                 ));
                                 let _ = writer_commands.send(
@@ -280,7 +297,7 @@ impl CodexDriver {
                             }
                             let worker_events = writer_events.clone();
                             let worker_commands = writer_commands.clone();
-                            let active_helper_pid = writer_active_helper_pid.clone();
+                            let computer_use_session = writer_computer_use_session.clone();
                             let worker_computer_tool_in_flight =
                                 writer_computer_tool_in_flight.clone();
                             let failed_request = request.clone();
@@ -289,18 +306,15 @@ impl CodexDriver {
                                 .spawn(move || {
                                     let _ = worker_events.send(DriverEvent::ComputerUseUpdated(
                                         ComputerUseState {
-                                            call_id: request.call_id.clone(),
                                             target: request.target(),
-                                            summary: request.summary(),
                                             phase: ComputerUsePhase::Running,
                                             visible: request.tool == "use",
                                             screenshot: None,
-                                            error: None,
                                         },
                                     ));
                                     let output = computer_use::execute_tool(
                                         request.clone(),
-                                        active_helper_pid,
+                                        computer_use_session,
                                     );
                                     worker_computer_tool_in_flight.store(false, Ordering::SeqCst);
                                     if let Some(permissions) = output.permissions.clone() {
@@ -345,16 +359,12 @@ impl CodexDriver {
                         }),
                         CommandMessage::RejectComputerTool { request, reason } => {
                             let target = request.target();
-                            let summary = request.summary();
                             let _ = writer_events.send(DriverEvent::ComputerUseUpdated(
                                 ComputerUseState {
-                                    call_id: request.call_id.clone(),
                                     target,
-                                    summary,
                                     phase: ComputerUsePhase::Failed,
                                     visible: request.tool == "use",
                                     screenshot: None,
-                                    error: Some(reason.clone()),
                                 },
                             ));
                             json!({
@@ -449,7 +459,7 @@ impl CodexDriver {
         let reader_pending_rollbacks = pending_rollbacks.clone();
         let reader_pending_forks = pending_forks.clone();
         let reader_events = events.clone();
-        thread::Builder::new()
+        let reader_thread = thread::Builder::new()
             .name("waku-codex-reader".into())
             .spawn(move || {
                 let mut stream_state = CodexStreamState::default();
@@ -483,22 +493,48 @@ impl CodexDriver {
                         }
                     }
                 }
-                let _ = reader_events.send(DriverEvent::ProcessExited);
             })?;
 
-        thread::Builder::new()
+        let last_visible_stderr = Arc::new(Mutex::new(None::<String>));
+        let stderr_last_error = last_visible_stderr.clone();
+        let stderr_events = events.clone();
+        let stderr_thread = thread::Builder::new()
             .name("waku-codex-stderr".into())
             .spawn(move || {
                 for line in BufReader::new(stderr).lines().map_while(Result::ok) {
                     if is_visible_stderr_notice(&line) {
-                        let _ = events.send(DriverEvent::Error(clean_stderr(&line)));
+                        let error = clean_stderr(&line);
+                        *stderr_last_error.lock() = Some(error.clone());
+                        let _ = stderr_events.send(DriverEvent::Error(error));
                     }
                 }
             })?;
 
+        thread::Builder::new()
+            .name("waku-codex-process".into())
+            .spawn(move || {
+                let status = child.wait();
+                let _ = reader_thread.join();
+                let _ = stderr_thread.join();
+                match status {
+                    Ok(status) if !status.success() && last_visible_stderr.lock().is_none() => {
+                        let _ = events.send(DriverEvent::Error(format!(
+                            "Codex app-server exited with {status}"
+                        )));
+                    }
+                    Err(error) => {
+                        let _ = events.send(DriverEvent::Error(format!(
+                            "Could not read Codex app-server exit status: {error}"
+                        )));
+                    }
+                    _ => {}
+                }
+                let _ = events.send(DriverEvent::ProcessExited);
+            })?;
+
         Ok(Self {
             commands,
-            active_helper_pid,
+            computer_use_session,
         })
     }
 }
@@ -533,12 +569,12 @@ impl DriverControl for CodexDriver {
     }
 
     fn cancel(&self) {
-        computer_use::cancel_helper(&self.active_helper_pid);
+        self.computer_use_session.cancel();
         let _ = self.commands.send(CommandMessage::Cancel);
     }
 
     fn cancel_computer_use(&self) {
-        computer_use::cancel_helper(&self.active_helper_pid);
+        self.computer_use_session.cancel();
     }
 
     fn respond(&self, request_id: String, option_id: String) {
@@ -594,7 +630,7 @@ impl DriverControl for CodexDriver {
 
 impl Drop for CodexDriver {
     fn drop(&mut self) {
-        computer_use::cancel_helper(&self.active_helper_pid);
+        self.computer_use_session.cancel();
         let _ = self.commands.send(CommandMessage::Shutdown);
     }
 }
@@ -869,14 +905,19 @@ fn handle_codex_message(
                 let kind = codex_activity_kind(item);
                 if let Some(kind) = kind {
                     let title = codex_item_title(item);
-                    let detail = codex_item_detail(item);
-                    let _ = events.send(DriverEvent::Activity {
-                        id: item.get("id").and_then(Value::as_str).map(str::to_owned),
+                    let output = codex_item_output(item);
+                    let detail = codex_item_detail(item, output.as_deref());
+                    let activity = ActivityItem::new(
+                        item.get("id").and_then(Value::as_str).map(str::to_owned),
                         kind,
                         title,
                         detail,
                         complete,
-                    });
+                    )
+                    .with_arguments(codex_item_arguments(item))
+                    .with_output(output)
+                    .with_failed(codex_item_failed(item));
+                    let _ = events.send(DriverEvent::RichActivity(activity));
                 }
             }
         }
@@ -969,6 +1010,21 @@ fn codex_item_title(item: &Value) -> String {
     if item.get("type").and_then(Value::as_str) == Some("webSearch") {
         return codex_web_search_title(item);
     }
+    if item.get("type").and_then(Value::as_str) == Some("dynamicToolCall")
+        && item.get("namespace").and_then(Value::as_str) == Some(computer_use::NAMESPACE)
+        && let Some(tool) = item.get("tool").and_then(Value::as_str)
+    {
+        return match tool {
+            "status" => "Check Computer Use access".into(),
+            "list_targets" => "List controllable windows".into(),
+            "use" => item
+                .pointer("/arguments/target/appName")
+                .and_then(Value::as_str)
+                .map(|app| format!("Use {app}"))
+                .unwrap_or_else(|| "Use app window".into()),
+            _ => split_camel_case(tool),
+        };
+    }
     if let Some(name) = item.get("tool").and_then(Value::as_str) {
         return split_camel_case(name);
     }
@@ -1034,12 +1090,123 @@ fn non_empty_string(value: Option<&Value>) -> Option<&str> {
         .filter(|value| !value.is_empty())
 }
 
-fn codex_item_detail(item: &Value) -> Option<String> {
+fn codex_item_detail(item: &Value, output: Option<&str>) -> Option<String> {
+    if codex_item_failed(item)
+        && let Some(first_line) =
+            output.and_then(|output| output.lines().map(str::trim).find(|line| !line.is_empty()))
+    {
+        return Some(first_line.to_owned());
+    }
     item.get("cwd")
         .and_then(Value::as_str)
         .or_else(|| item.get("path").and_then(Value::as_str))
         .or_else(|| item.get("status").and_then(Value::as_str))
         .map(str::to_owned)
+}
+
+fn codex_item_arguments(item: &Value) -> Option<String> {
+    match item.get("type").and_then(Value::as_str) {
+        Some("dynamicToolCall" | "mcpToolCall") => item
+            .get("arguments")
+            .filter(|value| !value.is_null())
+            .and_then(format_activity_json),
+        Some("commandExecution") => {
+            let mut arguments = serde_json::Map::new();
+            if let Some(command) = item.get("command") {
+                arguments.insert("command".into(), command.clone());
+            }
+            if let Some(cwd) = item.get("cwd") {
+                arguments.insert("cwd".into(), cwd.clone());
+            }
+            (!arguments.is_empty())
+                .then(|| Value::Object(arguments))
+                .as_ref()
+                .and_then(format_activity_json)
+        }
+        _ => None,
+    }
+}
+
+fn codex_item_output(item: &Value) -> Option<String> {
+    match item.get("type").and_then(Value::as_str) {
+        Some("dynamicToolCall") => {
+            let items = item.get("contentItems").and_then(Value::as_array)?;
+            let output = items
+                .iter()
+                .filter_map(|item| match item.get("type").and_then(Value::as_str) {
+                    Some("inputText") => {
+                        item.get("text").and_then(Value::as_str).map(str::to_owned)
+                    }
+                    Some("inputImage") => Some("[Image output]".into()),
+                    Some("inputAudio") => Some("[Audio output]".into()),
+                    _ => format_activity_json(item),
+                })
+                .collect::<Vec<_>>()
+                .join("\n\n");
+            non_empty_activity_text(output)
+        }
+        Some("mcpToolCall") => {
+            if let Some(message) = item.pointer("/error/message").and_then(Value::as_str) {
+                return non_empty_activity_text(message.to_owned());
+            }
+            let result = item.get("result").filter(|value| !value.is_null())?;
+            if let Some(structured) = result
+                .get("structuredContent")
+                .filter(|value| !value.is_null())
+            {
+                return format_activity_json(structured);
+            }
+            result
+                .get("content")
+                .filter(|value| !value.is_null())
+                .and_then(format_activity_json)
+        }
+        Some("commandExecution") => {
+            let output = item
+                .get("aggregatedOutput")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            let exit = item.get("exitCode").and_then(Value::as_i64);
+            let text = match (output.trim().is_empty(), exit) {
+                (false, Some(exit)) => format!("{}\n\nExit code: {exit}", output.trim_end()),
+                (false, None) => output.trim_end().to_owned(),
+                (true, Some(exit)) => format!("Exit code: {exit}"),
+                (true, None) => return None,
+            };
+            non_empty_activity_text(text)
+        }
+        _ => None,
+    }
+}
+
+fn codex_item_failed(item: &Value) -> bool {
+    item.get("status").and_then(Value::as_str) == Some("failed")
+        || item.get("success").and_then(Value::as_bool) == Some(false)
+        || item.get("error").is_some_and(|error| !error.is_null())
+        || item
+            .get("exitCode")
+            .and_then(Value::as_i64)
+            .is_some_and(|code| code != 0)
+}
+
+fn format_activity_json(value: &Value) -> Option<String> {
+    serde_json::to_string_pretty(value)
+        .ok()
+        .and_then(non_empty_activity_text)
+}
+
+fn non_empty_activity_text(value: String) -> Option<String> {
+    const MAX_CHARS: usize = 16_000;
+    let value = value.trim().to_owned();
+    if value.is_empty() {
+        return None;
+    }
+    if value.chars().count() <= MAX_CHARS {
+        return Some(value);
+    }
+    let mut truncated = value.chars().take(MAX_CHARS).collect::<String>();
+    truncated.push_str("\n\n… output truncated");
+    Some(truncated)
 }
 
 fn approval_copy(method: &str, params: &Value) -> (String, String) {
@@ -1075,6 +1242,12 @@ fn parse_rpc_id(value: &str) -> Value {
 fn split_camel_case(value: &str) -> String {
     let mut output = String::with_capacity(value.len() + 4);
     for (index, character) in value.chars().enumerate() {
+        if character == '_' || character == '-' {
+            if !output.ends_with(' ') {
+                output.push(' ');
+            }
+            continue;
+        }
         if index > 0 && character.is_ascii_uppercase() {
             output.push(' ');
         }
@@ -1101,6 +1274,7 @@ fn is_visible_stderr_notice(line: &str) -> bool {
         return false;
     }
     line.contains(" ERROR ")
+        || lowercase.starts_with("error:")
         || line.contains('⚠')
         || lowercase.contains("fatal")
         || lowercase.contains("warning")
@@ -1111,6 +1285,22 @@ fn is_visible_stderr_notice(line: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn computer_use_is_pinned_to_wakus_native_runtime() {
+        assert_eq!(
+            DISABLE_EXTERNAL_COMPUTER_USE_PLUGIN,
+            "plugins.computer-use@openai-bundled.enabled=false"
+        );
+        assert_eq!(
+            DISABLE_EXTERNAL_COMPUTER_USE_MCP,
+            "mcp_servers.computer-use.enabled=false"
+        );
+        assert_eq!(
+            DISABLE_EXTERNAL_COMPUTER_USE_SKILL,
+            r#"skills.config=[{name="computer-use:computer-use",enabled=false}]"#
+        );
+    }
 
     #[test]
     fn access_modes_match_codex_permission_profiles() {
@@ -1140,6 +1330,13 @@ mod tests {
     fn missing_launcher_dependencies_are_visible() {
         assert!(is_visible_stderr_notice(
             "env: node: No such file or directory"
+        ));
+    }
+
+    #[test]
+    fn startup_configuration_errors_are_visible() {
+        assert!(is_visible_stderr_notice(
+            "Error: error loading default config after config error: invalid transport"
         ));
     }
 
@@ -1355,5 +1552,76 @@ mod tests {
         assert_eq!(request.rpc_id, "1");
         assert_eq!(request.call_id, "computer-1");
         assert_eq!(request.tool, "list_targets");
+    }
+
+    #[test]
+    fn dynamic_tool_activity_keeps_arguments_output_and_failure() {
+        let thread_id = Mutex::new(Some("thread-1".to_owned()));
+        let turn_id = Mutex::new(Some("turn-1".to_owned()));
+        let turn_ids = Mutex::new(vec!["turn-1".to_owned()]);
+        let pending_rollbacks = Mutex::new(HashMap::new());
+        let pending_forks = Mutex::new(HashMap::new());
+        let (event_tx, event_rx) = unbounded();
+        let mut stream_state = CodexStreamState::default();
+        let arguments = json!({
+            "target": {
+                "windowId": 42,
+                "bundleId": "net.imput.helium",
+                "appName": "Helium",
+                "windowTitle": "Window",
+                "width": 1440,
+                "height": 823
+            },
+            "actions": []
+        });
+
+        handle_codex_message(
+            json!({
+                "method": "item/completed",
+                "params": {
+                    "threadId": "thread-1",
+                    "turnId": "turn-1",
+                    "item": {
+                        "type": "dynamicToolCall",
+                        "id": "exec-1",
+                        "namespace": computer_use::NAMESPACE,
+                        "tool": "use",
+                        "arguments": arguments,
+                        "status": "failed",
+                        "contentItems": [{
+                            "type": "inputText",
+                            "text": "Computer Use helper closed its session"
+                        }],
+                        "success": false,
+                        "durationMs": 80
+                    },
+                    "completedAtMs": 1
+                }
+            }),
+            &thread_id,
+            &turn_id,
+            &turn_ids,
+            &pending_rollbacks,
+            &pending_forks,
+            &event_tx,
+            &mut stream_state,
+        );
+
+        let DriverEvent::RichActivity(activity) = event_rx.recv().unwrap() else {
+            panic!("expected a rich activity");
+        };
+        assert_eq!(activity.source_id.as_deref(), Some("exec-1"));
+        assert_eq!(activity.title, "Use Helium");
+        assert!(activity.arguments.as_deref().unwrap().contains("windowId"));
+        assert_eq!(
+            activity.output.as_deref(),
+            Some("Computer Use helper closed its session")
+        );
+        assert_eq!(
+            activity.detail.as_deref(),
+            Some("Computer Use helper closed its session")
+        );
+        assert!(activity.failed);
+        assert!(activity.complete);
     }
 }

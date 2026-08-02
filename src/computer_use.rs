@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::fs;
 use std::io::{Read as _, Write as _};
 use std::os::unix::ffi::OsStrExt as _;
@@ -75,6 +76,17 @@ impl ComputerAppGrant {
     pub fn key(&self) -> String {
         format!("{}:{}", self.bundle_id, self.team_id)
     }
+}
+
+pub fn requires_app_approval(
+    target: &ComputerTarget,
+    allowed_apps: &[ComputerAppGrant],
+    task_grants: &HashSet<String>,
+) -> bool {
+    let key = target.grant_key();
+    let globally_allowed =
+        target.persistable() && allowed_apps.iter().any(|grant| grant.key() == key);
+    !(globally_allowed || task_grants.contains(&key))
 }
 
 #[derive(Clone, Debug)]
@@ -162,13 +174,10 @@ pub enum ComputerUsePhase {
 
 #[derive(Clone, Debug)]
 pub struct ComputerUseState {
-    pub call_id: String,
     pub target: Option<ComputerTarget>,
-    pub summary: String,
     pub phase: ComputerUsePhase,
     pub visible: bool,
     pub screenshot: Option<Arc<gpui::Image>>,
-    pub error: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -184,6 +193,85 @@ pub struct ComputerToolOutput {
     pub content_items: Vec<Value>,
     pub state: ComputerUseState,
     pub permissions: Option<ComputerPermissions>,
+}
+
+/// One authenticated Computer Use helper for the lifetime of an agent turn.
+///
+/// Codex's Computer Use client keeps an app-use session alive while the model
+/// observes and acts. Keeping Waku's helper alive gives the helper the same
+/// lifecycle: target indicators survive across tool calls, and closing the
+/// session at turn completion removes them immediately.
+pub struct ComputerUseSession {
+    helper: parking_lot::Mutex<Option<HelperClient>>,
+    active_helper_pid: AtomicU32,
+}
+
+impl ComputerUseSession {
+    pub fn new() -> Self {
+        Self {
+            helper: parking_lot::Mutex::new(None),
+            active_helper_pid: AtomicU32::new(0),
+        }
+    }
+
+    fn invoke(&self, operation: &Value) -> anyhow::Result<HelperResponse> {
+        if let Some(helper) = std::env::var_os("WAKU_COMPUTER_USE_HELPER") {
+            return invoke_helper_direct(
+                &PathBuf::from(helper),
+                operation,
+                &self.active_helper_pid,
+            );
+        }
+
+        let mut helper = self.helper.lock();
+        if helper.is_none() {
+            let bundled_helper = helper_app_path()?;
+            let installed_helper = install_helper_app(&bundled_helper)?;
+            *helper = Some(HelperClient::connect(
+                &installed_helper,
+                &self.active_helper_pid,
+            )?);
+        }
+
+        let result = helper
+            .as_mut()
+            .expect("helper initialized above")
+            .exchange(operation);
+        if result.is_err() {
+            helper.take();
+            self.active_helper_pid.store(0, Ordering::SeqCst);
+        }
+        result
+    }
+
+    pub fn cancel(&self) {
+        if let Some(mut helper) = self.helper.try_lock() {
+            self.active_helper_pid.store(0, Ordering::SeqCst);
+            helper.take();
+            return;
+        }
+
+        // A request is still blocked in IPC. Terminating the helper releases
+        // that worker immediately; the normal idle path above closes the
+        // socket first so ScreenCaptureKit can stop its streams gracefully.
+        let pid = self.active_helper_pid.swap(0, Ordering::SeqCst);
+        if pid != 0 {
+            terminate_process(pid);
+        }
+        self.helper.lock().take();
+    }
+}
+
+impl Default for ComputerUseSession {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Drop for ComputerUseSession {
+    fn drop(&mut self) {
+        self.cancel();
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -392,21 +480,17 @@ pub fn is_blocked_bundle_id(bundle_id: &str) -> bool {
 
 pub fn execute_tool(
     request: ComputerToolRequest,
-    active_helper_pid: Arc<AtomicU32>,
+    session: Arc<ComputerUseSession>,
 ) -> ComputerToolOutput {
-    let summary = request.summary();
     let target = request.target();
     let failed = |error: String| ComputerToolOutput {
         success: false,
         content_items: vec![json!({"type": "inputText", "text": error})],
         state: ComputerUseState {
-            call_id: request.call_id.clone(),
             target: target.clone(),
-            summary: summary.clone(),
             phase: ComputerUsePhase::Failed,
             visible: request.tool == "use",
             screenshot: None,
-            error: Some(error),
         },
         permissions: None,
     };
@@ -425,7 +509,7 @@ pub fn execute_tool(
         }),
         _ => unreachable!("validated above"),
     };
-    let response = match invoke_helper(&operation, active_helper_pid) {
+    let response = match session.invoke(&operation) {
         Ok(response) => response,
         Err(error) => return failed(error.to_string()),
     };
@@ -473,13 +557,10 @@ pub fn execute_tool(
         success: true,
         content_items,
         state: ComputerUseState {
-            call_id: request.call_id,
             target: response.target.or(target),
-            summary,
             phase: ComputerUsePhase::Completed,
             visible: request.tool == "use",
             screenshot,
-            error: None,
         },
         permissions: response.permissions,
     }
@@ -499,7 +580,8 @@ pub fn probe_permissions(prompt: bool) -> anyhow::Result<ComputerPermissions> {
     } else {
         json!({"operation": "status"})
     };
-    let response = invoke_helper(&operation, Arc::new(AtomicU32::new(0)))?;
+    let session = ComputerUseSession::new();
+    let response = session.invoke(&operation)?;
     if !response.success {
         bail!(
             "{}",
@@ -511,22 +593,10 @@ pub fn probe_permissions(prompt: bool) -> anyhow::Result<ComputerPermissions> {
     Ok(response.permissions.unwrap_or_default())
 }
 
-fn invoke_helper(
-    operation: &Value,
-    active_helper_pid: Arc<AtomicU32>,
-) -> anyhow::Result<HelperResponse> {
-    if let Some(helper) = std::env::var_os("WAKU_COMPUTER_USE_HELPER") {
-        return invoke_helper_direct(&PathBuf::from(helper), operation, active_helper_pid);
-    }
-    let bundled_helper = helper_app_path()?;
-    let installed_helper = install_helper_app(&bundled_helper)?;
-    invoke_helper_app(&installed_helper, operation, active_helper_pid)
-}
-
 fn invoke_helper_direct(
     helper: &Path,
     operation: &Value,
-    active_helper_pid: Arc<AtomicU32>,
+    active_helper_pid: &AtomicU32,
 ) -> anyhow::Result<HelperResponse> {
     let mut child = Command::new(&helper)
         .stdin(Stdio::piped())
@@ -536,18 +606,6 @@ fn invoke_helper_direct(
         .with_context(|| format!("failed to start {}", helper.display()))?;
     let pid = child.id();
     active_helper_pid.store(pid, Ordering::SeqCst);
-    let watchdog_pid = active_helper_pid.clone();
-    thread::spawn(move || {
-        thread::sleep(Duration::from_secs(30));
-        if watchdog_pid
-            .compare_exchange(pid, 0, Ordering::SeqCst, Ordering::SeqCst)
-            .is_ok()
-        {
-            let _ = Command::new("/bin/kill")
-                .args(["-TERM", &pid.to_string()])
-                .status();
-        }
-    });
     let payload = serde_json::to_vec(operation)?;
     child
         .stdin
@@ -604,101 +662,101 @@ impl Drop for HelperSocket {
     }
 }
 
-fn invoke_helper_app(
-    helper: &Path,
-    operation: &Value,
-    active_helper_pid: Arc<AtomicU32>,
-) -> anyhow::Result<HelperResponse> {
-    let socket = HelperSocket::bind()?;
-    let helper_name = helper
-        .file_stem()
-        .ok_or_else(|| anyhow!("Computer Use helper name is invalid"))?;
-    let helper_executable =
-        fs::canonicalize(helper.join("Contents").join("MacOS").join(helper_name))
-            .context("Computer Use helper executable is unavailable")?;
-    // Launch Services gives this standalone app its own macOS privacy identity.
-    // Directly spawning an embedded executable makes the containing Waku app
-    // the responsible process instead.
-    let mut launch = HelperLaunch::new(launch_helper_app(helper, &socket.path)?);
-    let launcher_pid = launch.launcher_pid;
-    let _active_helper_reset = ActiveHelperReset(active_helper_pid.clone());
-    active_helper_pid.store(launcher_pid, Ordering::SeqCst);
+struct HelperClient {
+    _socket: HelperSocket,
+    stream: UnixStream,
+    launch: HelperLaunch,
+}
 
-    let accept_started = Instant::now();
-    let (mut stream, helper_pid) = loop {
-        match socket.listener.accept() {
-            Ok((stream, _)) => {
-                if let Some(peer_pid) = peer_pid(&stream)
-                    && process_executable(peer_pid).as_deref() == Some(helper_executable.as_path())
-                {
-                    break (stream, peer_pid);
+impl HelperClient {
+    fn connect(helper: &Path, active_helper_pid: &AtomicU32) -> anyhow::Result<Self> {
+        let socket = HelperSocket::bind()?;
+        let helper_name = helper
+            .file_stem()
+            .ok_or_else(|| anyhow!("Computer Use helper name is invalid"))?;
+        let helper_executable =
+            fs::canonicalize(helper.join("Contents").join("MacOS").join(helper_name))
+                .context("Computer Use helper executable is unavailable")?;
+        // Launch Services gives this standalone app its own macOS privacy
+        // identity. The process remains alive for the active agent turn.
+        let mut launch = HelperLaunch::new(launch_helper_app(helper, &socket.path)?);
+        let launcher_pid = launch.launcher_pid;
+        active_helper_pid.store(launcher_pid, Ordering::SeqCst);
+
+        let accept_started = Instant::now();
+        let (stream, helper_pid) = loop {
+            match socket.listener.accept() {
+                Ok((stream, _)) => {
+                    if let Some(peer_pid) = peer_pid(&stream)
+                        && process_executable(peer_pid).as_deref()
+                            == Some(helper_executable.as_path())
+                    {
+                        break (stream, peer_pid);
+                    }
                 }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
+                Err(error) => return Err(error).context("computer-use helper IPC failed"),
             }
-            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
-            Err(error) => return Err(error).context("computer-use helper IPC failed"),
-        }
-        if let Some(status) = launch.launcher.try_wait()? {
-            active_helper_pid.store(0, Ordering::SeqCst);
-            bail!("computer-use helper did not connect ({status})");
-        }
-        if accept_started.elapsed() >= Duration::from_secs(5) {
-            active_helper_pid.store(0, Ordering::SeqCst);
-            bail!("computer-use helper did not connect in time");
-        }
-        thread::sleep(Duration::from_millis(10));
-    };
+            if let Some(status) = launch.launcher.try_wait()? {
+                active_helper_pid.store(0, Ordering::SeqCst);
+                bail!("computer-use helper did not connect ({status})");
+            }
+            if accept_started.elapsed() >= Duration::from_secs(5) {
+                active_helper_pid.store(0, Ordering::SeqCst);
+                bail!("computer-use helper did not connect in time");
+            }
+            thread::sleep(Duration::from_millis(10));
+        };
 
-    if active_helper_pid
-        .compare_exchange(launcher_pid, helper_pid, Ordering::SeqCst, Ordering::SeqCst)
-        .is_err()
-    {
-        bail!("computer-use helper was cancelled");
-    }
-    launch.helper_pid = Some(helper_pid);
-
-    let watchdog_pid = active_helper_pid.clone();
-    thread::spawn(move || {
-        thread::sleep(Duration::from_secs(30));
-        if watchdog_pid
-            .compare_exchange(helper_pid, 0, Ordering::SeqCst, Ordering::SeqCst)
-            .is_ok()
+        if active_helper_pid
+            .compare_exchange(launcher_pid, helper_pid, Ordering::SeqCst, Ordering::SeqCst)
+            .is_err()
         {
-            terminate_process(helper_pid);
+            bail!("computer-use helper was cancelled");
         }
-    });
+        launch.helper_pid = Some(helper_pid);
+        stream.set_nonblocking(false)?;
+        stream.set_read_timeout(Some(Duration::from_secs(30)))?;
+        stream.set_write_timeout(Some(Duration::from_secs(5)))?;
+        Ok(Self {
+            _socket: socket,
+            stream,
+            launch,
+        })
+    }
 
-    stream.set_nonblocking(false)?;
-    stream.set_read_timeout(Some(Duration::from_secs(30)))?;
-    stream.set_write_timeout(Some(Duration::from_secs(5)))?;
-    let exchange = (|| -> anyhow::Result<Vec<u8>> {
-        serde_json::to_writer(&mut stream, operation)?;
-        stream.shutdown(std::net::Shutdown::Write)?;
-        let mut response = Vec::new();
-        (&mut stream)
-            .take((MAX_HELPER_OUTPUT_BYTES + 1) as u64)
-            .read_to_end(&mut response)?;
-        if response.len() > MAX_HELPER_OUTPUT_BYTES {
+    fn exchange(&mut self, operation: &Value) -> anyhow::Result<HelperResponse> {
+        let payload = serde_json::to_vec(operation)?;
+        let length = u32::try_from(payload.len()).context("computer-use request is too large")?;
+        self.stream
+            .write_all(&length.to_be_bytes())
+            .context("Computer Use IPC request header failed")?;
+        self.stream
+            .write_all(&payload)
+            .context("Computer Use IPC request failed")?;
+        self.stream.flush()?;
+
+        let mut header = [0_u8; 4];
+        self.stream
+            .read_exact(&mut header)
+            .context("Computer Use helper closed its session")?;
+        let response_length = u32::from_be_bytes(header) as usize;
+        if response_length > MAX_HELPER_OUTPUT_BYTES {
             bail!("computer-use helper returned too much data");
         }
-        Ok(response)
-    })();
+        let mut response = vec![0_u8; response_length];
+        self.stream
+            .read_exact(&mut response)
+            .context("Computer Use IPC response failed")?;
+        serde_json::from_slice(&response).context("computer-use helper returned invalid JSON")
+    }
+}
 
-    let response = match exchange {
-        Ok(response) => response,
-        Err(error) => {
-            active_helper_pid.store(0, Ordering::SeqCst);
-            bail!("Computer Use IPC failed: {error}");
-        }
-    };
-    let decoded =
-        serde_json::from_slice(&response).context("computer-use helper returned invalid JSON")?;
-    // The response is complete once the helper closes its IPC channel. End
-    // the one-shot helper immediately instead of leaving Launch Services or
-    // ScreenCaptureKit time to retain its capture identity after the turn.
-    terminate_process(helper_pid);
-    let _ = launch.finish()?;
-    active_helper_pid.store(0, Ordering::SeqCst);
-    Ok(decoded)
+impl Drop for HelperClient {
+    fn drop(&mut self) {
+        let _ = self.stream.shutdown(std::net::Shutdown::Both);
+        self.launch.finish_gracefully();
+    }
 }
 
 fn launch_helper_app(helper: &Path, socket_path: &Path) -> anyhow::Result<Child> {
@@ -722,14 +780,6 @@ struct HelperLaunch {
     finished: bool,
 }
 
-struct ActiveHelperReset(Arc<AtomicU32>);
-
-impl Drop for ActiveHelperReset {
-    fn drop(&mut self) {
-        self.0.store(0, Ordering::SeqCst);
-    }
-}
-
 impl HelperLaunch {
     fn new(launcher: Child) -> Self {
         let launcher_pid = launcher.id();
@@ -741,10 +791,17 @@ impl HelperLaunch {
         }
     }
 
-    fn finish(&mut self) -> std::io::Result<std::process::ExitStatus> {
-        let status = self.launcher.wait()?;
-        self.finished = true;
-        Ok(status)
+    fn finish_gracefully(&mut self) {
+        for _ in 0..50 {
+            match self.launcher.try_wait() {
+                Ok(Some(_)) => {
+                    self.finished = true;
+                    return;
+                }
+                Ok(None) => thread::sleep(Duration::from_millis(10)),
+                Err(_) => return,
+            }
+        }
     }
 }
 
@@ -933,15 +990,6 @@ pub fn helper_display_name() -> String {
         .unwrap_or_else(|| "Waku Computer Use".into())
 }
 
-pub fn cancel_helper(active_helper_pid: &AtomicU32) {
-    let pid = active_helper_pid.swap(0, Ordering::SeqCst);
-    if pid != 0 {
-        let _ = Command::new("/bin/kill")
-            .args(["-TERM", &pid.to_string()])
-            .status();
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -982,6 +1030,40 @@ mod tests {
     }
 
     #[test]
+    fn always_allowed_signed_app_does_not_prompt_again_for_keyboard_actions() {
+        let target = ComputerTarget {
+            window_id: 42,
+            bundle_id: "net.imput.helium".into(),
+            team_id: Some("S4Q33XPHB4".into()),
+            app_name: "Helium".into(),
+            window_title: "Window".into(),
+            width: 1440,
+            height: 823,
+        };
+        let request = ComputerToolRequest {
+            rpc_id: "1".into(),
+            call_id: "call".into(),
+            tool: "use".into(),
+            arguments: json!({
+                "target": target,
+                "actions": [{"type": "keypress", "key": "l", "modifiers": ["command"]}]
+            }),
+        };
+        assert!(request.requires_sensitive_confirmation());
+
+        let allowed_apps = vec![ComputerAppGrant {
+            bundle_id: "net.imput.helium".into(),
+            team_id: "S4Q33XPHB4".into(),
+            app_name: "Helium".into(),
+        }];
+        assert!(!requires_app_approval(
+            request.target().as_ref().unwrap(),
+            &allowed_apps,
+            &HashSet::new(),
+        ));
+    }
+
+    #[test]
     fn privileged_and_self_targets_are_blocked() {
         assert!(is_blocked_bundle_id("codes.waku.dev"));
         assert!(is_blocked_bundle_id("com.apple.SecurityAgent"));
@@ -1016,12 +1098,9 @@ mod tests {
         let bundled_helper = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("target/debug/Waku Debug.app/Contents/Helpers/Waku Debug Computer Use.app");
         let helper = install_helper_app(&bundled_helper).unwrap();
-        let response = invoke_helper_app(
-            &helper,
-            &json!({"operation": "status"}),
-            Arc::new(AtomicU32::new(0)),
-        )
-        .unwrap();
+        let active_pid = AtomicU32::new(0);
+        let mut client = HelperClient::connect(&helper, &active_pid).unwrap();
+        let response = client.exchange(&json!({"operation": "status"})).unwrap();
         assert!(!response.success);
         assert!(
             response
@@ -1067,12 +1146,18 @@ mod tests {
         assert_eq!(unsafe { get_responsible_pid(helper_pid) }, helper_pid);
 
         stream.set_nonblocking(false).unwrap();
-        serde_json::to_writer(&mut stream, &json!({"operation": "status"})).unwrap();
-        stream.shutdown(std::net::Shutdown::Write).unwrap();
-        let mut response = Vec::new();
-        stream.read_to_end(&mut response).unwrap();
+        let request = serde_json::to_vec(&json!({"operation": "status"})).unwrap();
+        stream
+            .write_all(&(request.len() as u32).to_be_bytes())
+            .unwrap();
+        stream.write_all(&request).unwrap();
+        let mut header = [0_u8; 4];
+        stream.read_exact(&mut header).unwrap();
+        let mut response = vec![0_u8; u32::from_be_bytes(header) as usize];
+        stream.read_exact(&mut response).unwrap();
         let response: HelperResponse = serde_json::from_slice(&response).unwrap();
         assert!(!response.success);
+        stream.shutdown(std::net::Shutdown::Both).unwrap();
         assert!(launcher.wait().unwrap().success());
     }
 }

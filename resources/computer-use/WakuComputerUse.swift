@@ -1,10 +1,13 @@
 import AppKit
 import CoreGraphics
+import CoreMedia
 import Darwin
 import Foundation
 import ScreenCaptureKit
 import Security
 
+// This process owns macOS privacy access and keeps its Apple Development
+// code-signing identity while the surrounding debug app is rebuilt.
 private let maximumCaptureWidth = 1440
 private let maximumCaptureHeight = 1200
 private let helperDisplayName =
@@ -102,11 +105,12 @@ struct WakuComputerUse {
         if let socketPath = socketPathArgument() {
             do {
                 let (channel, peerPID) = try connectedChannel(at: socketPath)
-                try await serve(
+                try await serveSession(
                     input: channel,
                     output: channel,
                     authorizationFailure: authorizationFailure(pid: peerPID)
                 )
+                await CaptureSessions.shared.stopAll()
                 channel.closeFile()
             } catch {
                 FileHandle.standardError.write(Data("\(helperDisplayName): \(error.localizedDescription)\n".utf8))
@@ -116,14 +120,14 @@ struct WakuComputerUse {
         }
 
         do {
-            try await serve(input: .standardInput, output: .standardOutput)
+            try await serveOneShot(input: .standardInput, output: .standardOutput)
         } catch {
             FileHandle.standardError.write(Data("\(helperDisplayName): \(error.localizedDescription)\n".utf8))
             exit(1)
         }
     }
 
-    static func serve(
+    static func serveOneShot(
         input: FileHandle,
         output: FileHandle,
         authorizationFailure: String? = nil
@@ -142,6 +146,27 @@ struct WakuComputerUse {
         }
 
         try write(response, to: output)
+    }
+
+    static func serveSession(
+        input: FileHandle,
+        output: FileHandle,
+        authorizationFailure: String? = nil
+    ) async throws {
+        while let payload = try readFrame(from: input) {
+            let response: Response
+            do {
+                let request = try JSONDecoder().decode(Request.self, from: payload)
+                if let authorizationFailure {
+                    response = .failure(HelperError.unauthorizedClient(authorizationFailure))
+                } else {
+                    response = try await handle(request)
+                }
+            } catch {
+                response = .failure(error)
+            }
+            try writeFrame(response, to: output)
+        }
     }
 
     static func handle(_ request: Request) async throws -> Response {
@@ -173,7 +198,8 @@ struct WakuComputerUse {
             guard CGPreflightScreenCaptureAccess() else {
                 throw HelperError.missingPermission("Screen Recording")
             }
-            let windows = try await availableWindows()
+            let content = try await availableContent()
+            let windows = availableWindows(in: content)
             return Response(
                 success: true,
                 error: nil,
@@ -197,7 +223,8 @@ struct WakuComputerUse {
             guard actions.isEmpty || AXIsProcessTrusted() else {
                 throw HelperError.missingPermission("Accessibility")
             }
-            guard let window = try await availableWindows().first(where: { $0.windowID == requested.windowId }) else {
+            let content = try await availableContent()
+            guard let window = availableWindows(in: content).first(where: { $0.windowID == requested.windowId }) else {
                 throw HelperError.targetUnavailable
             }
             let current = target(for: window)
@@ -208,11 +235,20 @@ struct WakuComputerUse {
                   requested.teamId == nil || current.teamId == requested.teamId else {
                 throw HelperError.targetIdentityChanged
             }
+            guard let display = captureDisplay(for: window, in: content.displays) else {
+                throw HelperError.targetUnavailable
+            }
+            let filter = SCContentFilter(display: display, including: [window])
+            let sourceRect = captureSourceRect(for: window, on: display)
+            try await CaptureSessions.shared.start(
+                for: window,
+                filter: filter,
+                sourceRect: sourceRect
+            )
             if !actions.isEmpty {
-                try focus(window)
                 try perform(actions, in: window, coordinateSpace: requested)
             }
-            let capture = try await capture(window)
+            let capture = try await capture(window, filter: filter, sourceRect: sourceRect)
             return Response(
                 success: true,
                 error: nil,
@@ -248,6 +284,51 @@ private func write(_ response: Response, to output: FileHandle) throws {
     let encoder = JSONEncoder()
     encoder.outputFormatting = [.withoutEscapingSlashes]
     try output.write(contentsOf: encoder.encode(response))
+}
+
+private func readFrame(from input: FileHandle) throws -> Data? {
+    guard let header = try readExactly(4, from: input) else {
+        return nil
+    }
+    let bytes = [UInt8](header)
+    let length =
+        Int(bytes[0]) << 24
+        | Int(bytes[1]) << 16
+        | Int(bytes[2]) << 8
+        | Int(bytes[3])
+    guard length <= 24 * 1024 * 1024 else {
+        throw HelperError.ipc("request is too large")
+    }
+    return try readExactly(length, from: input)
+}
+
+private func readExactly(_ count: Int, from input: FileHandle) throws -> Data? {
+    var data = Data()
+    while data.count < count {
+        let chunk = try input.read(upToCount: count - data.count) ?? Data()
+        if chunk.isEmpty {
+            if data.isEmpty {
+                return nil
+            }
+            throw HelperError.ipc("the Waku connection closed mid-message")
+        }
+        data.append(chunk)
+    }
+    return data
+}
+
+private func writeFrame(_ response: Response, to output: FileHandle) throws {
+    let encoder = JSONEncoder()
+    encoder.outputFormatting = [.withoutEscapingSlashes]
+    let payload = try encoder.encode(response)
+    guard let length = UInt32(exactly: payload.count) else {
+        throw HelperError.ipc("response is too large")
+    }
+    var bigEndianLength = length.bigEndian
+    try withUnsafeBytes(of: &bigEndianLength) { header in
+        try output.write(contentsOf: header)
+    }
+    try output.write(contentsOf: payload)
 }
 
 private func connectedChannel(at path: String) throws -> (FileHandle, pid_t) {
@@ -323,8 +404,11 @@ private func currentPermissions() -> Permissions {
     )
 }
 
-private func availableWindows() async throws -> [SCWindow] {
-    let content = try await SCShareableContent.excludingDesktopWindows(true, onScreenWindowsOnly: true)
+private func availableContent() async throws -> SCShareableContent {
+    try await SCShareableContent.excludingDesktopWindows(true, onScreenWindowsOnly: true)
+}
+
+private func availableWindows(in content: SCShareableContent) -> [SCWindow] {
     return content.windows
         .filter { window in
             guard let app = window.owningApplication,
@@ -344,6 +428,33 @@ private func availableWindows() async throws -> [SCWindow] {
             }
             return leftApp < rightApp
         }
+}
+
+private func captureDisplay(for window: SCWindow, in displays: [SCDisplay]) -> SCDisplay? {
+    var selected: SCDisplay?
+    var selectedArea: CGFloat = 0
+    for display in displays {
+        let intersection = display.frame.intersection(window.frame)
+        guard !intersection.isNull, !intersection.isEmpty else {
+            continue
+        }
+        let area: CGFloat = intersection.width * intersection.height
+        if area > selectedArea {
+            selected = display
+            selectedArea = area
+        }
+    }
+    return selected
+}
+
+private func captureSourceRect(for window: SCWindow, on display: SCDisplay) -> CGRect {
+    let intersection = window.frame.intersection(display.frame)
+    return CGRect(
+        x: intersection.minX - display.frame.minX,
+        y: intersection.minY - display.frame.minY,
+        width: intersection.width,
+        height: intersection.height
+    )
 }
 
 private func target(for window: SCWindow, includeTitle: Bool = true) -> Target {
@@ -409,6 +520,89 @@ private func isBlocked(bundleId: String) -> Bool {
     ].contains(bundle)
 }
 
+private actor CaptureSessions {
+    static let shared = CaptureSessions()
+
+    private var sessions: [CGWindowID: WindowCaptureSession] = [:]
+
+    func start(
+        for window: SCWindow,
+        filter: SCContentFilter,
+        sourceRect: CGRect
+    ) async throws {
+        guard sessions[window.windowID] == nil else {
+            return
+        }
+        let session = try WindowCaptureSession(
+            window: window,
+            filter: filter,
+            sourceRect: sourceRect
+        )
+        do {
+            try await session.start()
+            sessions[window.windowID] = session
+        } catch {
+            await session.stop()
+            throw error
+        }
+    }
+
+    func stopAll() async {
+        let active = sessions.values
+        sessions.removeAll()
+        for session in active {
+            await session.stop()
+        }
+    }
+}
+
+private final class WindowCaptureOutput: NSObject, SCStreamOutput, SCStreamDelegate {
+    func stream(
+        _ stream: SCStream,
+        didOutputSampleBuffer sampleBuffer: CMSampleBuffer,
+        of outputType: SCStreamOutputType
+    ) {}
+
+    func stream(_ stream: SCStream, didStopWithError error: Error) {}
+}
+
+private final class WindowCaptureSession {
+    private let output = WindowCaptureOutput()
+    private let outputQueue: DispatchQueue
+    private let stream: SCStream
+    private var capturing = false
+
+    init(window: SCWindow, filter: SCContentFilter, sourceRect: CGRect) throws {
+        let configuration = SCStreamConfiguration()
+        // The stream exists to let macOS own and display the window-sharing
+        // state. Actual tool screenshots still use SCScreenshotManager.
+        let size = captureSize(for: sourceRect)
+        configuration.sourceRect = sourceRect
+        configuration.width = size.width
+        configuration.height = size.height
+        configuration.queueDepth = 1
+        configuration.minimumFrameInterval = CMTime(value: 1, timescale: 1)
+        configuration.showsCursor = false
+        configuration.capturesAudio = false
+        outputQueue = DispatchQueue(label: "codes.waku.computer-use.capture.\(window.windowID)")
+        stream = SCStream(filter: filter, configuration: configuration, delegate: output)
+        try stream.addStreamOutput(output, type: .screen, sampleHandlerQueue: outputQueue)
+    }
+
+    func start() async throws {
+        try await stream.startCapture()
+        capturing = true
+    }
+
+    func stop() async {
+        guard capturing else {
+            return
+        }
+        try? await stream.stopCapture()
+        capturing = false
+    }
+}
+
 private struct Capture {
     let dataUrl: String
     let width: Int
@@ -426,12 +620,16 @@ private func captureSize(for frame: CGRect) -> (width: Int, height: Int) {
     )
 }
 
-private func capture(_ window: SCWindow) async throws -> Capture {
-    let size = captureSize(for: window.frame)
+private func capture(
+    _ window: SCWindow,
+    filter: SCContentFilter,
+    sourceRect: CGRect
+) async throws -> Capture {
+    let size = captureSize(for: sourceRect)
     let image: CGImage
     if #available(macOS 14.0, *) {
-        let filter = SCContentFilter(desktopIndependentWindow: window)
         let configuration = SCStreamConfiguration()
+        configuration.sourceRect = sourceRect
         configuration.width = size.width
         configuration.height = size.height
         configuration.scalesToFit = true
@@ -460,16 +658,10 @@ private func capture(_ window: SCWindow) async throws -> Capture {
     )
 }
 
-private func focus(_ window: SCWindow) throws {
-    guard let app = window.owningApplication,
-          let running = NSRunningApplication(processIdentifier: app.processID) else {
+private func perform(_ actions: [Action], in window: SCWindow, coordinateSpace: Target) throws {
+    guard let processID = window.owningApplication?.processID else {
         throw HelperError.targetUnavailable
     }
-    running.activate(options: [.activateIgnoringOtherApps])
-    usleep(160_000)
-}
-
-private func perform(_ actions: [Action], in window: SCWindow, coordinateSpace: Target) throws {
     let frame = window.frame
     func point(_ x: Double?, _ y: Double?) throws -> CGPoint {
         guard let x, let y, x.isFinite, y.isFinite else {
@@ -486,25 +678,32 @@ private func perform(_ actions: [Action], in window: SCWindow, coordinateSpace: 
     for action in actions {
         switch action.type {
         case "click":
-            try click(at: point(action.x, action.y), count: 1)
+            try click(at: point(action.x, action.y), count: 1, processID: processID)
         case "double_click":
-            try click(at: point(action.x, action.y), count: 2)
+            try click(at: point(action.x, action.y), count: 2, processID: processID)
         case "move":
-            try mouseEvent(type: .mouseMoved, at: point(action.x, action.y), button: .left).post(tap: .cghidEventTap)
+            try post(
+                mouseEvent(type: .mouseMoved, at: point(action.x, action.y), button: .left),
+                to: processID
+            )
         case "drag":
-            try drag(from: point(action.x, action.y), to: point(action.toX, action.toY))
+            try drag(
+                from: point(action.x, action.y),
+                to: point(action.toX, action.toY),
+                processID: processID
+            )
         case "scroll":
-            try scroll(deltaX: action.deltaX ?? 0, deltaY: action.deltaY ?? 0)
+            try scroll(deltaX: action.deltaX ?? 0, deltaY: action.deltaY ?? 0, processID: processID)
         case "type":
             guard let text = action.text, text.utf8.count <= 10_000 else {
                 throw HelperError.invalidRequest("Typed text is missing or too long")
             }
-            try typeText(text)
+            try typeText(text, processID: processID)
         case "keypress":
             guard let key = action.key else {
                 throw HelperError.invalidRequest("keypress requires a key")
             }
-            try pressKey(key, modifiers: action.modifiers ?? [])
+            try pressKey(key, modifiers: action.modifiers ?? [], processID: processID)
         case "wait":
             usleep(useconds_t(min(action.durationMs ?? 0, 2_000) * 1_000))
         default:
@@ -521,35 +720,39 @@ private func mouseEvent(type: CGEventType, at point: CGPoint, button: CGMouseBut
     return event
 }
 
-private func click(at point: CGPoint, count: Int64) throws {
+private func post(_ event: CGEvent, to processID: pid_t) {
+    event.postToPid(processID)
+}
+
+private func click(at point: CGPoint, count: Int64, processID: pid_t) throws {
     for index in 1...count {
         let down = try mouseEvent(type: .leftMouseDown, at: point, button: .left)
         let up = try mouseEvent(type: .leftMouseUp, at: point, button: .left)
         down.setIntegerValueField(.mouseEventClickState, value: index)
         up.setIntegerValueField(.mouseEventClickState, value: index)
-        down.post(tap: .cghidEventTap)
+        post(down, to: processID)
         usleep(35_000)
-        up.post(tap: .cghidEventTap)
+        post(up, to: processID)
         usleep(70_000)
     }
 }
 
-private func drag(from start: CGPoint, to end: CGPoint) throws {
+private func drag(from start: CGPoint, to end: CGPoint, processID: pid_t) throws {
     let down = try mouseEvent(type: .leftMouseDown, at: start, button: .left)
-    down.post(tap: .cghidEventTap)
+    post(down, to: processID)
     for step in 1...12 {
         let progress = Double(step) / 12
         let point = CGPoint(
             x: start.x + (end.x - start.x) * progress,
             y: start.y + (end.y - start.y) * progress
         )
-        try mouseEvent(type: .leftMouseDragged, at: point, button: .left).post(tap: .cghidEventTap)
+        try post(mouseEvent(type: .leftMouseDragged, at: point, button: .left), to: processID)
         usleep(12_000)
     }
-    try mouseEvent(type: .leftMouseUp, at: end, button: .left).post(tap: .cghidEventTap)
+    try post(mouseEvent(type: .leftMouseUp, at: end, button: .left), to: processID)
 }
 
-private func scroll(deltaX: Double, deltaY: Double) throws {
+private func scroll(deltaX: Double, deltaY: Double, processID: pid_t) throws {
     guard deltaX.isFinite, deltaY.isFinite,
           let event = CGEvent(
             scrollWheelEvent2Source: nil,
@@ -561,10 +764,10 @@ private func scroll(deltaX: Double, deltaY: Double) throws {
           ) else {
         throw HelperError.eventCreationFailed
     }
-    event.post(tap: .cghidEventTap)
+    post(event, to: processID)
 }
 
-private func typeText(_ text: String) throws {
+private func typeText(_ text: String, processID: pid_t) throws {
     for chunk in Array(text.utf16).chunked(maxCount: 32) {
         guard let down = CGEvent(keyboardEventSource: nil, virtualKey: 0, keyDown: true),
               let up = CGEvent(keyboardEventSource: nil, virtualKey: 0, keyDown: false) else {
@@ -572,13 +775,13 @@ private func typeText(_ text: String) throws {
         }
         down.keyboardSetUnicodeString(stringLength: chunk.count, unicodeString: chunk)
         up.keyboardSetUnicodeString(stringLength: chunk.count, unicodeString: chunk)
-        down.post(tap: .cghidEventTap)
-        up.post(tap: .cghidEventTap)
+        post(down, to: processID)
+        post(up, to: processID)
         usleep(8_000)
     }
 }
 
-private func pressKey(_ key: String, modifiers: [String]) throws {
+private func pressKey(_ key: String, modifiers: [String], processID: pid_t) throws {
     guard let keyCode = virtualKeyCode(for: key) else {
         throw HelperError.invalidRequest("Unsupported key: \(key)")
     }
@@ -589,9 +792,9 @@ private func pressKey(_ key: String, modifiers: [String]) throws {
     }
     down.flags = flags
     up.flags = flags
-    down.post(tap: .cghidEventTap)
+    post(down, to: processID)
     usleep(35_000)
-    up.post(tap: .cghidEventTap)
+    post(up, to: processID)
 }
 
 private func eventFlags(_ modifiers: [String]) -> CGEventFlags {

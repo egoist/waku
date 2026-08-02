@@ -896,6 +896,7 @@ pub enum DriverEvent {
         detail: Option<String>,
         complete: bool,
     },
+    RichActivity(ActivityItem),
     Permission {
         request_id: String,
         title: String,
@@ -928,6 +929,12 @@ pub struct ActivityItem {
     pub kind: ActivityKind,
     pub title: String,
     pub detail: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub arguments: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output: Option<String>,
+    #[serde(default)]
+    pub failed: bool,
     pub complete: bool,
 }
 
@@ -945,8 +952,26 @@ impl ActivityItem {
             kind,
             title: title.into(),
             detail,
+            arguments: None,
+            output: None,
+            failed: false,
             complete,
         }
+    }
+
+    pub fn with_arguments(mut self, arguments: Option<String>) -> Self {
+        self.arguments = arguments;
+        self
+    }
+
+    pub fn with_output(mut self, output: Option<String>) -> Self {
+        self.output = output;
+        self
+    }
+
+    pub fn with_failed(mut self, failed: bool) -> Self {
+        self.failed = failed;
+        self
     }
 }
 

@@ -104,8 +104,15 @@ impl Waku {
                     activity.kind = item.kind;
                     activity.title = item.title;
                     activity.complete = item.complete;
+                    activity.failed = item.failed;
                     if item.detail.is_some() {
                         activity.detail = item.detail;
+                    }
+                    if item.arguments.is_some() {
+                        activity.arguments = item.arguments;
+                    }
+                    if item.output.is_some() {
+                        activity.output = item.output;
                     }
                     session.updated_at = unix_time();
                     runtime.stream_phase = Some(StreamPhase::Activity);
@@ -190,6 +197,7 @@ impl Waku {
     ) -> bool {
         match event {
             DriverEvent::Connected { provider_cursor } => {
+                runtime.last_driver_error = None;
                 if let Some(session) = self
                     .state
                     .sessions
@@ -210,6 +218,7 @@ impl Waku {
                 }
             }
             DriverEvent::TurnStarted => {
+                runtime.last_driver_error = None;
                 if let Some(session) = self
                     .state
                     .sessions
@@ -244,6 +253,11 @@ impl Waku {
                         runtime,
                         ActivityItem::new(id, kind, title, detail, complete),
                     );
+                }
+            }
+            DriverEvent::RichActivity(item) => {
+                if self.accepts_turn_output(session_id) {
+                    self.update_activity(session_id, runtime, item);
                 }
             }
             DriverEvent::Permission {
@@ -288,29 +302,22 @@ impl Waku {
                             .into(),
                     );
                 } else if let Some(target) = request.target() {
-                    let key = target.grant_key();
-                    let globally_allowed = target.persistable()
-                        && self
-                            .state
-                            .computer_use_allowed_apps
-                            .iter()
-                            .any(|grant| grant.key() == key);
-                    let already_allowed =
-                        globally_allowed || runtime.computer_session_grants.contains(&key);
                     let sensitive = request.requires_sensitive_confirmation();
-                    if already_allowed && !sensitive {
+                    let needs_approval = crate::computer_use::requires_app_approval(
+                        &target,
+                        &self.state.computer_use_allowed_apps,
+                        &runtime.computer_session_grants,
+                    );
+                    if !needs_approval {
                         runtime.driver.run_computer_tool(request);
                     } else {
                         Self::upsert_computer_use_preview(
                             runtime,
                             ComputerUseState {
-                                call_id: request.call_id.clone(),
                                 target: Some(target.clone()),
-                                summary: request.summary(),
                                 phase: ComputerUsePhase::AwaitingApproval,
                                 visible: true,
                                 screenshot: None,
-                                error: None,
                             },
                         );
                         runtime.pending_computer_approval = Some(PendingComputerApproval {
@@ -335,36 +342,10 @@ impl Waku {
                 }
             }
             DriverEvent::ComputerUseUpdated(state) => {
-                let complete = matches!(
-                    state.phase,
-                    ComputerUsePhase::Completed | ComputerUsePhase::Failed
-                );
-                let app_name = state
-                    .target
-                    .as_ref()
-                    .map(|target| target.app_name.as_str())
-                    .unwrap_or("the computer");
-                let title = match (state.target.is_some(), state.phase) {
-                    (false, _) => state.summary.clone(),
-                    (true, ComputerUsePhase::AwaitingApproval) => {
-                        format!("Waiting to use {app_name}")
-                    }
-                    (true, ComputerUsePhase::Running) => format!("Using {app_name}"),
-                    (true, ComputerUsePhase::Completed) => format!("Used {app_name}"),
-                    (true, ComputerUsePhase::Failed) => format!("Could not use {app_name}"),
-                };
-                let detail = state.error.clone().or_else(|| Some(state.summary.clone()));
-                self.update_activity(
-                    session_id,
-                    runtime,
-                    ActivityItem::new(
-                        Some(state.call_id.clone()),
-                        ActivityKind::Tool,
-                        title,
-                        detail,
-                        complete,
-                    ),
-                );
+                // Codex emits the corresponding dynamicToolCall item with the
+                // provider-native arguments, output, status, and stable item ID.
+                // Keep this event focused on Waku's live window preview so we
+                // do not create a second, less-informative transcript row.
                 Self::upsert_computer_use_preview(runtime, state);
                 if let Some(session) = self
                     .state
@@ -381,6 +362,7 @@ impl Waku {
                 self.computer_permissions = permissions;
             }
             DriverEvent::TurnFinished { success, summary } => {
+                runtime.last_driver_error = None;
                 if self
                     .state
                     .sessions
@@ -431,6 +413,7 @@ impl Waku {
                 self.capture_latest_turn_checkpoint_for(session_id);
             }
             DriverEvent::Error(error) => {
+                runtime.last_driver_error = Some(error.clone());
                 if self.state.selected_session == Some(session_id) {
                     self.toast = Some(error.clone());
                 }
@@ -472,6 +455,10 @@ impl Waku {
                 runtime.pending_computer_approval = None;
                 runtime.driver.cancel_computer_use();
                 runtime.computer_use_previews.clear();
+                let needs_fallback = !self.turn_has_assistant_message(session_id);
+                let failure_message = runtime.last_driver_error.take().unwrap_or_else(|| {
+                    "Codex app-server exited before returning a response.".into()
+                });
                 let mut finished_turn = false;
                 if let Some(session) = self
                     .state
@@ -485,6 +472,9 @@ impl Waku {
                 {
                     session.status = SessionStatus::Failed;
                     session.updated_at = unix_time();
+                    if needs_fallback {
+                        session.push_message(MessageRole::Assistant, failure_message);
+                    }
                     finished_turn = session.finish_active_turn(TurnStatus::Failed).is_some();
                 }
                 if finished_turn {

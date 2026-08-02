@@ -2,7 +2,26 @@
 set -eu
 
 profile="${1:-debug}"
-codesign_identity="${WAKU_CODESIGN_IDENTITY:--}"
+if [ -n "${WAKU_CODESIGN_IDENTITY:-}" ]; then
+  codesign_identity="$WAKU_CODESIGN_IDENTITY"
+else
+  if [ "$profile" = "debug" ]; then
+    preferred_identity="Apple Development:"
+    fallback_identity="Developer ID Application:"
+  else
+    preferred_identity="Developer ID Application:"
+    fallback_identity="Apple Development:"
+  fi
+  codesign_identity=$(security find-identity -v -p codesigning 2>/dev/null \
+    | awk -v identity="$preferred_identity" 'index($0, "\"" identity) { print $2; exit }')
+  if [ -z "$codesign_identity" ]; then
+    codesign_identity=$(security find-identity -v -p codesigning 2>/dev/null \
+      | awk -v identity="$fallback_identity" 'index($0, "\"" identity) { print $2; exit }')
+  fi
+  if [ -z "$codesign_identity" ]; then
+    codesign_identity="-"
+  fi
+fi
 case "$profile" in
   debug)
     cargo build
@@ -37,10 +56,9 @@ legacy_helper_cache_root="target/computer-use-cache/$profile"
 helper_cache_entry="$helper_cache_root/$helper_fingerprint"
 cached_helper_bundle="$helper_cache_entry/$helper_name.app"
 
-# Ad-hoc debug signing uses the helper's CDHash as its designated requirement.
-# Keep the compiled helper outside target so `cargo clean` and ordinary app
-# rebuilds cannot silently replace its macOS privacy identity. Migrate an
-# existing cache entry so current grants survive this change as well.
+# Keep compiled helpers outside target so `cargo clean` does not force an
+# unnecessary Swift rebuild. The fingerprint includes the signing identity so
+# switching certificates can never reuse a helper signed as different code.
 if [ ! -d "$cached_helper_bundle" ] && [ -d "$legacy_helper_cache_root/$helper_fingerprint/$helper_name.app" ]; then
   mkdir -p "$helper_cache_root"
   cp -R "$legacy_helper_cache_root/$helper_fingerprint" "$helper_cache_entry"
