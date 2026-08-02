@@ -1,5 +1,9 @@
 use std::collections::HashMap;
+use std::ffi::OsString;
+use std::fs;
 use std::io::{BufRead, BufReader, Write};
+use std::os::unix::ffi::OsStringExt as _;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
 use std::thread;
@@ -9,6 +13,7 @@ use anyhow::{Context as _, anyhow};
 use crossbeam_channel::{Sender, bounded, unbounded};
 use parking_lot::Mutex;
 use serde_json::{Value, json};
+use uuid::Uuid;
 
 use crate::computer_use;
 use crate::driver::{DriverControl, DriverStartOptions};
@@ -47,6 +52,8 @@ enum CommandMessage {
 
 pub struct CodexDriver {
     commands: Sender<CommandMessage>,
+    computer_use_process_directory: PathBuf,
+    computer_use_server_path: PathBuf,
 }
 
 impl CodexDriver {
@@ -72,7 +79,18 @@ impl CodexDriver {
             None => None,
         };
         let computer_use_server_path = computer_use::mcp_server_command()?;
+        let computer_use_process_directory = std::env::temp_dir()
+            .join("waku-computer-use")
+            .join(Uuid::new_v4().simple().to_string());
+        fs::create_dir_all(&computer_use_process_directory).with_context(|| {
+            format!(
+                "could not create Computer Use process directory {}",
+                computer_use_process_directory.display()
+            )
+        })?;
         let computer_use_server = toml_string(&computer_use_server_path.display().to_string());
+        let computer_use_process_directory_config =
+            toml_string(&computer_use_process_directory.display().to_string());
         let computer_use_client_path = computer_use::node_repl_client_path()?;
         let computer_use_client = toml_string(&computer_use_client_path.display().to_string());
         let computer_use_skill_root = computer_use::skill_root_path()?;
@@ -106,6 +124,7 @@ impl CodexDriver {
                 "NODE_REPL_TRUSTED_CODE_PATHS",
                 "SKY_CUA_SERVICE_PATH",
                 "WAKU_COMPUTER_USE_CLIENT",
+                "WAKU_COMPUTER_USE_PROCESS_DIRECTORY",
                 "WAKU_COMPUTER_USE_SERVER",
             ]
             .join(","),
@@ -113,6 +132,10 @@ impl CodexDriver {
         let mut command = crate::command_env::command(binary);
         command.env("WAKU_COMPUTER_USE_SERVER", &computer_use_server_path);
         command.env("WAKU_COMPUTER_USE_CLIENT", &computer_use_client_path);
+        command.env(
+            "WAKU_COMPUTER_USE_PROCESS_DIRECTORY",
+            &computer_use_process_directory,
+        );
         let mut child = command
             .args(["app-server", "--stdio"])
             .arg("-c")
@@ -130,6 +153,10 @@ impl CodexDriver {
             .arg("-c")
             .arg(format!(
                 "mcp_servers.node_repl.env.WAKU_COMPUTER_USE_CLIENT={computer_use_client}"
+            ))
+            .arg("-c")
+            .arg(format!(
+                "mcp_servers.node_repl.env.WAKU_COMPUTER_USE_PROCESS_DIRECTORY={computer_use_process_directory_config}"
             ))
             .arg("-c")
             .arg(format!(
@@ -499,6 +526,8 @@ impl CodexDriver {
 
         Ok(Self {
             commands,
+            computer_use_process_directory,
+            computer_use_server_path,
         })
     }
 }
@@ -540,13 +569,19 @@ impl DriverControl for CodexDriver {
         let _ = self.commands.send(CommandMessage::Cancel);
     }
 
+    fn cancel_computer_use(&self) {
+        stop_registered_computer_use_processes(
+            &self.computer_use_process_directory,
+            &self.computer_use_server_path,
+        );
+    }
+
     fn respond(&self, request_id: String, option_id: String) {
         let _ = self.commands.send(CommandMessage::Respond {
             request_id,
             option_id,
         });
     }
-
 
     fn rollback(&self, turns: usize) -> anyhow::Result<Option<ProviderResumeCursor>> {
         if turns == 0 {
@@ -584,8 +619,55 @@ impl DriverControl for CodexDriver {
 
 impl Drop for CodexDriver {
     fn drop(&mut self) {
+        self.cancel_computer_use();
+        let _ = fs::remove_dir_all(&self.computer_use_process_directory);
         let _ = self.commands.send(CommandMessage::Shutdown);
     }
+}
+
+fn stop_registered_computer_use_processes(directory: &Path, helper_executable: &Path) {
+    let expected_executable =
+        fs::canonicalize(helper_executable).unwrap_or_else(|_| helper_executable.to_path_buf());
+    for (pid, registration) in registered_computer_use_processes(directory) {
+        if process_executable(pid).as_deref() == Some(expected_executable.as_path()) {
+            unsafe {
+                libc::kill(pid, libc::SIGTERM);
+            }
+        }
+        let _ = fs::remove_file(registration);
+    }
+}
+
+fn registered_computer_use_processes(directory: &Path) -> Vec<(i32, PathBuf)> {
+    let Ok(entries) = fs::read_dir(directory) else {
+        return Vec::new();
+    };
+    entries
+        .filter_map(Result::ok)
+        .filter_map(|entry| {
+            if !entry.file_type().ok()?.is_file() {
+                return None;
+            }
+            let pid = entry.file_name().to_str()?.parse::<i32>().ok()?;
+            (pid > 1).then_some((pid, entry.path()))
+        })
+        .collect()
+}
+
+fn process_executable(pid: i32) -> Option<PathBuf> {
+    let mut buffer = vec![0_u8; libc::PROC_PIDPATHINFO_MAXSIZE as usize];
+    let length = unsafe {
+        libc::proc_pidpath(
+            pid,
+            buffer.as_mut_ptr().cast(),
+            libc::PROC_PIDPATHINFO_MAXSIZE as u32,
+        )
+    };
+    if length <= 0 {
+        return None;
+    }
+    buffer.truncate(length as usize);
+    Some(PathBuf::from(OsString::from_vec(buffer)))
 }
 
 fn write_json_line(writer: &mut impl Write, value: &Value) -> std::io::Result<()> {
@@ -1302,6 +1384,30 @@ mod tests {
         assert!(is_visible_stderr_notice(
             "Error: error loading default config after config error: invalid transport"
         ));
+    }
+
+    #[test]
+    fn computer_use_process_registry_accepts_only_pid_files() {
+        let directory = std::env::temp_dir().join(format!(
+            "waku-computer-use-process-test-{}",
+            Uuid::new_v4().simple()
+        ));
+        fs::create_dir_all(directory.join("456")).unwrap();
+        fs::write(directory.join("123"), []).unwrap();
+        fs::write(directory.join("not-a-pid"), []).unwrap();
+
+        let processes = registered_computer_use_processes(&directory);
+        assert_eq!(processes.len(), 1);
+        assert_eq!(processes[0].0, 123);
+        assert_eq!(processes[0].1, directory.join("123"));
+
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn computer_use_cleanup_verifies_the_registered_executable() {
+        let current = fs::canonicalize(std::env::current_exe().unwrap()).unwrap();
+        assert_eq!(process_executable(std::process::id() as i32), Some(current));
     }
 
     #[test]

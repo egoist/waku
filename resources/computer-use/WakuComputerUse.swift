@@ -119,7 +119,7 @@ private final class ComputerUseStatusItem {
     private func createItemIfNeeded() {
         guard item == nil else { return }
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-        item.length = 80
+        item.length = 54
         item.button?.toolTip = "Waku Computer Use"
         self.item = item
     }
@@ -145,7 +145,9 @@ private final class ComputerUseStatusItem {
             self.item = nil
             return
         }
-        item.button?.image = self.statusImage()
+        let image = self.statusImage()
+        item.length = image.size.width
+        item.button?.image = image
         let menu = NSMenu()
         let title = NSMenuItem(title: "Waku Computer Use", action: nil, keyEquivalent: "")
         title.isEnabled = false
@@ -160,16 +162,19 @@ private final class ComputerUseStatusItem {
     }
 
     private func statusImage() -> NSImage {
-        let image = NSImage(size: NSSize(width: 80, height: 22))
+        let visibleApps = Array(apps.prefix(4))
+        let stackedAppWidth = CGFloat(max(visibleApps.count - 1, 0)) * 8
+        let cursorX = 29 + stackedAppWidth
+        let imageWidth = 54 + stackedAppWidth
+        let image = NSImage(size: NSSize(width: imageWidth, height: 22))
         image.lockFocus()
-        let bounds = NSRect(x: 0.5, y: 0.5, width: 79, height: 21)
+        let bounds = NSRect(x: 0.5, y: 0.5, width: imageWidth - 1, height: 21)
         NSColor.white.withAlphaComponent(0.58).setFill()
         NSBezierPath(roundedRect: bounds, xRadius: 10.5, yRadius: 10.5).fill()
 
-        let visibleApps = Array(apps.prefix(4))
         for (index, app) in visibleApps.enumerated() {
             let iconRect = NSRect(
-                x: 12 + CGFloat(index) * 8,
+                x: 7 + CGFloat(index) * 8,
                 y: 1,
                 width: 20,
                 height: 20
@@ -187,7 +192,7 @@ private final class ComputerUseStatusItem {
         }
 
         CursorAssets.menuBar?.draw(
-            in: NSRect(x: 52, y: 2, width: 19, height: 17),
+            in: NSRect(x: cursorX, y: 2, width: 19, height: 17),
             from: .zero,
             operation: .sourceOver,
             fraction: 1
@@ -263,6 +268,46 @@ private final class StatusAgentProcess {
     }
 }
 
+private final class BridgeProcessRegistration {
+    static let shared = BridgeProcessRegistration()
+
+    private var registration: URL?
+    private let lock = NSLock()
+
+    func activate() {
+        lock.lock()
+        defer { lock.unlock() }
+        guard registration == nil,
+              let directoryPath = commandLineArgument("--process-directory"),
+              let bridgePID = commandLineArgument("--bridge-pid"),
+              let bridgePIDValue = Int32(bridgePID),
+              bridgePIDValue > 1 else {
+            return
+        }
+        let directory = URL(fileURLWithPath: directoryPath, isDirectory: true).standardizedFileURL
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: directory.path, isDirectory: &isDirectory),
+              isDirectory.boolValue else {
+            return
+        }
+        let registration = directory.appendingPathComponent(bridgePID, isDirectory: false)
+        guard FileManager.default.createFile(atPath: registration.path, contents: Data()) else {
+            return
+        }
+        self.registration = registration
+    }
+
+    func remove() {
+        lock.lock()
+        let registration = self.registration
+        self.registration = nil
+        lock.unlock()
+        if let registration {
+            try? FileManager.default.removeItem(at: registration)
+        }
+    }
+}
+
 struct Response: Encodable {
     let success: Bool
     let error: String?
@@ -325,7 +370,10 @@ struct WakuComputerUse {
             do {
                 if CommandLine.arguments.contains("mcp-child") {
                     let (channel, _) = try connectedChannel(at: socketPathArgument() ?? "")
-                    defer { StatusAgentProcess.shared.stop() }
+                    defer {
+                        BridgeProcessRegistration.shared.remove()
+                        StatusAgentProcess.shared.stop()
+                    }
                     try await serveMCP(input: channel, output: channel)
                     await CaptureSessions.shared.stopAll()
                     channel.closeFile()
@@ -537,6 +585,7 @@ struct WakuComputerUse {
             }
             let filter = SCContentFilter(display: display, including: [window])
             let sourceRect = captureSourceRect(for: window, on: display)
+            BridgeProcessRegistration.shared.activate()
             try await CaptureSessions.shared.start(
                 for: window,
                 filter: filter,
@@ -632,8 +681,20 @@ struct WakuComputerUse {
     static func serveMCPBridge() async throws {
         let listener = try UnixListener()
         defer { listener.close() }
+        var childArguments = [
+            "mcp",
+            "mcp-child",
+            "--socket",
+            listener.path,
+            "--bridge-pid",
+            String(getpid()),
+        ]
+        if let processDirectory = ProcessInfo.processInfo.environment["WAKU_COMPUTER_USE_PROCESS_DIRECTORY"],
+           !processDirectory.isEmpty {
+            childArguments.append(contentsOf: ["--process-directory", processDirectory])
+        }
         let launcher = try launchSelfThroughLaunchServices(
-            arguments: ["mcp", "mcp-child", "--socket", listener.path]
+            arguments: childArguments
         )
         defer {
             if launcher.isRunning { launcher.terminate() }
@@ -807,12 +868,16 @@ struct WakuComputerUse {
     }
 }
 
-private func socketPathArgument() -> String? {
-    guard let index = CommandLine.arguments.firstIndex(of: "--socket"),
+private func commandLineArgument(_ name: String) -> String? {
+    guard let index = CommandLine.arguments.firstIndex(of: name),
           CommandLine.arguments.indices.contains(index + 1) else {
         return nil
     }
     return CommandLine.arguments[index + 1]
+}
+
+private func socketPathArgument() -> String? {
+    commandLineArgument("--socket")
 }
 
 private final class AccessibilityRegistry {
@@ -1940,6 +2005,7 @@ private func captureAppState(
     }
     let filter = SCContentFilter(display: display, including: [resolved.window])
     let sourceRect = captureSourceRect(for: resolved.window, on: display)
+    BridgeProcessRegistration.shared.activate()
     try await CaptureSessions.shared.start(
         for: resolved.window,
         filter: filter,
