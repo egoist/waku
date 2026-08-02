@@ -52,17 +52,14 @@ helper_fingerprint="$({
   xcrun swiftc -version
 } | shasum -a 256 | awk '{ print $1 }')"
 helper_cache_root=".waku-cache/computer-use/$profile"
-legacy_helper_cache_root="target/computer-use-cache/$profile"
 helper_cache_entry="$helper_cache_root/$helper_fingerprint"
 cached_helper_bundle="$helper_cache_entry/$helper_name.app"
 
 # Keep compiled helpers outside target so `cargo clean` does not force an
 # unnecessary Swift rebuild. The fingerprint includes the signing identity so
 # switching certificates can never reuse a helper signed as different code.
-if [ ! -d "$cached_helper_bundle" ] && [ -d "$legacy_helper_cache_root/$helper_fingerprint/$helper_name.app" ]; then
-  mkdir -p "$helper_cache_root"
-  cp -R "$legacy_helper_cache_root/$helper_fingerprint" "$helper_cache_entry"
-fi
+# The TCC-facing runtime copy is installed separately by Waku under Application
+# Support; this directory is only a build cache.
 
 if [ ! -d "$cached_helper_bundle" ]; then
   helper_cache_staging="$helper_cache_root/.staging-$helper_fingerprint-$$"
@@ -92,9 +89,12 @@ if [ ! -d "$cached_helper_bundle" ]; then
 fi
 
 rm -rf "$bundle"
-mkdir -p "$contents/MacOS" "$contents/Resources" "$contents/Helpers"
+mkdir -p "$contents/MacOS" "$contents/Resources/skills/waku-computer-use" "$contents/Helpers"
 cp "target/$profile/waku" "$contents/MacOS/$app_name"
 cp resources/Info.plist "$contents/Info.plist"
+cp resources/computer-use/SKILL.md "$contents/Resources/skills/waku-computer-use/SKILL.md"
+cp resources/computer-use/mcp.json "$contents/Resources/Waku Computer Use MCP.json"
+cp resources/computer-use/waku-computer-use-client.mjs "$contents/Resources/Waku Computer Use Client.mjs"
 plutil -replace CFBundleDisplayName -string "$app_name" "$contents/Info.plist"
 plutil -replace CFBundleExecutable -string "$app_name" "$contents/Info.plist"
 plutil -replace CFBundleIdentifier -string "$bundle_identifier" "$contents/Info.plist"

@@ -318,7 +318,6 @@ impl Waku {
         let theme = Theme::current(cx);
         let enabled = self.state.computer_use_enabled;
         let permissions = self.computer_permissions.clone();
-        let access_ready = permissions.ready();
         let pending = self.computer_permission_request_pending;
         let helper_name = crate::computer_use::helper_display_name();
         let mut allowed_apps = div().flex().flex_col().gap(px(1.0));
@@ -485,7 +484,6 @@ impl Waku {
                         "Captures only the approved app window.",
                         permissions.screen_recording,
                         "screen-recording-settings",
-                        "Privacy_ScreenCapture",
                         theme,
                         cx,
                     ))
@@ -494,7 +492,6 @@ impl Waku {
                         "Posts pointer and keyboard events after approval.",
                         permissions.accessibility,
                         "accessibility-settings",
-                        "Privacy_Accessibility",
                         theme,
                         cx,
                     ))
@@ -523,16 +520,7 @@ impl Waku {
                                         this.request_computer_permissions(false, cx);
                                     })),
                             ),
-                    )
-                    .when(!access_ready, |element| {
-                        element.child(
-                            div()
-                                .mt(px(8.0))
-                                .text_size(px(10.0))
-                                .text_color(theme.text_tertiary)
-                                .child("If access belongs to an older debug helper, remove that helper from System Settings and request access again."),
-                        )
-                    }),
+                    ),
             )
             .child(
                 div()
@@ -573,6 +561,9 @@ impl Waku {
             }
         }
         self.save();
+        if enabled {
+            self.request_computer_permissions(true, cx);
+        }
         cx.notify();
     }
 
@@ -639,14 +630,6 @@ impl Waku {
         None
     }
 
-    fn open_privacy_settings(pane: &'static str) {
-        let _ = Command::new("/usr/bin/open")
-            .arg(format!(
-                "x-apple.systempreferences:com.apple.preference.security?{pane}"
-            ))
-            .spawn();
-    }
-
     fn render_settings_drag_region(
         &self,
         id: &'static str,
@@ -705,9 +688,8 @@ fn permission_status_row(
     description: &'static str,
     granted: bool,
     id: &'static str,
-    pane: &'static str,
     theme: Theme,
-    _cx: &mut Context<Waku>,
+    cx: &mut Context<Waku>,
 ) -> Div {
     div()
         .mt(px(10.0))
@@ -755,10 +737,10 @@ fn permission_status_row(
                 } else {
                     "Grant Access"
                 })
-                .on_click(move |_, _, _| {
+                .on_click(cx.listener(move |this, _, _, cx| {
                     if !granted {
-                        Waku::open_privacy_settings(pane);
+                        this.request_computer_permissions(true, cx);
                     }
-                }),
+                })),
         )
 }

@@ -286,84 +286,6 @@ impl Waku {
                     }
                 }
             }
-            DriverEvent::ComputerToolRequested(request) => {
-                if !self.state.computer_use_enabled {
-                    runtime.driver.reject_computer_tool(
-                        request,
-                        "Computer Use is disabled in Waku Settings.".into(),
-                    );
-                } else if let Err(error) = crate::computer_use::validate_request(&request) {
-                    runtime
-                        .driver
-                        .reject_computer_tool(request, error.to_string());
-                } else if request.tool != "use" {
-                    runtime.driver.run_computer_tool(request);
-                } else if runtime.pending_computer_approval.is_some() {
-                    runtime.driver.reject_computer_tool(
-                        request,
-                        "Another app-control request is awaiting approval. Retry after it resolves."
-                            .into(),
-                    );
-                } else if let Some(target) = request.target() {
-                    let sensitive = request.requires_sensitive_confirmation();
-                    let needs_approval = crate::computer_use::requires_app_approval(
-                        &target,
-                        &self.state.computer_use_allowed_apps,
-                        &runtime.computer_session_grants,
-                    );
-                    if !needs_approval {
-                        runtime.driver.run_computer_tool(request);
-                    } else {
-                        Self::upsert_computer_use_preview(
-                            runtime,
-                            ComputerUseState {
-                                target: Some(target.clone()),
-                                phase: ComputerUsePhase::AwaitingApproval,
-                                visible: true,
-                                screenshot: None,
-                            },
-                        );
-                        runtime.pending_computer_approval = Some(PendingComputerApproval {
-                            request,
-                            target,
-                            sensitive,
-                        });
-                        if let Some(session) = self
-                            .state
-                            .sessions
-                            .iter_mut()
-                            .find(|session| session.id == session_id)
-                        {
-                            session.status = SessionStatus::Waiting;
-                        }
-                    }
-                } else {
-                    runtime.driver.reject_computer_tool(
-                        request,
-                        "Computer use requires a target returned by list_targets.".into(),
-                    );
-                }
-            }
-            DriverEvent::ComputerUseUpdated(state) => {
-                // Codex emits the corresponding dynamicToolCall item with the
-                // provider-native arguments, output, status, and stable item ID.
-                // Keep this event focused on Waku's live window preview so we
-                // do not create a second, less-informative transcript row.
-                Self::upsert_computer_use_preview(runtime, state);
-                if let Some(session) = self
-                    .state
-                    .sessions
-                    .iter_mut()
-                    .find(|session| session.id == session_id)
-                    && session.status == SessionStatus::Waiting
-                    && runtime.pending_computer_approval.is_none()
-                {
-                    session.status = SessionStatus::Working;
-                }
-            }
-            DriverEvent::ComputerPermissions(permissions) => {
-                self.computer_permissions = permissions;
-            }
             DriverEvent::TurnFinished { success, summary } => {
                 runtime.last_driver_error = None;
                 if self
@@ -489,26 +411,6 @@ impl Waku {
         true
     }
 
-    fn upsert_computer_use_preview(runtime: &mut SessionRuntime, mut state: ComputerUseState) {
-        if !state.visible {
-            return;
-        }
-        let Some(window_id) = state.target.as_ref().map(|target| target.window_id) else {
-            return;
-        };
-        if let Some(index) = runtime.computer_use_previews.iter().position(|preview| {
-            preview
-                .target
-                .as_ref()
-                .is_some_and(|target| target.window_id == window_id)
-        }) {
-            let previous = runtime.computer_use_previews.remove(index);
-            if state.screenshot.is_none() {
-                state.screenshot = previous.screenshot;
-            }
-        }
-        runtime.computer_use_previews.push(state);
-    }
 }
 
 pub(super) fn stream_delta_kind(event: &DriverEvent) -> Option<StreamDeltaKind> {

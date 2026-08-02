@@ -2,7 +2,6 @@ use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
 use std::process::Stdio;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::Duration;
 
@@ -11,9 +10,7 @@ use crossbeam_channel::{Sender, bounded, unbounded};
 use parking_lot::Mutex;
 use serde_json::{Value, json};
 
-use crate::computer_use::{
-    self, ComputerToolRequest, ComputerUsePhase, ComputerUseSession, ComputerUseState,
-};
+use crate::computer_use;
 use crate::driver::{DriverControl, DriverStartOptions};
 use crate::model::{
     ActivityItem, ActivityKind, DriverEvent, InteractionMode, PermissionOption,
@@ -24,6 +21,8 @@ const DISABLE_EXTERNAL_COMPUTER_USE_PLUGIN: &str =
     "plugins.computer-use@openai-bundled.enabled=false";
 // Codex 0.146 only resolves plugin enablement from user/profile config layers, so a
 // process-local `-c` plugin override does not yet suppress its bundled capabilities.
+const DISABLE_EXTERNAL_COMPUTER_USE_MCP_COMMAND: &str =
+    "mcp_servers.computer-use.command=\"/usr/bin/true\"";
 const DISABLE_EXTERNAL_COMPUTER_USE_MCP: &str = "mcp_servers.computer-use.enabled=false";
 const DISABLE_EXTERNAL_COMPUTER_USE_SKILL: &str =
     r#"skills.config=[{name="computer-use:computer-use",enabled=false}]"#;
@@ -34,16 +33,6 @@ enum CommandMessage {
     Respond {
         request_id: String,
         option_id: String,
-    },
-    RunComputerTool(ComputerToolRequest),
-    DynamicToolResponse {
-        rpc_id: String,
-        success: bool,
-        content_items: Vec<Value>,
-    },
-    RejectComputerTool {
-        request: ComputerToolRequest,
-        reason: String,
     },
     Rollback {
         turns: usize,
@@ -58,7 +47,6 @@ enum CommandMessage {
 
 pub struct CodexDriver {
     commands: Sender<CommandMessage>,
-    computer_use_session: Arc<ComputerUseSession>,
 }
 
 impl CodexDriver {
@@ -83,17 +71,31 @@ impl CodexDriver {
             }
             None => None,
         };
-        let mut child = crate::command_env::command(binary)
-            .args([
-                "app-server",
-                "--stdio",
-                "-c",
-                DISABLE_EXTERNAL_COMPUTER_USE_PLUGIN,
-                "-c",
-                DISABLE_EXTERNAL_COMPUTER_USE_MCP,
-                "-c",
-                DISABLE_EXTERNAL_COMPUTER_USE_SKILL,
-            ])
+        let computer_use_server_path = computer_use::mcp_server_command()?;
+        let computer_use_server = toml_string(&computer_use_server_path.display().to_string());
+        let computer_use_client_path = computer_use::node_repl_client_path()?;
+        let computer_use_skill_root = computer_use::skill_root_path()?;
+        let mut command = crate::command_env::command(binary);
+        command.env("WAKU_COMPUTER_USE_SERVER", &computer_use_server_path);
+        command.env("WAKU_COMPUTER_USE_CLIENT", &computer_use_client_path);
+        let mut child = command
+            .args(["app-server", "--stdio"])
+            .arg("-c")
+            .arg(DISABLE_EXTERNAL_COMPUTER_USE_PLUGIN)
+            .arg("-c")
+            .arg(DISABLE_EXTERNAL_COMPUTER_USE_MCP_COMMAND)
+            .arg("-c")
+            .arg(DISABLE_EXTERNAL_COMPUTER_USE_MCP)
+            .arg("-c")
+            .arg(DISABLE_EXTERNAL_COMPUTER_USE_SKILL)
+            .arg("-c")
+            .arg(format!(
+                "mcp_servers.waku_computer_use.command={computer_use_server}"
+            ))
+            .arg("-c")
+            .arg("mcp_servers.waku_computer_use.args=[\"mcp\"]")
+            .arg("-c")
+            .arg("mcp_servers.waku_computer_use.enabled=true")
             .current_dir(&cwd)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -114,8 +116,6 @@ impl CodexDriver {
             .take()
             .ok_or_else(|| anyhow!("Codex stderr unavailable"))?;
         let (commands, command_rx) = unbounded();
-        let computer_use_session = Arc::new(ComputerUseSession::new());
-        let computer_tool_in_flight = Arc::new(AtomicBool::new(false));
         let thread_id = Arc::new(Mutex::new(None::<String>));
         let turn_id = Arc::new(Mutex::new(None::<String>));
         let turn_ids = Arc::new(Mutex::new(Vec::<String>::new()));
@@ -133,9 +133,6 @@ impl CodexDriver {
         let writer_pending_rollbacks = pending_rollbacks.clone();
         let writer_pending_forks = pending_forks.clone();
         let writer_events = events.clone();
-        let writer_commands = commands.clone();
-        let writer_computer_use_session = computer_use_session.clone();
-        let writer_computer_tool_in_flight = computer_tool_in_flight.clone();
         let cwd_string = cwd.display().to_string();
         thread::Builder::new()
             .name("waku-codex-writer".into())
@@ -171,6 +168,27 @@ impl CodexDriver {
                     return;
                 }
 
+                // Register Waku's bundled skill through Codex's discoverable-skill
+                // mechanism. Keep the skill out of developerInstructions so it is
+                // loaded and displayed like Codex's own bundled skills.
+                if write_json_line(
+                    &mut stdin,
+                    &json!({
+                        "method": "skills/extraRoots/set",
+                        "id": "waku-computer-use-skill",
+                        "params": {
+                            "extraRoots": [computer_use_skill_root.display().to_string()]
+                        }
+                    }),
+                )
+                .is_err()
+                {
+                    let _ = writer_events.send(DriverEvent::Error(
+                        "Failed to register Waku Computer Use skill with Codex".into(),
+                    ));
+                    return;
+                }
+
                 let (approval_policy, sandbox, approvals_reviewer) =
                     codex_permissions(mode, interaction_mode);
                 let open_thread = if let Some(thread_id) = provider_session_id {
@@ -198,8 +216,7 @@ impl CodexDriver {
                         "approvalPolicy": approval_policy,
                         "sandbox": sandbox,
                         "approvalsReviewer": approvals_reviewer,
-                        "serviceName": "waku",
-                        "dynamicTools": computer_use::dynamic_tools()
+                        "serviceName": "waku"
                     });
                     if let Some(model) = model.as_deref() {
                         params["model"] = json!(model);
@@ -270,109 +287,6 @@ impl CodexDriver {
                             json!({
                                 "id": id,
                                 "result": {"decision": option_id}
-                            })
-                        }
-                        CommandMessage::RunComputerTool(request) => {
-                            if writer_computer_tool_in_flight.swap(true, Ordering::SeqCst) {
-                                let reason = "Another computer-use call is still running. Retry after it completes.".to_owned();
-                                let _ = writer_events.send(DriverEvent::ComputerUseUpdated(
-                                    ComputerUseState {
-                                        target: request.target(),
-                                        phase: ComputerUsePhase::Failed,
-                                        visible: request.tool == "use",
-                                        screenshot: None,
-                                    },
-                                ));
-                                let _ = writer_commands.send(
-                                    CommandMessage::DynamicToolResponse {
-                                        rpc_id: request.rpc_id,
-                                        success: false,
-                                        content_items: vec![json!({
-                                            "type": "inputText",
-                                            "text": reason
-                                        })],
-                                    },
-                                );
-                                continue;
-                            }
-                            let worker_events = writer_events.clone();
-                            let worker_commands = writer_commands.clone();
-                            let computer_use_session = writer_computer_use_session.clone();
-                            let worker_computer_tool_in_flight =
-                                writer_computer_tool_in_flight.clone();
-                            let failed_request = request.clone();
-                            let spawn_result = thread::Builder::new()
-                                .name("waku-computer-use".into())
-                                .spawn(move || {
-                                    let _ = worker_events.send(DriverEvent::ComputerUseUpdated(
-                                        ComputerUseState {
-                                            target: request.target(),
-                                            phase: ComputerUsePhase::Running,
-                                            visible: request.tool == "use",
-                                            screenshot: None,
-                                        },
-                                    ));
-                                    let output = computer_use::execute_tool(
-                                        request.clone(),
-                                        computer_use_session,
-                                    );
-                                    worker_computer_tool_in_flight.store(false, Ordering::SeqCst);
-                                    if let Some(permissions) = output.permissions.clone() {
-                                        let _ = worker_events
-                                            .send(DriverEvent::ComputerPermissions(permissions));
-                                    }
-                                    let _ = worker_events
-                                        .send(DriverEvent::ComputerUseUpdated(output.state));
-                                    let _ =
-                                        worker_commands.send(CommandMessage::DynamicToolResponse {
-                                            rpc_id: request.rpc_id,
-                                            success: output.success,
-                                            content_items: output.content_items,
-                                        });
-                                });
-                            if let Err(error) = spawn_result {
-                                writer_computer_tool_in_flight.store(false, Ordering::SeqCst);
-                                let reason = format!("Could not start computer use: {error}");
-                                let _ = writer_commands.send(
-                                    CommandMessage::DynamicToolResponse {
-                                        rpc_id: failed_request.rpc_id,
-                                        success: false,
-                                        content_items: vec![json!({
-                                            "type": "inputText",
-                                            "text": reason
-                                        })],
-                                    },
-                                );
-                            }
-                            continue;
-                        }
-                        CommandMessage::DynamicToolResponse {
-                            rpc_id,
-                            success,
-                            content_items,
-                        } => json!({
-                            "id": parse_rpc_id(&rpc_id),
-                            "result": {
-                                "success": success,
-                                "contentItems": content_items
-                            }
-                        }),
-                        CommandMessage::RejectComputerTool { request, reason } => {
-                            let target = request.target();
-                            let _ = writer_events.send(DriverEvent::ComputerUseUpdated(
-                                ComputerUseState {
-                                    target,
-                                    phase: ComputerUsePhase::Failed,
-                                    visible: request.tool == "use",
-                                    screenshot: None,
-                                },
-                            ));
-                            json!({
-                                "id": parse_rpc_id(&request.rpc_id),
-                                "result": {
-                                    "success": false,
-                                    "contentItems": [{"type": "inputText", "text": reason}]
-                                }
                             })
                         }
                         CommandMessage::Rollback { turns, response } => {
@@ -534,7 +448,6 @@ impl CodexDriver {
 
         Ok(Self {
             commands,
-            computer_use_session,
         })
     }
 }
@@ -563,18 +476,17 @@ fn codex_sandbox_policy(sandbox: &str) -> Value {
     }
 }
 
+fn toml_string(value: &str) -> String {
+    serde_json::to_string(value).expect("a filesystem path is always valid JSON")
+}
+
 impl DriverControl for CodexDriver {
     fn prompt(&self, prompt: String) {
         let _ = self.commands.send(CommandMessage::Prompt(prompt));
     }
 
     fn cancel(&self) {
-        self.computer_use_session.cancel();
         let _ = self.commands.send(CommandMessage::Cancel);
-    }
-
-    fn cancel_computer_use(&self) {
-        self.computer_use_session.cancel();
     }
 
     fn respond(&self, request_id: String, option_id: String) {
@@ -584,15 +496,6 @@ impl DriverControl for CodexDriver {
         });
     }
 
-    fn run_computer_tool(&self, request: ComputerToolRequest) {
-        let _ = self.commands.send(CommandMessage::RunComputerTool(request));
-    }
-
-    fn reject_computer_tool(&self, request: ComputerToolRequest, reason: String) {
-        let _ = self
-            .commands
-            .send(CommandMessage::RejectComputerTool { request, reason });
-    }
 
     fn rollback(&self, turns: usize) -> anyhow::Result<Option<ProviderResumeCursor>> {
         if turns == 0 {
@@ -630,7 +533,6 @@ impl DriverControl for CodexDriver {
 
 impl Drop for CodexDriver {
     fn drop(&mut self) {
-        self.computer_use_session.cancel();
         let _ = self.commands.send(CommandMessage::Shutdown);
     }
 }
@@ -852,24 +754,6 @@ fn handle_codex_message(
     let params = value.get("params").cloned().unwrap_or(Value::Null);
 
     match method {
-        "item/tool/call" if value.get("id").is_some() => {
-            if params.get("namespace").and_then(Value::as_str) == Some(computer_use::NAMESPACE)
-                && let (Some(call_id), Some(tool)) = (
-                    params.get("callId").and_then(Value::as_str),
-                    params.get("tool").and_then(Value::as_str),
-                )
-            {
-                let _ = events.send(DriverEvent::ComputerToolRequested(ComputerToolRequest {
-                    rpc_id: rpc_id_string(value.get("id").unwrap()),
-                    call_id: call_id.to_owned(),
-                    tool: tool.to_owned(),
-                    arguments: params
-                        .get("arguments")
-                        .cloned()
-                        .unwrap_or_else(|| json!({})),
-                }));
-            }
-        }
         "turn/started" => {
             stream_state.begin_turn();
             if let Some(id) = params.pointer("/turn/id").and_then(Value::as_str) {
@@ -1012,18 +896,20 @@ fn codex_item_title(item: &Value) -> String {
     if item.get("type").and_then(Value::as_str) == Some("webSearch") {
         return codex_web_search_title(item);
     }
-    if item.get("type").and_then(Value::as_str) == Some("dynamicToolCall")
-        && item.get("namespace").and_then(Value::as_str) == Some(computer_use::NAMESPACE)
-        && let Some(tool) = item.get("tool").and_then(Value::as_str)
+    if item.get("type").and_then(Value::as_str) == Some("mcpToolCall")
+        && item
+            .get("server")
+            .or_else(|| item.get("serverName"))
+            .and_then(Value::as_str)
+            .is_some_and(|server| server.contains("waku"))
+        && let Some(tool) = item
+            .get("tool")
+            .or_else(|| item.get("name"))
+            .and_then(Value::as_str)
     {
         return match tool {
-            "status" => "Check Computer Use access".into(),
-            "list_targets" => "List controllable windows".into(),
-            "use" => item
-                .pointer("/arguments/target/appName")
-                .and_then(Value::as_str)
-                .map(|app| format!("Use {app}"))
-                .unwrap_or_else(|| "Use app window".into()),
+            "get_app_state" => "Inspect app state".into(),
+            "list_apps" => "List apps".into(),
             _ => split_camel_case(tool),
         };
     }
@@ -1108,7 +994,7 @@ fn codex_item_detail(item: &Value, output: Option<&str>) -> Option<String> {
 
 fn codex_item_arguments(item: &Value) -> Option<String> {
     match item.get("type").and_then(Value::as_str) {
-        Some("dynamicToolCall" | "mcpToolCall") => item
+        Some("mcpToolCall") => item
             .get("arguments")
             .filter(|value| !value.is_null())
             .and_then(format_activity_json),
@@ -1131,22 +1017,6 @@ fn codex_item_arguments(item: &Value) -> Option<String> {
 
 fn codex_item_output(item: &Value) -> Option<String> {
     match item.get("type").and_then(Value::as_str) {
-        Some("dynamicToolCall") => {
-            let items = item.get("contentItems").and_then(Value::as_array)?;
-            let output = items
-                .iter()
-                .filter_map(|item| match item.get("type").and_then(Value::as_str) {
-                    Some("inputText") => {
-                        item.get("text").and_then(Value::as_str).map(str::to_owned)
-                    }
-                    Some("inputImage") => None,
-                    Some("inputAudio") => Some("[Audio output]".into()),
-                    _ => format_activity_json(item),
-                })
-                .collect::<Vec<_>>()
-                .join("\n\n");
-            non_empty_activity_text(output)
-        }
         Some("mcpToolCall") => {
             if let Some(message) = item.pointer("/error/message").and_then(Value::as_str) {
                 return non_empty_activity_text(message.to_owned());
@@ -1199,7 +1069,6 @@ fn codex_item_output(item: &Value) -> Option<String> {
 
 fn codex_item_image_urls(item: &Value) -> Vec<String> {
     let content = match item.get("type").and_then(Value::as_str) {
-        Some("dynamicToolCall") => item.get("contentItems"),
         Some("mcpToolCall") => item.pointer("/result/content"),
         _ => None,
     };
@@ -1345,22 +1214,6 @@ fn is_visible_stderr_notice(line: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn computer_use_is_pinned_to_wakus_native_runtime() {
-        assert_eq!(
-            DISABLE_EXTERNAL_COMPUTER_USE_PLUGIN,
-            "plugins.computer-use@openai-bundled.enabled=false"
-        );
-        assert_eq!(
-            DISABLE_EXTERNAL_COMPUTER_USE_MCP,
-            "mcp_servers.computer-use.enabled=false"
-        );
-        assert_eq!(
-            DISABLE_EXTERNAL_COMPUTER_USE_SKILL,
-            r#"skills.config=[{name="computer-use:computer-use",enabled=false}]"#
-        );
-    }
 
     #[test]
     fn access_modes_match_codex_permission_profiles() {
@@ -1572,136 +1425,6 @@ mod tests {
             state.rewrite_citation_delta("Claim.\u{e200}cite\u{e202}turn9search0\u{e201} After."),
             "Claim. After."
         );
-    }
-
-    #[test]
-    fn native_dynamic_tool_requests_are_forwarded_even_when_the_rpc_id_is_one() {
-        let thread_id = Mutex::new(Some("thread-1".to_owned()));
-        let turn_id = Mutex::new(Some("turn-1".to_owned()));
-        let turn_ids = Mutex::new(vec!["turn-1".to_owned()]);
-        let pending_rollbacks = Mutex::new(HashMap::new());
-        let pending_forks = Mutex::new(HashMap::new());
-        let (event_tx, event_rx) = unbounded();
-        let mut stream_state = CodexStreamState::default();
-
-        handle_codex_message(
-            json!({
-                "id": 1,
-                "method": "item/tool/call",
-                "params": {
-                    "threadId": "thread-1",
-                    "turnId": "turn-1",
-                    "callId": "computer-1",
-                    "namespace": computer_use::NAMESPACE,
-                    "tool": "list_targets",
-                    "arguments": {}
-                }
-            }),
-            &thread_id,
-            &turn_id,
-            &turn_ids,
-            &pending_rollbacks,
-            &pending_forks,
-            &event_tx,
-            &mut stream_state,
-        );
-
-        let DriverEvent::ComputerToolRequested(request) = event_rx.recv().unwrap() else {
-            panic!("expected a computer tool request");
-        };
-        assert_eq!(request.rpc_id, "1");
-        assert_eq!(request.call_id, "computer-1");
-        assert_eq!(request.tool, "list_targets");
-    }
-
-    #[test]
-    fn dynamic_tool_activity_keeps_arguments_output_and_failure() {
-        let thread_id = Mutex::new(Some("thread-1".to_owned()));
-        let turn_id = Mutex::new(Some("turn-1".to_owned()));
-        let turn_ids = Mutex::new(vec!["turn-1".to_owned()]);
-        let pending_rollbacks = Mutex::new(HashMap::new());
-        let pending_forks = Mutex::new(HashMap::new());
-        let (event_tx, event_rx) = unbounded();
-        let mut stream_state = CodexStreamState::default();
-        let arguments = json!({
-            "target": {
-                "windowId": 42,
-                "bundleId": "net.imput.helium",
-                "appName": "Helium",
-                "windowTitle": "Window",
-                "width": 1440,
-                "height": 823
-            },
-            "actions": []
-        });
-
-        handle_codex_message(
-            json!({
-                "method": "item/completed",
-                "params": {
-                    "threadId": "thread-1",
-                    "turnId": "turn-1",
-                    "item": {
-                        "type": "dynamicToolCall",
-                        "id": "exec-1",
-                        "namespace": computer_use::NAMESPACE,
-                        "tool": "use",
-                        "arguments": arguments,
-                        "status": "failed",
-                        "contentItems": [{
-                            "type": "inputText",
-                            "text": "Computer Use helper closed its session"
-                        }],
-                        "success": false,
-                        "durationMs": 80
-                    },
-                    "completedAtMs": 1
-                }
-            }),
-            &thread_id,
-            &turn_id,
-            &turn_ids,
-            &pending_rollbacks,
-            &pending_forks,
-            &event_tx,
-            &mut stream_state,
-        );
-
-        let DriverEvent::RichActivity(activity) = event_rx.recv().unwrap() else {
-            panic!("expected a rich activity");
-        };
-        assert_eq!(activity.source_id.as_deref(), Some("exec-1"));
-        assert_eq!(activity.title, "Use Helium");
-        assert!(activity.arguments.as_deref().unwrap().contains("windowId"));
-        assert_eq!(
-            activity.output.as_deref(),
-            Some("Computer Use helper closed its session")
-        );
-        assert_eq!(
-            activity.detail.as_deref(),
-            Some("Computer Use helper closed its session")
-        );
-        assert!(activity.failed);
-        assert!(activity.complete);
-    }
-
-    #[test]
-    fn dynamic_tool_image_output_is_preserved_for_native_rendering() {
-        let image_url = "data:image/png;base64,aGVsbG8=";
-        let item = json!({
-            "type": "dynamicToolCall",
-            "contentItems": [
-                {"type": "inputText", "text": "Completed 1 action."},
-                {"type": "inputImage", "imageUrl": image_url}
-            ]
-        });
-
-        assert_eq!(
-            codex_item_output(&item).as_deref(),
-            Some("Completed 1 action.")
-        );
-        assert_eq!(codex_item_image_urls(&item), vec![image_url]);
-        assert!(!codex_item_output(&item).unwrap().contains("[Image output]"));
     }
 
     #[test]

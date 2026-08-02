@@ -903,9 +903,6 @@ pub enum DriverEvent {
         detail: String,
         options: Vec<PermissionOption>,
     },
-    ComputerToolRequested(crate::computer_use::ComputerToolRequest),
-    ComputerUseUpdated(crate::computer_use::ComputerUseState),
-    ComputerPermissions(crate::computer_use::ComputerPermissions),
     TurnFinished {
         success: bool,
         summary: Option<String>,
