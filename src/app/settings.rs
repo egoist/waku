@@ -1,5 +1,7 @@
 use super::*;
 
+const SETTINGS_CONTENT_MAX_WIDTH: f32 = 760.0;
+
 impl Waku {
     pub(super) fn render_settings(&self, cx: &mut Context<Self>) -> AnyElement {
         let theme = Theme::current(cx);
@@ -177,7 +179,8 @@ impl Waku {
                     .child(
                         div()
                             .w_full()
-                            .max_w(px(1080.0))
+                            .max_w(px(SETTINGS_CONTENT_MAX_WIDTH))
+                            .mx_auto()
                             .child(
                                 div()
                                     .pt(px(2.0))
@@ -204,7 +207,6 @@ impl Waku {
         div()
             .mt(px(15.0))
             .w_full()
-            .max_w(px(1080.0))
             .px(px(20.0))
             .py(px(14.0))
             .rounded(px(13.0))
@@ -257,7 +259,6 @@ impl Waku {
         div()
             .mt(px(15.0))
             .w_full()
-            .max_w(px(1080.0))
             .min_h(px(60.0))
             .px(px(20.0))
             .py(px(12.0))
@@ -376,7 +377,6 @@ impl Waku {
         div()
             .mt(px(15.0))
             .w_full()
-            .max_w(px(760.0))
             .flex()
             .flex_col()
             .gap(px(12.0))
