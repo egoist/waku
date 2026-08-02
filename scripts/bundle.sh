@@ -46,9 +46,15 @@ contents="$bundle/Contents"
 helper_bundle="$contents/Helpers/$helper_name.app"
 swift_module_cache="target/$profile/swift-module-cache"
 helper_source="resources/computer-use/WakuComputerUse.swift"
+menu_bar_cursor_resource="resources/computer-use/menubar-cursor.png"
+overlay_cursor_resource="resources/computer-use/overlay-cursor.svg"
 helper_fingerprint="$({
-  shasum -a 256 "$helper_source" resources/computer-use/Info.plist
-  printf '%s\n' "$helper_name" "$bundle_identifier.computer-use" "$codesign_identity" "$(uname -m)-apple-macos13.0"
+  shasum -a 256 \
+    "$helper_source" \
+    resources/computer-use/Info.plist \
+    "$menu_bar_cursor_resource" \
+    "$overlay_cursor_resource"
+  printf '%s\n' "standalone-service-v1" "$helper_name" "$bundle_identifier.computer-use" "$codesign_identity" "$(uname -m)-apple-macos13.0"
   xcrun swiftc -version
 } | shasum -a 256 | awk '{ print $1 }')"
 helper_cache_root=".waku-cache/computer-use/$profile"
@@ -58,16 +64,19 @@ cached_helper_bundle="$helper_cache_entry/$helper_name.app"
 # Keep compiled helpers outside target so `cargo clean` does not force an
 # unnecessary Swift rebuild. The fingerprint includes the signing identity so
 # switching certificates can never reuse a helper signed as different code.
-# The TCC-facing runtime copy is installed separately by Waku under Application
-# Support; this directory is only a build cache.
+# The cached app is copied into Waku's standard Helpers directory as the
+# canonical packaged service. Waku refreshes a stable standalone runtime copy
+# from it so Screen Recording is attributed to the helper rather than Waku.
 
 if [ ! -d "$cached_helper_bundle" ]; then
   helper_cache_staging="$helper_cache_root/.staging-$helper_fingerprint-$$"
   rm -rf "$helper_cache_staging"
   cached_helper_staging="$helper_cache_staging/$helper_name.app"
   cached_helper_contents="$cached_helper_staging/Contents"
-  mkdir -p "$cached_helper_contents/MacOS" "$swift_module_cache"
+  mkdir -p "$cached_helper_contents/MacOS" "$cached_helper_contents/Resources" "$swift_module_cache"
   cp resources/computer-use/Info.plist "$cached_helper_contents/Info.plist"
+  cp "$menu_bar_cursor_resource" "$overlay_cursor_resource" "$cached_helper_contents/Resources/"
+  printf '%s\n' "$helper_fingerprint" > "$cached_helper_contents/Resources/.waku-helper-fingerprint"
   plutil -replace CFBundleDisplayName -string "$helper_name" "$cached_helper_contents/Info.plist"
   plutil -replace CFBundleExecutable -string "$helper_name" "$cached_helper_contents/Info.plist"
   plutil -replace CFBundleIdentifier -string "$bundle_identifier.computer-use" "$cached_helper_contents/Info.plist"

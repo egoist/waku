@@ -69,24 +69,28 @@ async function bundledHelperCommand() {
   const resources = path.dirname(fileURLToPath(import.meta.url));
   const helpers = path.join(resources, "..", "Helpers");
   const entries = await fs.readdir(helpers, { withFileTypes: true });
-  const candidates = [];
   for (const entry of entries) {
     if (!entry.isDirectory() || !entry.name.endsWith(" Computer Use.app")) continue;
     const executable = entry.name.slice(0, -".app".length);
-    candidates.push(
-      path.join(os.homedir(), "Library", "Application Support", "Waku", "Computer Use", entry.name, "Contents", "MacOS", executable),
-      path.join(helpers, entry.name, "Contents", "MacOS", executable),
+    const candidate = path.join(
+      os.homedir(),
+      "Library",
+      "Application Support",
+      "Waku",
+      "Computer Use",
+      entry.name,
+      "Contents",
+      "MacOS",
+      executable,
     );
-  }
-  for (const candidate of candidates) {
     try {
       await fs.access(candidate);
       return candidate;
     } catch {
-      // Try the next bundled profile.
+      // The host installs the packaged helper before exposing this client.
     }
   }
-  throw new Error("Waku Computer Use helper was not found next to the client");
+  throw new Error("Waku Computer Use service is not installed; restart the current Waku session");
 }
 
 class MCPClient {

@@ -243,13 +243,14 @@ pub fn mcp_server_command() -> anyhow::Result<PathBuf> {
     Ok(helper.join("Contents").join("MacOS").join(executable))
 }
 
-/// Keep the TCC-facing helper at a stable path.
+/// Install the bundled helper as an independent, stable runtime service.
 ///
-/// The helper is embedded in the debug/release app for distribution, but
-/// launching that nested copy directly makes every rebuilt app bundle a new
-/// privacy client. Installing the signed helper at the stable Application
-/// Support path preserves the client macOS associates with the user's
-/// Accessibility and Screen Recording grants.
+/// Screen Recording differs from Accessibility on macOS: it follows the
+/// responsible application. A helper launched from inside Waku's bundle is
+/// therefore attributed to Waku even though the capture API runs in the
+/// helper. Launching this standalone copy through Launch Services gives the
+/// helper its own TCC identity while the signed app bundle remains the source
+/// shipped with Waku.
 fn install_helper_app(source: &Path) -> anyhow::Result<PathBuf> {
     let application_support =
         dirs::data_dir().ok_or_else(|| anyhow!("Application Support directory is unavailable"))?;
@@ -292,22 +293,12 @@ fn helper_install_matches(source: &Path, destination: &Path) -> anyhow::Result<b
     if !destination.is_dir() {
         return Ok(false);
     }
-    let helper_name = source
-        .file_stem()
-        .ok_or_else(|| anyhow!("Computer Use helper name is invalid"))?;
-    for relative in [
-        PathBuf::from("Contents/Info.plist"),
-        PathBuf::from("Contents/MacOS").join(helper_name),
-    ] {
-        let source_bytes = fs::read(source.join(&relative))?;
-        let Ok(installed_bytes) = fs::read(destination.join(&relative)) else {
-            return Ok(false);
-        };
-        if source_bytes != installed_bytes {
-            return Ok(false);
-        }
-    }
-    Ok(true)
+    let fingerprint = Path::new("Contents/Resources/.waku-helper-fingerprint");
+    let source_fingerprint = fs::read(source.join(fingerprint))?;
+    let Ok(installed_fingerprint) = fs::read(destination.join(fingerprint)) else {
+        return Ok(false);
+    };
+    Ok(source_fingerprint == installed_fingerprint)
 }
 
 fn copy_directory(source: &Path, destination: &Path) -> anyhow::Result<()> {
@@ -342,7 +333,9 @@ pub fn node_repl_client_path() -> anyhow::Result<PathBuf> {
     let contents = macos
         .parent()
         .ok_or_else(|| anyhow!("Waku app bundle is malformed"))?;
-    let path = contents.join("Resources").join("Waku Computer Use Client.mjs");
+    let path = contents
+        .join("Resources")
+        .join("Waku Computer Use Client.mjs");
     if !path.is_file() {
         bail!("Computer Use node_repl client is missing from this Waku build")
     }
@@ -386,5 +379,4 @@ mod tests {
         assert_eq!(target.grant_key(), grant.key());
         assert!(target.persistable());
     }
-
 }

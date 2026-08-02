@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 32 32">
+  <path
+    d="M 0.00599 0.15864 C -0.02364 0.06456 0.06169 -0.02474 0.15158 0.00627 L 0.87634 0.25652 C 0.97594 0.29096 0.9834 0.43547 0.88794 0.48095 L 0.59343 0.62108 L 0.45955 0.92925 C 0.41611 1.02925 0.27801 1.02146 0.2451 0.91717 L 0.00599 0.15864 Z"
+    transform="translate(4 3) scale(24)"
+    fill="#111"
+    stroke="#fff"
+    stroke-width="0.0833333"
+    stroke-linejoin="round"
+  />
+</svg>
