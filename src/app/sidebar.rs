@@ -153,7 +153,7 @@ impl Waku {
             }))
     }
 
-    fn render_history_button(
+    pub(super) fn render_history_button(
         &self,
         id: &'static str,
         icon_path: &'static str,

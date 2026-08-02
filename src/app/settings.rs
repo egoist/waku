@@ -111,7 +111,7 @@ impl Waku {
             .flex()
             .flex_col()
             .bg(theme.sidebar)
-            .child(self.render_settings_drag_region("settings-sidebar-titlebar", cx))
+            .child(self.render_settings_sidebar_titlebar(cx))
             .child(
                 div().px(px(12.0)).child(
                     div()
@@ -153,6 +153,29 @@ impl Waku {
             )
             .child(div().h(px(18.0)))
             .child(div().px(px(12.0)).child(navigation))
+    }
+
+    fn render_settings_sidebar_titlebar(&self, cx: &mut Context<Self>) -> Stateful<Div> {
+        div()
+            .id("settings-sidebar-titlebar")
+            .h(px(48.0))
+            .flex_none()
+            .flex()
+            .items_center()
+            .child(
+                self.window_drag_region(
+                    div()
+                        .id("settings-sidebar-traffic-light-drag-region")
+                        .w(px(TRAFFIC_LIGHT_CLEARANCE))
+                        .h_full()
+                        .flex_none(),
+                    cx,
+                ),
+            )
+            .child(
+                self.render_settings_drag_region("settings-sidebar-titlebar-drag-region", cx)
+                    .flex_1(),
+            )
     }
 
     fn render_settings_content(&self, cx: &mut Context<Self>) -> Div {
