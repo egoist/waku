@@ -52,6 +52,9 @@ struct Request: Decodable {
 }
 
 private enum CursorAssets {
+    static let overlaySize = NSSize(width: 32, height: 32)
+    static let overlayHotspot = NSPoint(x: 4, y: 3)
+
     static let menuBar: NSImage? = {
         guard let url = Bundle.main.url(forResource: "menubar-cursor", withExtension: "png") else {
             return nil
@@ -59,13 +62,16 @@ private enum CursorAssets {
         return NSImage(contentsOf: url)
     }()
 
-    static let overlay: CGImage? = {
-        guard let url = Bundle.main.url(forResource: "overlay-cursor", withExtension: "svg"),
-              let image = NSImage(contentsOf: url)
-        else {
+    static let overlayImage: NSImage? = {
+        guard let url = Bundle.main.url(forResource: "overlay-cursor", withExtension: "svg") else {
             return nil
         }
-        var rect = NSRect(origin: .zero, size: image.size)
+        return NSImage(contentsOf: url)
+    }()
+
+    static let overlay: CGImage? = {
+        guard let image = overlayImage else { return nil }
+        var rect = NSRect(origin: .zero, size: overlaySize)
         return image.cgImage(forProposedRect: &rect, context: nil, hints: nil)
     }()
 }
@@ -87,7 +93,8 @@ private final class VirtualCursorStore {
         return fallback
     }
 
-    func move(for windowID: CGWindowID, to position: CGPoint, size: CGSize) {
+    @discardableResult
+    func move(for windowID: CGWindowID, to position: CGPoint, size: CGSize) -> CGPoint {
         let clamped = CGPoint(
             x: min(max(position.x, 0), max(size.width, 1)),
             y: min(max(position.y, 0), max(size.height, 1))
@@ -95,6 +102,7 @@ private final class VirtualCursorStore {
         lock.lock()
         positions[windowID] = clamped
         lock.unlock()
+        return clamped
     }
 }
 
@@ -202,6 +210,128 @@ private final class ComputerUseStatusItem {
     }
 }
 
+private final class SoftwareCursorView: NSView {
+    override var isFlipped: Bool { true }
+
+    override func draw(_ dirtyRect: NSRect) {
+        super.draw(dirtyRect)
+        CursorAssets.overlayImage?.draw(
+            in: bounds,
+            from: .zero,
+            operation: .sourceOver,
+            fraction: 1,
+            respectFlipped: true,
+            hints: nil
+        )
+    }
+}
+
+private final class SoftwareCursorOverlay {
+    static let shared = SoftwareCursorOverlay()
+
+    private struct State {
+        let panel: NSPanel
+        let processID: pid_t
+        let windowLayer: Int
+        let normalizedPoint: CGPoint
+        let fallbackScreenPoint: CGPoint
+    }
+
+    private var states: [CGWindowID: State] = [:]
+    private var refreshTimer: Timer?
+
+    func show(
+        windowID: CGWindowID,
+        processID: pid_t,
+        windowLayer: Int,
+        normalizedPoint: CGPoint,
+        fallbackScreenPoint: CGPoint
+    ) {
+        guard CursorAssets.overlayImage != nil else { return }
+        DispatchQueue.main.async {
+            let panel = self.states[windowID]?.panel ?? self.makePanel()
+            self.states[windowID] = State(
+                panel: panel,
+                processID: processID,
+                windowLayer: windowLayer,
+                normalizedPoint: normalizedPoint,
+                fallbackScreenPoint: fallbackScreenPoint
+            )
+            self.startRefreshTimerIfNeeded()
+            self.refresh()
+        }
+    }
+
+    private func startRefreshTimerIfNeeded() {
+        guard refreshTimer == nil else { return }
+        refreshTimer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in
+            self?.refresh()
+        }
+    }
+
+    private func refresh() {
+        for (windowID, state) in states {
+            guard let screenPoint = screenPoint(for: windowID, state: state) else {
+                state.panel.orderOut(nil)
+                continue
+            }
+            let mainScreenMaxY = NSScreen.screens.first?.frame.maxY ?? 0
+            state.panel.setFrameOrigin(NSPoint(
+                x: screenPoint.x - CursorAssets.overlayHotspot.x,
+                y: mainScreenMaxY - screenPoint.y
+                    - (CursorAssets.overlaySize.height - CursorAssets.overlayHotspot.y)
+            ))
+            state.panel.level = NSWindow.Level(rawValue: state.windowLayer)
+            // Keep the cursor immediately above its controlled window rather
+            // than gating it on macOS's single global frontmost application.
+            // A window on another display can therefore stay visible while
+            // focus is elsewhere, and windows above the target in this same
+            // z-order still cover the cursor naturally.
+            state.panel.order(.above, relativeTo: Int(windowID))
+        }
+    }
+
+    private func screenPoint(for windowID: CGWindowID, state: State) -> CGPoint? {
+        guard let windows = CGWindowListCopyWindowInfo([.optionIncludingWindow], windowID)
+                as? [[String: Any]],
+              let window = windows.first(where: {
+                  ($0[kCGWindowNumber as String] as? NSNumber)?.uint32Value == windowID
+              }) else {
+            return state.fallbackScreenPoint
+        }
+        guard (window[kCGWindowOwnerPID as String] as? NSNumber)?.int32Value == state.processID,
+              (window[kCGWindowIsOnscreen as String] as? NSNumber)?.boolValue != false,
+              let bounds = window[kCGWindowBounds as String] as? NSDictionary else {
+            return nil
+        }
+        var frame = CGRect.zero
+        guard CGRectMakeWithDictionaryRepresentation(bounds as CFDictionary, &frame) else {
+            return nil
+        }
+        return CGPoint(
+            x: frame.minX + state.normalizedPoint.x * frame.width,
+            y: frame.minY + state.normalizedPoint.y * frame.height
+        )
+    }
+
+    private func makePanel() -> NSPanel {
+        let panel = NSPanel(
+            contentRect: NSRect(origin: .zero, size: CursorAssets.overlaySize),
+            styleMask: [.borderless, .nonactivatingPanel],
+            backing: .buffered,
+            defer: false
+        )
+        panel.isOpaque = false
+        panel.backgroundColor = .clear
+        panel.hasShadow = false
+        panel.hidesOnDeactivate = false
+        panel.ignoresMouseEvents = true
+        panel.collectionBehavior = [.fullScreenAuxiliary]
+        panel.contentView = SoftwareCursorView(frame: NSRect(origin: .zero, size: CursorAssets.overlaySize))
+        return panel
+    }
+}
+
 private struct TrackedApp {
     let bundleID: String
     var name: String
@@ -244,10 +374,35 @@ private final class StatusAgentProcess {
 
     func track(bundleID: String, name: String) {
         start()
+        send(["type": "track", "bundleID": bundleID, "name": name])
+    }
+
+    func showCursor(window: SCWindow, localPoint: CGPoint, coordinateSpace: Target) {
+        let width = CGFloat(max(coordinateSpace.width, 1))
+        let height = CGFloat(max(coordinateSpace.height, 1))
+        let normalizedPoint = CGPoint(x: localPoint.x / width, y: localPoint.y / height)
+        let screenPoint = CGPoint(
+            x: window.frame.minX + normalizedPoint.x * window.frame.width,
+            y: window.frame.minY + normalizedPoint.y * window.frame.height
+        )
+        guard let processID = window.owningApplication?.processID else { return }
+        start()
+        send([
+            "type": "cursor",
+            "windowID": Int(window.windowID),
+            "processID": Int(processID),
+            "windowLayer": window.windowLayer,
+            "normalizedX": Double(normalizedPoint.x),
+            "normalizedY": Double(normalizedPoint.y),
+            "x": Double(screenPoint.x),
+            "y": Double(screenPoint.y),
+        ])
+    }
+
+    private func send(_ message: [String: Any]) {
         lock.lock()
         defer { lock.unlock() }
         guard let input else { return }
-        let message: [String: String] = ["bundleID": bundleID, "name": name]
         guard let data = try? JSONSerialization.data(withJSONObject: message) else { return }
         var payload = data
         payload.append(10)
@@ -305,6 +460,25 @@ private final class BridgeProcessRegistration {
         if let registration {
             try? FileManager.default.removeItem(at: registration)
         }
+    }
+}
+
+private struct ComputerUsePreviewUpdate: Encodable {
+    let target: Target
+    let imageUrl: String
+}
+
+private enum ComputerUsePreviewStore {
+    static func publish(target: Target, capture: Capture) {
+        guard let directoryPath = commandLineArgument("--process-directory") else { return }
+        let directory = URL(fileURLWithPath: directoryPath, isDirectory: true)
+        let destination = directory.appendingPathComponent(
+            "preview-\(target.windowId).json",
+            isDirectory: false
+        )
+        let update = ComputerUsePreviewUpdate(target: target, imageUrl: capture.dataUrl)
+        guard let data = try? JSONEncoder().encode(update) else { return }
+        try? data.write(to: destination, options: .atomic)
     }
 }
 
@@ -464,15 +638,38 @@ struct WakuComputerUse {
         let run = {
             NSApplication.shared.setActivationPolicy(.accessory)
             DispatchQueue.global(qos: .utility).async {
-                while let app = readLine(from: .standardInput) {
+                while let line = readLine(from: .standardInput) {
+                    guard let data = line.data(using: .utf8),
+                          let message = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+                    else {
+                        continue
+                    }
                     DispatchQueue.main.async {
-                        guard let data = app.data(using: .utf8),
-                              let message = try? JSONSerialization.jsonObject(with: data) as? [String: String],
-                              let bundleID = message["bundleID"],
-                              let name = message["name"] else {
-                            return
+                        switch message["type"] as? String {
+                        case "cursor":
+                            guard let windowID = (message["windowID"] as? NSNumber)?.uint32Value,
+                                  let processID = (message["processID"] as? NSNumber)?.int32Value,
+                                  let windowLayer = (message["windowLayer"] as? NSNumber)?.intValue,
+                                  let normalizedX = (message["normalizedX"] as? NSNumber)?.doubleValue,
+                                  let normalizedY = (message["normalizedY"] as? NSNumber)?.doubleValue,
+                                  let x = (message["x"] as? NSNumber)?.doubleValue,
+                                  let y = (message["y"] as? NSNumber)?.doubleValue else {
+                                return
+                            }
+                            SoftwareCursorOverlay.shared.show(
+                                windowID: windowID,
+                                processID: processID,
+                                windowLayer: windowLayer,
+                                normalizedPoint: CGPoint(x: normalizedX, y: normalizedY),
+                                fallbackScreenPoint: CGPoint(x: x, y: y)
+                            )
+                        default:
+                            guard let bundleID = message["bundleID"] as? String,
+                                  let name = message["name"] as? String else {
+                                return
+                            }
+                            ComputerUseStatusItem.shared.track(bundleID: bundleID, name: name)
                         }
-                        ComputerUseStatusItem.shared.track(bundleID: bundleID, name: name)
                     }
                 }
                 DispatchQueue.main.async {
@@ -595,30 +792,33 @@ struct WakuComputerUse {
                 try perform(actions, in: window, coordinateSpace: requested)
             }
             StatusAgentProcess.shared.track(bundleID: current.bundleId, name: current.appName)
+            let cursor = VirtualCursorStore.shared.position(
+                for: window.windowID,
+                size: CGSize(width: CGFloat(requested.width), height: CGFloat(requested.height))
+            )
             let capture = try await capture(
                 window,
                 filter: filter,
                 sourceRect: sourceRect,
-                cursor: VirtualCursorStore.shared.position(
-                    for: window.windowID,
-                    size: CGSize(width: CGFloat(requested.width), height: CGFloat(requested.height))
-                ),
+                cursor: cursor,
                 coordinateSpace: requested
             )
+            let capturedTarget = Target(
+                windowId: current.windowId,
+                bundleId: current.bundleId,
+                teamId: current.teamId,
+                appName: current.appName,
+                windowTitle: current.windowTitle,
+                width: UInt32(capture.width),
+                height: UInt32(capture.height)
+            )
+            ComputerUsePreviewStore.publish(target: capturedTarget, capture: capture)
             return Response(
                 success: true,
                 error: nil,
                 permissions: currentPermissions(),
                 targets: nil,
-                target: Target(
-                    windowId: current.windowId,
-                    bundleId: current.bundleId,
-                    teamId: current.teamId,
-                    appName: current.appName,
-                    windowTitle: current.windowTitle,
-                    width: UInt32(capture.width),
-                    height: UInt32(capture.height)
-                ),
+                target: capturedTarget,
                 imageUrl: capture.dataUrl,
                 summary: actions.isEmpty ? "Captured \(current.appName)." : "Completed \(actions.count) action\(actions.count == 1 ? "" : "s") in \(current.appName)."
             )
@@ -759,7 +959,9 @@ struct WakuComputerUse {
                 throw HelperError.missingPermission("Accessibility")
             }
             let app = try requiredString(arguments, "app")
+            let frontmost = FrontmostApplicationSnapshot()
             let resolved = try await resolveAppWindow(app)
+            defer { frontmost.restore(ifControlledProcessID: resolved.processID) }
             let state = try await captureAppState(
                 resolved,
                 disableDiff: (arguments["disableDiff"] as? Bool) ?? false
@@ -780,7 +982,9 @@ struct WakuComputerUse {
                 throw HelperError.missingPermission("Accessibility")
             }
             let app = try requiredString(arguments, "app")
+            let frontmost = FrontmostApplicationSnapshot()
             let resolved = try await resolveAppWindow(app)
+            defer { frontmost.restore(ifControlledProcessID: resolved.processID) }
             if name == "click", let rawIndex = arguments["element_index"] {
                 let index = try elementIndex(rawIndex)
                 guard AccessibilityRegistry.shared.belongs(
@@ -831,7 +1035,9 @@ struct WakuComputerUse {
                 throw HelperError.missingPermission("Accessibility")
             }
             let app = try requiredString(arguments, "app")
+            let frontmost = FrontmostApplicationSnapshot()
             let resolved = try await resolveAppWindow(app)
+            defer { frontmost.restore(ifControlledProcessID: resolved.processID) }
             let index = try elementIndex(arguments["element_index"] as Any)
             guard AccessibilityRegistry.shared.belongs(
                 bundleID: resolved.target.bundleId,
@@ -1573,6 +1779,23 @@ private func listTargetableApps() -> [[String: Any]] {
     }
 }
 
+private struct FrontmostApplicationSnapshot {
+    private let application = NSWorkspace.shared.frontmostApplication
+
+    func restore(ifControlledProcessID processID: pid_t) {
+        guard let application,
+              application.processIdentifier != processID else {
+            return
+        }
+        // Never override a user switch to a third app. Restore only when the
+        // controlled process itself took frontmost status during the call.
+        guard NSWorkspace.shared.frontmostApplication?.processIdentifier == processID else {
+            return
+        }
+        application.activate(options: [.activateIgnoringOtherApps])
+    }
+}
+
 private func launchApplication(for identifier: String) async throws {
     guard let url = applicationURL(for: identifier),
           let bundleID = Bundle(url: url)?.bundleIdentifier,
@@ -2029,6 +2252,7 @@ private func captureAppState(
         cursor: cursor,
         coordinateSpace: resolved.target
     )
+    ComputerUsePreviewStore.publish(target: resolved.target, capture: capture)
     let fullTree = accessibilityText(for: resolved)
     let text = AccessibilityDiffStore.shared.render(
         fullTree,
@@ -2817,10 +3041,15 @@ private func updateVirtualCursor(
     coordinateSpace: Target
 ) {
     guard let x, let y, x.isFinite, y.isFinite else { return }
-    VirtualCursorStore.shared.move(
+    let cursor = VirtualCursorStore.shared.move(
         for: window.windowID,
         to: CGPoint(x: x, y: y),
         size: CGSize(width: CGFloat(coordinateSpace.width), height: CGFloat(coordinateSpace.height))
+    )
+    StatusAgentProcess.shared.showCursor(
+        window: window,
+        localPoint: cursor,
+        coordinateSpace: coordinateSpace
     )
 }
 

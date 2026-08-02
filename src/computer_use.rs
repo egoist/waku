@@ -7,6 +7,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use anyhow::{Context as _, anyhow, bail};
+use base64::Engine as _;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use uuid::Uuid;
@@ -115,6 +116,7 @@ fn plural(count: usize, noun: &str) -> String {
 pub enum ComputerUsePhase {
     AwaitingApproval,
     Running,
+    Completed,
     Failed,
 }
 
@@ -124,6 +126,38 @@ pub struct ComputerUseState {
     pub phase: ComputerUsePhase,
     pub visible: bool,
     pub screenshot: Option<Arc<gpui::Image>>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ComputerUsePreviewUpdate {
+    target: ComputerTarget,
+    image_url: String,
+}
+
+pub fn decode_preview_update(data: &[u8]) -> anyhow::Result<ComputerUseState> {
+    const PNG_PREFIX: &str = "data:image/png;base64,";
+    let update: ComputerUsePreviewUpdate =
+        serde_json::from_slice(data).context("Computer Use preview is invalid JSON")?;
+    let encoded = update
+        .image_url
+        .strip_prefix(PNG_PREFIX)
+        .ok_or_else(|| anyhow!("Computer Use preview is not a PNG data URL"))?;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(encoded)
+        .context("Computer Use preview contains invalid base64")?;
+    if bytes.is_empty() {
+        bail!("Computer Use preview is empty");
+    }
+    Ok(ComputerUseState {
+        target: Some(update.target),
+        phase: ComputerUsePhase::Completed,
+        visible: true,
+        screenshot: Some(Arc::new(gpui::Image::from_bytes(
+            gpui::ImageFormat::Png,
+            bytes,
+        ))),
+    })
 }
 
 #[derive(Clone, Debug)]
@@ -378,5 +412,29 @@ mod tests {
         };
         assert_eq!(target.grant_key(), grant.key());
         assert!(target.persistable());
+    }
+
+    #[test]
+    fn preview_updates_restore_the_pip_state() {
+        let state = decode_preview_update(
+            br#"{
+                "target": {
+                    "windowId": 42,
+                    "bundleId": "net.imput.helium",
+                    "teamId": "S4Q33XPHB4",
+                    "appName": "Helium",
+                    "windowTitle": "Window",
+                    "width": 1440,
+                    "height": 823
+                },
+                "imageUrl": "data:image/png;base64,aGVsbG8="
+            }"#,
+        )
+        .unwrap();
+
+        assert_eq!(state.target.unwrap().window_id, 42);
+        assert_eq!(state.phase, ComputerUsePhase::Completed);
+        assert!(state.visible);
+        assert!(state.screenshot.is_some());
     }
 }

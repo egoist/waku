@@ -3,11 +3,13 @@ use std::ffi::OsString;
 use std::fs;
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::ffi::OsStringExt as _;
+use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use anyhow::{Context as _, anyhow};
 use crossbeam_channel::{Sender, bounded, unbounded};
@@ -54,6 +56,62 @@ pub struct CodexDriver {
     commands: Sender<CommandMessage>,
     computer_use_process_directory: Option<PathBuf>,
     computer_use_server_path: Option<PathBuf>,
+    computer_use_preview_monitor: Option<ComputerUsePreviewMonitor>,
+}
+
+struct ComputerUsePreviewMonitor {
+    running: Arc<AtomicBool>,
+}
+
+impl ComputerUsePreviewMonitor {
+    fn start(directory: PathBuf, events: Sender<DriverEvent>) -> anyhow::Result<Self> {
+        let running = Arc::new(AtomicBool::new(true));
+        let thread_running = running.clone();
+        thread::Builder::new()
+            .name("waku-computer-use-preview".into())
+            .spawn(move || {
+                let mut seen = HashMap::<PathBuf, (SystemTime, u64)>::new();
+                while thread_running.load(Ordering::Acquire) {
+                    if let Ok(entries) = fs::read_dir(&directory) {
+                        for entry in entries.flatten() {
+                            let path = entry.path();
+                            let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+                                continue;
+                            };
+                            if !name.starts_with("preview-") || !name.ends_with(".json") {
+                                continue;
+                            }
+                            let Ok(metadata) = entry.metadata() else {
+                                continue;
+                            };
+                            let Ok(modified) = metadata.modified() else {
+                                continue;
+                            };
+                            let revision = (modified, metadata.len());
+                            if seen.get(&path) == Some(&revision) {
+                                continue;
+                            }
+                            seen.insert(path.clone(), revision);
+                            let Ok(data) = fs::read(&path) else {
+                                continue;
+                            };
+                            if let Ok(state) = computer_use::decode_preview_update(&data) {
+                                let _ = events.send(DriverEvent::ComputerUseUpdated(state));
+                            }
+                        }
+                    }
+                    thread::sleep(Duration::from_millis(50));
+                }
+            })
+            .context("failed to start the Computer Use preview monitor")?;
+        Ok(Self { running })
+    }
+}
+
+impl Drop for ComputerUsePreviewMonitor {
+    fn drop(&mut self) {
+        self.running.store(false, Ordering::Release);
+    }
 }
 
 struct CodexComputerUseConfig {
@@ -87,6 +145,14 @@ impl CodexComputerUseConfig {
                 process_directory.display()
             )
         })?;
+        fs::set_permissions(&process_directory, fs::Permissions::from_mode(0o700)).with_context(
+            || {
+                format!(
+                    "could not secure Computer Use process directory {}",
+                    process_directory.display()
+                )
+            },
+        )?;
         let process_directory_config = toml_string(&process_directory.display().to_string());
         let codex_home = std::env::var_os("CODEX_HOME")
             .map(PathBuf::from)
@@ -252,6 +318,10 @@ impl CodexDriver {
             .stderr
             .take()
             .ok_or_else(|| anyhow!("Codex stderr unavailable"))?;
+        let computer_use_preview_monitor = computer_use_process_directory
+            .as_ref()
+            .map(|directory| ComputerUsePreviewMonitor::start(directory.clone(), events.clone()))
+            .transpose()?;
         let (commands, command_rx) = unbounded();
         let thread_id = Arc::new(Mutex::new(None::<String>));
         let turn_id = Arc::new(Mutex::new(None::<String>));
@@ -589,6 +659,7 @@ impl CodexDriver {
             commands,
             computer_use_process_directory,
             computer_use_server_path,
+            computer_use_preview_monitor,
         })
     }
 }
@@ -683,6 +754,7 @@ impl DriverControl for CodexDriver {
 impl Drop for CodexDriver {
     fn drop(&mut self) {
         self.cancel_computer_use();
+        drop(self.computer_use_preview_monitor.take());
         if let Some(directory) = self.computer_use_process_directory.as_deref() {
             let _ = fs::remove_dir_all(directory);
         }

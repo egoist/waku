@@ -286,6 +286,11 @@ impl Waku {
                     }
                 }
             }
+            DriverEvent::ComputerUseUpdated(state) => {
+                if self.accepts_turn_output(session_id) {
+                    Self::upsert_computer_use_preview(runtime, state);
+                }
+            }
             DriverEvent::TurnFinished { success, summary } => {
                 runtime.last_driver_error = None;
                 if self
@@ -411,6 +416,26 @@ impl Waku {
         true
     }
 
+    fn upsert_computer_use_preview(runtime: &mut SessionRuntime, mut state: ComputerUseState) {
+        if !state.visible {
+            return;
+        }
+        let Some(window_id) = state.target.as_ref().map(|target| target.window_id) else {
+            return;
+        };
+        if let Some(index) = runtime.computer_use_previews.iter().position(|preview| {
+            preview
+                .target
+                .as_ref()
+                .is_some_and(|target| target.window_id == window_id)
+        }) {
+            let previous = runtime.computer_use_previews.remove(index);
+            if state.screenshot.is_none() {
+                state.screenshot = previous.screenshot;
+            }
+        }
+        runtime.computer_use_previews.push(state);
+    }
 }
 
 pub(super) fn stream_delta_kind(event: &DriverEvent) -> Option<StreamDeltaKind> {
