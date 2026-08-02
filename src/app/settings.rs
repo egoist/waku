@@ -55,7 +55,7 @@ impl Waku {
             (
                 SettingsPage::ComputerUse,
                 "Computer Use",
-                "icons/globe.svg",
+                "icons/cursor-spark.svg",
                 "computer use screen recording accessibility apps control codex",
             ),
         ]
@@ -682,6 +682,40 @@ fn permission_status_row(
     theme: Theme,
     cx: &mut Context<Waku>,
 ) -> Div {
+    let status = if granted {
+        div()
+            .id(id)
+            .h(px(25.0))
+            .px(px(4.0))
+            .rounded(px(6.0))
+            .flex()
+            .items_center()
+            .gap(px(5.0))
+            .cursor_default()
+            .text_size(px(10.0))
+            .text_color(theme.success)
+            .child(icon("icons/check.svg", 12.0, theme.success))
+            .child("Access Granted")
+    } else {
+        div()
+            .id(id)
+            .h(px(25.0))
+            .px(px(9.0))
+            .rounded(px(6.0))
+            .border_1()
+            .border_color(theme.border_strong)
+            .flex()
+            .items_center()
+            .cursor_default()
+            .text_size(px(10.0))
+            .text_color(theme.text_secondary)
+            .hover(|element| element.bg(theme.overlay).text_color(theme.text))
+            .child("Grant Access")
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.request_computer_permissions(true, cx);
+            }))
+    };
+
     div()
         .mt(px(10.0))
         .pt(px(10.0))
@@ -709,29 +743,5 @@ fn permission_status_row(
                         .child(description),
                 ),
         )
-        .child(
-            div()
-                .id(id)
-                .h(px(25.0))
-                .px(px(9.0))
-                .rounded(px(6.0))
-                .border_1()
-                .border_color(theme.border_strong)
-                .flex()
-                .items_center()
-                .cursor_default()
-                .text_size(px(10.0))
-                .text_color(theme.text_secondary)
-                .hover(|element| element.bg(theme.overlay).text_color(theme.text))
-                .child(if granted {
-                    "Access Granted"
-                } else {
-                    "Grant Access"
-                })
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    if !granted {
-                        this.request_computer_permissions(true, cx);
-                    }
-                })),
-        )
+        .child(status)
 }

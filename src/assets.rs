@@ -26,6 +26,7 @@ const ICONS: &[(&str, &[u8])] = icons![
     "chevron-down",
     "chevron-right",
     "copy",
+    "cursor-spark",
     "folder",
     "folder-new",
     "file-diff",
