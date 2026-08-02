@@ -252,68 +252,6 @@ private final class StatusAgentProcess {
     }
 }
 
-private final class SoftwareCursorView: NSView {
-    override func draw(_ dirtyRect: NSRect) {
-        let path = NSBezierPath()
-        path.move(to: NSPoint(x: 5, y: 40))
-        path.line(to: NSPoint(x: 5, y: 8))
-        path.line(to: NSPoint(x: 14, y: 17))
-        path.line(to: NSPoint(x: 21, y: 5))
-        path.line(to: NSPoint(x: 27, y: 9))
-        path.line(to: NSPoint(x: 20, y: 21))
-        path.line(to: NSPoint(x: 32, y: 21))
-        path.close()
-        NSColor.black.withAlphaComponent(0.8).setStroke()
-        NSColor.white.setFill()
-        path.lineWidth = 2
-        path.fill()
-        path.stroke()
-    }
-}
-
-private final class SoftwareCursorOverlay {
-    static let shared = SoftwareCursorOverlay()
-
-    private var panels: [CGWindowID: NSPanel] = [:]
-
-    func show(window: SCWindow, localPoint: CGPoint, coordinateSpace: Target) {
-        let frame = window.frame
-        let x = frame.minX + localPoint.x / CGFloat(max(coordinateSpace.width, 1)) * frame.width
-        let yFromTop = localPoint.y / CGFloat(max(coordinateSpace.height, 1)) * frame.height
-        DispatchQueue.main.async {
-            let panel = self.panels[window.windowID] ?? self.makePanel(for: window.windowID)
-            self.panels[window.windowID] = panel
-            let screenHeight = NSScreen.screens.first?.frame.maxY ?? 0
-            panel.setFrameOrigin(NSPoint(x: x - 5, y: screenHeight - (frame.maxY - yFromTop) - 40))
-            panel.orderFrontRegardless()
-        }
-    }
-
-    func hideAll() {
-        DispatchQueue.main.async {
-            self.panels.values.forEach { $0.orderOut(nil) }
-            self.panels.removeAll()
-        }
-    }
-
-    private func makePanel(for _: CGWindowID) -> NSPanel {
-        let panel = NSPanel(
-            contentRect: NSRect(x: 0, y: 0, width: 40, height: 48),
-            styleMask: [.borderless, .nonactivatingPanel],
-            backing: .buffered,
-            defer: false
-        )
-        panel.isOpaque = false
-        panel.backgroundColor = .clear
-        panel.hasShadow = false
-        panel.ignoresMouseEvents = true
-        panel.level = .floating
-        panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary]
-        panel.contentView = SoftwareCursorView(frame: panel.contentRect(forFrameRect: panel.frame))
-        return panel
-    }
-}
-
 struct Response: Encodable {
     let success: Bool
     let error: String?
@@ -354,8 +292,8 @@ enum HelperError: LocalizedError {
         case .ipc(let message): "Computer Use connection failed: \(message)"
         case .missingPermission(let permission): "\(helperDisplayName) needs \(permission) access. Open Waku Settings > Computer Use to grant it."
         case .unauthorizedClient(let reason): "Computer Use rejected a request that did not come from a trusted Waku app: \(reason)"
-        case .targetUnavailable: "The selected app window is no longer available. Call list_targets again."
-        case .targetIdentityChanged: "The selected window now belongs to a different signed app. Call list_targets again."
+        case .targetUnavailable: "The app has no available window. Retry get_app_state, or call list_apps() to confirm the app identifier."
+        case .targetIdentityChanged: "The selected app window changed. Call get_app_state again before interacting."
         case .targetBlocked: "Waku does not allow computer control of that app."
         case .unsupportedAction(let action): "Unsupported computer-use action: \(action)"
         case .eventCreationFailed: "macOS could not create an input event."
@@ -379,7 +317,6 @@ struct WakuComputerUse {
                     defer { StatusAgentProcess.shared.stop() }
                     try await serveMCP(input: channel, output: channel)
                     await CaptureSessions.shared.stopAll()
-                    SoftwareCursorOverlay.shared.hideAll()
                     channel.closeFile()
                 } else {
                     try await serveMCPBridge()
@@ -598,14 +535,6 @@ struct WakuComputerUse {
                 try perform(actions, in: window, coordinateSpace: requested)
             }
             StatusAgentProcess.shared.track(bundleID: current.bundleId, name: current.appName)
-            SoftwareCursorOverlay.shared.show(
-                window: window,
-                localPoint: VirtualCursorStore.shared.position(
-                    for: window.windowID,
-                    size: CGSize(width: CGFloat(requested.width), height: CGFloat(requested.height))
-                ),
-                coordinateSpace: requested
-            )
             let capture = try await capture(
                 window,
                 filter: filter,
@@ -747,123 +676,96 @@ struct WakuComputerUse {
     private static func callMCPTool(name: String, arguments: [String: Any]) async throws -> [String: Any] {
         switch name {
         case "list_apps":
-            let apps = NSWorkspace.shared.runningApplications
-                .filter { !$0.isTerminated && !$0.isHidden && $0.activationPolicy != .prohibited }
-                .compactMap { app -> [String: Any]? in
-                    guard let bundleID = app.bundleIdentifier else { return nil }
-                    return [
-                        "id": bundleID,
-                        "displayName": app.localizedName ?? bundleID,
-                        "isRunning": true,
-                    ]
-                }
-                .sorted { ($0["displayName"] as? String ?? "") < ($1["displayName"] as? String ?? "") }
+            let apps = listTargetableApps()
             return mcpResult(text: try jsonString(apps), structured: ["apps": apps])
 
         case "get_app_state":
+            guard CGPreflightScreenCaptureAccess() else {
+                throw HelperError.missingPermission("Screen Recording")
+            }
+            guard AXIsProcessTrusted() else {
+                throw HelperError.missingPermission("Accessibility")
+            }
             let app = try requiredString(arguments, "app")
-            let target = try await targetForApp(app)
-            let response = try await handle(Request(operation: "use", target: target, actions: []))
-            let text = try await accessibilityText(for: target)
-            var structured: [String: Any] = ["text": text, "target": try jsonObject(target)]
-            if let imageURL = response.imageUrl { structured["screenshot"] = imageURL }
+            let resolved = try await resolveAppWindow(app)
+            let state = try await captureAppState(
+                resolved,
+                disableDiff: (arguments["disableDiff"] as? Bool) ?? false
+            )
+            let structured: [String: Any] = [
+                "app": app,
+                "text": state.text,
+                "screenshot": state.capture.dataUrl,
+            ]
             return mcpResult(
-                text: text,
-                imageURL: response.imageUrl,
+                text: state.text,
+                imageURL: state.capture.dataUrl,
                 structured: structured
             )
 
         case "click", "drag", "press_key", "type_text":
+            guard AXIsProcessTrusted() else {
+                throw HelperError.missingPermission("Accessibility")
+            }
             let app = try requiredString(arguments, "app")
-            let target = try await targetForApp(app)
+            let resolved = try await resolveAppWindow(app)
             if name == "click", let rawIndex = arguments["element_index"] {
                 let index = try elementIndex(rawIndex)
-                let processID = try await processID(for: target)
-                guard AccessibilityRegistry.shared.belongs(to: processID),
+                guard AccessibilityRegistry.shared.belongs(
+                    bundleID: resolved.target.bundleId,
+                    processID: resolved.processID,
+                    windowID: resolved.target.windowId
+                ),
                       let element = AccessibilityRegistry.shared.element(for: index) else {
                     throw HelperError.invalidRequest("Element (index) is stale. Call get_app_state again.")
                 }
                 try performAccessibilityAction(element, name: kAXPressAction)
-                let response = try await handle(Request(operation: "use", target: target, actions: []))
-                return mcpResult(
-                    text: response.summary ?? "Clicked element (index).",
-                    imageURL: response.imageUrl
-                )
+                RecentComputerActionStore.shared.record(resolved.target.bundleId)
+                return mcpResult(text: "")
             }
-            let action: Action
             switch name {
             case "click":
-                let clickCount = max(1, min(Int64(number(arguments, "click_count") ?? 1), 2))
-                action = Action(
-                    type: clickCount == 2 ? "double_click" : "click",
-                    x: number(arguments, "x"),
-                    y: number(arguments, "y"),
-                    toX: nil,
-                    toY: nil,
-                    deltaX: nil,
-                    deltaY: nil,
-                    text: nil,
-                    key: nil,
-                    modifiers: nil,
-                    mouseButton: arguments["mouse_button"] as? String,
-                    durationMs: nil
-                )
+                try performCoordinateClick(arguments, in: resolved)
             case "drag":
-                action = Action(
-                    type: "drag",
-                    x: number(arguments, "from_x"),
-                    y: number(arguments, "from_y"),
-                    toX: number(arguments, "to_x"),
-                    toY: number(arguments, "to_y"),
-                    deltaX: nil,
-                    deltaY: nil,
-                    text: nil,
-                    key: nil,
-                    modifiers: nil,
-                    mouseButton: nil,
-                    durationMs: nil
+                try perform(
+                    [Action(
+                        type: "drag",
+                        x: number(arguments, "from_x"),
+                        y: number(arguments, "from_y"),
+                        toX: number(arguments, "to_x"),
+                        toY: number(arguments, "to_y"),
+                        deltaX: nil,
+                        deltaY: nil,
+                        text: nil,
+                        key: nil,
+                        modifiers: nil,
+                        mouseButton: nil,
+                        durationMs: nil
+                    )],
+                    in: resolved.window,
+                    coordinateSpace: resolved.target
                 )
             case "press_key":
                 let keyParts = try keyAndModifiers(try requiredString(arguments, "key"))
-                action = Action(
-                    type: "keypress",
-                    x: nil,
-                    y: nil,
-                    toX: nil,
-                    toY: nil,
-                    deltaX: nil,
-                    deltaY: nil,
-                    text: nil,
-                    key: keyParts.key,
-                    modifiers: keyParts.modifiers,
-                    mouseButton: nil,
-                    durationMs: nil
-                )
+                try pressKey(keyParts.key, modifiers: keyParts.modifiers, processID: resolved.processID)
             default:
-                action = Action(
-                    type: "type",
-                    x: nil,
-                    y: nil,
-                    toX: nil,
-                    toY: nil,
-                    deltaX: nil,
-                    deltaY: nil,
-                    text: try requiredString(arguments, "text"),
-                    key: nil,
-                    modifiers: nil,
-                    mouseButton: nil,
-                    durationMs: nil
-                )
+                try typeText(try requiredString(arguments, "text"), processID: resolved.processID)
             }
-            let response = try await handle(Request(operation: "use", target: target, actions: [action]))
-            return mcpResult(text: response.summary ?? "Computer action completed.", imageURL: response.imageUrl)
+            RecentComputerActionStore.shared.record(resolved.target.bundleId)
+            return mcpResult(text: "")
 
         case "perform_secondary_action", "set_value", "select_text", "scroll":
+            guard AXIsProcessTrusted() else {
+                throw HelperError.missingPermission("Accessibility")
+            }
             let app = try requiredString(arguments, "app")
-            let target = try await targetForApp(app)
-            let processID = try await processID(for: target)
+            let resolved = try await resolveAppWindow(app)
             let index = try elementIndex(arguments["element_index"] as Any)
-            guard AccessibilityRegistry.shared.belongs(to: processID) else {
+            guard AccessibilityRegistry.shared.belongs(
+                bundleID: resolved.target.bundleId,
+                processID: resolved.processID,
+                windowID: resolved.target.windowId
+            ) else {
                 throw HelperError.invalidRequest("Element (index) is stale. Call get_app_state again.")
             }
             guard let element = AccessibilityRegistry.shared.element(for: index) else {
@@ -871,7 +773,10 @@ struct WakuComputerUse {
             }
             switch name {
             case "perform_secondary_action":
-                try performAccessibilityAction(element, name: try requiredString(arguments, "action"))
+                try performAccessibilityAction(
+                    element,
+                    matching: try requiredString(arguments, "action")
+                )
             case "set_value":
                 let value = try requiredString(arguments, "value")
                 guard AXUIElementSetAttributeValue(element, kAXValueAttribute as CFString, value as CFTypeRef) == .success else {
@@ -880,9 +785,10 @@ struct WakuComputerUse {
             case "select_text":
                 try selectText(arguments, in: element)
             default:
-                try scrollAccessibility(arguments, element: element)
+                try scrollAccessibility(arguments, element: element, processID: resolved.processID)
             }
-            return mcpResult(text: "Completed \(name).")
+            RecentComputerActionStore.shared.record(resolved.target.bundleId)
+            return mcpResult(text: "")
 
         default:
             throw HelperError.invalidRequest("Unknown MCP tool: \(name)")
@@ -902,13 +808,17 @@ private final class AccessibilityRegistry {
     static let shared = AccessibilityRegistry()
 
     private var elements: [String: AXUIElement] = [:]
+    private var bundleID: String?
     private var processID: pid_t?
+    private var windowID: CGWindowID?
     private let lock = NSLock()
 
-    func reset(processID: pid_t) {
+    func reset(bundleID: String, processID: pid_t, windowID: CGWindowID) {
         lock.lock()
         elements.removeAll(keepingCapacity: true)
+        self.bundleID = bundleID
         self.processID = processID
+        self.windowID = windowID
         lock.unlock()
     }
 
@@ -926,10 +836,12 @@ private final class AccessibilityRegistry {
         return elements[index]
     }
 
-    func belongs(to processID: pid_t) -> Bool {
+    func belongs(bundleID: String, processID: pid_t, windowID: CGWindowID) -> Bool {
         lock.lock()
         defer { lock.unlock() }
-        return self.processID == processID
+        return self.bundleID == bundleID
+            && self.processID == processID
+            && self.windowID == windowID
     }
 }
 
@@ -947,13 +859,13 @@ private func mcpTools() -> [[String: Any]] {
         [
             "name": "get_app_state",
             "description": "Get an app's current screenshot and accessibility tree. Call this before interacting with the app.",
-            "inputSchema": ["type": "object", "additionalProperties": false, "required": ["app"], "properties": ["app": app]],
+            "inputSchema": ["type": "object", "additionalProperties": false, "required": ["app"], "properties": ["app": app, "disableDiff": ["type": "boolean"]]],
             "annotations": ["readOnlyHint": true, "idempotentHint": true, "openWorldHint": false, "destructiveHint": false],
         ],
         [
             "name": "click",
             "description": "Click an app at screenshot pixel coordinates.",
-            "inputSchema": ["type": "object", "additionalProperties": false, "required": ["app"], "properties": ["app": app, "element_index": element, "x": coordinate, "y": coordinate, "click_count": ["type": "integer"], "mouse_button": ["type": "string"]]],
+            "inputSchema": ["type": "object", "additionalProperties": false, "required": ["app"], "properties": ["app": app, "element_index": element, "x": coordinate, "y": coordinate, "click_count": ["type": "integer", "minimum": 1], "mouse_button": ["type": "string", "enum": ["left", "right", "middle", "l", "r", "m"]]]],
             "annotations": ["readOnlyHint": false, "idempotentHint": false, "openWorldHint": false, "destructiveHint": false],
         ],
         [
@@ -989,13 +901,13 @@ private func mcpTools() -> [[String: Any]] {
         [
             "name": "select_text",
             "description": "Select matching text in an accessibility element.",
-            "inputSchema": ["type": "object", "additionalProperties": false, "required": ["app", "element_index", "text"], "properties": ["app": app, "element_index": element, "text": ["type": "string"], "prefix": ["type": "string"], "suffix": ["type": "string"]]],
+            "inputSchema": ["type": "object", "additionalProperties": false, "required": ["app", "element_index", "text"], "properties": ["app": app, "element_index": element, "text": ["type": "string"], "prefix": ["type": "string"], "suffix": ["type": "string"], "selection_type": ["type": "string", "enum": ["text", "cursor_before", "cursor_after"]]]],
             "annotations": ["readOnlyHint": false, "idempotentHint": false, "openWorldHint": false, "destructiveHint": false],
         ],
         [
             "name": "scroll",
             "description": "Scroll an accessibility element in a direction.",
-            "inputSchema": ["type": "object", "additionalProperties": false, "required": ["app", "element_index", "direction"], "properties": ["app": app, "element_index": element, "direction": ["type": "string"], "pages": ["type": "number"]]],
+            "inputSchema": ["type": "object", "additionalProperties": false, "required": ["app", "element_index", "direction"], "properties": ["app": app, "element_index": element, "direction": ["type": "string", "enum": ["up", "down", "left", "right", "u", "d", "l", "r"]], "pages": ["type": "number", "exclusiveMinimum": 0]]],
             "annotations": ["readOnlyHint": false, "idempotentHint": false, "openWorldHint": false, "destructiveHint": false],
         ],
     ]
@@ -1038,8 +950,9 @@ private func mcpResult(text: String, imageURL: String? = nil, structured: [Strin
 }
 
 private func requiredString(_ arguments: [String: Any], _ name: String) throws -> String {
-    guard let value = arguments[name] as? String, !value.isEmpty else {
-        throw HelperError.invalidRequest("Missing (name)")
+    guard let value = arguments[name] as? String,
+          !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+        throw HelperError.invalidRequest("\(name) is required")
     }
     return value
 }
@@ -1057,16 +970,21 @@ private func number(_ arguments: [String: Any], _ name: String) -> Double? {
 }
 
 private func keyAndModifiers(_ value: String) throws -> (key: String, modifiers: [String]) {
-    let parts = value.split(separator: "+").map(String.init)
+    let parts = value.split(separator: "+", omittingEmptySubsequences: false)
+        .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
     guard let key = parts.last, !key.isEmpty else {
         throw HelperError.invalidRequest("Key is empty")
     }
     let modifiers = parts.dropLast().map { part -> String in
         switch part.lowercased() {
-        case "cmd", "command", "super": return "command"
-        case "ctrl", "control": return "control"
-        case "alt", "option": return "option"
-        case "shift": return "shift"
+        case "cmd", "command", "command_l", "command_r", "super", "super_l", "super_r", "meta":
+            return "command"
+        case "ctrl", "control", "control_l", "control_r":
+            return "control"
+        case "alt", "alt_l", "alt_r", "option", "option_l", "option_r":
+            return "option"
+        case "shift", "shift_l", "shift_r":
+            return "shift"
         default: return part
         }
     }
@@ -1318,6 +1236,322 @@ private func availableWindows(in content: SCShareableContent) -> [SCWindow] {
         }
 }
 
+private struct ResolvedAppWindow {
+    let content: SCShareableContent
+    let window: SCWindow
+    let target: Target
+    let processID: pid_t
+}
+
+private final class AccessibilityDiffStore {
+    static let shared = AccessibilityDiffStore()
+
+    private var trees: [String: String] = [:]
+    private let lock = NSLock()
+
+    func render(_ tree: String, for app: String, disableDiff: Bool) -> String {
+        lock.lock()
+        let previous = trees.updateValue(tree, forKey: app)
+        lock.unlock()
+        guard !disableDiff, let previous else {
+            return tree
+        }
+        guard previous != tree else {
+            return "<accessibility_diff>\nNo accessibility changes.\n</accessibility_diff>"
+        }
+
+        let oldLines = indexedAccessibilityLines(previous)
+        let newLines = indexedAccessibilityLines(tree)
+        let indexes = Set(oldLines.keys).union(newLines.keys).sorted()
+        var changes: [String] = []
+        for index in indexes {
+            switch (oldLines[index], newLines[index]) {
+            case let (old?, new?) where old != new:
+                changes.append("- \(old)")
+                changes.append("+ \(new)")
+            case let (old?, nil):
+                changes.append("- \(old)")
+            case let (nil, new?):
+                changes.append("+ \(new)")
+            default:
+                break
+            }
+        }
+        return "<accessibility_diff>\n\(changes.joined(separator: "\n"))\n</accessibility_diff>"
+    }
+}
+
+private final class RecentComputerActionStore {
+    static let shared = RecentComputerActionStore()
+
+    private var dates: [String: Date] = [:]
+    private let lock = NSLock()
+
+    func record(_ bundleID: String) {
+        lock.lock()
+        dates[bundleID] = Date()
+        lock.unlock()
+    }
+
+    func remainingDelay(for bundleID: String) -> TimeInterval {
+        lock.lock()
+        let date = dates[bundleID]
+        lock.unlock()
+        guard let date else { return 0 }
+        return max(0, 1 - Date().timeIntervalSince(date))
+    }
+}
+
+private func indexedAccessibilityLines(_ tree: String) -> [Int: String] {
+    var result: [Int: String] = [:]
+    for line in tree.split(separator: "\n", omittingEmptySubsequences: false) {
+        let value = String(line)
+        guard let open = value.firstIndex(of: "["),
+              let close = value[open...].firstIndex(of: "]"),
+              let index = Int(value[value.index(after: open)..<close]) else {
+            continue
+        }
+        result[index] = value
+    }
+    return result
+}
+
+private func normalizedAppIdentifier(_ identifier: String) throws -> String {
+    let normalized = identifier.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+    guard !normalized.isEmpty else {
+        throw HelperError.invalidRequest("app is required")
+    }
+    return normalized
+}
+
+private func matchingWindows(
+    for identifier: String,
+    in content: SCShareableContent
+) throws -> [SCWindow] {
+    let normalized = try normalizedAppIdentifier(identifier)
+    return availableWindows(in: content).filter { window in
+        guard let app = window.owningApplication else { return false }
+        let running = NSRunningApplication(processIdentifier: app.processID)
+        let path = running?.bundleURL?.path.lowercased()
+        let processName = running?.executableURL?.deletingPathExtension().lastPathComponent.lowercased()
+        return app.applicationName.lowercased() == normalized
+            || app.bundleIdentifier.lowercased() == normalized
+            || path == normalized
+            || processName == normalized
+    }
+}
+
+private func chooseWindow(_ windows: [SCWindow], identifier: String) throws -> SCWindow? {
+    guard !windows.isEmpty else { return nil }
+    let normalized = try normalizedAppIdentifier(identifier)
+    let exactIdentities = Set(windows.compactMap { window -> String? in
+        guard let app = window.owningApplication else { return nil }
+        let running = NSRunningApplication(processIdentifier: app.processID)
+        let path = running?.bundleURL?.path.lowercased()
+        if app.bundleIdentifier.lowercased() == normalized || path == normalized {
+            return app.bundleIdentifier
+        }
+        return nil
+    })
+    let bundleIDs = Set(windows.compactMap { $0.owningApplication?.bundleIdentifier })
+    if exactIdentities.isEmpty, bundleIDs.count > 1 {
+        let choices = bundleIDs.sorted().joined(separator: ", ")
+        throw HelperError.invalidRequest(
+            "App '\(identifier)' is ambiguous. Retry with a bundle identifier from list_apps(): \(choices)"
+        )
+    }
+
+    let frontmostPID = NSWorkspace.shared.frontmostApplication?.processIdentifier
+    return windows.max { lhs, rhs in
+        func rank(_ window: SCWindow) -> (Int, Int, CGFloat) {
+            let frontmost = window.owningApplication?.processID == frontmostPID ? 1 : 0
+            let onScreen = window.isOnScreen ? 1 : 0
+            return (frontmost, onScreen, window.frame.width * window.frame.height)
+        }
+        return rank(lhs) < rank(rhs)
+    }
+}
+
+private func applicationURL(for identifier: String) -> URL? {
+    let trimmed = identifier.trimmingCharacters(in: .whitespacesAndNewlines)
+    if trimmed.contains("/"), FileManager.default.fileExists(atPath: trimmed) {
+        return URL(fileURLWithPath: trimmed)
+    }
+    if let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: trimmed) {
+        return url
+    }
+    let normalized = trimmed.lowercased()
+    return installedApplicationURLs().first { url in
+        let bundle = Bundle(url: url)
+        let displayName = (bundle?.object(forInfoDictionaryKey: "CFBundleDisplayName") as? String)
+            ?? (bundle?.object(forInfoDictionaryKey: "CFBundleName") as? String)
+            ?? url.deletingPathExtension().lastPathComponent
+        return displayName.lowercased() == normalized
+            || url.deletingPathExtension().lastPathComponent.lowercased() == normalized
+    }
+}
+
+private func installedApplicationURLs() -> [URL] {
+    let roots = [
+        URL(fileURLWithPath: "/Applications", isDirectory: true),
+        URL(fileURLWithPath: "/System/Applications", isDirectory: true),
+        FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Applications", isDirectory: true),
+    ]
+    var urls = Set<URL>()
+    for root in roots where FileManager.default.fileExists(atPath: root.path) {
+        guard let enumerator = FileManager.default.enumerator(
+            at: root,
+            includingPropertiesForKeys: [.isApplicationKey],
+            options: [.skipsHiddenFiles, .skipsPackageDescendants]
+        ) else { continue }
+        for case let url as URL in enumerator where url.pathExtension.lowercased() == "app" {
+            urls.insert(url.resolvingSymlinksInPath())
+            enumerator.skipDescendants()
+        }
+    }
+    for app in NSWorkspace.shared.runningApplications {
+        if let url = app.bundleURL {
+            urls.insert(url.resolvingSymlinksInPath())
+        }
+    }
+    return urls.sorted { $0.path.localizedCaseInsensitiveCompare($1.path) == .orderedAscending }
+}
+
+private func listTargetableApps() -> [[String: Any]] {
+    let running = NSWorkspace.shared.runningApplications.filter { !$0.isTerminated }
+    let runningBundleIDs = Set(running.compactMap(\.bundleIdentifier))
+    var apps: [String: (name: String, running: Bool)] = [:]
+
+    for url in installedApplicationURLs() {
+        guard let bundle = Bundle(url: url),
+              let bundleID = bundle.bundleIdentifier,
+              !isBlocked(bundleId: bundleID) else {
+            continue
+        }
+        let name = (bundle.object(forInfoDictionaryKey: "CFBundleDisplayName") as? String)
+            ?? (bundle.object(forInfoDictionaryKey: "CFBundleName") as? String)
+            ?? url.deletingPathExtension().lastPathComponent
+        apps[bundleID] = (name, runningBundleIDs.contains(bundleID))
+    }
+    for app in running {
+        guard let bundleID = app.bundleIdentifier,
+              !isBlocked(bundleId: bundleID),
+              app.activationPolicy != .prohibited else {
+            continue
+        }
+        apps[bundleID] = (app.localizedName ?? apps[bundleID]?.name ?? bundleID, true)
+    }
+
+    return apps.map { bundleID, app in
+        [
+            "id": bundleID,
+            "displayName": app.name,
+            "isRunning": app.running,
+        ]
+    }.sorted {
+        ($0["displayName"] as? String ?? "").localizedCaseInsensitiveCompare(
+            $1["displayName"] as? String ?? ""
+        ) == .orderedAscending
+    }
+}
+
+private func launchApplication(for identifier: String) async throws {
+    guard let url = applicationURL(for: identifier),
+          let bundleID = Bundle(url: url)?.bundleIdentifier,
+          !isBlocked(bundleId: bundleID) else {
+        throw HelperError.invalidRequest(
+            "App '\(identifier)' was not found. Call list_apps() to inspect targetable apps."
+        )
+    }
+    let configuration = NSWorkspace.OpenConfiguration()
+    configuration.activates = false
+    try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+        NSWorkspace.shared.openApplication(at: url, configuration: configuration) { _, error in
+            if let error {
+                continuation.resume(throwing: error)
+            } else {
+                continuation.resume(returning: ())
+            }
+        }
+    }
+}
+
+private func resolveAppWindow(_ identifier: String, launchIfNeeded: Bool = true) async throws -> ResolvedAppWindow {
+    func resolve() async throws -> ResolvedAppWindow? {
+        let content = try await availableContent()
+        let windows = try matchingWindows(for: identifier, in: content)
+        guard let window = try chooseWindow(windows, identifier: identifier),
+              let processID = window.owningApplication?.processID else {
+            return nil
+        }
+        return ResolvedAppWindow(
+            content: content,
+            window: window,
+            target: target(for: window),
+            processID: processID
+        )
+    }
+
+    if let resolved = try await resolve() {
+        return resolved
+    }
+    guard launchIfNeeded else {
+        throw HelperError.invalidRequest(
+            "App '\(identifier)' has no targetable window. Call list_apps() to confirm the app identifier."
+        )
+    }
+    try await launchApplication(for: identifier)
+    for _ in 0..<50 {
+        if let resolved = try await resolve() {
+            return resolved
+        }
+        try await Task.sleep(nanoseconds: 100_000_000)
+    }
+    throw HelperError.invalidRequest(
+        "App '\(identifier)' launched but did not open a targetable window."
+    )
+}
+
+private func pointInWindow(
+    x: Double?,
+    y: Double?,
+    resolved: ResolvedAppWindow
+) throws -> CGPoint {
+    guard let x, let y, x.isFinite, y.isFinite else {
+        throw HelperError.invalidRequest("Pointer actions require finite x and y coordinates")
+    }
+    let width = Double(max(resolved.target.width, 1))
+    let height = Double(max(resolved.target.height, 1))
+    let localX = min(max(x, 0), width)
+    let localY = min(max(y, 0), height)
+    return CGPoint(
+        x: resolved.window.frame.minX + localX / width * resolved.window.frame.width,
+        y: resolved.window.frame.minY + localY / height * resolved.window.frame.height
+    )
+}
+
+private func performCoordinateClick(
+    _ arguments: [String: Any],
+    in resolved: ResolvedAppWindow
+) throws {
+    let rawCount = number(arguments, "click_count") ?? 1
+    guard rawCount.isFinite,
+          rawCount.rounded() == rawCount,
+          rawCount >= 1,
+          rawCount <= 10 else {
+        throw HelperError.invalidRequest("click_count must be an integer from 1 through 10")
+    }
+    let x = number(arguments, "x")
+    let y = number(arguments, "y")
+    updateVirtualCursor(x, y, window: resolved.window, coordinateSpace: resolved.target)
+    try click(
+        at: pointInWindow(x: x, y: y, resolved: resolved),
+        count: Int64(rawCount),
+        button: mouseButton(arguments["mouse_button"] as? String),
+        processID: resolved.processID
+    )
+}
+
 private func targetForApp(_ identifier: String) async throws -> Target {
     let content = try await availableContent()
     let normalized = identifier.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
@@ -1371,7 +1605,48 @@ private func accessibilityString(_ element: AXUIElement, _ name: String) -> Stri
 }
 
 private func accessibilityChildren(_ element: AXUIElement) -> [AXUIElement] {
-    (accessibilityAttribute(element, kAXChildrenAttribute) as? [AXUIElement]) ?? []
+    let attributes = [
+        kAXChildrenAttribute,
+        "AXChildrenInNavigationOrder",
+        kAXVisibleChildrenAttribute,
+        kAXContentsAttribute,
+    ]
+    var seen = Set<CFHashCode>()
+    var children: [AXUIElement] = []
+    for attribute in attributes {
+        for child in (accessibilityAttribute(element, attribute) as? [AXUIElement]) ?? [] {
+            if seen.insert(CFHash(child)).inserted {
+                children.append(child)
+            }
+        }
+    }
+    return children
+}
+
+private func enableEnhancedAccessibility(_ application: AXUIElement) {
+    _ = AXUIElementSetAttributeValue(
+        application,
+        "AXEnhancedUserInterface" as CFString,
+        kCFBooleanTrue
+    )
+}
+
+private func accessibilityFrameCenter(_ element: AXUIElement) -> CGPoint? {
+    guard let positionAttribute = accessibilityAttribute(element, kAXPositionAttribute),
+          let sizeAttribute = accessibilityAttribute(element, kAXSizeAttribute),
+          CFGetTypeID(positionAttribute) == AXValueGetTypeID(),
+          CFGetTypeID(sizeAttribute) == AXValueGetTypeID() else {
+        return nil
+    }
+    let positionValue = unsafeBitCast(positionAttribute, to: AXValue.self)
+    let sizeValue = unsafeBitCast(sizeAttribute, to: AXValue.self)
+    var position = CGPoint.zero
+    var size = CGSize.zero
+    guard AXValueGetValue(positionValue, .cgPoint, &position),
+          AXValueGetValue(sizeValue, .cgSize, &size) else {
+        return nil
+    }
+    return CGPoint(x: position.x + size.width / 2, y: position.y + size.height / 2)
 }
 
 private func accessibilityText(for target: Target) async throws -> String {
@@ -1380,13 +1655,83 @@ private func accessibilityText(for target: Target) async throws -> String {
           let processID = window.owningApplication?.processID else {
         throw HelperError.targetUnavailable
     }
-    AccessibilityRegistry.shared.reset(processID: processID)
+    AccessibilityRegistry.shared.reset(
+        bundleID: target.bundleId,
+        processID: processID,
+        windowID: target.windowId
+    )
     let root = accessibilityRoot(for: processID)
+    enableEnhancedAccessibility(root)
     let windows = accessibilityChildren(root)
     let axWindow = windows.first ?? root
     var lines: [String] = []
     appendAccessibilityTree(axWindow, depth: 0, lines: &lines)
     return lines.joined(separator: "\n")
+}
+
+private func accessibilityText(for resolved: ResolvedAppWindow) -> String {
+    AccessibilityRegistry.shared.reset(
+        bundleID: resolved.target.bundleId,
+        processID: resolved.processID,
+        windowID: resolved.target.windowId
+    )
+    let root = accessibilityRoot(for: resolved.processID)
+    enableEnhancedAccessibility(root)
+    let windows = accessibilityChildren(root)
+    let axWindow = windows.first { element in
+        (accessibilityAttribute(element, "AXWindowNumber") as? NSNumber)?.uint32Value
+            == resolved.target.windowId
+    } ?? windows.first ?? root
+    var lines: [String] = []
+    appendAccessibilityTree(axWindow, depth: 0, lines: &lines)
+    return lines.joined(separator: "\n")
+}
+
+private func captureAppState(
+    _ initialResolved: ResolvedAppWindow,
+    disableDiff: Bool
+) async throws -> (text: String, capture: Capture) {
+    var resolved = initialResolved
+    let remainingDelay = RecentComputerActionStore.shared.remainingDelay(for: resolved.target.bundleId)
+    if remainingDelay > 0 {
+        try await Task.sleep(nanoseconds: UInt64(remainingDelay * 1_000_000_000))
+        resolved = try await resolveAppWindow(resolved.target.bundleId, launchIfNeeded: false)
+    }
+    guard let display = captureDisplay(for: resolved.window, in: resolved.content.displays) else {
+        throw HelperError.captureFailed
+    }
+    let filter = SCContentFilter(display: display, including: [resolved.window])
+    let sourceRect = captureSourceRect(for: resolved.window, on: display)
+    try await CaptureSessions.shared.start(
+        for: resolved.window,
+        filter: filter,
+        sourceRect: sourceRect
+    )
+    StatusAgentProcess.shared.track(
+        bundleID: resolved.target.bundleId,
+        name: resolved.target.appName
+    )
+    let cursor = VirtualCursorStore.shared.position(
+        for: resolved.window.windowID,
+        size: CGSize(
+            width: CGFloat(resolved.target.width),
+            height: CGFloat(resolved.target.height)
+        )
+    )
+    let capture = try await capture(
+        resolved.window,
+        filter: filter,
+        sourceRect: sourceRect,
+        cursor: cursor,
+        coordinateSpace: resolved.target
+    )
+    let fullTree = accessibilityText(for: resolved)
+    let text = AccessibilityDiffStore.shared.render(
+        fullTree,
+        for: resolved.target.bundleId,
+        disableDiff: disableDiff
+    )
+    return (text, capture)
 }
 
 private func appendAccessibilityTree(
@@ -1428,30 +1773,105 @@ private func performAccessibilityAction(_ element: AXUIElement, name: String) th
     }
 }
 
+private func performAccessibilityAction(_ element: AXUIElement, matching requested: String) throws {
+    let actions = try accessibilityActions(element)
+    let normalized = normalizeAccessibilityAction(requested)
+    guard let action = actions.first(where: { normalizeAccessibilityAction($0) == normalized }) else {
+        throw HelperError.invalidRequest(
+            "The element does not expose the \(requested) action"
+        )
+    }
+    try performAccessibilityAction(element, name: action)
+}
+
+private func normalizeAccessibilityAction(_ value: String) -> String {
+    var normalized = value.lowercased().filter(\.isLetter)
+    if normalized.hasPrefix("ax") {
+        normalized.removeFirst(2)
+    }
+    return normalized
+}
+
 private func selectText(_ arguments: [String: Any], in element: AXUIElement) throws {
     let text = try requiredString(arguments, "text")
-    guard let value = accessibilityString(element, kAXValueAttribute),
-          let range = value.range(of: text) else {
+    guard let value = accessibilityString(element, kAXValueAttribute) else {
         throw HelperError.invalidRequest("Text was not found in the element")
     }
-    let location = value.utf16.distance(from: value.utf16.startIndex, to: range.lowerBound)
-    let length = value.utf16.distance(from: range.lowerBound, to: range.upperBound)
-    var selection = CFRange(location: location, length: length)
+    let prefix = arguments["prefix"] as? String
+    let suffix = arguments["suffix"] as? String
+    let source = value as NSString
+    let needle = text as NSString
+    var candidates: [NSRange] = []
+    var search = NSRange(location: 0, length: source.length)
+    while search.length > 0 {
+        let match = source.range(of: needle as String, options: [], range: search)
+        if match.location == NSNotFound { break }
+        let prefixMatches = prefix.map { candidate in
+            let length = (candidate as NSString).length
+            guard match.location >= length else { return false }
+            return source.substring(with: NSRange(location: match.location - length, length: length)) == candidate
+        } ?? true
+        let suffixMatches = suffix.map { candidate in
+            let length = (candidate as NSString).length
+            let location = match.location + match.length
+            guard location + length <= source.length else { return false }
+            return source.substring(with: NSRange(location: location, length: length)) == candidate
+        } ?? true
+        if prefixMatches && suffixMatches {
+            candidates.append(match)
+        }
+        let next = match.location + max(match.length, 1)
+        search = NSRange(location: next, length: source.length - next)
+    }
+    guard candidates.count == 1, var match = candidates.first else {
+        let reason = candidates.isEmpty ? "was not found" : "is ambiguous"
+        throw HelperError.invalidRequest("Text \(reason) in the element")
+    }
+    switch (arguments["selection_type"] as? String) ?? "text" {
+    case "text":
+        break
+    case "cursor_before":
+        match.length = 0
+    case "cursor_after":
+        match.location += match.length
+        match.length = 0
+    default:
+        throw HelperError.invalidRequest(
+            "selection_type must be text, cursor_before, or cursor_after"
+        )
+    }
+    var selection = CFRange(location: match.location, length: match.length)
     guard let rangeValue = AXValueCreate(.cfRange, &selection),
           AXUIElementSetAttributeValue(element, kAXSelectedTextRangeAttribute as CFString, rangeValue) == .success else {
         throw HelperError.invalidRequest("The element does not support text selection")
     }
 }
 
-private func scrollAccessibility(_ arguments: [String: Any], element: AXUIElement) throws {
+private func scrollAccessibility(
+    _ arguments: [String: Any],
+    element: AXUIElement,
+    processID: pid_t
+) throws {
     let direction = try requiredString(arguments, "direction").lowercased()
-    let action: String
+    let pages = number(arguments, "pages") ?? 1
+    guard pages.isFinite, pages > 0 else {
+        throw HelperError.invalidRequest("pages must be a finite number greater than zero")
+    }
+    let distance = pages * 700
+    let delta: (x: Double, y: Double)
     switch direction {
-    case "up", "u": action = kAXDecrementAction
-    case "down", "d": action = kAXIncrementAction
+    case "up", "u": delta = (0, distance)
+    case "down", "d": delta = (0, -distance)
+    case "left", "l": delta = (distance, 0)
+    case "right", "r": delta = (-distance, 0)
     default: throw HelperError.invalidRequest("Unsupported scroll direction: \(direction)")
     }
-    try performAccessibilityAction(element, name: action)
+    try scroll(
+        deltaX: delta.x,
+        deltaY: delta.y,
+        at: accessibilityFrameCenter(element),
+        processID: processID
+    )
 }
 
 private func captureDisplay(for window: SCWindow, in displays: [SCDisplay]) -> SCDisplay? {
@@ -1526,7 +1946,18 @@ private func signingInformation(pid: pid_t) -> [String: Any]? {
 
 private func isBlocked(bundleId: String) -> Bool {
     let bundle = bundleId.lowercased()
-    return bundle.hasPrefix("codes.waku") || [
+    if [
+        "codes.waku",
+        "com.openai.codex",
+        "com.openai.sky.",
+        "com.1password.",
+        "2bua8c4s2c.com.1password.",
+        "com.bitwarden.",
+        "com.lastpass.",
+    ].contains(where: bundle.hasPrefix) {
+        return true
+    }
+    return [
         "com.apple.loginwindow",
         "com.apple.securityagent",
         "com.apple.systempreferences",
@@ -1537,10 +1968,6 @@ private func isBlocked(bundleId: String) -> Bool {
         "com.googlecode.iterm2",
         "com.mitchellh.ghostty",
         "org.alacritty",
-        "com.1password.1password",
-        "com.1password.1password7",
-        "com.bitwarden.desktop",
-        "com.lastpass.lastpass",
     ].contains(bundle)
 }
 
@@ -1556,6 +1983,11 @@ private actor CaptureSessions {
     ) async throws {
         guard sessions[window.windowID] == nil else {
             return
+        }
+        let staleSessions = sessions.filter { $0.key != window.windowID }.map(\.value)
+        sessions = sessions.filter { $0.key == window.windowID }
+        for session in staleSessions {
+            await session.stop()
         }
         let session = try WindowCaptureSession(
             window: window,
@@ -1818,9 +2250,9 @@ private func post(_ event: CGEvent, to processID: pid_t) {
 }
 
 private func mouseButton(_ value: String?) -> CGMouseButton {
-    switch value?.lowercased() {
-    case "right", "secondary": return .right
-    case "middle", "center": return .center
+    switch value?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+    case "r", "right", "secondary": return .right
+    case "m", "middle", "center": return .center
     default: return .left
     }
 }
@@ -1866,7 +2298,12 @@ private func drag(from start: CGPoint, to end: CGPoint, processID: pid_t) throws
     try post(mouseEvent(type: .leftMouseUp, at: end, button: .left), to: processID)
 }
 
-private func scroll(deltaX: Double, deltaY: Double, processID: pid_t) throws {
+private func scroll(
+    deltaX: Double,
+    deltaY: Double,
+    at location: CGPoint? = nil,
+    processID: pid_t
+) throws {
     guard deltaX.isFinite, deltaY.isFinite,
           let event = CGEvent(
             scrollWheelEvent2Source: nil,
@@ -1877,6 +2314,9 @@ private func scroll(deltaX: Double, deltaY: Double, processID: pid_t) throws {
             wheel3: 0
           ) else {
         throw HelperError.eventCreationFailed
+    }
+    if let location {
+        event.location = location
     }
     post(event, to: processID)
 }
@@ -1943,7 +2383,19 @@ private func virtualKeyCode(for key: String) -> CGKeyCode? {
         "f4": 118, "end": 119, "f2": 120, "pagedown": 121, "f1": 122,
         "left": 123, "right": 124, "down": 125, "up": 126,
     ]
-    return codes[key.lowercased()]
+    let normalized = key.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+    let aliases: [String: String] = [
+        "backspace": "delete",
+        "esc": "escape",
+        "page_down": "pagedown",
+        "page_up": "pageup",
+        "period": ".",
+        "greater": ".",
+        "kp_0": "0",
+        "numpad_0": "0",
+        "spacebar": "space",
+    ]
+    return codes[aliases[normalized] ?? normalized]
 }
 
 private extension Array where Element == UInt16 {

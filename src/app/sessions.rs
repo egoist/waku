@@ -1,5 +1,9 @@
 use super::*;
 
+fn retain_runtime_after_cancel(provider: ProviderKind) -> bool {
+    provider != ProviderKind::Codex
+}
+
 impl Waku {
     pub(super) fn select_project(&mut self, project_id: Uuid, cx: &mut Context<Self>) {
         self.state.selected_project = Some(project_id);
@@ -412,6 +416,7 @@ impl Waku {
         self.activities_expanded.clear();
         self.expanded_activity_items.clear();
         self.expanded_turns.clear();
+        self.activity_text_states.borrow_mut().clear();
         self.message_edit = None;
         self.toast = None;
         self.navigation_rail_active_scale_enabled.set(false);
@@ -557,6 +562,12 @@ impl Waku {
         let Some(session_id) = self.state.selected_session else {
             return;
         };
+        let retain_runtime = self
+            .state
+            .sessions
+            .iter()
+            .find(|session| session.id == session_id)
+            .is_some_and(|session| retain_runtime_after_cancel(session.provider));
         let mut runtime = self.runtimes.remove(&session_id);
         if let Some(runtime) = runtime.as_ref() {
             runtime.driver.cancel();
@@ -607,7 +618,14 @@ impl Waku {
         if has_active_turn {
             self.capture_latest_turn_checkpoint_for(session_id);
         }
-        if keep_runtime && let Some(runtime) = runtime {
+        // A Codex runtime owns its node_repl and Computer Use descendants.
+        // Stopping the turn must close that whole process tree so capture,
+        // status, and accessibility sessions do not outlive the turn. The
+        // next prompt resumes the same provider thread with a fresh runtime.
+        if retain_runtime
+            && keep_runtime
+            && let Some(runtime) = runtime
+        {
             self.runtimes.insert(session_id, runtime);
         }
         self.remeasure_transcript_tail();
@@ -745,5 +763,20 @@ impl Waku {
             }
         })
         .detach();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stopping_codex_releases_its_computer_use_process_tree() {
+        assert!(!retain_runtime_after_cancel(ProviderKind::Codex));
+        for provider in ProviderKind::ALL {
+            if provider != ProviderKind::Codex {
+                assert!(retain_runtime_after_cancel(provider));
+            }
+        }
     }
 }

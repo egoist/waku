@@ -2,17 +2,18 @@ import { spawn } from "node:child_process";
 import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { fileURLToPath } from "node:url";
 
-const RUNTIME_KEY = Symbol.for("waku.computer-use.runtime");
+const COMPUTER_USE_RUNTIME_KEY = Symbol.for("openai.computer-use.runtime");
+const CHROME_COMPUTER_USE_META_KEY = "codex/computerUseChrome";
+const MAC_CHROME_APP_PATH_PATTERN = /(?:^|[\\/])Google Chrome\.app(?:[\\/]|$)/i;
 
 /**
- * Install the Waku-owned `sky` facade in a persistent node_repl session.
- * The facade deliberately mirrors the Codex Computer Use surface while the
- * bundled Swift helper remains the MCP/native-control boundary.
+ * Install the Codex-compatible `sky` surface in a persistent node_repl
+ * session while the bundled Swift helper remains the native-control boundary.
  */
 export async function setupComputerUseRuntime({ globals = globalThis } = {}) {
-  const installed = Reflect.get(globalThis, RUNTIME_KEY);
+  const installed = Reflect.get(globalThis, COMPUTER_USE_RUNTIME_KEY);
   if (installed) {
     Reflect.set(globalThis, "sky", installed);
     Reflect.set(globals, "sky", installed);
@@ -26,17 +27,31 @@ export async function setupComputerUseRuntime({ globals = globalThis } = {}) {
   );
   await client.initialize();
 
-  const sky = Object.freeze({
+  const sky = createSkyFacade(client);
+  installChromeComputerUseMetadata(sky);
+  Object.freeze(sky);
+
+  Reflect.set(globalThis, COMPUTER_USE_RUNTIME_KEY, sky);
+  Reflect.set(globalThis, "sky", sky);
+  Reflect.set(globals, "sky", sky);
+  return sky;
+}
+
+export function createSkyFacade(client) {
+  return {
     target: "mac",
     list_apps: async () => parseJSONText(await client.call("list_apps", {})),
-    get_app_state: async ({ app, disableDiff: _disableDiff } = {}) => {
-      const result = await client.call("get_app_state", { app });
-      const text = textContent(result);
-      const image = imageContent(result);
+    get_app_state: async ({ app, disableDiff } = {}) => {
+      const result = await client.call("get_app_state", withoutUndefined({ app, disableDiff }));
+      const structured = result?.structuredContent;
+      const text = typeof structured?.text === "string" ? structured.text : textContent(result);
+      const screenshotUrl = typeof structured?.screenshot === "string"
+        ? structured.screenshot
+        : imageDataUrl(imageContent(result));
       return {
         app,
         text,
-        screenshot: image ? { url: await writeScreenshot(image) } : null,
+        screenshot: screenshotUrl ? { url: screenshotUrl } : null,
       };
     },
     click: async (args) => { await client.call("click", args); },
@@ -47,12 +62,7 @@ export async function setupComputerUseRuntime({ globals = globalThis } = {}) {
     scroll: async (args) => { await client.call("scroll", args); },
     press_key: async (args) => { await client.call("press_key", args); },
     type_text: async (args) => { await client.call("type_text", args); },
-  });
-
-  Reflect.set(globalThis, RUNTIME_KEY, sky);
-  Reflect.set(globalThis, "sky", sky);
-  Reflect.set(globals, "sky", sky);
-  return sky;
+  };
 }
 
 async function bundledHelperCommand() {
@@ -86,7 +96,6 @@ class MCPClient {
     this.args = args;
     this.child = null;
     this.initialized = false;
-    this.idleTimer = null;
     this.nextId = 1;
     this.pending = new Map();
     this.buffer = "";
@@ -101,16 +110,11 @@ class MCPClient {
     });
     this.notify("notifications/initialized", {});
     this.initialized = true;
-    this.scheduleIdleClose();
   }
 
   async call(name, arguments_) {
-    clearTimeout(this.idleTimer);
-    this.idleTimer = null;
     if (!this.initialized || !this.isChildRunning()) await this.initialize();
-    const result = await this.request("tools/call", { name, arguments: arguments_ });
-    this.scheduleIdleClose();
-    return result;
+    return this.request("tools/call", { name, arguments: arguments_ });
   }
 
   ensureChild() {
@@ -139,12 +143,6 @@ class MCPClient {
     return this.child !== null && this.child.exitCode === null && !this.child.killed;
   }
 
-  scheduleIdleClose() {
-    clearTimeout(this.idleTimer);
-    this.idleTimer = setTimeout(() => this.close(), 500);
-    this.idleTimer.unref?.();
-  }
-
   notify(method, params) {
     if (!this.isChildRunning()) throw new Error("Waku Computer Use MCP bridge is not running");
     this.child.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", method, params })}\n`);
@@ -164,8 +162,6 @@ class MCPClient {
   }
 
   close() {
-    clearTimeout(this.idleTimer);
-    this.idleTimer = null;
     const child = this.child;
     this.child = null;
     this.initialized = false;
@@ -206,13 +202,40 @@ function imageContent(result) {
 }
 
 function parseJSONText(result) {
+  if (Array.isArray(result?.structuredContent?.apps)) return result.structuredContent.apps;
   const text = textContent(result);
   try { return JSON.parse(text); } catch { return []; }
 }
 
-async function writeScreenshot(image) {
-  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "waku-computer-use-"));
-  const filename = path.join(directory, "screenshot.png");
-  await fs.writeFile(filename, Buffer.from(image.data, "base64"));
-  return pathToFileURL(filename).href;
+function imageDataUrl(image) {
+  if (!image?.data) return null;
+  const mimeType = image.mimeType || image.mime_type || "image/png";
+  return `data:${mimeType};base64,${image.data}`;
+}
+
+function withoutUndefined(value) {
+  return Object.fromEntries(Object.entries(value).filter(([, item]) => item !== undefined));
+}
+
+function installChromeComputerUseMetadata(sky) {
+  for (const [property, value] of Object.entries(sky)) {
+    if (property === "list_apps" || typeof value !== "function") continue;
+    Reflect.set(sky, property, (...args) => {
+      if (isChromeComputerUseInput(args[0])) {
+        globalThis.nodeRepl?.setResponseMeta?.({ [CHROME_COMPUTER_USE_META_KEY]: true });
+      }
+      return Reflect.apply(value, sky, args);
+    });
+  }
+}
+
+function isChromeComputerUseInput(input) {
+  if (typeof input !== "object" || input === null) return false;
+  const descriptor = Object.getOwnPropertyDescriptor(input, "app");
+  if (!descriptor || !("value" in descriptor) || typeof descriptor.value !== "string") {
+    return false;
+  }
+  const app = descriptor.value.trim();
+  return ["chrome", "google chrome", "com.google.chrome"].includes(app.toLowerCase())
+    || MAC_CHROME_APP_PATH_PATTERN.test(app);
 }

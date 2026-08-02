@@ -67,7 +67,6 @@ impl ComputerToolRequest {
     pub fn summary(&self) -> String {
         if self.tool != "use" {
             return match self.tool.as_str() {
-                "list_targets" => "Inspect available app windows".into(),
                 "status" => "Check computer-use access".into(),
                 _ => self.tool.clone(),
             };

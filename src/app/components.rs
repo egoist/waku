@@ -641,7 +641,40 @@ pub(super) fn activity_summary(activities: &[ActivityItem]) -> String {
     )
 }
 
-pub(super) fn activity_disclosure_text(activity: &ActivityItem) -> Option<String> {
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub(super) enum ActivityDisclosureSectionKind {
+    Arguments,
+    Output,
+    Detail,
+}
+
+impl ActivityDisclosureSectionKind {
+    pub(super) fn id(self) -> &'static str {
+        match self {
+            Self::Arguments => "arguments",
+            Self::Output => "output",
+            Self::Detail => "detail",
+        }
+    }
+
+    pub(super) fn label(self) -> Option<&'static str> {
+        match self {
+            Self::Arguments => Some("Arguments"),
+            Self::Output => Some("Output"),
+            Self::Detail => None,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) struct ActivityDisclosureSection {
+    pub(super) kind: ActivityDisclosureSectionKind,
+    pub(super) content: String,
+}
+
+pub(super) fn activity_disclosure_sections(
+    activity: &ActivityItem,
+) -> Vec<ActivityDisclosureSection> {
     let mut sections = Vec::new();
     if let Some(arguments) = activity
         .arguments
@@ -649,7 +682,10 @@ pub(super) fn activity_disclosure_text(activity: &ActivityItem) -> Option<String
         .map(str::trim)
         .filter(|value| !value.is_empty())
     {
-        sections.push(format!("Arguments\n{arguments}"));
+        sections.push(ActivityDisclosureSection {
+            kind: ActivityDisclosureSectionKind::Arguments,
+            content: arguments.to_owned(),
+        });
     }
     if let Some(output) = activity
         .output
@@ -657,20 +693,46 @@ pub(super) fn activity_disclosure_text(activity: &ActivityItem) -> Option<String
         .map(str::trim)
         .filter(|value| !value.is_empty())
     {
-        sections.push(format!("Output\n{output}"));
+        sections.push(ActivityDisclosureSection {
+            kind: ActivityDisclosureSectionKind::Output,
+            content: output.to_owned(),
+        });
+    } else if !activity.image_urls.is_empty() {
+        sections.push(ActivityDisclosureSection {
+            kind: ActivityDisclosureSectionKind::Output,
+            content: String::new(),
+        });
     }
-    if !activity.image_urls.is_empty() && activity.output.is_none() {
-        sections.push("Output".to_owned());
+    if sections.is_empty()
+        && let Some(detail) = activity
+            .detail
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+    {
+        sections.push(ActivityDisclosureSection {
+            kind: ActivityDisclosureSectionKind::Detail,
+            content: detail.to_owned(),
+        });
     }
-    if !sections.is_empty() {
-        return Some(sections.join("\n\n"));
-    }
-    activity
-        .detail
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(str::to_owned)
+    sections
+}
+
+pub(super) fn activity_disclosure_text(activity: &ActivityItem) -> Option<String> {
+    let sections = activity_disclosure_sections(activity);
+    (!sections.is_empty()).then(|| {
+        sections
+            .into_iter()
+            .map(
+                |section| match (section.kind.label(), section.content.is_empty()) {
+                    (Some(label), false) => format!("{label}\n{}", section.content),
+                    (Some(label), true) => label.to_owned(),
+                    (None, _) => section.content,
+                },
+            )
+            .collect::<Vec<_>>()
+            .join("\n\n")
+    })
 }
 
 pub(super) fn activity_preview(activity: &ActivityItem) -> String {
@@ -776,6 +838,19 @@ mod message_time_tests {
         .with_output(Some("Computer Use helper closed its session".into()))
         .with_failed(true);
 
+        assert_eq!(
+            activity_disclosure_sections(&activity),
+            vec![
+                ActivityDisclosureSection {
+                    kind: ActivityDisclosureSectionKind::Arguments,
+                    content: "{\n  \"actions\": []\n}".into(),
+                },
+                ActivityDisclosureSection {
+                    kind: ActivityDisclosureSectionKind::Output,
+                    content: "Computer Use helper closed its session".into(),
+                },
+            ]
+        );
         assert_eq!(
             activity_disclosure_text(&activity).as_deref(),
             Some(
