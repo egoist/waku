@@ -858,6 +858,7 @@ impl Waku {
             runtime.stream_remeasure_pending = false;
             runtime.stream_phase = None;
             runtime.pending_permission = None;
+            runtime.pending_computer_approval = None;
         }
         self.reasoning_expanded.clear();
         self.activities_expanded.clear();
@@ -946,6 +947,9 @@ impl Waku {
                 stream_phase: None,
                 stream_remeasure_pending: false,
                 pending_permission: None,
+                pending_computer_approval: None,
+                computer_use_previews: Vec::new(),
+                computer_session_grants: HashSet::new(),
             },
         );
         Ok(handle)
@@ -1005,6 +1009,7 @@ impl Waku {
             runtime.stream_remeasure_pending = false;
             runtime.stream_phase = None;
             runtime.pending_permission = None;
+            runtime.pending_computer_approval = None;
         }
         self.reasoning_expanded.clear();
         self.activities_expanded.clear();
@@ -1056,6 +1061,19 @@ impl Waku {
                 *existing = probe;
             } else {
                 self.probes.push(probe);
+            }
+            changed = true;
+        }
+        changed
+    }
+
+    pub(super) fn drain_computer_permission_events(&mut self) -> bool {
+        let mut changed = false;
+        while let Ok(result) = self.computer_permission_events.try_recv() {
+            self.computer_permission_request_pending = false;
+            match result {
+                Ok(permissions) => self.computer_permissions = permissions,
+                Err(error) => self.toast = Some(error),
             }
             changed = true;
         }

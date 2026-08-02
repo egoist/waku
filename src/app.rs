@@ -12,19 +12,23 @@ use gpui::{
     Anchor, Animation, AnimationExt, AnyElement, App, ClipboardItem, Context, Div, Entity,
     FocusHandle, Focusable, FontWeight, Hsla, IntoElement, KeyDownEvent, ListAlignment, ListOffset,
     ListState, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, NavigationDirection,
-    PathPromptOptions, Pixels, Point, Render, ScrollHandle, SharedString, Size, Stateful,
-    StyleRefinement, WeakEntity, Window, canvas, div, ease_out_quint, fill, linear_color_stop,
-    linear_gradient, list, point, prelude::*, pulsating_between, px, rems, rgb, size,
+    ObjectFit, PathPromptOptions, Pixels, Point, Render, ScrollHandle, SharedString, Size,
+    Stateful, StyleRefinement, WeakEntity, Window, canvas, div, ease_out_quint, fill, img,
+    linear_color_stop, linear_gradient, list, point, prelude::*, pulsating_between, px, rems, rgb,
+    size,
 };
 use uuid::Uuid;
 
 use crate::checkpoint;
+use crate::computer_use::{
+    ComputerPermissions, ComputerUsePhase, ComputerUseState, PendingComputerApproval,
+};
 use crate::driver::{self, DriverHandle, DriverStartOptions};
 use crate::input::{ComposerEvent, ComposerInput, preserve_composer_focus_for_context_menu};
 use crate::model::{
-    ActivityItem, AgentSession, Checkpoint, CheckpointStatus, DriverEvent, FavoriteModel,
-    InteractionMode, Message, MessageRole, PendingPermission, Project, ProviderKind, ProviderModel,
-    ProviderProbe, ProviderResumeCursor, ReasoningBlock, RuntimeMode, SessionStatus,
+    ActivityItem, ActivityKind, AgentSession, Checkpoint, CheckpointStatus, DriverEvent,
+    FavoriteModel, InteractionMode, Message, MessageRole, PendingPermission, Project, ProviderKind,
+    ProviderModel, ProviderProbe, ProviderResumeCursor, ReasoningBlock, RuntimeMode, SessionStatus,
     TranscriptBlock, TranscriptBlockContent, TurnStatus, compact_path, unix_time, unix_time_millis,
 };
 use gpui_component::highlighter::Language;
@@ -105,6 +109,7 @@ enum ModelPickerTab {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum SettingsPage {
     General,
+    ComputerUse,
     Appearance,
 }
 
@@ -553,6 +558,10 @@ struct SessionRuntime {
     stream_phase: Option<StreamPhase>,
     stream_remeasure_pending: bool,
     pending_permission: Option<PendingPermission>,
+    pending_computer_approval: Option<PendingComputerApproval>,
+    /// Back-to-front stack of window previews captured during the active turn.
+    computer_use_previews: Vec<ComputerUseState>,
+    computer_session_grants: HashSet<String>,
 }
 
 #[derive(Debug, Default)]
@@ -598,6 +607,10 @@ pub struct Waku {
     provider_probe_events: Receiver<ProviderProbe>,
     provider_model_discoveries: HashSet<ProviderKind>,
     provider_model_discoveries_pending: HashSet<ProviderKind>,
+    computer_permissions: ComputerPermissions,
+    computer_permission_tx: Sender<Result<ComputerPermissions, String>>,
+    computer_permission_events: Receiver<Result<ComputerPermissions, String>>,
+    computer_permission_request_pending: bool,
     model_picker_tab: ModelPickerTab,
     runtimes: HashMap<Uuid, SessionRuntime>,
     stream_state_dirty: bool,
@@ -774,6 +787,18 @@ impl Waku {
             .map(ProviderProbe::pending)
             .collect::<Vec<_>>();
         let (provider_probe_tx, provider_probe_events) = unbounded();
+        let (computer_permission_tx, computer_permission_events) = unbounded();
+        {
+            let computer_permission_tx = computer_permission_tx.clone();
+            std::thread::Builder::new()
+                .name("waku-computer-permission-probe".into())
+                .spawn(move || {
+                    let result = crate::computer_use::probe_permissions(false)
+                        .map_err(|error| error.to_string());
+                    let _ = computer_permission_tx.send(result);
+                })
+                .ok();
+        }
         let model_picker_tab = ModelPickerTab::Provider(
             state
                 .selected_session
@@ -836,6 +861,9 @@ impl Waku {
             cx.observe_window_activation(window, |this: &mut Self, window, cx| {
                 if window.is_window_active() {
                     this.reload_clean_right_panel_file_editors(window, cx);
+                    if this.settings_page == Some(SettingsPage::ComputerUse) {
+                        this.request_computer_permissions(false, cx);
+                    }
                 }
             })
             .detach();
@@ -870,7 +898,10 @@ impl Waku {
                     cx.background_executor().timer(STREAM_FRAME_INTERVAL).await;
                     if this
                         .update(cx, |this, cx| {
-                            if this.drain_driver_events() || this.drain_provider_probe_events() {
+                            if this.drain_driver_events()
+                                || this.drain_provider_probe_events()
+                                || this.drain_computer_permission_events()
+                            {
                                 cx.notify();
                             }
                         })
@@ -893,6 +924,10 @@ impl Waku {
                 provider_probe_events,
                 provider_model_discoveries: HashSet::new(),
                 provider_model_discoveries_pending: HashSet::new(),
+                computer_permissions: ComputerPermissions::default(),
+                computer_permission_tx,
+                computer_permission_events,
+                computer_permission_request_pending: false,
                 model_picker_tab,
                 runtimes: HashMap::new(),
                 stream_state_dirty: false,

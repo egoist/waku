@@ -50,6 +50,12 @@ impl Waku {
                 "icons/appearance.svg",
                 "appearance theme system light dark",
             ),
+            (
+                SettingsPage::ComputerUse,
+                "Computer Use",
+                "icons/globe.svg",
+                "computer use screen recording accessibility apps control codex",
+            ),
         ]
         .into_iter()
         .filter(|(_, _, _, keywords)| query.is_empty() || keywords.contains(query.as_str()))
@@ -180,11 +186,13 @@ impl Waku {
                                     .text_color(theme.text)
                                     .child(match page {
                                         SettingsPage::General => "General",
+                                        SettingsPage::ComputerUse => "Computer Use",
                                         SettingsPage::Appearance => "Appearance",
                                     }),
                             )
                             .child(match page {
                                 SettingsPage::General => self.render_general_settings(cx),
+                                SettingsPage::ComputerUse => self.render_computer_use_settings(cx),
                                 SettingsPage::Appearance => self.render_appearance_settings(cx),
                             }),
                     ),
@@ -282,6 +290,313 @@ impl Waku {
             .into_any_element()
     }
 
+    fn render_computer_use_settings(&self, cx: &mut Context<Self>) -> AnyElement {
+        let theme = Theme::current(cx);
+        let enabled = self.state.computer_use_enabled;
+        let permissions = self.computer_permissions.clone();
+        let access_ready = permissions.ready();
+        let pending = self.computer_permission_request_pending;
+        let helper_name = crate::computer_use::helper_display_name();
+        let mut allowed_apps = div().flex().flex_col().gap(px(1.0));
+        if self.state.computer_use_allowed_apps.is_empty() {
+            allowed_apps = allowed_apps.child(
+                div()
+                    .py(px(12.0))
+                    .text_size(px(11.5))
+                    .text_color(theme.text_tertiary)
+                    .child("No apps are always allowed. Task-scoped grants stay in memory only."),
+            );
+        } else {
+            for grant in &self.state.computer_use_allowed_apps {
+                let key = grant.key();
+                allowed_apps = allowed_apps.child(
+                    div()
+                        .py(px(9.0))
+                        .flex()
+                        .items_center()
+                        .gap(px(10.0))
+                        .border_b_1()
+                        .border_color(theme.border)
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .child(
+                                    div()
+                                        .text_size(px(12.0))
+                                        .font_weight(FontWeight::MEDIUM)
+                                        .text_color(theme.text)
+                                        .child(SharedString::from(grant.app_name.clone())),
+                                )
+                                .child(
+                                    div()
+                                        .mt(px(2.0))
+                                        .text_size(px(9.5))
+                                        .text_color(theme.text_tertiary)
+                                        .truncate()
+                                        .child(SharedString::from(grant.bundle_id.clone())),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .id(SharedString::from(format!("revoke-computer-app-{key}")))
+                                .h(px(25.0))
+                                .px(px(9.0))
+                                .rounded(px(6.0))
+                                .border_1()
+                                .border_color(theme.border_strong)
+                                .flex()
+                                .items_center()
+                                .cursor_default()
+                                .text_size(px(10.5))
+                                .text_color(theme.text_secondary)
+                                .hover(|element| element.bg(theme.overlay).text_color(theme.danger))
+                                .child("Revoke")
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.revoke_computer_app(&key, cx);
+                                })),
+                        ),
+                );
+            }
+        }
+
+        div()
+            .mt(px(15.0))
+            .w_full()
+            .max_w(px(760.0))
+            .flex()
+            .flex_col()
+            .gap(px(12.0))
+            .child(
+                div()
+                    .px(px(20.0))
+                    .py(px(14.0))
+                    .rounded(px(13.0))
+                    .bg(theme.raised)
+                    .flex()
+                    .items_center()
+                    .gap(px(20.0))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .child(
+                                div()
+                                    .text_size(px(13.5))
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .text_color(theme.text)
+                                    .child("Let Codex use apps"),
+                            )
+                            .child(
+                                div()
+                                    .mt(px(5.0))
+                                    .text_size(px(12.0))
+                                    .line_height(px(18.0))
+                                    .text_color(theme.text_secondary)
+                                    .child("Codex can inspect and control only the app window you approve. Window screenshots are shared with the active model; full workspace access never bypasses these grants."),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .id("computer-use-enabled")
+                            .w(px(36.0))
+                            .h(px(20.0))
+                            .p(px(2.0))
+                            .rounded_full()
+                            .cursor_default()
+                            .bg(if enabled { theme.inverse } else { theme.inset })
+                            .border_1()
+                            .border_color(if enabled { theme.inverse } else { theme.border_strong })
+                            .flex()
+                            .items_center()
+                            .when(enabled, |element| element.justify_end())
+                            .child(
+                                div()
+                                    .w(px(14.0))
+                                    .h(px(14.0))
+                                    .rounded_full()
+                                    .bg(if enabled { theme.on_inverse } else { theme.text_tertiary }),
+                            )
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.set_computer_use_enabled(!enabled, cx);
+                            })),
+                    ),
+            )
+            .child(
+                div()
+                    .px(px(20.0))
+                    .py(px(14.0))
+                    .rounded(px(13.0))
+                    .bg(theme.raised)
+                    .child(
+                        div()
+                            .text_size(px(13.5))
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(theme.text)
+                            .child("macOS access"),
+                    )
+                    .child(
+                        div()
+                            .mt(px(4.0))
+                            .text_size(px(11.5))
+                            .text_color(theme.text_secondary)
+                            .child(SharedString::from(format!(
+                                "Grant access to {helper_name}, Waku's isolated control helper."
+                            ))),
+                    )
+                    .child(permission_status_row(
+                        "Screen Recording",
+                        "Captures only the approved app window.",
+                        permissions.screen_recording,
+                        "screen-recording-settings",
+                        "Privacy_ScreenCapture",
+                        theme,
+                        cx,
+                    ))
+                    .child(permission_status_row(
+                        "Accessibility",
+                        "Posts pointer and keyboard events after approval.",
+                        permissions.accessibility,
+                        "accessibility-settings",
+                        "Privacy_Accessibility",
+                        theme,
+                        cx,
+                    ))
+                    .child(
+                        div()
+                            .mt(px(11.0))
+                            .flex()
+                            .items_center()
+                            .gap(px(8.0))
+                            .child(
+                                div()
+                                    .id("request-computer-permissions")
+                                    .h(px(28.0))
+                                    .px(px(11.0))
+                                    .rounded(px(7.0))
+                                    .bg(theme.inverse)
+                                    .text_color(theme.on_inverse)
+                                    .flex()
+                                    .items_center()
+                                    .cursor_default()
+                                    .text_size(px(10.5))
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .opacity(if pending { 0.6 } else { 1.0 })
+                                    .child(if pending {
+                                        "Checking…"
+                                    } else if access_ready {
+                                        "Access granted"
+                                    } else {
+                                        "Request access"
+                                    })
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.request_computer_permissions(!access_ready, cx);
+                                    })),
+                            )
+                            .child(
+                                div()
+                                    .id("recheck-computer-permissions")
+                                    .h(px(28.0))
+                                    .px(px(11.0))
+                                    .rounded(px(7.0))
+                                    .border_1()
+                                    .border_color(theme.border_strong)
+                                    .text_color(theme.text_secondary)
+                                    .flex()
+                                    .items_center()
+                                    .cursor_default()
+                                    .text_size(px(10.5))
+                                    .child("Recheck")
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.request_computer_permissions(false, cx);
+                                    })),
+                            ),
+                    )
+                    .when(!access_ready, |element| {
+                        element.child(
+                            div()
+                                .mt(px(8.0))
+                                .text_size(px(10.0))
+                                .text_color(theme.text_tertiary)
+                                .child("If access belongs to an older debug helper, remove that helper from System Settings and request access again."),
+                        )
+                    }),
+            )
+            .child(
+                div()
+                    .px(px(20.0))
+                    .py(px(14.0))
+                    .rounded(px(13.0))
+                    .bg(theme.raised)
+                    .child(
+                        div()
+                            .text_size(px(13.5))
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(theme.text)
+                            .child("Always allowed apps"),
+                    )
+                    .child(
+                        div()
+                            .mt(px(4.0))
+                            .text_size(px(11.5))
+                            .text_color(theme.text_secondary)
+                            .child("Waku pins these grants to the app's bundle ID and signing team."),
+                    )
+                    .child(allowed_apps),
+            )
+            .into_any_element()
+    }
+
+    fn set_computer_use_enabled(&mut self, enabled: bool, cx: &mut Context<Self>) {
+        self.state.computer_use_enabled = enabled;
+        if !enabled {
+            for runtime in self.runtimes.values_mut() {
+                if let Some(pending) = runtime.pending_computer_approval.take() {
+                    runtime.driver.reject_computer_tool(
+                        pending.request,
+                        "Computer Use was disabled in Waku Settings.".into(),
+                    );
+                }
+                runtime.computer_session_grants.clear();
+            }
+        }
+        self.save();
+        cx.notify();
+    }
+
+    pub(super) fn request_computer_permissions(&mut self, prompt: bool, cx: &mut Context<Self>) {
+        if self.computer_permission_request_pending {
+            return;
+        }
+        self.computer_permission_request_pending = true;
+        let tx = self.computer_permission_tx.clone();
+        std::thread::Builder::new()
+            .name("waku-computer-permission-request".into())
+            .spawn(move || {
+                let result = crate::computer_use::probe_permissions(prompt)
+                    .map_err(|error| error.to_string());
+                let _ = tx.send(result);
+            })
+            .ok();
+        cx.notify();
+    }
+
+    fn revoke_computer_app(&mut self, key: &str, cx: &mut Context<Self>) {
+        self.state
+            .computer_use_allowed_apps
+            .retain(|grant| grant.key() != key);
+        self.save();
+        cx.notify();
+    }
+
+    fn open_privacy_settings(pane: &'static str) {
+        let _ = Command::new("/usr/bin/open")
+            .arg(format!(
+                "x-apple.systempreferences:com.apple.preference.security?{pane}"
+            ))
+            .spawn();
+    }
+
     fn render_settings_drag_region(
         &self,
         id: &'static str,
@@ -333,4 +648,70 @@ impl Waku {
         self.save();
         cx.notify();
     }
+}
+
+fn permission_status_row(
+    name: &'static str,
+    description: &'static str,
+    granted: bool,
+    id: &'static str,
+    pane: &'static str,
+    theme: Theme,
+    _cx: &mut Context<Waku>,
+) -> Div {
+    div()
+        .mt(px(10.0))
+        .pt(px(10.0))
+        .border_t_1()
+        .border_color(theme.border)
+        .flex()
+        .items_center()
+        .gap(px(10.0))
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .child(
+                    div()
+                        .text_size(px(11.5))
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(theme.text)
+                        .child(name),
+                )
+                .child(
+                    div()
+                        .mt(px(2.0))
+                        .text_size(px(10.0))
+                        .text_color(theme.text_tertiary)
+                        .child(description),
+                ),
+        )
+        .child(
+            div()
+                .text_size(px(10.0))
+                .font_weight(FontWeight::MEDIUM)
+                .text_color(if granted {
+                    theme.text_secondary
+                } else {
+                    theme.warning
+                })
+                .child(if granted { "Granted" } else { "Needs access" }),
+        )
+        .child(
+            div()
+                .id(id)
+                .h(px(25.0))
+                .px(px(9.0))
+                .rounded(px(6.0))
+                .border_1()
+                .border_color(theme.border_strong)
+                .flex()
+                .items_center()
+                .cursor_default()
+                .text_size(px(10.0))
+                .text_color(theme.text_secondary)
+                .hover(|element| element.bg(theme.overlay).text_color(theme.text))
+                .child("Open Settings")
+                .on_click(move |_, _, _| Waku::open_privacy_settings(pane)),
+        )
 }

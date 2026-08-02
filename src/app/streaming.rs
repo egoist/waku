@@ -269,6 +269,117 @@ impl Waku {
                     }
                 }
             }
+            DriverEvent::ComputerToolRequested(request) => {
+                if !self.state.computer_use_enabled {
+                    runtime.driver.reject_computer_tool(
+                        request,
+                        "Computer Use is disabled in Waku Settings.".into(),
+                    );
+                } else if let Err(error) = crate::computer_use::validate_request(&request) {
+                    runtime
+                        .driver
+                        .reject_computer_tool(request, error.to_string());
+                } else if request.tool != "use" {
+                    runtime.driver.run_computer_tool(request);
+                } else if runtime.pending_computer_approval.is_some() {
+                    runtime.driver.reject_computer_tool(
+                        request,
+                        "Another app-control request is awaiting approval. Retry after it resolves."
+                            .into(),
+                    );
+                } else if let Some(target) = request.target() {
+                    let key = target.grant_key();
+                    let globally_allowed = target.persistable()
+                        && self
+                            .state
+                            .computer_use_allowed_apps
+                            .iter()
+                            .any(|grant| grant.key() == key);
+                    let already_allowed =
+                        globally_allowed || runtime.computer_session_grants.contains(&key);
+                    let sensitive = request.requires_sensitive_confirmation();
+                    if already_allowed && !sensitive {
+                        runtime.driver.run_computer_tool(request);
+                    } else {
+                        Self::upsert_computer_use_preview(
+                            runtime,
+                            ComputerUseState {
+                                call_id: request.call_id.clone(),
+                                target: Some(target.clone()),
+                                summary: request.summary(),
+                                phase: ComputerUsePhase::AwaitingApproval,
+                                visible: true,
+                                screenshot: None,
+                                error: None,
+                            },
+                        );
+                        runtime.pending_computer_approval = Some(PendingComputerApproval {
+                            request,
+                            target,
+                            sensitive,
+                        });
+                        if let Some(session) = self
+                            .state
+                            .sessions
+                            .iter_mut()
+                            .find(|session| session.id == session_id)
+                        {
+                            session.status = SessionStatus::Waiting;
+                        }
+                    }
+                } else {
+                    runtime.driver.reject_computer_tool(
+                        request,
+                        "Computer use requires a target returned by list_targets.".into(),
+                    );
+                }
+            }
+            DriverEvent::ComputerUseUpdated(state) => {
+                let complete = matches!(
+                    state.phase,
+                    ComputerUsePhase::Completed | ComputerUsePhase::Failed
+                );
+                let app_name = state
+                    .target
+                    .as_ref()
+                    .map(|target| target.app_name.as_str())
+                    .unwrap_or("the computer");
+                let title = match (state.target.is_some(), state.phase) {
+                    (false, _) => state.summary.clone(),
+                    (true, ComputerUsePhase::AwaitingApproval) => {
+                        format!("Waiting to use {app_name}")
+                    }
+                    (true, ComputerUsePhase::Running) => format!("Using {app_name}"),
+                    (true, ComputerUsePhase::Completed) => format!("Used {app_name}"),
+                    (true, ComputerUsePhase::Failed) => format!("Could not use {app_name}"),
+                };
+                let detail = state.error.clone().or_else(|| Some(state.summary.clone()));
+                self.update_activity(
+                    session_id,
+                    runtime,
+                    ActivityItem::new(
+                        Some(state.call_id.clone()),
+                        ActivityKind::Tool,
+                        title,
+                        detail,
+                        complete,
+                    ),
+                );
+                Self::upsert_computer_use_preview(runtime, state);
+                if let Some(session) = self
+                    .state
+                    .sessions
+                    .iter_mut()
+                    .find(|session| session.id == session_id)
+                    && session.status == SessionStatus::Waiting
+                    && runtime.pending_computer_approval.is_none()
+                {
+                    session.status = SessionStatus::Working;
+                }
+            }
+            DriverEvent::ComputerPermissions(permissions) => {
+                self.computer_permissions = permissions;
+            }
             DriverEvent::TurnFinished { success, summary } => {
                 if self
                     .state
@@ -314,6 +425,9 @@ impl Waku {
                     });
                 }
                 runtime.pending_permission = None;
+                runtime.pending_computer_approval = None;
+                runtime.driver.cancel_computer_use();
+                runtime.computer_use_previews.clear();
                 self.capture_latest_turn_checkpoint_for(session_id);
             }
             DriverEvent::Error(error) => {
@@ -355,6 +469,9 @@ impl Waku {
                 self.complete_turn_blocks(session_id);
                 runtime.stream_phase = None;
                 runtime.pending_permission = None;
+                runtime.pending_computer_approval = None;
+                runtime.driver.cancel_computer_use();
+                runtime.computer_use_previews.clear();
                 let mut finished_turn = false;
                 if let Some(session) = self
                     .state
@@ -377,6 +494,27 @@ impl Waku {
             }
         }
         true
+    }
+
+    fn upsert_computer_use_preview(runtime: &mut SessionRuntime, mut state: ComputerUseState) {
+        if !state.visible {
+            return;
+        }
+        let Some(window_id) = state.target.as_ref().map(|target| target.window_id) else {
+            return;
+        };
+        if let Some(index) = runtime.computer_use_previews.iter().position(|preview| {
+            preview
+                .target
+                .as_ref()
+                .is_some_and(|target| target.window_id == window_id)
+        }) {
+            let previous = runtime.computer_use_previews.remove(index);
+            if state.screenshot.is_none() {
+                state.screenshot = previous.screenshot;
+            }
+        }
+        runtime.computer_use_previews.push(state);
     }
 }
 

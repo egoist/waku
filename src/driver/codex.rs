@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
 use std::process::Stdio;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::thread;
 use std::time::Duration;
 
@@ -10,6 +11,7 @@ use crossbeam_channel::{Sender, bounded, unbounded};
 use parking_lot::Mutex;
 use serde_json::{Value, json};
 
+use crate::computer_use::{self, ComputerToolRequest, ComputerUsePhase, ComputerUseState};
 use crate::driver::{DriverControl, DriverStartOptions};
 use crate::model::{
     ActivityKind, DriverEvent, InteractionMode, PermissionOption, ProviderResumeCursor, RuntimeMode,
@@ -21,6 +23,16 @@ enum CommandMessage {
     Respond {
         request_id: String,
         option_id: String,
+    },
+    RunComputerTool(ComputerToolRequest),
+    DynamicToolResponse {
+        rpc_id: String,
+        success: bool,
+        content_items: Vec<Value>,
+    },
+    RejectComputerTool {
+        request: ComputerToolRequest,
+        reason: String,
     },
     Rollback {
         turns: usize,
@@ -35,6 +47,7 @@ enum CommandMessage {
 
 pub struct CodexDriver {
     commands: Sender<CommandMessage>,
+    active_helper_pid: Arc<AtomicU32>,
 }
 
 impl CodexDriver {
@@ -81,6 +94,8 @@ impl CodexDriver {
             .take()
             .ok_or_else(|| anyhow!("Codex stderr unavailable"))?;
         let (commands, command_rx) = unbounded();
+        let active_helper_pid = Arc::new(AtomicU32::new(0));
+        let computer_tool_in_flight = Arc::new(AtomicBool::new(false));
         let thread_id = Arc::new(Mutex::new(None::<String>));
         let turn_id = Arc::new(Mutex::new(None::<String>));
         let turn_ids = Arc::new(Mutex::new(Vec::<String>::new()));
@@ -98,6 +113,9 @@ impl CodexDriver {
         let writer_pending_rollbacks = pending_rollbacks.clone();
         let writer_pending_forks = pending_forks.clone();
         let writer_events = events.clone();
+        let writer_commands = commands.clone();
+        let writer_active_helper_pid = active_helper_pid.clone();
+        let writer_computer_tool_in_flight = computer_tool_in_flight.clone();
         let cwd_string = cwd.display().to_string();
         thread::Builder::new()
             .name("waku-codex-writer".into())
@@ -160,7 +178,8 @@ impl CodexDriver {
                         "approvalPolicy": approval_policy,
                         "sandbox": sandbox,
                         "approvalsReviewer": approvals_reviewer,
-                        "serviceName": "waku"
+                        "serviceName": "waku",
+                        "dynamicTools": computer_use::dynamic_tools()
                     });
                     if let Some(model) = model.as_deref() {
                         params["model"] = json!(model);
@@ -231,6 +250,119 @@ impl CodexDriver {
                             json!({
                                 "id": id,
                                 "result": {"decision": option_id}
+                            })
+                        }
+                        CommandMessage::RunComputerTool(request) => {
+                            if writer_computer_tool_in_flight.swap(true, Ordering::SeqCst) {
+                                let reason = "Another computer-use call is still running. Retry after it completes.".to_owned();
+                                let _ = writer_events.send(DriverEvent::ComputerUseUpdated(
+                                    ComputerUseState {
+                                        call_id: request.call_id.clone(),
+                                        target: request.target(),
+                                        summary: request.summary(),
+                                        phase: ComputerUsePhase::Failed,
+                                        visible: request.tool == "use",
+                                        screenshot: None,
+                                        error: Some(reason.clone()),
+                                    },
+                                ));
+                                let _ = writer_commands.send(
+                                    CommandMessage::DynamicToolResponse {
+                                        rpc_id: request.rpc_id,
+                                        success: false,
+                                        content_items: vec![json!({
+                                            "type": "inputText",
+                                            "text": reason
+                                        })],
+                                    },
+                                );
+                                continue;
+                            }
+                            let worker_events = writer_events.clone();
+                            let worker_commands = writer_commands.clone();
+                            let active_helper_pid = writer_active_helper_pid.clone();
+                            let worker_computer_tool_in_flight =
+                                writer_computer_tool_in_flight.clone();
+                            let failed_request = request.clone();
+                            let spawn_result = thread::Builder::new()
+                                .name("waku-computer-use".into())
+                                .spawn(move || {
+                                    let _ = worker_events.send(DriverEvent::ComputerUseUpdated(
+                                        ComputerUseState {
+                                            call_id: request.call_id.clone(),
+                                            target: request.target(),
+                                            summary: request.summary(),
+                                            phase: ComputerUsePhase::Running,
+                                            visible: request.tool == "use",
+                                            screenshot: None,
+                                            error: None,
+                                        },
+                                    ));
+                                    let output = computer_use::execute_tool(
+                                        request.clone(),
+                                        active_helper_pid,
+                                    );
+                                    worker_computer_tool_in_flight.store(false, Ordering::SeqCst);
+                                    if let Some(permissions) = output.permissions.clone() {
+                                        let _ = worker_events
+                                            .send(DriverEvent::ComputerPermissions(permissions));
+                                    }
+                                    let _ = worker_events
+                                        .send(DriverEvent::ComputerUseUpdated(output.state));
+                                    let _ =
+                                        worker_commands.send(CommandMessage::DynamicToolResponse {
+                                            rpc_id: request.rpc_id,
+                                            success: output.success,
+                                            content_items: output.content_items,
+                                        });
+                                });
+                            if let Err(error) = spawn_result {
+                                writer_computer_tool_in_flight.store(false, Ordering::SeqCst);
+                                let reason = format!("Could not start computer use: {error}");
+                                let _ = writer_commands.send(
+                                    CommandMessage::DynamicToolResponse {
+                                        rpc_id: failed_request.rpc_id,
+                                        success: false,
+                                        content_items: vec![json!({
+                                            "type": "inputText",
+                                            "text": reason
+                                        })],
+                                    },
+                                );
+                            }
+                            continue;
+                        }
+                        CommandMessage::DynamicToolResponse {
+                            rpc_id,
+                            success,
+                            content_items,
+                        } => json!({
+                            "id": parse_rpc_id(&rpc_id),
+                            "result": {
+                                "success": success,
+                                "contentItems": content_items
+                            }
+                        }),
+                        CommandMessage::RejectComputerTool { request, reason } => {
+                            let target = request.target();
+                            let summary = request.summary();
+                            let _ = writer_events.send(DriverEvent::ComputerUseUpdated(
+                                ComputerUseState {
+                                    call_id: request.call_id.clone(),
+                                    target,
+                                    summary,
+                                    phase: ComputerUsePhase::Failed,
+                                    visible: request.tool == "use",
+                                    screenshot: None,
+                                    error: Some(reason.clone()),
+                                },
+                            ));
+                            json!({
+                                "id": parse_rpc_id(&request.rpc_id),
+                                "result": {
+                                    "success": false,
+                                    "contentItems": [{"type": "inputText", "text": reason}]
+                                }
                             })
                         }
                         CommandMessage::Rollback { turns, response } => {
@@ -364,7 +496,10 @@ impl CodexDriver {
                 }
             })?;
 
-        Ok(Self { commands })
+        Ok(Self {
+            commands,
+            active_helper_pid,
+        })
     }
 }
 
@@ -398,7 +533,12 @@ impl DriverControl for CodexDriver {
     }
 
     fn cancel(&self) {
+        computer_use::cancel_helper(&self.active_helper_pid);
         let _ = self.commands.send(CommandMessage::Cancel);
+    }
+
+    fn cancel_computer_use(&self) {
+        computer_use::cancel_helper(&self.active_helper_pid);
     }
 
     fn respond(&self, request_id: String, option_id: String) {
@@ -406,6 +546,16 @@ impl DriverControl for CodexDriver {
             request_id,
             option_id,
         });
+    }
+
+    fn run_computer_tool(&self, request: ComputerToolRequest) {
+        let _ = self.commands.send(CommandMessage::RunComputerTool(request));
+    }
+
+    fn reject_computer_tool(&self, request: ComputerToolRequest, reason: String) {
+        let _ = self
+            .commands
+            .send(CommandMessage::RejectComputerTool { request, reason });
     }
 
     fn rollback(&self, turns: usize) -> anyhow::Result<Option<ProviderResumeCursor>> {
@@ -444,6 +594,7 @@ impl DriverControl for CodexDriver {
 
 impl Drop for CodexDriver {
     fn drop(&mut self) {
+        computer_use::cancel_helper(&self.active_helper_pid);
         let _ = self.commands.send(CommandMessage::Shutdown);
     }
 }
@@ -592,7 +743,12 @@ fn handle_codex_message(
     events: &Sender<DriverEvent>,
     stream_state: &mut CodexStreamState,
 ) {
-    if let Some(id) = value.get("id").and_then(Value::as_u64)
+    // JSON-RPC IDs are scoped to each peer, so an app-server request may use
+    // the same numeric ID as one of Waku's earlier requests. Only messages
+    // without a method are responses to Waku-originated requests.
+    let is_response = value.get("method").is_none();
+    if is_response
+        && let Some(id) = value.get("id").and_then(Value::as_u64)
         && id != 1
         && let Some((turns, response)) = pending_rollbacks.lock().remove(&id)
     {
@@ -608,7 +764,8 @@ fn handle_codex_message(
         return;
     }
 
-    if let Some(id) = value.get("id").and_then(Value::as_u64)
+    if is_response
+        && let Some(id) = value.get("id").and_then(Value::as_u64)
         && id != 1
         && let Some(response) = pending_forks.lock().remove(&id)
     {
@@ -629,7 +786,7 @@ fn handle_codex_message(
         return;
     }
 
-    if value.get("id").and_then(Value::as_u64) == Some(1) {
+    if is_response && value.get("id").and_then(Value::as_u64) == Some(1) {
         if let Some(id) = value.pointer("/result/thread/id").and_then(Value::as_str) {
             *thread_id.lock() = Some(id.to_owned());
             *turn_ids.lock() = value
@@ -659,6 +816,24 @@ fn handle_codex_message(
     let params = value.get("params").cloned().unwrap_or(Value::Null);
 
     match method {
+        "item/tool/call" if value.get("id").is_some() => {
+            if params.get("namespace").and_then(Value::as_str) == Some(computer_use::NAMESPACE)
+                && let (Some(call_id), Some(tool)) = (
+                    params.get("callId").and_then(Value::as_str),
+                    params.get("tool").and_then(Value::as_str),
+                )
+            {
+                let _ = events.send(DriverEvent::ComputerToolRequested(ComputerToolRequest {
+                    rpc_id: rpc_id_string(value.get("id").unwrap()),
+                    call_id: call_id.to_owned(),
+                    tool: tool.to_owned(),
+                    arguments: params
+                        .get("arguments")
+                        .cloned()
+                        .unwrap_or_else(|| json!({})),
+                }));
+            }
+        }
         "turn/started" => {
             stream_state.begin_turn();
             if let Some(id) = params.pointer("/turn/id").and_then(Value::as_str) {
@@ -1140,5 +1315,45 @@ mod tests {
             state.rewrite_citation_delta("Claim.\u{e200}cite\u{e202}turn9search0\u{e201} After."),
             "Claim. After."
         );
+    }
+
+    #[test]
+    fn native_dynamic_tool_requests_are_forwarded_even_when_the_rpc_id_is_one() {
+        let thread_id = Mutex::new(Some("thread-1".to_owned()));
+        let turn_id = Mutex::new(Some("turn-1".to_owned()));
+        let turn_ids = Mutex::new(vec!["turn-1".to_owned()]);
+        let pending_rollbacks = Mutex::new(HashMap::new());
+        let pending_forks = Mutex::new(HashMap::new());
+        let (event_tx, event_rx) = unbounded();
+        let mut stream_state = CodexStreamState::default();
+
+        handle_codex_message(
+            json!({
+                "id": 1,
+                "method": "item/tool/call",
+                "params": {
+                    "threadId": "thread-1",
+                    "turnId": "turn-1",
+                    "callId": "computer-1",
+                    "namespace": computer_use::NAMESPACE,
+                    "tool": "list_targets",
+                    "arguments": {}
+                }
+            }),
+            &thread_id,
+            &turn_id,
+            &turn_ids,
+            &pending_rollbacks,
+            &pending_forks,
+            &event_tx,
+            &mut stream_state,
+        );
+
+        let DriverEvent::ComputerToolRequested(request) = event_rx.recv().unwrap() else {
+            panic!("expected a computer tool request");
+        };
+        assert_eq!(request.rpc_id, "1");
+        assert_eq!(request.call_id, "computer-1");
+        assert_eq!(request.tool, "list_targets");
     }
 }

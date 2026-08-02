@@ -4,6 +4,9 @@ impl Waku {
     // ── Permission ─────────────────────────────────────────────────────────
 
     pub(super) fn render_permission(&self, cx: &mut Context<Self>) -> Option<Div> {
+        if let Some(permission) = self.selected_runtime()?.pending_computer_approval.as_ref() {
+            return Some(self.render_computer_permission(permission, cx));
+        }
         let permission = self.selected_runtime()?.pending_permission.as_ref()?;
         let theme = Theme::current(cx);
         let request_id = permission.request_id.clone();
@@ -90,6 +93,380 @@ impl Waku {
                     )
                     .child(buttons),
             ),
+        )
+    }
+
+    fn render_computer_permission(
+        &self,
+        permission: &PendingComputerApproval,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let theme = Theme::current(cx);
+        let target = &permission.target;
+        let mut buttons = div().mt(px(12.0)).flex().items_center().gap(px(8.0));
+        let mut options = vec![("task", "Allow for task", true), ("deny", "Deny", false)];
+        if target.persistable() {
+            options.insert(1, ("always", "Always allow app", false));
+        }
+        for (decision, label, primary) in options {
+            buttons = buttons.child(
+                div()
+                    .id(SharedString::from(format!(
+                        "computer-permission-{}-{decision}",
+                        permission.request.call_id
+                    )))
+                    .h(px(29.0))
+                    .px(px(13.0))
+                    .rounded(px(7.0))
+                    .flex()
+                    .items_center()
+                    .cursor_default()
+                    .text_size(px(11.5))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .when(primary, |element| {
+                        element
+                            .bg(theme.inverse)
+                            .text_color(theme.on_inverse)
+                            .hover(|element| element.opacity(0.9))
+                    })
+                    .when(!primary, |element| {
+                        element
+                            .border_1()
+                            .border_color(theme.border_strong)
+                            .text_color(theme.text_secondary)
+                            .hover(|element| element.bg(theme.overlay).text_color(theme.text))
+                    })
+                    .active(|element| element.opacity(0.8))
+                    .child(label)
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.respond_computer_permission(decision, cx);
+                    })),
+            );
+        }
+
+        div().px(px(20.0)).pb(px(8.0)).child(
+            div()
+                .w_full()
+                .max_w(px(CONTENT_MAX_WIDTH))
+                .mx_auto()
+                .p(px(13.0))
+                .rounded(px(12.0))
+                .border_1()
+                .border_color(theme.warning.opacity(0.5))
+                .bg(theme.raised)
+                .shadow_md()
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(9.0))
+                        .child(icon("icons/globe.svg", 14.0, theme.warning))
+                        .child(
+                            div()
+                                .text_size(px(12.5))
+                                .font_weight(FontWeight::MEDIUM)
+                                .text_color(theme.text)
+                                .child(format!("Allow Codex to control {}?", target.app_name)),
+                        ),
+                )
+                .child(
+                    div()
+                        .mt(px(7.0))
+                        .text_size(px(10.0))
+                        .line_height(px(14.0))
+                        .text_color(theme.text_secondary)
+                        .child("A screenshot of this window will be shared with the active Codex model."),
+                )
+                .child(
+                    div()
+                        .mt(px(8.0))
+                        .p(px(9.0))
+                        .rounded(px(8.0))
+                        .bg(theme.inset)
+                        .child(
+                            div()
+                                .text_size(px(11.5))
+                                .font_weight(FontWeight::MEDIUM)
+                                .text_color(theme.text)
+                                .truncate()
+                                .child(SharedString::from(target.window_title.clone())),
+                        )
+                        .child(
+                            div()
+                                .mt(px(4.0))
+                                .text_size(px(10.5))
+                                .text_color(theme.text_secondary)
+                                .child(SharedString::from(permission.request.summary())),
+                        )
+                        .when(permission.sensitive, |element| {
+                            element.child(
+                                div()
+                                    .mt(px(5.0))
+                                    .text_size(px(10.5))
+                                    .text_color(theme.warning)
+                                    .child("This action can type text or press keys."),
+                            )
+                        }),
+                )
+                .child(
+                    div()
+                        .mt(px(7.0))
+                        .text_size(px(10.0))
+                        .text_color(theme.text_tertiary)
+                        .child(if target.persistable() {
+                            format!("Signed app: {}", target.bundle_id)
+                        } else {
+                            "This app has no stable signing identity, so it cannot be always allowed."
+                                .into()
+                        }),
+                )
+                .child(buttons),
+        )
+    }
+
+    pub(super) fn render_computer_use_overlay(&self, cx: &mut Context<Self>) -> Option<Div> {
+        let previews = self
+            .selected_runtime()?
+            .computer_use_previews
+            .iter()
+            .filter(|state| state.visible && state.phase != ComputerUsePhase::AwaitingApproval)
+            .collect::<Vec<_>>();
+        if previews.is_empty() {
+            return None;
+        }
+        let theme = Theme::current(cx);
+        let stack_x_offset = 14.0;
+        let stack_y_offset = 24.0;
+        let deepest_x_offset = (previews.len().saturating_sub(1) as f32) * stack_x_offset;
+        let deepest_y_offset = (previews.len().saturating_sub(1) as f32) * stack_y_offset;
+        let top_index = previews.len() - 1;
+        let cards = previews
+            .into_iter()
+            .enumerate()
+            .filter_map(|(index, state)| {
+                let target = state.target.as_ref()?;
+                let window_id = target.window_id;
+                let app_name = target.app_name.clone();
+                let app_initial = app_name.chars().next().unwrap_or('W').to_string();
+                let title = target.window_title.clone();
+                let screenshot = state.screenshot.clone();
+                let active = state.phase == ComputerUsePhase::Running;
+                let failed = state.phase == ComputerUsePhase::Failed;
+                let is_top = index == top_index;
+                let depth = (top_index - index) as f32;
+                let x_offset = depth * stack_x_offset;
+                let y_offset = depth * stack_y_offset;
+                let status_color = if failed {
+                    theme.danger
+                } else if active {
+                    theme.warning
+                } else {
+                    theme.accent
+                };
+                let status = if failed {
+                    "Stopped"
+                } else if active {
+                    "Controlling"
+                } else {
+                    "Captured"
+                };
+
+                Some(
+                    div()
+                        .id(SharedString::from(format!(
+                            "computer-use-preview-{window_id}"
+                        )))
+                        .absolute()
+                        .right(px(x_offset))
+                        .bottom(px(y_offset))
+                        .w(px(304.0))
+                        .h(px(220.0))
+                        .p(px(6.0))
+                        .rounded(px(16.0))
+                        .overflow_hidden()
+                        .border_1()
+                        .border_color(if is_top {
+                            theme.border_strong
+                        } else {
+                            theme.border
+                        })
+                        .bg(theme.raised)
+                        .shadow_lg()
+                        .cursor_default()
+                        .when(!is_top, |element| element.opacity(0.96))
+                        .child(
+                            div()
+                                .h(px(38.0))
+                                .px(px(5.0))
+                                .flex()
+                                .items_center()
+                                .gap(px(8.0))
+                                .child(
+                                    div()
+                                        .w(px(27.0))
+                                        .h(px(27.0))
+                                        .rounded(px(7.0))
+                                        .flex()
+                                        .items_center()
+                                        .justify_center()
+                                        .bg(theme.overlay_strong)
+                                        .text_size(px(11.0))
+                                        .font_weight(FontWeight::SEMIBOLD)
+                                        .text_color(theme.text_secondary)
+                                        .child(SharedString::from(app_initial)),
+                                )
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .min_w_0()
+                                        .child(
+                                            div()
+                                                .text_size(px(11.5))
+                                                .font_weight(FontWeight::MEDIUM)
+                                                .text_color(theme.text)
+                                                .truncate()
+                                                .child(SharedString::from(app_name)),
+                                        )
+                                        .child(
+                                            div()
+                                                .mt(px(1.0))
+                                                .text_size(px(9.5))
+                                                .text_color(theme.text_tertiary)
+                                                .truncate()
+                                                .child(SharedString::from(title)),
+                                        ),
+                                )
+                                .when(is_top, |element| {
+                                    element.child(
+                                        div()
+                                            .id(SharedString::from(format!(
+                                                "computer-use-preview-action-{window_id}"
+                                            )))
+                                            .h(px(27.0))
+                                            .px(px(10.0))
+                                            .rounded(px(7.0))
+                                            .border_1()
+                                            .border_color(theme.border_strong)
+                                            .flex()
+                                            .items_center()
+                                            .cursor_default()
+                                            .text_size(px(10.0))
+                                            .font_weight(FontWeight::MEDIUM)
+                                            .text_color(if active {
+                                                theme.danger
+                                            } else {
+                                                theme.text_secondary
+                                            })
+                                            .hover(|element| element.bg(theme.overlay))
+                                            .active(|element| element.opacity(0.8))
+                                            .child(if active { "Take Control" } else { "Close" })
+                                            .on_click(cx.listener(move |this, _, _, cx| {
+                                                cx.stop_propagation();
+                                                if active {
+                                                    this.cancel_turn(cx);
+                                                } else {
+                                                    this.dismiss_computer_use(window_id, cx);
+                                                }
+                                            })),
+                                    )
+                                }),
+                        )
+                        .child(
+                            div()
+                                .relative()
+                                .h(px(170.0))
+                                .w_full()
+                                .rounded(px(11.0))
+                                .overflow_hidden()
+                                .bg(rgb(0x101010))
+                                .when_some(screenshot, |element, screenshot| {
+                                    element.child(
+                                        img(screenshot)
+                                            .w_full()
+                                            .h_full()
+                                            .object_fit(ObjectFit::Contain),
+                                    )
+                                })
+                                .when(state.screenshot.is_none(), |element| {
+                                    element.child(
+                                        div()
+                                            .absolute()
+                                            .inset_0()
+                                            .flex()
+                                            .flex_col()
+                                            .items_center()
+                                            .justify_center()
+                                            .gap(px(9.0))
+                                            .child(
+                                                div()
+                                                    .w(px(34.0))
+                                                    .h(px(23.0))
+                                                    .rounded(px(5.0))
+                                                    .border_1()
+                                                    .border_color(theme.text_tertiary)
+                                                    .child(
+                                                        div()
+                                                            .mt(px(4.0))
+                                                            .ml(px(25.0))
+                                                            .w(px(3.0))
+                                                            .h(px(3.0))
+                                                            .rounded_full()
+                                                            .bg(status_color),
+                                                    ),
+                                            )
+                                            .child(
+                                                div()
+                                                    .text_size(px(10.0))
+                                                    .text_color(theme.text_tertiary)
+                                                    .child("Preparing preview…"),
+                                            ),
+                                    )
+                                })
+                                .child(
+                                    div()
+                                        .absolute()
+                                        .top(px(8.0))
+                                        .left(px(8.0))
+                                        .h(px(24.0))
+                                        .px(px(8.0))
+                                        .rounded_full()
+                                        .flex()
+                                        .items_center()
+                                        .gap(px(6.0))
+                                        .bg(theme.canvas.opacity(0.86))
+                                        .border_1()
+                                        .border_color(theme.border)
+                                        .child(
+                                            div()
+                                                .w(px(6.0))
+                                                .h(px(6.0))
+                                                .rounded_full()
+                                                .bg(status_color),
+                                        )
+                                        .child(
+                                            div()
+                                                .text_size(px(9.5))
+                                                .font_weight(FontWeight::MEDIUM)
+                                                .text_color(theme.text)
+                                                .child(status),
+                                        ),
+                                ),
+                        )
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.bring_computer_use_to_front(window_id, cx);
+                        })),
+                )
+            })
+            .collect::<Vec<_>>();
+
+        Some(
+            div()
+                .absolute()
+                .right(px(16.0))
+                .bottom(px(82.0))
+                .w(px(304.0 + deepest_x_offset))
+                .h(px(220.0 + deepest_y_offset))
+                .children(cards),
         )
     }
 

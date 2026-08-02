@@ -57,6 +57,7 @@ impl Render for Waku {
             .map(|session| session.messages.is_empty())
             .unwrap_or(true);
         let permission = self.render_permission(cx);
+        let computer_use = self.render_computer_use_overlay(cx);
         let toast = self.toast.clone();
         let (sidebar_width, right_panel_width) = self.effective_panel_widths(window);
         let chat_viewport_width = f32::from(window.viewport_size().width)
@@ -142,6 +143,7 @@ impl Render for Waku {
                             .child(self.render_workspace_footer(cx))
                     })
                     .relative()
+                    .children(computer_use)
                     .when(self.sidebar_visible, |element| {
                         element.child(self.render_panel_resize_handle(
                             "sidebar-resize-handle",

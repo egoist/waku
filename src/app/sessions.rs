@@ -586,6 +586,8 @@ impl Waku {
         if let Some(runtime) = runtime.as_mut() {
             runtime.stream_phase = None;
             runtime.pending_permission = None;
+            runtime.pending_computer_approval = None;
+            runtime.computer_use_previews.clear();
         }
         if has_active_turn {
             let needs_fallback = !self.turn_has_assistant_message(session_id);
@@ -628,6 +630,95 @@ impl Waku {
         }
         if let Some(session) = self.selected_session_mut() {
             session.status = SessionStatus::Working;
+        }
+        cx.notify();
+    }
+
+    pub(super) fn respond_computer_permission(
+        &mut self,
+        decision: &'static str,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(session_id) = self.state.selected_session else {
+            return;
+        };
+        let Some(mut runtime) = self.runtimes.remove(&session_id) else {
+            return;
+        };
+        let Some(pending) = runtime.pending_computer_approval.take() else {
+            self.runtimes.insert(session_id, runtime);
+            return;
+        };
+
+        if decision == "deny" {
+            runtime.driver.reject_computer_tool(
+                pending.request,
+                "The user denied control of this app.".into(),
+            );
+        } else {
+            let key = pending.target.grant_key();
+            runtime.computer_session_grants.insert(key);
+            if decision == "always" && pending.target.persistable() {
+                let team_id = pending.target.team_id.clone().unwrap_or_default();
+                let grant = crate::computer_use::ComputerAppGrant {
+                    bundle_id: pending.target.bundle_id.clone(),
+                    team_id,
+                    app_name: pending.target.app_name.clone(),
+                };
+                if !self
+                    .state
+                    .computer_use_allowed_apps
+                    .iter()
+                    .any(|existing| existing.key() == grant.key())
+                {
+                    self.state.computer_use_allowed_apps.push(grant);
+                    self.save();
+                }
+            }
+            runtime.driver.run_computer_tool(pending.request);
+        }
+        if let Some(session) = self
+            .state
+            .sessions
+            .iter_mut()
+            .find(|session| session.id == session_id)
+        {
+            session.status = SessionStatus::Working;
+        }
+        self.runtimes.insert(session_id, runtime);
+        cx.notify();
+    }
+
+    pub(super) fn bring_computer_use_to_front(&mut self, window_id: u32, cx: &mut Context<Self>) {
+        if let Some(runtime) = self
+            .state
+            .selected_session
+            .and_then(|session_id| self.runtimes.get_mut(&session_id))
+            && let Some(index) = runtime.computer_use_previews.iter().position(|preview| {
+                preview
+                    .target
+                    .as_ref()
+                    .is_some_and(|target| target.window_id == window_id)
+            })
+        {
+            let preview = runtime.computer_use_previews.remove(index);
+            runtime.computer_use_previews.push(preview);
+        }
+        cx.notify();
+    }
+
+    pub(super) fn dismiss_computer_use(&mut self, window_id: u32, cx: &mut Context<Self>) {
+        if let Some(runtime) = self
+            .state
+            .selected_session
+            .and_then(|session_id| self.runtimes.get_mut(&session_id))
+        {
+            runtime.computer_use_previews.retain(|preview| {
+                preview
+                    .target
+                    .as_ref()
+                    .is_none_or(|target| target.window_id != window_id)
+            });
         }
         cx.notify();
     }

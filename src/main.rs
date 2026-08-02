@@ -1,9 +1,12 @@
+#![recursion_limit = "256"]
+
 mod amp_session;
 mod app;
 mod assets;
 mod checkpoint;
 mod claude_session;
 mod command_env;
+mod computer_use;
 mod cursor_session;
 mod driver;
 mod grok_session;

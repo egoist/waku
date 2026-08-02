@@ -8,6 +8,7 @@ license = "MIT"
 [dependencies]
 alacritty_terminal = { version = "0.26", default-features = false }
 anyhow = "1.0"
+base64 = "0.22"
 chrono = "0.4"
 crossbeam-channel = "0.5"
 dirs = "6.0"
@@ -21,6 +22,7 @@ unicode-segmentation = "1.12"
 uuid = { version = "1.18", features = ["v4", "serde"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
+libc = "0.2"
 objc2 = "0.6"
 objc2-app-kit = { version = "0.3", default-features = false, features = [
     "std",
