@@ -82,33 +82,76 @@ async function bundledHelperCommand() {
 class MCPClient {
   constructor(command, args) {
     if (!command) throw new Error("Waku Computer Use requires WAKU_COMPUTER_USE_SERVER");
-    this.child = spawn(command, args, { stdio: ["pipe", "pipe", "pipe"] });
+    this.command = command;
+    this.args = args;
+    this.child = null;
+    this.initialized = false;
+    this.idleTimer = null;
     this.nextId = 1;
     this.pending = new Map();
     this.buffer = "";
-    this.child.stdout.setEncoding("utf8");
-    this.child.stdout.on("data", (chunk) => this.read(chunk));
-    this.child.on("error", (error) => this.rejectAll(error));
-    this.child.on("exit", (code) => this.rejectAll(new Error(`Waku Computer Use exited (${code ?? "unknown"})`)));
   }
 
-  initialize() {
-    return this.request("initialize", {
+  async initialize() {
+    this.ensureChild();
+    await this.request("initialize", {
       protocolVersion: "2025-06-18",
       capabilities: {},
       clientInfo: { name: "Waku node_repl", version: "1.0.0" },
-    }).then(() => this.notify("notifications/initialized", {}));
+    });
+    this.notify("notifications/initialized", {});
+    this.initialized = true;
+    this.scheduleIdleClose();
   }
 
-  call(name, arguments_) {
-    return this.request("tools/call", { name, arguments: arguments_ });
+  async call(name, arguments_) {
+    clearTimeout(this.idleTimer);
+    this.idleTimer = null;
+    if (!this.initialized || !this.isChildRunning()) await this.initialize();
+    const result = await this.request("tools/call", { name, arguments: arguments_ });
+    this.scheduleIdleClose();
+    return result;
+  }
+
+  ensureChild() {
+    if (this.isChildRunning()) return;
+    const child = spawn(this.command, this.args, { stdio: ["pipe", "pipe", "pipe"] });
+    this.child = child;
+    this.initialized = false;
+    this.buffer = "";
+    child.stdout.setEncoding("utf8");
+    child.stdout.on("data", (chunk) => this.read(chunk));
+    child.on("error", (error) => {
+      if (this.child === child) this.child = null;
+      this.initialized = false;
+      this.rejectAll(error);
+    });
+    child.on("exit", (code) => {
+      if (this.child === child) {
+        this.child = null;
+        this.initialized = false;
+      }
+      this.rejectAll(new Error(`Waku Computer Use exited (${code ?? "unknown"})`));
+    });
+  }
+
+  isChildRunning() {
+    return this.child !== null && this.child.exitCode === null && !this.child.killed;
+  }
+
+  scheduleIdleClose() {
+    clearTimeout(this.idleTimer);
+    this.idleTimer = setTimeout(() => this.close(), 500);
+    this.idleTimer.unref?.();
   }
 
   notify(method, params) {
+    if (!this.isChildRunning()) throw new Error("Waku Computer Use MCP bridge is not running");
     this.child.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", method, params })}\n`);
   }
 
   request(method, params) {
+    if (!this.isChildRunning()) return Promise.reject(new Error("Waku Computer Use MCP bridge is not running"));
     const id = this.nextId++;
     return new Promise((resolve, reject) => {
       this.pending.set(id, { resolve, reject });
@@ -118,6 +161,15 @@ class MCPClient {
       if (response.result?.isError) throw new Error(textContent(response.result) || "Computer Use action failed");
       return response.result;
     });
+  }
+
+  close() {
+    clearTimeout(this.idleTimer);
+    this.idleTimer = null;
+    const child = this.child;
+    this.child = null;
+    this.initialized = false;
+    if (child && !child.killed) child.stdin.end();
   }
 
   read(chunk) {

@@ -85,20 +85,9 @@ private final class ComputerUseStatusItem {
     private var item: NSStatusItem?
     private var apps: [TrackedApp] = []
 
-    func start() {
-        let create = {
-            guard self.item == nil else { return }
-            let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-            item.length = 96
-            item.button?.toolTip = "Waku Computer Use"
-            self.item = item
-            self.updateMenu()
-        }
-        DispatchQueue.main.async(execute: create)
-    }
-
     func track(bundleID: String, name: String) {
         DispatchQueue.main.async {
+            self.createItemIfNeeded()
             if let index = self.apps.firstIndex(where: { $0.bundleID == bundleID }) {
                 self.apps[index].name = name
             } else {
@@ -106,6 +95,14 @@ private final class ComputerUseStatusItem {
             }
             self.updateMenu()
         }
+    }
+
+    private func createItemIfNeeded() {
+        guard item == nil else { return }
+        let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+        item.length = 80
+        item.button?.toolTip = "Waku Computer Use"
+        self.item = item
     }
 
     func stop() {
@@ -124,38 +121,37 @@ private final class ComputerUseStatusItem {
 
     private func updateMenu() {
         guard let item else { return }
+        guard !apps.isEmpty else {
+            NSStatusBar.system.removeStatusItem(item)
+            self.item = nil
+            return
+        }
         item.button?.image = self.statusImage()
         let menu = NSMenu()
         let title = NSMenuItem(title: "Waku Computer Use", action: nil, keyEquivalent: "")
         title.isEnabled = false
         menu.addItem(title)
         menu.addItem(.separator())
-        if apps.isEmpty {
-            let empty = NSMenuItem(title: "No active app sessions", action: nil, keyEquivalent: "")
-            empty.isEnabled = false
-            menu.addItem(empty)
-        } else {
-            for app in apps {
-                let entry = NSMenuItem(title: app.name, action: nil, keyEquivalent: "")
-                entry.isEnabled = false
-                menu.addItem(entry)
-            }
+        for app in apps {
+            let entry = NSMenuItem(title: app.name, action: nil, keyEquivalent: "")
+            entry.isEnabled = false
+            menu.addItem(entry)
         }
         item.menu = menu
     }
 
     private func statusImage() -> NSImage {
-        let image = NSImage(size: NSSize(width: 96, height: 28))
+        let image = NSImage(size: NSSize(width: 80, height: 22))
         image.lockFocus()
-        let bounds = NSRect(x: 0.5, y: 0.5, width: 95, height: 27)
-        NSColor.controlBackgroundColor.withAlphaComponent(0.82).setFill()
-        NSBezierPath(roundedRect: bounds, xRadius: 13.5, yRadius: 13.5).fill()
+        let bounds = NSRect(x: 0.5, y: 0.5, width: 79, height: 21)
+        NSColor.white.withAlphaComponent(0.58).setFill()
+        NSBezierPath(roundedRect: bounds, xRadius: 10.5, yRadius: 10.5).fill()
 
         let visibleApps = Array(apps.prefix(4))
         for (index, app) in visibleApps.enumerated() {
             let iconRect = NSRect(
-                x: 8 + CGFloat(index) * 11,
-                y: 4,
+                x: 12 + CGFloat(index) * 8,
+                y: 1,
                 width: 20,
                 height: 20
             )
@@ -172,17 +168,17 @@ private final class ComputerUseStatusItem {
         }
 
         let cursor = NSBezierPath()
-        cursor.move(to: NSPoint(x: 63, y: 22))
-        cursor.line(to: NSPoint(x: 63, y: 7))
-        cursor.line(to: NSPoint(x: 77, y: 12))
-        cursor.line(to: NSPoint(x: 72, y: 15))
-        cursor.line(to: NSPoint(x: 80, y: 22))
-        cursor.line(to: NSPoint(x: 76, y: 25))
-        cursor.line(to: NSPoint(x: 69, y: 17))
+        cursor.move(to: NSPoint(x: 52, y: 20))
+        cursor.line(to: NSPoint(x: 72, y: 16))
+        cursor.line(to: NSPoint(x: 64, y: 14))
+        cursor.line(to: NSPoint(x: 69, y: 4))
+        cursor.line(to: NSPoint(x: 63, y: 1))
+        cursor.line(to: NSPoint(x: 58, y: 12))
+        cursor.line(to: NSPoint(x: 52, y: 7))
         cursor.close()
-        NSColor.black.withAlphaComponent(0.35).setStroke()
         NSColor.white.setFill()
-        cursor.lineWidth = 1.5
+        NSColor.gray.withAlphaComponent(0.55).setStroke()
+        cursor.lineWidth = 1.3
         cursor.fill()
         cursor.stroke()
         image.unlockFocus()
@@ -231,6 +227,7 @@ private final class StatusAgentProcess {
     }
 
     func track(bundleID: String, name: String) {
+        start()
         lock.lock()
         defer { lock.unlock() }
         guard let input else { return }
@@ -379,7 +376,6 @@ struct WakuComputerUse {
             do {
                 if CommandLine.arguments.contains("mcp-child") {
                     let (channel, _) = try connectedChannel(at: socketPathArgument() ?? "")
-                    StatusAgentProcess.shared.start()
                     defer { StatusAgentProcess.shared.stop() }
                     try await serveMCP(input: channel, output: channel)
                     await CaptureSessions.shared.stopAll()
@@ -471,7 +467,6 @@ struct WakuComputerUse {
     static func serveStatusAgent() {
         let run = {
             NSApplication.shared.setActivationPolicy(.accessory)
-            ComputerUseStatusItem.shared.start()
             DispatchQueue.global(qos: .utility).async {
                 while let app = readLine(from: .standardInput) {
                     DispatchQueue.main.async {
