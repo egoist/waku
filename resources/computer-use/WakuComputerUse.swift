@@ -1605,6 +1605,20 @@ private final class AccessibilityDiffStore {
     }
 }
 
+private final class AppSpecificInstructionsStore {
+    static let shared = AppSpecificInstructionsStore()
+
+    private var injectedApps = Set<String>()
+    private let lock = NSLock()
+
+    func take(_ instructions: String, for bundleID: String) -> String? {
+        lock.lock()
+        let isFirstInjection = injectedApps.insert(bundleID.lowercased()).inserted
+        lock.unlock()
+        return isFirstInjection ? instructions : nil
+    }
+}
+
 private final class RecentComputerActionStore {
     static let shared = RecentComputerActionStore()
 
@@ -2199,9 +2213,6 @@ private func accessibilityText(for resolved: ResolvedAppWindow) -> String {
     }
 
     var sections: [String] = []
-    if isBrowser(bundleID: resolved.target.bundleId) {
-        sections.append(browserComputerUseInstructions)
-    }
     sections.append("Window: \"\(resolved.target.windowTitle)\", App: \(resolved.target.appName).")
     sections.append(lines.joined(separator: "\n"))
     if let focused,
@@ -2254,11 +2265,20 @@ private func captureAppState(
     )
     ComputerUsePreviewStore.publish(target: resolved.target, capture: capture)
     let fullTree = accessibilityText(for: resolved)
-    let text = AccessibilityDiffStore.shared.render(
+    var text = AccessibilityDiffStore.shared.render(
         fullTree,
         for: resolved.target.bundleId,
         disableDiff: disableDiff
     )
+    // App-specific guidance belongs to the conversation context, not to each
+    // accessibility snapshot. A fresh full tree must not repeat it.
+    if isBrowser(bundleID: resolved.target.bundleId),
+       let instructions = AppSpecificInstructionsStore.shared.take(
+           browserComputerUseInstructions,
+           for: resolved.target.bundleId
+       ) {
+        text = "\(instructions)\n\(text)"
+    }
     return (text, capture)
 }
 
