@@ -102,7 +102,6 @@ mkdir -p "$contents/MacOS" "$contents/Resources/skills/waku-computer-use" "$cont
 cp "target/$profile/waku" "$contents/MacOS/$app_name"
 cp resources/Info.plist "$contents/Info.plist"
 cp resources/computer-use/SKILL.md "$contents/Resources/skills/waku-computer-use/SKILL.md"
-cp resources/computer-use/mcp.json "$contents/Resources/Waku Computer Use MCP.json"
 cp resources/computer-use/waku-computer-use-client.mjs "$contents/Resources/Waku Computer Use Client.mjs"
 plutil -replace CFBundleDisplayName -string "$app_name" "$contents/Info.plist"
 plutil -replace CFBundleExecutable -string "$app_name" "$contents/Info.plist"

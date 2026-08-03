@@ -1,8 +1,0 @@
-{
-  "mcpServers": {
-    "waku_computer_use": {
-      "command": "$WAKU_COMPUTER_USE_SERVER",
-      "args": ["mcp"]
-    }
-  }
-}
