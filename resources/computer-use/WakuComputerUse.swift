@@ -1003,7 +1003,41 @@ struct WakuComputerUse {
                       let element = AccessibilityRegistry.shared.element(for: index) else {
                     throw HelperError.invalidRequest("Element (index) is stale. Call get_app_state again.")
                 }
-                try performAccessibilityAction(element, name: kAXPressAction)
+                let rawCount = number(arguments, "click_count") ?? 1
+                guard rawCount.isFinite,
+                      rawCount.rounded() == rawCount,
+                      rawCount >= 1,
+                      rawCount <= 10 else {
+                    throw HelperError.invalidRequest(
+                        "click_count must be an integer from 1 through 10"
+                    )
+                }
+                let button = mouseButton(arguments["mouse_button"] as? String)
+                if button == .left, rawCount == 1 {
+                    try withInactiveElementRouting(
+                        resolved: resolved,
+                        element: element
+                    ) {
+                        try performAccessibilityAction(element, name: kAXPressAction)
+                    }
+                } else {
+                    guard let location = accessibilityFrameCenter(element) else {
+                        throw HelperError.invalidRequest(
+                            "Element \(index) has no clickable position"
+                        )
+                    }
+                    try click(
+                        at: location,
+                        localPoint: CGPoint(
+                            x: location.x - resolved.window.frame.minX,
+                            y: location.y - resolved.window.frame.minY
+                        ),
+                        count: Int64(rawCount),
+                        button: button,
+                        windowID: resolved.window.windowID,
+                        processID: resolved.processID
+                    )
+                }
                 RecentComputerActionStore.shared.record(resolved.target.bundleId)
                 return mcpResult(text: "")
             }
@@ -1031,9 +1065,44 @@ struct WakuComputerUse {
                 )
             case "press_key":
                 let keyParts = try keyAndModifiers(try requiredString(arguments, "key"))
-                try pressKey(keyParts.key, modifiers: keyParts.modifiers, processID: resolved.processID)
+                let globalPoint = CGPoint(
+                    x: resolved.window.frame.midX,
+                    y: resolved.window.frame.midY
+                )
+                try withInactiveWindowRouting(
+                    processID: resolved.processID,
+                    windowID: resolved.window.windowID,
+                    globalPoint: globalPoint,
+                    localPoint: CGPoint(
+                        x: resolved.window.frame.width / 2,
+                        y: resolved.window.frame.height / 2
+                    )
+                ) {
+                    try pressKey(
+                        keyParts.key,
+                        modifiers: keyParts.modifiers,
+                        processID: resolved.processID
+                    )
+                }
             default:
-                try typeText(try requiredString(arguments, "text"), processID: resolved.processID)
+                let globalPoint = CGPoint(
+                    x: resolved.window.frame.midX,
+                    y: resolved.window.frame.midY
+                )
+                try withInactiveWindowRouting(
+                    processID: resolved.processID,
+                    windowID: resolved.window.windowID,
+                    globalPoint: globalPoint,
+                    localPoint: CGPoint(
+                        x: resolved.window.frame.width / 2,
+                        y: resolved.window.frame.height / 2
+                    )
+                ) {
+                    try typeText(
+                        try requiredString(arguments, "text"),
+                        processID: resolved.processID
+                    )
+                }
             }
             RecentComputerActionStore.shared.record(resolved.target.bundleId)
             return mcpResult(text: "")
@@ -1055,21 +1124,36 @@ struct WakuComputerUse {
             guard let element = AccessibilityRegistry.shared.element(for: index) else {
                 throw HelperError.invalidRequest("Element \(index) is stale. Call get_app_state again.")
             }
-            switch name {
-            case "perform_secondary_action":
-                try performAccessibilityAction(
-                    element,
-                    matching: try requiredString(arguments, "action")
-                )
-            case "set_value":
-                let value = try requiredString(arguments, "value")
-                guard AXUIElementSetAttributeValue(element, kAXValueAttribute as CFString, value as CFTypeRef) == .success else {
-                    throw HelperError.invalidRequest("Element \(index) does not accept a value")
+            try withInactiveElementRouting(
+                resolved: resolved,
+                element: element
+            ) {
+                switch name {
+                case "perform_secondary_action":
+                    try performAccessibilityAction(
+                        element,
+                        matching: try requiredString(arguments, "action")
+                    )
+                case "set_value":
+                    let value = try requiredString(arguments, "value")
+                    guard AXUIElementSetAttributeValue(
+                        element,
+                        kAXValueAttribute as CFString,
+                        value as CFTypeRef
+                    ) == .success else {
+                        throw HelperError.invalidRequest(
+                            "Element \(index) does not accept a value"
+                        )
+                    }
+                case "select_text":
+                    try selectText(arguments, in: element)
+                default:
+                    try scrollAccessibility(
+                        arguments,
+                        element: element,
+                        processID: resolved.processID
+                    )
                 }
-            case "select_text":
-                try selectText(arguments, in: element)
-            default:
-                try scrollAccessibility(arguments, element: element, processID: resolved.processID)
             }
             RecentComputerActionStore.shared.record(resolved.target.bundleId)
             return mcpResult(text: "")
@@ -1888,11 +1972,38 @@ private func performCoordinateClick(
     let x = number(arguments, "x")
     let y = number(arguments, "y")
     updateVirtualCursor(x, y, window: resolved.window, coordinateSpace: resolved.target)
+    let location = try pointInWindow(x: x, y: y, resolved: resolved)
     try click(
-        at: pointInWindow(x: x, y: y, resolved: resolved),
+        at: location,
+        localPoint: CGPoint(
+            x: location.x - resolved.window.frame.minX,
+            y: location.y - resolved.window.frame.minY
+        ),
         count: Int64(rawCount),
         button: mouseButton(arguments["mouse_button"] as? String),
+        windowID: resolved.window.windowID,
         processID: resolved.processID
+    )
+}
+
+private func withInactiveElementRouting<T>(
+    resolved: ResolvedAppWindow,
+    element: AXUIElement,
+    _ operation: () throws -> T
+) throws -> T {
+    let point = accessibilityFrameCenter(element) ?? CGPoint(
+        x: resolved.window.frame.midX,
+        y: resolved.window.frame.midY
+    )
+    return try withInactiveWindowRouting(
+        processID: resolved.processID,
+        windowID: resolved.window.windowID,
+        globalPoint: point,
+        localPoint: CGPoint(
+            x: point.x - resolved.window.frame.minX,
+            y: point.y - resolved.window.frame.minY
+        ),
+        operation
     )
 }
 
@@ -2771,9 +2882,9 @@ private func signingInformation(pid: pid_t) -> [String: Any]? {
 private func isBlocked(bundleId: String) -> Bool {
     let bundle = bundleId.lowercased()
     if [
-        "sh.waku",
-        "com.openai.codex",
-        "com.openai.sky.",
+        // "sh.waku",
+        // "com.openai.codex",
+        // "com.openai.sky.",
         "com.1password.",
         "2bua8c4s2c.com.1password.",
         "com.bitwarden.",
@@ -2786,7 +2897,7 @@ private func isBlocked(bundleId: String) -> Bool {
         "com.apple.securityagent",
         "com.apple.systempreferences",
         "com.apple.systemsettings",
-        "com.openai.chat",
+        // "com.openai.chat",
         "com.apple.terminal",
         "com.apple.keychainaccess",
         "com.googlecode.iterm2",
@@ -3105,23 +3216,38 @@ private func perform(_ actions: [Action], in window: SCWindow, coordinateSpace: 
             y: frame.minY + localY / Double(max(coordinateSpace.height, 1)) * frame.height
         )
     }
+    func withWindowRouting(_ operation: () throws -> Void) throws {
+        try withInactiveWindowRouting(
+            processID: processID,
+            windowID: window.windowID,
+            globalPoint: CGPoint(x: frame.midX, y: frame.midY),
+            localPoint: CGPoint(x: frame.width / 2, y: frame.height / 2),
+            operation
+        )
+    }
 
     for action in actions {
         switch action.type {
         case "click":
             updateVirtualCursor(action.x, action.y, window: window, coordinateSpace: coordinateSpace)
+            let location = try point(action.x, action.y)
             try click(
-                at: point(action.x, action.y),
+                at: location,
+                localPoint: CGPoint(x: location.x - frame.minX, y: location.y - frame.minY),
                 count: 1,
                 button: mouseButton(action.mouseButton),
+                windowID: window.windowID,
                 processID: processID
             )
         case "double_click":
             updateVirtualCursor(action.x, action.y, window: window, coordinateSpace: coordinateSpace)
+            let location = try point(action.x, action.y)
             try click(
-                at: point(action.x, action.y),
+                at: location,
+                localPoint: CGPoint(x: location.x - frame.minX, y: location.y - frame.minY),
                 count: 2,
                 button: mouseButton(action.mouseButton),
+                windowID: window.windowID,
                 processID: processID
             )
         case "move":
@@ -3143,17 +3269,31 @@ private func perform(_ actions: [Action], in window: SCWindow, coordinateSpace: 
                 processID: processID
             )
         case "scroll":
-            try scroll(deltaX: action.deltaX ?? 0, deltaY: action.deltaY ?? 0, processID: processID)
+            try withWindowRouting {
+                try scroll(
+                    deltaX: action.deltaX ?? 0,
+                    deltaY: action.deltaY ?? 0,
+                    processID: processID
+                )
+            }
         case "type":
             guard let text = action.text, text.utf8.count <= 10_000 else {
                 throw HelperError.invalidRequest("Typed text is missing or too long")
             }
-            try typeText(text, processID: processID)
+            try withWindowRouting {
+                try typeText(text, processID: processID)
+            }
         case "keypress":
             guard let key = action.key else {
                 throw HelperError.invalidRequest("keypress requires a key")
             }
-            try pressKey(key, modifiers: action.modifiers ?? [], processID: processID)
+            try withWindowRouting {
+                try pressKey(
+                    key,
+                    modifiers: action.modifiers ?? [],
+                    processID: processID
+                )
+            }
         case "wait":
             usleep(useconds_t(min(action.durationMs ?? 0, 2_000) * 1_000))
         default:
@@ -3214,20 +3354,34 @@ private enum TargetProcessInputRouting {
     private static let keyFocusReturnedSubtype: UInt16 = 0x8000
     private static let inactiveWindowActivatedSubtype: UInt16 = 1
     private static let appDeactivatedSubtype: UInt16 = 2
-    private static let inactiveWindowModifiers = NSEvent.ModifierFlags(rawValue: 0xC0000)
+    private static let inactiveWindowModifiers = NSEvent.ModifierFlags(
+        rawValue: 0xC0000
+    )
     private static let lock = NSLock()
     private static var currentRoute: Route?
 
-    private struct Route {
+    private final class Route {
         let processID: pid_t
         let windowID: CGWindowID
-        let observedFrontmostProcessID: pid_t?
+        let focusStealSuppression: FocusStealSuppression
+
+        init(
+            processID: pid_t,
+            windowID: CGWindowID,
+            focusStealSuppression: FocusStealSuppression
+        ) {
+            self.processID = processID
+            self.windowID = windowID
+            self.focusStealSuppression = focusStealSuppression
+        }
     }
 
     static func ensureInactiveWindowRouting(
         processID: pid_t,
         windowID: CGWindowID,
-        guardedBy _: FocusStealSuppression
+        activationPoint: CGPoint?,
+        activationLocalPoint: CGPoint?,
+        synthesizeActivationClick: Bool
     ) throws {
         lock.lock()
         defer { lock.unlock() }
@@ -3243,54 +3397,86 @@ private enum TargetProcessInputRouting {
         }
 
         if let currentRoute,
-           currentRoute.processID == processID,
-           currentRoute.windowID == windowID,
-           currentRoute.observedFrontmostProcessID == frontmostProcessID {
+           currentRoute.processID == processID {
             return
         }
 
-        // A route is MCP-session state, like Codex's
-        // SyntheticAppFocusEnforcer. Rebuild it only when the target window or
-        // the user's real frontmost app changed. Tearing it down after every
-        // drag is what makes Chromium toolbars flash active/inactive.
+        // Sky retains one SyntheticAppFocusEnforcer for the selected process.
+        // Arm the preventer before delivering either activation-shaped event;
+        // the packets are not safe when sent outside this retained guard.
         deactivateCurrentRouteLocked()
-
-        // Codex first marks the PID as synthetically active without naming a
-        // window. The following window-scoped marker then carries the private
-        // inactive-window mask. Keep this ordering; sending subtype 1 directly
-        // to a window with empty flags is the unsafe foregrounding variant.
-        try post(
-            type: appKitDefinedType,
-            subtype: inactiveWindowActivatedSubtype,
-            windowNumber: 0,
-            modifierFlags: [],
-            to: processID
-        )
-        try post(
-            type: processNotificationType,
-            subtype: keyFocusReturnedSubtype,
-            windowNumber: 0,
-            modifierFlags: [],
-            to: processID
-        )
-
-        // This is the exact distinction between Codex's background route and
-        // the unsafe experiment that foregrounded Helium. A window-scoped
-        // subtype-1 event with empty flags is a real activation request. The
-        // 0xC0000 mask marks Codex's inactive-window route. Do not remove the
-        // mask, use window 0, or replace this with NSRunningApplication.activate.
-        try post(
-            type: appKitDefinedType,
-            subtype: inactiveWindowActivatedSubtype,
-            windowNumber: Int(windowID),
-            modifierFlags: inactiveWindowModifiers,
-            to: processID
-        )
-        currentRoute = Route(
+        guard let suppression = FocusStealSuppression(
+            targetProcessID: processID
+        ) else {
+            throw HelperError.eventCreationFailed
+        }
+        let route = Route(
             processID: processID,
             windowID: windowID,
-            observedFrontmostProcessID: frontmostProcessID
+            focusStealSuppression: suppression
         )
+        currentRoute = route
+
+        do {
+            // This is Sky's exact inactive-window activation packet: an
+            // AppKit-defined subtype-1 event carrying the real window number
+            // and the private 0xC0000 inactive-window mask.
+            try post(
+                type: appKitDefinedType,
+                subtype: inactiveWindowActivatedSubtype,
+                windowNumber: Int(windowID),
+                modifierFlags: inactiveWindowModifiers,
+                to: processID
+            )
+
+            // Sky's activation bundle can include a left down/up at the
+            // activation point. A background secondary click needs this so
+            // AppKit first establishes the row under the pointer as the menu
+            // owner instead of reusing the previously active row.
+            if synthesizeActivationClick,
+               let activationPoint,
+               let activationLocalPoint {
+                let eventNumber = SyntheticMouseEventNumbers.next()
+                let down = try windowTargetedMouseEvent(
+                    type: .leftMouseDown,
+                    at: activationPoint,
+                    localPoint: activationLocalPoint,
+                    button: .left,
+                    windowID: windowID,
+                    eventNumber: eventNumber,
+                    clickCount: 1,
+                    pressure: 1
+                )
+                let up = try windowTargetedMouseEvent(
+                    type: .leftMouseUp,
+                    at: activationPoint,
+                    localPoint: activationLocalPoint,
+                    button: .left,
+                    windowID: windowID,
+                    eventNumber: eventNumber,
+                    clickCount: 1,
+                    pressure: 0
+                )
+                down.timestamp = CGEventTimestamp(mach_absolute_time())
+                down.postToPid(processID)
+                up.timestamp = CGEventTimestamp(mach_absolute_time())
+                up.postToPid(processID)
+            }
+
+            // Sky updates the target's believed state in this order:
+            // application active first, then key focus returned.
+            try post(
+                type: processNotificationType,
+                subtype: keyFocusReturnedSubtype,
+                windowNumber: 0,
+                modifierFlags: [],
+                to: processID
+            )
+        } catch {
+            currentRoute = nil
+            suppression.stop()
+            throw error
+        }
     }
 
     static func deactivateCurrentRoute() {
@@ -3315,6 +3501,7 @@ private enum TargetProcessInputRouting {
             modifierFlags: [],
             to: route.processID
         )
+        route.focusStealSuppression.stop()
     }
 
     private static func post(
@@ -3371,23 +3558,40 @@ private let focusStealSuppressionCallback: CGEventTapCallBack = {
         return Unmanaged.passUnretained(event)
     }
 
-    guard type.rawValue == 21,
-          let targetProcessField = CGEventField(rawValue: 40),
+    guard let targetProcessField = CGEventField(rawValue: 40),
           let sourceProcessField = CGEventField(rawValue: 41),
-          let subtypeField = CGEventField(rawValue: 64),
           let subjectProcessField = CGEventField(rawValue: 73) else {
         return Unmanaged.passUnretained(event)
     }
     let targetProcessID = pid_t(event.getIntegerValueField(targetProcessField))
     let sourceProcessID = pid_t(event.getIntegerValueField(sourceProcessField))
     let subjectProcessID = pid_t(event.getIntegerValueField(subjectProcessField))
-    let subtype = UInt16(truncatingIfNeeded: event.getIntegerValueField(subtypeField))
 
-    // PID-targeted AppKit mouse delivery may produce a helper-origin
-    // key-focus-returned routing event. Codex permits exactly this subtype and
-    // it does not activate or repaint the target as active. Everything emitted
-    // by the controlled process remains blocked: a later NewFront request may
-    // identify Helium as its source, target, or subject PID.
+    if type.rawValue == 32 {
+        // Sky installs a second annotated-session tap for this private focus
+        // theft event type whenever the target believes it is active but is
+        // not really frontmost. Reject target-originated/target-directed
+        // promotion while leaving unrelated user input untouched.
+        if sourceProcessID == state.targetProcessID
+            || targetProcessID == state.targetProcessID
+            || subjectProcessID == state.targetProcessID {
+            return nil
+        }
+        return Unmanaged.passUnretained(event)
+    }
+
+    guard type.rawValue == 21,
+          let subtypeField = CGEventField(rawValue: 64) else {
+        return Unmanaged.passUnretained(event)
+    }
+    let subtype = UInt16(
+        truncatingIfNeeded: event.getIntegerValueField(subtypeField)
+    )
+
+    // Permit only the helper's synthetic KeyFocusReturned notification. Drop
+    // a target-originated NewFront/key-focus request before WindowServer can
+    // reorder either app. The target still receives the logical AppKit events
+    // posted directly to its PID.
     if sourceProcessID == getpid() && subtype == 0x8000 {
         return Unmanaged.passUnretained(event)
     }
@@ -3406,7 +3610,7 @@ private final class FocusStealSuppression {
         let state = FocusStealSuppressionState(targetProcessID: targetProcessID)
         self.state = state
         Thread {
-            let mask = CGEventMask(1) << CGEventType(rawValue: 21)!.rawValue
+            let mask = (CGEventMask(1) << 21) | (CGEventMask(1) << 32)
             guard let eventTap = CGEvent.tapCreate(
                 tap: .cgAnnotatedSessionEventTap,
                 place: .headInsertEventTap,
@@ -3429,6 +3633,7 @@ private final class FocusStealSuppression {
             CFRunLoopRun()
             CGEvent.tapEnable(tap: eventTap, enable: false)
             CFRunLoopRemoveSource(runLoop, source, .commonModes)
+            CFMachPortInvalidate(eventTap)
             state.stopped.signal()
         }.start()
 
@@ -3471,7 +3676,8 @@ private func windowTargetedMouseEvent(
     button: CGMouseButton,
     windowID: CGWindowID,
     eventNumber: Int64,
-    clickCount: Int
+    clickCount: Int,
+    pressure: Float = 1
 ) throws -> CGEvent {
     // Match Codex's inactive-window pointer construction. Creating an NSEvent
     // with the real target window number supplies AppKit metadata that a raw
@@ -3488,7 +3694,7 @@ private func windowTargetedMouseEvent(
         context: nil,
         eventNumber: Int(eventNumber),
         clickCount: clickCount,
-        pressure: 1
+        pressure: pressure
     ), let event = nsEvent.cgEvent else {
         throw HelperError.eventCreationFailed
     }
@@ -3536,9 +3742,37 @@ private func mouseButton(_ value: String?) -> CGMouseButton {
     }
 }
 
-private func click(at point: CGPoint, count: Int64, button: CGMouseButton, processID: pid_t) throws {
-    let downType: CGEventType
-    let upType: CGEventType
+private func withInactiveWindowRouting<T>(
+    processID: pid_t,
+    windowID: CGWindowID,
+    globalPoint: CGPoint,
+    localPoint: CGPoint,
+    synthesizeActivationClick: Bool = false,
+    _ operation: () throws -> T
+) throws -> T {
+    // The retained route owns the focus guard. Per-action AX focus writes and
+    // per-action tap teardown are observably different from Sky and can both
+    // dismiss transient menus.
+    try TargetProcessInputRouting.ensureInactiveWindowRouting(
+        processID: processID,
+        windowID: windowID,
+        activationPoint: globalPoint,
+        activationLocalPoint: localPoint,
+        synthesizeActivationClick: synthesizeActivationClick
+    )
+    return try operation()
+}
+
+private func click(
+    at point: CGPoint,
+    localPoint: CGPoint,
+    count: Int64,
+    button: CGMouseButton,
+    windowID: CGWindowID,
+    processID: pid_t
+) throws {
+    let downType: NSEvent.EventType
+    let upType: NSEvent.EventType
     switch button {
     case .right:
         downType = .rightMouseDown
@@ -3550,15 +3784,41 @@ private func click(at point: CGPoint, count: Int64, button: CGMouseButton, proce
         downType = .leftMouseDown
         upType = .leftMouseUp
     }
-    for index in 1...count {
-        let down = try mouseEvent(type: downType, at: point, button: button)
-        let up = try mouseEvent(type: upType, at: point, button: button)
-        down.setIntegerValueField(.mouseEventClickState, value: index)
-        up.setIntegerValueField(.mouseEventClickState, value: index)
-        post(down, to: processID)
-        usleep(35_000)
-        post(up, to: processID)
-        usleep(70_000)
+
+    try withInactiveWindowRouting(
+        processID: processID,
+        windowID: windowID,
+        globalPoint: point,
+        localPoint: localPoint,
+        synthesizeActivationClick: button == .right
+    ) {
+        for index in 1...count {
+            let eventNumber = SyntheticMouseEventNumbers.next()
+            let down = try windowTargetedMouseEvent(
+                type: downType,
+                at: point,
+                localPoint: localPoint,
+                button: button,
+                windowID: windowID,
+                eventNumber: eventNumber,
+                clickCount: Int(index),
+                pressure: 1
+            )
+            let up = try windowTargetedMouseEvent(
+                type: upType,
+                at: point,
+                localPoint: localPoint,
+                button: button,
+                windowID: windowID,
+                eventNumber: eventNumber,
+                clickCount: Int(index),
+                pressure: 0
+            )
+            post(down, to: processID)
+            usleep(35_000)
+            post(up, to: processID)
+            usleep(70_000)
+        }
     }
 }
 
@@ -3576,80 +3836,71 @@ private func drag(
     // or CGEvent.post(tap:): those change the controlled app's visible active
     // state. Restoring focus later is not equivalent because the browser has
     // already blinked or moved front.
-    guard let focusStealSuppression = FocusStealSuppression(targetProcessID: processID) else {
-        throw HelperError.eventCreationFailed
-    }
-    defer {
-        // Keep blocking a delayed target-originated NewFront request briefly
-        // after mouse-up, then remove the tap. This does not synthesize focus.
-        usleep(100_000)
-        focusStealSuppression.stop()
-    }
-
-    try TargetProcessInputRouting.ensureInactiveWindowRouting(
+    try withInactiveWindowRouting(
         processID: processID,
         windowID: windowID,
-        guardedBy: focusStealSuppression
-    )
-
-    // Codex uses one event number for down/up and a second shared number for
-    // every dragged sample. Preserve that AppKit gesture identity.
-    let clickEventNumber = SyntheticMouseEventNumbers.next()
-    let dragEventNumber = SyntheticMouseEventNumbers.next()
-    let down = try windowTargetedMouseEvent(
-        type: .leftMouseDown,
-        at: start,
-        localPoint: fromLocal,
-        button: .left,
-        windowID: windowID,
-        eventNumber: clickEventNumber,
-        clickCount: 1
-    )
-    post(down, to: processID)
-
-    let initialDrag = try windowTargetedMouseEvent(
-        type: .leftMouseDragged,
-        at: start,
-        localPoint: fromLocal,
-        button: .left,
-        windowID: windowID,
-        eventNumber: dragEventNumber,
-        clickCount: 0
-    )
-    post(initialDrag, to: processID)
-
-    for step in 1...12 {
-        let progress = Double(step) / 12
-        let point = CGPoint(
-            x: start.x + (end.x - start.x) * progress,
-            y: start.y + (end.y - start.y) * progress
+        globalPoint: start,
+        localPoint: fromLocal
+    ) {
+        // Codex uses one event number for down/up and a second shared number
+        // for every dragged sample. Preserve that AppKit gesture identity.
+        let clickEventNumber = SyntheticMouseEventNumbers.next()
+        let dragEventNumber = SyntheticMouseEventNumbers.next()
+        let down = try windowTargetedMouseEvent(
+            type: .leftMouseDown,
+            at: start,
+            localPoint: fromLocal,
+            button: .left,
+            windowID: windowID,
+            eventNumber: clickEventNumber,
+            clickCount: 1
         )
-        let localPoint = CGPoint(
-            x: fromLocal.x + (toLocal.x - fromLocal.x) * progress,
-            y: fromLocal.y + (toLocal.y - fromLocal.y) * progress
-        )
-        let event = try windowTargetedMouseEvent(
+        post(down, to: processID)
+
+        let initialDrag = try windowTargetedMouseEvent(
             type: .leftMouseDragged,
-            at: point,
-            localPoint: localPoint,
+            at: start,
+            localPoint: fromLocal,
             button: .left,
             windowID: windowID,
             eventNumber: dragEventNumber,
             clickCount: 0
         )
-        post(event, to: processID)
-    }
+        post(initialDrag, to: processID)
 
-    let up = try windowTargetedMouseEvent(
-        type: .leftMouseUp,
-        at: end,
-        localPoint: toLocal,
-        button: .left,
-        windowID: windowID,
-        eventNumber: clickEventNumber,
-        clickCount: 1
-    )
-    post(up, to: processID)
+        for step in 1...12 {
+            let progress = Double(step) / 12
+            let point = CGPoint(
+                x: start.x + (end.x - start.x) * progress,
+                y: start.y + (end.y - start.y) * progress
+            )
+            let localPoint = CGPoint(
+                x: fromLocal.x + (toLocal.x - fromLocal.x) * progress,
+                y: fromLocal.y + (toLocal.y - fromLocal.y) * progress
+            )
+            let event = try windowTargetedMouseEvent(
+                type: .leftMouseDragged,
+                at: point,
+                localPoint: localPoint,
+                button: .left,
+                windowID: windowID,
+                eventNumber: dragEventNumber,
+                clickCount: 0
+            )
+            post(event, to: processID)
+        }
+
+        let up = try windowTargetedMouseEvent(
+            type: .leftMouseUp,
+            at: end,
+            localPoint: toLocal,
+            button: .left,
+            windowID: windowID,
+            eventNumber: clickEventNumber,
+            clickCount: 1
+        )
+        post(up, to: processID)
+    }
 }
 
 private func scroll(
