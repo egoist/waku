@@ -2,13 +2,13 @@ use super::{
     NAVIGATION_RAIL_TICK_HEIGHT, NAVIGATION_RAIL_TURN_HEIGHT, SessionNavigation,
     StableListScrollbarHandle, StreamDeltaKind, TranscriptRowKind::*, active_navigation_turn_index,
     append_text_delta_to_session, apply_transcript_visibility_splice, assistant_response_footer,
-    assistant_response_footer_index, assistant_response_footer_time, escape_html,
-    estimated_message_height, estimated_text_height, fenced_code, fitted_file_tree_width,
-    fitted_panel_widths, folded_transcript_row_kinds, format_worked_duration,
-    maintain_transcript_anchor, markdown_estimation_source, message_starts_followup_turn,
-    navigation_preview_snippet, navigation_rail_height, navigation_rail_scale, pop_stream_chunk,
-    prepare_transcript_row_remeasurement, scale_scrollbar_offset,
-    scroll_top_after_row_invalidation, should_show_navigation_rail,
+    assistant_response_footer_index, assistant_response_footer_time, compact_driver_error,
+    escape_html, estimated_message_height, estimated_text_height, fenced_code,
+    fitted_file_tree_width, fitted_panel_widths, folded_transcript_row_kinds,
+    format_worked_duration, maintain_transcript_anchor, markdown_estimation_source,
+    message_starts_followup_turn, navigation_preview_snippet, navigation_rail_height,
+    navigation_rail_scale, pop_stream_chunk, prepare_transcript_row_remeasurement,
+    scale_scrollbar_offset, scroll_top_after_row_invalidation, should_show_navigation_rail,
     stabilized_transcript_anchor_end_space, take_stream_prefix, transcript_anchor_end_space,
     transcript_navigation_turns, transcript_row_kinds, transcript_row_splice,
     widened_panel_width_for_file_editor,
@@ -24,6 +24,23 @@ use std::{
     rc::Rc,
 };
 use uuid::Uuid;
+
+#[test]
+fn driver_errors_are_bounded_before_rendering() {
+    let error = (0..20)
+        .map(|line| format!("provider diagnostic line {line}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let compact = compact_driver_error(&error);
+
+    assert_eq!(compact.lines().count(), 7);
+    assert!(compact.ends_with('…'));
+    assert!(!compact.contains("provider diagnostic line 6"));
+
+    let long = compact_driver_error(&"x".repeat(2_000));
+    assert_eq!(long.chars().count(), 800);
+    assert!(long.ends_with('…'));
+}
 
 #[test]
 fn session_navigation_tracks_back_forward_and_new_branches() {

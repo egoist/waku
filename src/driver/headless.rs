@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::fs;
 use std::io::{BufRead, BufReader, Write};
+use std::os::unix::fs::{PermissionsExt as _, symlink};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::Arc;
@@ -13,7 +14,6 @@ use serde_json::Value;
 use uuid::Uuid;
 
 use super::{activity, computer_use as computer_use_runtime};
-use crate::computer_use;
 use crate::driver::{DriverControl, DriverStartOptions};
 use crate::model::{
     ActivityKind, DriverEvent, InteractionMode, ProviderKind, ProviderResumeCursor, RuntimeMode,
@@ -27,84 +27,61 @@ enum CommandMessage {
 pub struct HeadlessDriver {
     commands: Sender<CommandMessage>,
     active_pid: Arc<AtomicU32>,
-    computer_use: Option<OpenCodeComputerUseRuntime>,
+    computer_use: Option<HeadlessComputerUseRuntime>,
 }
 
 #[derive(Clone)]
-struct OpenCodeComputerUseConfig {
-    server_path: PathBuf,
-    process_directory: PathBuf,
-    config_content: String,
+enum HeadlessComputerUseConfig {
+    OpenCode {
+        base: computer_use_runtime::ComputerUseConfig,
+        config_content: String,
+    },
+    Grok {
+        base: computer_use_runtime::ComputerUseConfig,
+        grok_home: PathBuf,
+        auth_path: Option<PathBuf>,
+        rules: String,
+    },
 }
 
-impl OpenCodeComputerUseConfig {
-    fn load() -> anyhow::Result<Self> {
-        let server_path = computer_use::mcp_server_command()?;
-        let repl_path = computer_use::js_repl_server_path()?;
-        let skill_path = computer_use::skill_root_path()?
-            .join("waku-computer-use")
-            .join("SKILL.md");
-        let process_directory = computer_use_runtime::create_process_directory()?;
-        let existing = match std::env::var("OPENCODE_CONFIG_CONTENT") {
-            Ok(content) => Some(content),
-            Err(std::env::VarError::NotPresent) => None,
-            Err(std::env::VarError::NotUnicode(_)) => {
-                let _ = fs::remove_dir_all(&process_directory);
-                return Err(anyhow!("OPENCODE_CONFIG_CONTENT is not valid UTF-8"));
+struct HeadlessComputerUseRuntime {
+    runtime: computer_use_runtime::ComputerUseRuntime,
+    config: HeadlessComputerUseConfig,
+}
+
+impl HeadlessComputerUseRuntime {
+    fn start(provider: ProviderKind, events: Sender<DriverEvent>) -> anyhow::Result<Self> {
+        let runtime = computer_use_runtime::ComputerUseRuntime::start(events)?;
+        let config = match provider {
+            ProviderKind::OpenCode => {
+                let existing = match std::env::var("OPENCODE_CONFIG_CONTENT") {
+                    Ok(content) => Some(content),
+                    Err(std::env::VarError::NotPresent) => None,
+                    Err(std::env::VarError::NotUnicode(_)) => {
+                        return Err(anyhow!("OPENCODE_CONFIG_CONTENT is not valid UTF-8"));
+                    }
+                };
+                let base = runtime.config.clone();
+                let config_content = build_opencode_computer_use_config(
+                    existing.as_deref(),
+                    &base.server_path,
+                    &base.repl_path,
+                    &base.skill_path,
+                    &base.process_directory,
+                )?;
+                HeadlessComputerUseConfig::OpenCode {
+                    base,
+                    config_content,
+                }
             }
+            ProviderKind::Grok => build_grok_computer_use_config(runtime.config.clone())?,
+            _ => return Err(anyhow!("Computer Use is not supported by this driver")),
         };
-        let config_content = match build_opencode_computer_use_config(
-            existing.as_deref(),
-            &server_path,
-            &repl_path,
-            &skill_path,
-            &process_directory,
-        ) {
-            Ok(content) => content,
-            Err(error) => {
-                let _ = fs::remove_dir_all(&process_directory);
-                return Err(error);
-            }
-        };
-        Ok(Self {
-            server_path,
-            process_directory,
-            config_content,
-        })
-    }
-}
-
-struct OpenCodeComputerUseRuntime {
-    config: OpenCodeComputerUseConfig,
-    preview_monitor: Option<computer_use_runtime::ComputerUsePreviewMonitor>,
-}
-
-impl OpenCodeComputerUseRuntime {
-    fn start(events: Sender<DriverEvent>) -> anyhow::Result<Self> {
-        let config = OpenCodeComputerUseConfig::load()?;
-        let preview_monitor = computer_use_runtime::ComputerUsePreviewMonitor::start(
-            config.process_directory.clone(),
-            events,
-        )?;
-        Ok(Self {
-            config,
-            preview_monitor: Some(preview_monitor),
-        })
+        Ok(Self { runtime, config })
     }
 
     fn stop(&self) {
-        computer_use_runtime::stop_registered_processes(
-            &self.config.process_directory,
-            &self.config.server_path,
-        );
-    }
-}
-
-impl Drop for OpenCodeComputerUseRuntime {
-    fn drop(&mut self) {
-        self.stop();
-        drop(self.preview_monitor.take());
-        let _ = fs::remove_dir_all(&self.config.process_directory);
+        self.runtime.stop();
     }
 }
 
@@ -157,17 +134,206 @@ fn build_opencode_computer_use_config(
 
 fn configure_opencode_computer_use_command(
     command: &mut Command,
-    config: Option<&OpenCodeComputerUseConfig>,
+    config: Option<&HeadlessComputerUseConfig>,
 ) {
-    if let Some(config) = config {
+    if let Some(HeadlessComputerUseConfig::OpenCode {
+        base,
+        config_content,
+    }) = config
+    {
         command
-            .env("OPENCODE_CONFIG_CONTENT", &config.config_content)
-            .env("WAKU_COMPUTER_USE_SERVER", &config.server_path)
+            .env("OPENCODE_CONFIG_CONTENT", config_content)
+            .env("WAKU_COMPUTER_USE_SERVER", &base.server_path)
             .env(
                 "WAKU_COMPUTER_USE_PROCESS_DIRECTORY",
-                &config.process_directory,
+                &base.process_directory,
             );
     }
+}
+
+fn build_grok_computer_use_config(
+    base: computer_use_runtime::ComputerUseConfig,
+) -> anyhow::Result<HeadlessComputerUseConfig> {
+    let source_home = match std::env::var_os("GROK_HOME") {
+        Some(home) => PathBuf::from(home),
+        None => dirs::home_dir()
+            .ok_or_else(|| anyhow!("home directory is unavailable"))?
+            .join(".grok"),
+    };
+    let grok_home = base.process_directory.join("grok-home");
+    fs::create_dir(&grok_home).with_context(|| {
+        format!(
+            "could not create isolated Grok home {}",
+            grok_home.display()
+        )
+    })?;
+    fs::set_permissions(&grok_home, fs::Permissions::from_mode(0o700)).with_context(|| {
+        format!(
+            "could not secure isolated Grok home {}",
+            grok_home.display()
+        )
+    })?;
+    if source_home.is_dir() {
+        for entry in fs::read_dir(&source_home)
+            .with_context(|| format!("could not read Grok home {}", source_home.display()))?
+        {
+            let entry = entry?;
+            let name = entry.file_name();
+            if matches!(
+                name.to_str(),
+                Some("config.toml" | "auth.json" | "auth.json.lock")
+            ) {
+                continue;
+            }
+            symlink(entry.path(), grok_home.join(name)).with_context(|| {
+                format!(
+                    "could not mirror Grok runtime resource {}",
+                    entry.path().display()
+                )
+            })?;
+        }
+    }
+    let existing = match fs::read_to_string(source_home.join("config.toml")) {
+        Ok(content) => Some(content),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => {
+            return Err(error).with_context(|| {
+                format!(
+                    "could not read {}",
+                    source_home.join("config.toml").display()
+                )
+            });
+        }
+    };
+    let config_content = build_grok_computer_use_toml(existing.as_deref(), &base)?;
+    fs::write(grok_home.join("config.toml"), config_content).with_context(|| {
+        format!(
+            "could not write isolated Grok config {}",
+            grok_home.join("config.toml").display()
+        )
+    })?;
+    let auth_path = std::env::var_os("GROK_AUTH_PATH")
+        .map(PathBuf::from)
+        .or_else(|| {
+            let path = source_home.join("auth.json");
+            path.is_file().then_some(path)
+        });
+    let rules = fs::read_to_string(&base.skill_path).with_context(|| {
+        format!(
+            "could not read Waku Computer Use skill {}",
+            base.skill_path.display()
+        )
+    })?;
+    Ok(HeadlessComputerUseConfig::Grok {
+        base,
+        grok_home,
+        auth_path,
+        rules,
+    })
+}
+
+fn build_grok_computer_use_toml(
+    existing: Option<&str>,
+    base: &computer_use_runtime::ComputerUseConfig,
+) -> anyhow::Result<String> {
+    let mut root = match existing.filter(|content| !content.trim().is_empty()) {
+        Some(content) => {
+            toml::from_str::<toml::Table>(content).context("Grok config.toml is invalid TOML")?
+        }
+        None => toml::Table::new(),
+    };
+    let mcp_servers = root
+        .entry("mcp_servers")
+        .or_insert_with(|| toml::Value::Table(toml::Table::new()))
+        .as_table_mut()
+        .ok_or_else(|| anyhow!("Grok config.toml mcp_servers must be a table"))?;
+    let mut environment = toml::Table::new();
+    environment.insert(
+        "WAKU_COMPUTER_USE_SERVER".into(),
+        toml::Value::String(base.server_path.display().to_string()),
+    );
+    environment.insert(
+        "WAKU_COMPUTER_USE_PROCESS_DIRECTORY".into(),
+        toml::Value::String(base.process_directory.display().to_string()),
+    );
+    let mut server = toml::Table::new();
+    server.insert(
+        "command".into(),
+        toml::Value::String(base.repl_path.display().to_string()),
+    );
+    server.insert("args".into(), toml::Value::Array(Vec::new()));
+    server.insert("env".into(), toml::Value::Table(environment));
+    server.insert("enabled".into(), toml::Value::Boolean(true));
+    mcp_servers.insert("waku_js_repl".into(), toml::Value::Table(server));
+    toml::to_string(&root).context("could not encode Grok Computer Use configuration")
+}
+
+fn configure_grok_computer_use_command(
+    command: &mut Command,
+    config: Option<&HeadlessComputerUseConfig>,
+) {
+    if let Some(HeadlessComputerUseConfig::Grok {
+        base,
+        grok_home,
+        auth_path,
+        rules,
+    }) = config
+    {
+        command
+            .env("GROK_HOME", grok_home)
+            .env("WAKU_COMPUTER_USE_SERVER", &base.server_path)
+            .env(
+                "WAKU_COMPUTER_USE_PROCESS_DIRECTORY",
+                &base.process_directory,
+            )
+            .arg(format!("--rules={rules}"));
+        if let Some(auth_path) = auth_path {
+            command.env("GROK_AUTH_PATH", auth_path);
+        }
+    }
+}
+
+fn provider_stderr_error(lines: Vec<String>) -> Option<String> {
+    let first_error = lines
+        .iter()
+        .find(|line| line.to_ascii_lowercase().contains("error"))?
+        .trim();
+
+    // CLI parsers can echo a rejected multi-line argument in full. The first
+    // diagnostic already identifies the failure; forwarding the rest would
+    // turn provider stderr into an enormous assistant message.
+    if first_error.to_ascii_lowercase().starts_with("error:") {
+        return Some(truncate_error(first_error, 400));
+    }
+
+    let mut message = String::new();
+    let first_error_index = lines
+        .iter()
+        .position(|line| line.trim() == first_error)
+        .unwrap_or_default();
+    for line in lines.iter().skip(first_error_index).take(6) {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        if !message.is_empty() {
+            message.push('\n');
+        }
+        message.push_str(line);
+        if message.chars().count() >= 800 {
+            break;
+        }
+    }
+    Some(truncate_error(&message, 800))
+}
+
+fn truncate_error(message: &str, max_chars: usize) -> String {
+    if message.chars().count() <= max_chars {
+        return message.to_owned();
+    }
+    let mut truncated = message.chars().take(max_chars).collect::<String>();
+    truncated.push('…');
+    truncated
 }
 
 impl HeadlessDriver {
@@ -226,8 +392,9 @@ impl HeadlessDriver {
         let (commands, command_rx) = unbounded();
         let active_pid = Arc::new(AtomicU32::new(0));
         let worker_pid = active_pid.clone();
-        let computer_use = (provider == ProviderKind::OpenCode && computer_use_enabled)
-            .then(|| OpenCodeComputerUseRuntime::start(events.clone()))
+        let computer_use = (matches!(provider, ProviderKind::OpenCode | ProviderKind::Grok)
+            && computer_use_enabled)
+            .then(|| HeadlessComputerUseRuntime::start(provider, events.clone()))
             .transpose()?;
         let worker_computer_use = computer_use.as_ref().map(|runtime| runtime.config.clone());
 
@@ -376,7 +543,7 @@ fn run_prompt(
     prompt: String,
     events: &Sender<DriverEvent>,
     active_pid: &AtomicU32,
-    open_code_computer_use: Option<&OpenCodeComputerUseConfig>,
+    computer_use: Option<&HeadlessComputerUseConfig>,
 ) -> Option<String> {
     let _ = events.send(DriverEvent::TurnStarted);
     let previous_claude_message = (provider == ProviderKind::Claude)
@@ -448,7 +615,7 @@ fn run_prompt(
             command.arg(&prompt);
         }
         ProviderKind::OpenCode => {
-            configure_opencode_computer_use_command(&mut command, open_code_computer_use);
+            configure_opencode_computer_use_command(&mut command, computer_use);
             command.args(["run", "--format", "json", "--thinking"]);
             if let Some(model) = model {
                 command.args(["--model", model]);
@@ -470,6 +637,7 @@ fn run_prompt(
             command.arg(&prompt);
         }
         ProviderKind::Grok => {
+            configure_grok_computer_use_command(&mut command, computer_use);
             command.args([
                 "--no-auto-update",
                 "-p",
@@ -558,12 +726,9 @@ fn run_prompt(
                 .map_while(Result::ok)
                 .filter(|line| !line.trim().is_empty())
                 .collect::<Vec<_>>();
-            if !lines.is_empty() {
-                let message = lines.join("\n");
-                if message.to_ascii_lowercase().contains("error") {
-                    let _ = stderr_events
-                        .send(DriverEvent::Error(format!("{provider_name}: {message}")));
-                }
+            if let Some(message) = provider_stderr_error(lines) {
+                let _ =
+                    stderr_events.send(DriverEvent::Error(format!("{provider_name}: {message}")));
             }
         })
     });
@@ -1318,6 +1483,17 @@ fn classify_grok_tool(kind: Option<&str>, name: Option<&str>, title: &str) -> Ac
 mod tests {
     use super::*;
 
+    fn computer_use_config() -> computer_use_runtime::ComputerUseConfig {
+        computer_use_runtime::ComputerUseConfig {
+            server_path: PathBuf::from("/tmp/Waku Computer Use"),
+            repl_path: PathBuf::from("/Applications/Waku.app/Contents/Resources/waku_js_repl"),
+            skill_path: PathBuf::from(
+                "/Applications/Waku.app/Contents/Resources/skills/waku-computer-use/SKILL.md",
+            ),
+            process_directory: PathBuf::from("/tmp/waku-computer-use/session"),
+        }
+    }
+
     #[test]
     fn opencode_computer_use_config_preserves_existing_inline_config() {
         let content = build_opencode_computer_use_config(
@@ -1381,10 +1557,10 @@ mod tests {
 
     #[test]
     fn opencode_computer_use_command_is_process_scoped() {
-        let config = OpenCodeComputerUseConfig {
-            server_path: PathBuf::from("/tmp/Waku Computer Use"),
-            process_directory: PathBuf::from("/tmp/waku-computer-use/session"),
-            config_content: r#"{"mcp":{"waku_js_repl":{}}}"#.into(),
+        let config_content = r#"{"mcp":{"waku_js_repl":{}}}"#.to_owned();
+        let config = HeadlessComputerUseConfig::OpenCode {
+            base: computer_use_config(),
+            config_content: config_content.clone(),
         };
         let mut command = Command::new("opencode");
 
@@ -1401,7 +1577,7 @@ mod tests {
             .collect::<HashMap<_, _>>();
         assert_eq!(
             environment.get("OPENCODE_CONFIG_CONTENT"),
-            Some(&Some(config.config_content.clone()))
+            Some(&Some(config_content))
         );
         assert_eq!(
             environment.get("WAKU_COMPUTER_USE_SERVER"),
@@ -1410,6 +1586,111 @@ mod tests {
         assert_eq!(
             environment.get("WAKU_COMPUTER_USE_PROCESS_DIRECTORY"),
             Some(&Some("/tmp/waku-computer-use/session".into()))
+        );
+    }
+
+    #[test]
+    fn grok_computer_use_config_preserves_existing_config_and_replaces_waku_server() {
+        let content = build_grok_computer_use_toml(
+            Some(
+                r#"
+                    default_model = "grok-code-fast"
+
+                    [mcp_servers.existing]
+                    command = "existing-server"
+
+                    [mcp_servers.waku_js_repl]
+                    command = "stale-server"
+                "#,
+            ),
+            &computer_use_config(),
+        )
+        .unwrap();
+        let value: toml::Value = toml::from_str(&content).unwrap();
+
+        assert_eq!(
+            value.get("default_model").and_then(toml::Value::as_str),
+            Some("grok-code-fast")
+        );
+        assert_eq!(
+            value
+                .get("mcp_servers")
+                .and_then(|mcp| mcp.get("existing"))
+                .and_then(|server| server.get("command"))
+                .and_then(toml::Value::as_str),
+            Some("existing-server")
+        );
+        let server = value
+            .get("mcp_servers")
+            .and_then(|mcp| mcp.get("waku_js_repl"))
+            .unwrap();
+        assert_eq!(
+            server.get("command").and_then(toml::Value::as_str),
+            Some("/Applications/Waku.app/Contents/Resources/waku_js_repl")
+        );
+        assert_eq!(
+            server
+                .get("env")
+                .and_then(|env| env.get("WAKU_COMPUTER_USE_SERVER"))
+                .and_then(toml::Value::as_str),
+            Some("/tmp/Waku Computer Use")
+        );
+    }
+
+    #[test]
+    fn grok_computer_use_command_is_process_scoped_and_loads_rules() {
+        let config = HeadlessComputerUseConfig::Grok {
+            base: computer_use_config(),
+            grok_home: PathBuf::from("/tmp/waku-computer-use/session/grok-home"),
+            auth_path: Some(PathBuf::from("/Users/test/.grok/auth.json")),
+            rules: "Waku Computer Use rules".into(),
+        };
+        let mut command = Command::new("grok");
+
+        configure_grok_computer_use_command(&mut command, Some(&config));
+
+        let arguments = command
+            .get_args()
+            .map(|argument| argument.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(arguments, ["--rules=Waku Computer Use rules"]);
+        let environment = command
+            .get_envs()
+            .map(|(name, value)| {
+                (
+                    name.to_string_lossy().into_owned(),
+                    value.map(|value| value.to_string_lossy().into_owned()),
+                )
+            })
+            .collect::<HashMap<_, _>>();
+        assert_eq!(
+            environment.get("GROK_HOME"),
+            Some(&Some("/tmp/waku-computer-use/session/grok-home".into()))
+        );
+        assert_eq!(
+            environment.get("GROK_AUTH_PATH"),
+            Some(&Some("/Users/test/.grok/auth.json".into()))
+        );
+    }
+
+    #[test]
+    fn provider_stderr_keeps_cli_argument_errors_compact() {
+        let message = provider_stderr_error(vec![
+            "error: unexpected argument '---".into(),
+            "name: waku-computer-use".into(),
+            "description: a very long bundled skill".into(),
+            "---' found".into(),
+            "tip: to pass it as a value, use '-- ---'".into(),
+        ]);
+
+        assert_eq!(message.as_deref(), Some("error: unexpected argument '---"));
+    }
+
+    #[test]
+    fn provider_stderr_ignores_non_error_diagnostics() {
+        assert_eq!(
+            provider_stderr_error(vec!["warning: optional integration unavailable".into()]),
+            None
         );
     }
 
@@ -1954,6 +2235,40 @@ mod tests {
             receiver.recv().unwrap(),
             DriverEvent::TextDelta(text) if text == "After"
         ));
+    }
+
+    #[test]
+    fn grok_mcp_use_tool_prefers_the_nested_js_title() {
+        let (events, receiver) = unbounded();
+        let mut parser = StreamParser::default();
+        parser.parse_grok(
+            serde_json::json!({
+                "type": "tool_call",
+                "toolCallId": "tool-1",
+                "title": "use_tool",
+                "kind": "use_tool",
+                "toolName": "use_tool",
+                "status": "pending",
+                "rawInput": {
+                    "tool_name": "waku_js_repl__js",
+                    "tool_input": {
+                        "code": "nodeRepl.write(\"ok\");",
+                        "title": "Verify Grok bridge"
+                    }
+                }
+            }),
+            &events,
+        );
+
+        let DriverEvent::RichActivity(item) = receiver.recv().unwrap() else {
+            panic!("expected a rich Grok MCP activity");
+        };
+        assert_eq!(item.title, "Verify Grok bridge");
+        assert!(
+            item.arguments
+                .as_deref()
+                .is_some_and(|arguments| arguments.contains("nodeRepl.write"))
+        );
     }
 
     #[test]

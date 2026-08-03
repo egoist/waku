@@ -107,11 +107,12 @@ if [ ! -d "$cached_helper_bundle" ]; then
 fi
 
 rm -rf "$bundle"
-mkdir -p "$contents/MacOS" "$contents/Resources/skills/waku-computer-use" "$contents/Helpers"
+mkdir -p "$contents/MacOS" "$contents/Resources/computer-use" "$contents/Resources/skills/waku-computer-use" "$contents/Helpers"
 cp "$cargo_target_dir/$profile/waku" "$contents/MacOS/$app_name"
 cp "$cargo_target_dir/$profile/waku_js_repl" "$repl_executable"
 chmod 755 "$repl_executable"
 cp resources/Info.plist "$contents/Info.plist"
+cp resources/computer-use/pi-extension.ts "$contents/Resources/computer-use/pi-extension.ts"
 cp resources/computer-use/SKILL.md "$contents/Resources/skills/waku-computer-use/SKILL.md"
 plutil -replace CFBundleDisplayName -string "$app_name" "$contents/Info.plist"
 plutil -replace CFBundleExecutable -string "$app_name" "$contents/Info.plist"

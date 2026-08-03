@@ -16,6 +16,59 @@ use uuid::Uuid;
 use crate::computer_use;
 use crate::model::DriverEvent;
 
+#[derive(Clone)]
+pub(super) struct ComputerUseConfig {
+    pub(super) server_path: PathBuf,
+    pub(super) repl_path: PathBuf,
+    pub(super) skill_path: PathBuf,
+    pub(super) process_directory: PathBuf,
+}
+
+pub(super) struct ComputerUseRuntime {
+    pub(super) config: ComputerUseConfig,
+    preview_monitor: Option<ComputerUsePreviewMonitor>,
+}
+
+impl ComputerUseRuntime {
+    pub(super) fn start(events: Sender<DriverEvent>) -> anyhow::Result<Self> {
+        let server_path = computer_use::mcp_server_command()?;
+        let repl_path = computer_use::js_repl_server_path()?;
+        let skill_path = computer_use::skill_root_path()?
+            .join("waku-computer-use")
+            .join("SKILL.md");
+        let process_directory = create_process_directory()?;
+        let preview_monitor =
+            match ComputerUsePreviewMonitor::start(process_directory.clone(), events) {
+                Ok(monitor) => monitor,
+                Err(error) => {
+                    let _ = fs::remove_dir_all(&process_directory);
+                    return Err(error);
+                }
+            };
+        Ok(Self {
+            config: ComputerUseConfig {
+                server_path,
+                repl_path,
+                skill_path,
+                process_directory,
+            },
+            preview_monitor: Some(preview_monitor),
+        })
+    }
+
+    pub(super) fn stop(&self) {
+        stop_registered_processes(&self.config.process_directory, &self.config.server_path);
+    }
+}
+
+impl Drop for ComputerUseRuntime {
+    fn drop(&mut self) {
+        self.stop();
+        drop(self.preview_monitor.take());
+        let _ = fs::remove_dir_all(&self.config.process_directory);
+    }
+}
+
 pub(super) struct ComputerUsePreviewMonitor {
     running: Arc<AtomicBool>,
 }

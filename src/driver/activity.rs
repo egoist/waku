@@ -48,12 +48,45 @@ pub(super) fn tool_activity(
 }
 
 pub(super) fn input_title(value: Option<&Value>) -> Option<String> {
+    let value = value?;
     value
-        .and_then(|value| value.get("title"))
+        .get("title")
+        .or_else(|| value.pointer("/arguments/title"))
+        .or_else(|| value.pointer("/input/title"))
+        .or_else(|| value.pointer("/tool_input/title"))
         .and_then(Value::as_str)
         .map(str::trim)
         .filter(|title| !title.is_empty())
         .map(str::to_owned)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn title_supports_direct_and_provider_wrapped_arguments() {
+        assert_eq!(
+            input_title(Some(&serde_json::json!({"title": "Inspect app"}))).as_deref(),
+            Some("Inspect app")
+        );
+        assert_eq!(
+            input_title(Some(&serde_json::json!({
+                "tool_name": "waku_js_repl__js",
+                "arguments": {"code": "1", "title": "Inspect wrapped app"}
+            })))
+            .as_deref(),
+            Some("Inspect wrapped app")
+        );
+        assert_eq!(
+            input_title(Some(&serde_json::json!({
+                "tool_name": "waku_js_repl__js",
+                "tool_input": {"code": "1", "title": "Verify Grok bridge"}
+            })))
+            .as_deref(),
+            Some("Verify Grok bridge")
+        );
+    }
 }
 
 pub(super) fn format_json(value: &Value) -> Option<String> {

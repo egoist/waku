@@ -291,6 +291,24 @@ pub fn js_repl_server_path() -> anyhow::Result<PathBuf> {
     Ok(path)
 }
 
+pub fn pi_extension_path() -> anyhow::Result<PathBuf> {
+    let executable = std::env::current_exe().context("Waku executable path is unavailable")?;
+    let macos = executable
+        .parent()
+        .ok_or_else(|| anyhow!("Waku executable has no parent directory"))?;
+    let contents = macos
+        .parent()
+        .ok_or_else(|| anyhow!("Waku app bundle is malformed"))?;
+    let path = contents
+        .join("Resources")
+        .join("computer-use")
+        .join("pi-extension.ts");
+    if !path.is_file() {
+        bail!("Waku Pi Computer Use extension is missing from this Waku build")
+    }
+    Ok(path)
+}
+
 /// Install the bundled helper as an independent, stable runtime service.
 ///
 /// Screen Recording differs from Accessibility on macOS: it follows the

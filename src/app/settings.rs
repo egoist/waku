@@ -428,7 +428,9 @@ impl Waku {
                                     .text_size(px(12.0))
                                     .line_height(px(18.0))
                                     .text_color(theme.text_secondary)
-                                    .child("Computer Use is available with Codex and OpenCode."),
+                                    .child(
+                                        "Computer Use is available with Codex, OpenCode, Grok, and Pi.",
+                                    ),
                             ),
                     )
                     .child(

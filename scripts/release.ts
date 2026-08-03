@@ -170,6 +170,12 @@ const bundledComputerUseSkill = join(
   "waku-computer-use",
   "SKILL.md",
 );
+const bundledPiComputerUseExtension = join(
+  contentsDirectory,
+  "Resources",
+  "computer-use",
+  "pi-extension.ts",
+);
 const bundledComputerUseHelper = join(
   contentsDirectory,
   "Helpers",
@@ -277,6 +283,7 @@ try {
     join(contentsDirectory, "MacOS", executableName),
     bundledJsReplExecutable,
     bundledComputerUseSkill,
+    bundledPiComputerUseExtension,
     bundledComputerUseHelper,
   ]) {
     await access(artifact);
@@ -349,6 +356,12 @@ try {
       "skills",
       "waku-computer-use",
       "SKILL.md",
+    ),
+    join(
+      mountedContents,
+      "Resources",
+      "computer-use",
+      "pi-extension.ts",
     ),
     mountedComputerUseHelper,
   ]) {

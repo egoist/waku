@@ -343,6 +343,7 @@ impl Waku {
                 self.capture_latest_turn_checkpoint_for(session_id);
             }
             DriverEvent::Error(error) => {
+                let error = compact_driver_error(&error);
                 runtime.last_driver_error = Some(error.clone());
                 if self.state.selected_session == Some(session_id) {
                     self.toast = Some(error.clone());
@@ -452,6 +453,27 @@ pub(super) fn stream_delta_text(event: &DriverEvent, kind: StreamDeltaKind) -> O
         | (StreamDeltaKind::Reasoning, DriverEvent::ReasoningDelta(text)) => Some(text),
         _ => None,
     }
+}
+
+pub(super) fn compact_driver_error(error: &str) -> String {
+    const MAX_LINES: usize = 6;
+    const MAX_CHARS: usize = 800;
+
+    let lines = error.lines().collect::<Vec<_>>();
+    let mut compact = lines
+        .iter()
+        .take(MAX_LINES)
+        .copied()
+        .collect::<Vec<_>>()
+        .join("\n");
+    if lines.len() > MAX_LINES {
+        compact.push_str("\n…");
+    }
+    if compact.chars().count() > MAX_CHARS {
+        compact = compact.chars().take(MAX_CHARS - 1).collect();
+        compact.push('…');
+    }
+    compact
 }
 
 pub(super) fn stream_frame_budget(backlog: usize) -> usize {
