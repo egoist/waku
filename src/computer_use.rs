@@ -116,7 +116,6 @@ fn plural(count: usize, noun: &str) -> String {
 pub enum ComputerUsePhase {
     AwaitingApproval,
     Running,
-    Completed,
     Failed,
 }
 
@@ -151,7 +150,7 @@ pub fn decode_preview_update(data: &[u8]) -> anyhow::Result<ComputerUseState> {
     }
     Ok(ComputerUseState {
         target: Some(update.target),
-        phase: ComputerUsePhase::Completed,
+        phase: ComputerUsePhase::Running,
         visible: true,
         screenshot: Some(Arc::new(gpui::Image::from_bytes(
             gpui::ImageFormat::Png,
@@ -433,7 +432,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(state.target.unwrap().window_id, 42);
-        assert_eq!(state.phase, ComputerUsePhase::Completed);
+        assert_eq!(state.phase, ComputerUsePhase::Running);
         assert!(state.visible);
         assert!(state.screenshot.is_some());
     }

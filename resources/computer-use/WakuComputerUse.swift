@@ -1,6 +1,8 @@
 import AppKit
 import CoreGraphics
+import CoreImage
 import CoreMedia
+import CoreVideo
 import Darwin
 import Foundation
 import ApplicationServices
@@ -11,6 +13,9 @@ import Security
 // code-signing identity while the surrounding debug app is rebuilt.
 private let maximumCaptureWidth = 1440
 private let maximumCaptureHeight = 1200
+private let maximumPreviewWidth = 608
+private let maximumPreviewHeight = 480
+private let previewFramesPerSecond: Int32 = 15
 private let helperDisplayName =
     (Bundle.main.object(forInfoDictionaryKey: "CFBundleDisplayName") as? String)
     ?? "Waku Computer Use"
@@ -787,7 +792,8 @@ struct WakuComputerUse {
             try await CaptureSessions.shared.start(
                 for: window,
                 filter: filter,
-                sourceRect: sourceRect
+                sourceRect: sourceRect,
+                target: current
             )
             if !actions.isEmpty {
                 try perform(actions, in: window, coordinateSpace: requested)
@@ -2226,7 +2232,8 @@ private func captureAppState(
     try await CaptureSessions.shared.start(
         for: resolved.window,
         filter: filter,
-        sourceRect: sourceRect
+        sourceRect: sourceRect,
+        target: resolved.target
     )
     StatusAgentProcess.shared.track(
         bundleID: resolved.target.bundleId,
@@ -2796,20 +2803,24 @@ private actor CaptureSessions {
     func start(
         for window: SCWindow,
         filter: SCContentFilter,
-        sourceRect: CGRect
+        sourceRect: CGRect,
+        target: Target
     ) async throws {
-        guard sessions[window.windowID] == nil else {
+        if let session = sessions[window.windowID], session.sourceRect == sourceRect {
+            session.update(target: target)
             return
         }
-        let staleSessions = sessions.filter { $0.key != window.windowID }.map(\.value)
-        sessions = sessions.filter { $0.key == window.windowID }
+
+        let staleSessions = sessions.values
+        sessions.removeAll()
         for session in staleSessions {
             await session.stop()
         }
         let session = try WindowCaptureSession(
             window: window,
             filter: filter,
-            sourceRect: sourceRect
+            sourceRect: sourceRect,
+            target: target
         )
         do {
             try await session.start()
@@ -2830,36 +2841,118 @@ private actor CaptureSessions {
 }
 
 private final class WindowCaptureOutput: NSObject, SCStreamOutput, SCStreamDelegate {
+    private let context = CIContext(options: [.cacheIntermediates: false])
+    private let targetLock = NSLock()
+    private var target: Target
+
+    init(target: Target) {
+        self.target = target
+    }
+
+    func update(target: Target) {
+        targetLock.lock()
+        self.target = target
+        targetLock.unlock()
+    }
+
+    private func currentTarget() -> Target {
+        targetLock.lock()
+        defer { targetLock.unlock() }
+        return target
+    }
+
     func stream(
         _ stream: SCStream,
         didOutputSampleBuffer sampleBuffer: CMSampleBuffer,
         of outputType: SCStreamOutputType
-    ) {}
+    ) {
+        guard outputType == .screen,
+              sampleBuffer.isValid,
+              let attachments = CMSampleBufferGetSampleAttachmentsArray(
+                  sampleBuffer,
+                  createIfNecessary: false
+              ) as? [[SCStreamFrameInfo: Any]],
+              let attachment = attachments.first,
+              let statusRawValue = attachment[.status] as? Int,
+              SCFrameStatus(rawValue: statusRawValue) == .complete,
+              let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer)
+        else {
+            return
+        }
+
+        autoreleasepool {
+            let image = CIImage(cvImageBuffer: pixelBuffer)
+            let bounds = CGRect(
+                x: 0,
+                y: 0,
+                width: CVPixelBufferGetWidth(pixelBuffer),
+                height: CVPixelBufferGetHeight(pixelBuffer)
+            )
+            guard let frame = context.createCGImage(image, from: bounds) else {
+                return
+            }
+            let target = currentTarget()
+            let cursor = VirtualCursorStore.shared.position(
+                for: target.windowId,
+                size: CGSize(width: CGFloat(target.width), height: CGFloat(target.height))
+            )
+            let preview = drawVirtualCursor(
+                on: frame,
+                cursor: cursor,
+                coordinateSpace: target
+            )
+            let previewTarget = Target(
+                windowId: target.windowId,
+                bundleId: target.bundleId,
+                teamId: target.teamId,
+                appName: target.appName,
+                windowTitle: target.windowTitle,
+                width: UInt32(preview.width),
+                height: UInt32(preview.height)
+            )
+            ComputerUsePreviewStore.publish(target: previewTarget, image: preview)
+        }
+    }
 
     func stream(_ stream: SCStream, didStopWithError error: Error) {}
 }
 
 private final class WindowCaptureSession {
-    private let output = WindowCaptureOutput()
+    let sourceRect: CGRect
+    private let output: WindowCaptureOutput
     private let outputQueue: DispatchQueue
     private let stream: SCStream
     private var capturing = false
 
-    init(window: SCWindow, filter: SCContentFilter, sourceRect: CGRect) throws {
+    init(
+        window: SCWindow,
+        filter: SCContentFilter,
+        sourceRect: CGRect,
+        target: Target
+    ) throws {
+        self.sourceRect = sourceRect
+        output = WindowCaptureOutput(target: target)
         let configuration = SCStreamConfiguration()
-        // The stream exists to let macOS own and display the window-sharing
-        // state. Actual tool screenshots still use SCScreenshotManager.
-        let size = captureSize(for: sourceRect)
+        let size = previewCaptureSize(for: sourceRect)
         configuration.sourceRect = sourceRect
         configuration.width = size.width
         configuration.height = size.height
+        configuration.scalesToFit = true
+        configuration.pixelFormat = kCVPixelFormatType_32BGRA
         configuration.queueDepth = 1
-        configuration.minimumFrameInterval = CMTime(value: 1, timescale: 1)
+        configuration.minimumFrameInterval = CMTime(
+            value: 1,
+            timescale: previewFramesPerSecond
+        )
         configuration.showsCursor = false
         configuration.capturesAudio = false
         outputQueue = DispatchQueue(label: "codes.waku.computer-use.capture.\(window.windowID)")
         stream = SCStream(filter: filter, configuration: configuration, delegate: output)
         try stream.addStreamOutput(output, type: .screen, sampleHandlerQueue: outputQueue)
+    }
+
+    func update(target: Target) {
+        output.update(target: target)
     }
 
     func start() async throws {
@@ -2882,10 +2975,38 @@ private struct Capture {
     let height: Int
 }
 
+private extension ComputerUsePreviewStore {
+    static func publish(target: Target, image: CGImage) {
+        let representation = NSBitmapImageRep(cgImage: image)
+        guard let png = representation.representation(using: .png, properties: [:]) else {
+            return
+        }
+        publish(
+            target: target,
+            capture: Capture(
+                dataUrl: "data:image/png;base64," + png.base64EncodedString(),
+                width: image.width,
+                height: image.height
+            )
+        )
+    }
+}
+
 private func captureSize(for frame: CGRect) -> (width: Int, height: Int) {
     let scale = min(
         1,
         min(Double(maximumCaptureWidth) / max(frame.width, 1), Double(maximumCaptureHeight) / max(frame.height, 1))
+    )
+    return (
+        max(1, Int((frame.width * scale).rounded())),
+        max(1, Int((frame.height * scale).rounded()))
+    )
+}
+
+private func previewCaptureSize(for frame: CGRect) -> (width: Int, height: Int) {
+    let scale = min(
+        1,
+        min(Double(maximumPreviewWidth) / max(frame.width, 1), Double(maximumPreviewHeight) / max(frame.height, 1))
     )
     return (
         max(1, Int((frame.width * scale).rounded())),

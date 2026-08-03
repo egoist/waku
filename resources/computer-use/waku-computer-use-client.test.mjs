@@ -79,6 +79,24 @@ test("get_app_state preserves MCP image data as a data URL", async () => {
   });
 });
 
+test("picture-in-picture consumes live ScreenCaptureKit frames", async () => {
+  const source = await readFile(new URL("./WakuComputerUse.swift", import.meta.url), "utf8");
+  const outputStart = source.indexOf("private final class WindowCaptureOutput");
+  const outputEnd = source.indexOf("private final class WindowCaptureSession", outputStart);
+  const sessionEnd = source.indexOf("private struct Capture", outputEnd);
+
+  assert.ok(outputStart >= 0 && outputEnd > outputStart, "capture output is missing");
+  assert.ok(sessionEnd > outputEnd, "capture session is missing");
+
+  const output = source.slice(outputStart, outputEnd);
+  const session = source.slice(outputEnd, sessionEnd);
+  assert.match(output, /didOutputSampleBuffer/);
+  assert.match(output, /CMSampleBufferGetImageBuffer/);
+  assert.match(output, /ComputerUsePreviewStore\.publish\(target: previewTarget, image: preview\)/);
+  assert.match(session, /minimumFrameInterval = CMTime\([\s\S]*timescale: previewFramesPerSecond/);
+  assert.match(session, /configuration\.scalesToFit = true/);
+});
+
 test("background drags use guarded Codex routing without foreground or global delivery", async () => {
   const source = await readFile(new URL("./WakuComputerUse.swift", import.meta.url), "utf8");
   const postStart = source.indexOf("private func post(_ event: CGEvent, to processID: pid_t)");
