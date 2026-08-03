@@ -1,132 +1,30 @@
+use std::collections::HashMap;
 use std::fs;
 use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::thread;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, anyhow, bail};
 use base64::Engine as _;
 use parking_lot::Mutex;
 use rquickjs::context::EvalOptions;
-use rquickjs::{Context, Ctx, Exception, Function, Promise, Runtime, Value};
+use rquickjs::{Context, Ctx, Exception, Function, Persistent, Promise, Runtime, Value};
 use serde_json::{Map, Value as JsonValue, json};
 
 const MCP_PROTOCOL_VERSION: &str = "2025-06-18";
 const DEFAULT_EXECUTION_TIMEOUT_MS: u64 = 30_000;
 const MAX_REQUEST_BYTES: usize = 16 * 1024 * 1024;
 
-const SERVER_INSTRUCTIONS: &str = "Use `js` to run JavaScript in the persistent QuickJS kernel. When a skill or prompt says to use `node_repl`, call this server's `js` execution tool. Calls default to a 30000 ms (30 seconds) timeout when `timeout_ms` is omitted. Waku Computer Use is initialized lazily with `await setupComputerUseRuntime({ globals: globalThis })`; that installs `sky` without importing a module. The runtime also exposes `nodeRepl.cwd`, `nodeRepl.homeDir`, `nodeRepl.tmpDir`, `nodeRepl.requestMeta`, `nodeRepl.setResponseMeta(...)`, `nodeRepl.write(...)`, and `await nodeRepl.emitImage(...)`. Top-level bindings persist across `js` calls until `js_reset`; do not redeclare existing `const` or `let` names. Reuse existing bindings, use top-level `var` for reusable state that may be assigned again, or choose a fresh descriptive name.";
+// Mirrors Codex node_repl's server instructions, substituting the actual QuickJS backend and
+// omitting its unsupported Node module-directory guidance.
+const SERVER_INSTRUCTIONS: &str = "Use `js` to run JavaScript in the persistent QuickJS kernel. When a skill or prompt says to use `waku_js_repl`, call this server's `js` execution tool. Calls default to a 30000 ms (30 seconds) timeout when `timeout_ms` is omitted. The runtime exposes `nodeRepl.cwd`, `nodeRepl.homeDir`, `nodeRepl.tmpDir`, `nodeRepl.requestMeta`, `nodeRepl.setResponseMeta(...)`, and `await nodeRepl.emitImage(...)`. Top-level bindings persist across `js` calls until `js_reset`; do not redeclare existing `const` or `let` names. Reuse existing bindings, use top-level `var` for reusable state that may be assigned again, or choose a fresh descriptive name.";
 
-const KERNEL_BOOTSTRAP: &str = r#"
-(() => {
-  const format = (value, seen = new Set()) => {
-    if (typeof value === "string") return value;
-    if (typeof value === "bigint") return `${value}n`;
-    if (typeof value === "undefined") return "undefined";
-    if (typeof value === "function") return `[Function${value.name ? `: ${value.name}` : ""}]`;
-    if (value === null || typeof value !== "object") return String(value);
-    if (seen.has(value)) return "[Circular]";
-    seen.add(value);
-    try {
-      if (value instanceof Error) return value.stack || `${value.name}: ${value.message}`;
-      if (Array.isArray(value)) return `[ ${value.map((item) => format(item, seen)).join(", ")} ]`;
-      const entries = Object.entries(value).map(([key, item]) => `${key}: ${format(item, seen)}`);
-      return `{ ${entries.join(", ")} }`;
-    } finally {
-      seen.delete(value);
-    }
-  };
-
-  const nativeSkyCall = globalThis.__wakuSkyCall;
-  const nativeWrite = globalThis.__wakuWrite;
-  const nativeEmitImage = globalThis.__wakuEmitImage;
-  const nativeSetResponseMeta = globalThis.__wakuSetResponseMeta;
-  const cwd = globalThis.__wakuCwd;
-  const homeDir = globalThis.__wakuHomeDir;
-  const tmpDir = globalThis.__wakuTmpDir;
-  delete globalThis.__wakuSkyCall;
-  delete globalThis.__wakuWrite;
-  delete globalThis.__wakuEmitImage;
-  delete globalThis.__wakuSetResponseMeta;
-  delete globalThis.__wakuCwd;
-  delete globalThis.__wakuHomeDir;
-  delete globalThis.__wakuTmpDir;
-
-  const write = (value, newline = false) => nativeWrite(format(value), newline);
-  globalThis.console = Object.freeze({
-    log: (...values) => nativeWrite(values.map((value) => format(value)).join(" "), true),
-    info: (...values) => nativeWrite(values.map((value) => format(value)).join(" "), true),
-    warn: (...values) => nativeWrite(values.map((value) => format(value)).join(" "), true),
-    error: (...values) => nativeWrite(values.map((value) => format(value)).join(" "), true),
-  });
-
-  const chromeComputerUseMetaKey = "codex/computerUseChrome";
-  const macChromeAppPathPattern = /(?:^|[\\/])Google Chrome\.app(?:[\\/]|$)/i;
-  const markChromeComputerUse = (arguments_) => {
-    if (typeof arguments_ !== "object" || arguments_ === null) return;
-    const descriptor = Object.getOwnPropertyDescriptor(arguments_, "app");
-    if (!descriptor || !("value" in descriptor) || typeof descriptor.value !== "string") return;
-    const app = descriptor.value.trim();
-    if (
-      ["chrome", "google chrome", "com.google.chrome"].includes(app.toLowerCase()) ||
-      macChromeAppPathPattern.test(app)
-    ) {
-      nativeSetResponseMeta(JSON.stringify({ [chromeComputerUseMetaKey]: true }));
-    }
-  };
-  const nativeCall = (name, arguments_ = {}) => {
-    if (name !== "list_apps") markChromeComputerUse(arguments_);
-    const envelope = JSON.parse(nativeSkyCall(name, JSON.stringify(arguments_ ?? {})));
-    if (!envelope.ok) throw new Error(envelope.error || `Computer Use ${name} failed`);
-    return envelope.value;
-  };
-  const computerUseRuntimeKey = Symbol.for("openai.computer-use.runtime");
-  globalThis.setupComputerUseRuntime = async ({ globals = globalThis } = {}) => {
-    let sky = globalThis[computerUseRuntimeKey];
-    if (!sky) {
-      sky = Object.freeze({
-        target: "mac",
-        list_apps: async () => nativeCall("list_apps"),
-        get_app_state: async (arguments_ = {}) => nativeCall("get_app_state", arguments_),
-        click: async (arguments_) => { nativeCall("click", arguments_); },
-        drag: async (arguments_) => { nativeCall("drag", arguments_); },
-        perform_secondary_action: async (arguments_) => { nativeCall("perform_secondary_action", arguments_); },
-        set_value: async (arguments_) => { nativeCall("set_value", arguments_); },
-        select_text: async (arguments_) => { nativeCall("select_text", arguments_); },
-        scroll: async (arguments_) => { nativeCall("scroll", arguments_); },
-        press_key: async (arguments_) => { nativeCall("press_key", arguments_); },
-        type_text: async (arguments_) => { nativeCall("type_text", arguments_); },
-      });
-      Object.defineProperty(globalThis, computerUseRuntimeKey, { value: sky });
-    }
-    Reflect.set(globalThis, "sky", sky);
-    Reflect.set(globals, "sky", sky);
-    return sky;
-  };
-
-  globalThis.nodeRepl = {
-    cwd,
-    homeDir,
-    tmpDir,
-    requestMeta: {},
-    write: (value) => write(value, false),
-    setResponseMeta: (meta) => {
-      const envelope = JSON.parse(nativeSetResponseMeta(JSON.stringify(meta ?? {})));
-      if (!envelope.ok) throw new TypeError(envelope.error || "response metadata must be an object");
-    },
-    emitImage: async (imageLike) => {
-      const candidate = typeof imageLike === "string" ? imageLike : imageLike?.url;
-      if (typeof candidate !== "string") {
-        throw new TypeError("emitImage expects a data URL, file URL, or { url } object");
-      }
-      const envelope = JSON.parse(nativeEmitImage(candidate));
-      if (!envelope.ok) throw new Error(envelope.error || "could not emit image");
-    },
-  };
-})();
-"#;
+const KERNEL_BOOTSTRAP: &str = include_str!("js_repl_bootstrap.js");
+const JS_TOOL_DESCRIPTION: &str = "Run JavaScript in a persistent QuickJS kernel with top-level await. This is the JavaScript execution tool for the `waku_js_repl` MCP server; use it whenever instructions say to use `waku_js_repl`, the Waku JavaScript REPL MCP, or run Waku JavaScript REPL code. If `timeout_ms` is omitted, execution times out after 30000 ms (30 seconds); pass a larger `timeout_ms` for slow Computer Use automation or other long-running operations. Use `nodeRepl.cwd`, `nodeRepl.homeDir`, and `nodeRepl.tmpDir` to inspect host paths. Use `nodeRepl.requestMeta` to inspect the current MCP request `_meta` object during a tool call. Use `nodeRepl.setResponseMeta(meta)` to attach top-level MCP result `_meta`; repeated calls shallow-merge object keys for the current tool call. Use `nodeRepl.write(value)` to add output without a newline. Strings are unchanged; other values use console-style formatting, including BigInt and circular objects. Prefer it over `console.log(...)` for final output; `console.log(...)` remains useful for debugging or multiple values. Use `await nodeRepl.emitImage(imageLike)` to return images; each call adds one image to the outer tool result, so call it multiple times to emit multiple images. Supported image inputs are a base64 data URL, a file URL, or an object with a `url` property. Saved references to `nodeRepl.write(...)` and `nodeRepl.emitImage(...)` stay reusable across calls. Scheduled callbacks only run while a JavaScript execution call is active; overdue timers resume at the start of the next call. Top-level bindings persist across calls until `js_reset`. If a call throws, prior bindings remain available and bindings that finished initializing before the throw often remain reusable. For reusable names that may be assigned again later, prefer top-level `var name = ...`; `var` can be redeclared across calls. If you hit `SyntaxError: Identifier 'x' has already been declared`, reuse the existing binding if possible, reassign it only if it was declared with `let` or `var`, or pick a new name instead of resetting immediately; a previous `const x` cannot be changed into `var x`. Use a short `{ ... }` block only for temporary scratch names, and do not wrap an entire call in block scope if you want those names reusable later. Module imports are not supported. Prefer `nodeRepl.write(...)` for text or formatted values and `nodeRepl.emitImage(...)` for images.";
 
 #[derive(Default)]
 struct CallOutput {
@@ -141,9 +39,88 @@ struct EmittedImage {
     mime_type: String,
 }
 
+struct TimerEntry {
+    due: Instant,
+    delay: Duration,
+    repeat: bool,
+}
+
+struct TimerQueue {
+    next_id: u32,
+    entries: HashMap<u32, TimerEntry>,
+}
+
+impl TimerQueue {
+    fn new() -> Self {
+        Self {
+            next_id: 1,
+            entries: HashMap::new(),
+        }
+    }
+
+    fn schedule(&mut self, delay: Duration, repeat: bool) -> u32 {
+        let id = self.next_available_id();
+        self.entries.insert(
+            id,
+            TimerEntry {
+                due: Instant::now() + delay,
+                delay,
+                repeat,
+            },
+        );
+        id
+    }
+
+    fn next_available_id(&mut self) -> u32 {
+        loop {
+            let id = self.next_id;
+            self.next_id = self.next_id.checked_add(1).unwrap_or(1);
+            if id != 0 && !self.entries.contains_key(&id) {
+                return id;
+            }
+        }
+    }
+
+    fn clear(&mut self, id: u32) {
+        self.entries.remove(&id);
+    }
+
+    fn refresh(&mut self, id: u32) {
+        if let Some(timer) = self.entries.get_mut(&id) {
+            timer.due = Instant::now() + timer.delay;
+        }
+    }
+
+    fn take_due(&mut self, now: Instant) -> Vec<u32> {
+        let mut due = self
+            .entries
+            .iter()
+            .filter_map(|(&id, timer)| (timer.due <= now).then_some((timer.due, id)))
+            .collect::<Vec<_>>();
+        due.sort_unstable();
+        for (_, id) in &due {
+            let Some(mut timer) = self.entries.remove(id) else {
+                continue;
+            };
+            if timer.repeat {
+                timer.due = now + timer.delay;
+                self.entries.insert(*id, timer);
+            }
+        }
+        due.into_iter().map(|(_, id)| id).collect()
+    }
+
+    fn next_deadline(&self) -> Option<Instant> {
+        self.entries.values().map(|timer| timer.due).min()
+    }
+}
+
 struct Kernel {
-    _runtime: Runtime,
     context: Context,
+    timer_dispatch: Persistent<Function<'static>>,
+    request_meta_setter: Persistent<Function<'static>>,
+    timers: Arc<Mutex<TimerQueue>>,
+    _runtime: Runtime,
 }
 
 pub fn serve_stdio() -> anyhow::Result<()> {
@@ -234,7 +211,7 @@ fn tool_definitions() -> Vec<JsonValue> {
     vec![
         json!({
             "name": "js",
-            "description": "Run JavaScript in a persistent QuickJS kernel with top-level await. This is the JavaScript execution tool for Waku Computer Use; initialize `sky` lazily with `await setupComputerUseRuntime({ globals: globalThis })`. If `timeout_ms` is omitted, execution times out after 30000 ms (30 seconds). Use `nodeRepl.write(...)` for text and `await nodeRepl.emitImage(...)` for images. Top-level bindings persist across calls until `js_reset`.",
+            "description": JS_TOOL_DESCRIPTION.trim(),
             "inputSchema": {
                 "type": "object",
                 "additionalProperties": false,
@@ -376,34 +353,50 @@ impl JavaScriptRepl {
     }
 
     fn execute(&mut self, code: &str, timeout: Duration, request_meta: JsonValue) -> JsonValue {
+        let call_deadline = Instant::now() + timeout;
         self.timed_out.store(false, Ordering::Release);
-        *self.deadline.lock() = Some(Instant::now() + timeout);
+        *self.deadline.lock() = Some(call_deadline);
         *self.call_output.lock() = Some(CallOutput {
             request_meta,
             ..Default::default()
         });
 
-        let execution = self
-            .kernel
-            .context
-            .with(|ctx| -> Result<(), (rquickjs::Error, String)> {
-                install_request_meta(&ctx, &self.call_output).map_err(|error| {
-                    let message = javascript_error(&ctx, &error);
-                    (error, message)
-                })?;
-                let mut options = EvalOptions::default();
-                options.global = true;
-                options.promise = true;
-                let promise: Promise<'_> =
-                    ctx.eval_with_options(code, options).map_err(|error| {
+        let execution =
+            self.kernel
+                .context
+                .with(|ctx| -> Result<(), (rquickjs::Error, String)> {
+                    install_request_meta(&ctx, &self.call_output, &self.kernel.request_meta_setter)
+                        .map_err(|error| {
+                            let message = javascript_error(&ctx, &error);
+                            (error, message)
+                        })?;
+                    run_due_timers(&ctx, &self.kernel.timer_dispatch, &self.kernel.timers)
+                        .map_err(|error| {
+                            let message = javascript_error(&ctx, &error);
+                            (error, message)
+                        })?;
+                    let mut options = EvalOptions::default();
+                    options.global = true;
+                    options.promise = true;
+                    let promise: Promise<'_> =
+                        ctx.eval_with_options(code, options).map_err(|error| {
+                            let message = javascript_error(&ctx, &error);
+                            (error, message)
+                        })?;
+                    finish_promise_with_timers(
+                        &ctx,
+                        &promise,
+                        &self.kernel.timer_dispatch,
+                        &self.kernel.timers,
+                        call_deadline,
+                        &self.timed_out,
+                    )
+                    .map(|_| ())
+                    .map_err(|error| {
                         let message = javascript_error(&ctx, &error);
                         (error, message)
-                    })?;
-                promise.finish::<Value<'_>>().map(|_| ()).map_err(|error| {
-                    let message = javascript_error(&ctx, &error);
-                    (error, message)
-                })
-            });
+                    })
+                });
 
         *self.deadline.lock() = None;
         let mut output = self.call_output.lock().take().unwrap_or_default();
@@ -428,6 +421,59 @@ impl JavaScriptRepl {
     }
 }
 
+fn run_due_timers<'js>(
+    ctx: &Ctx<'js>,
+    timer_dispatch: &Persistent<Function<'static>>,
+    timers: &Arc<Mutex<TimerQueue>>,
+) -> rquickjs::Result<()> {
+    loop {
+        let due = timers.lock().take_due(Instant::now());
+        if due.is_empty() {
+            return Ok(());
+        }
+        let dispatch = timer_dispatch.clone().restore(ctx)?;
+        for id in due {
+            dispatch.call::<_, ()>((id,))?;
+            while ctx.execute_pending_job() {}
+        }
+    }
+}
+
+fn finish_promise_with_timers<'js>(
+    ctx: &Ctx<'js>,
+    promise: &Promise<'js>,
+    timer_dispatch: &Persistent<Function<'static>>,
+    timers: &Arc<Mutex<TimerQueue>>,
+    deadline: Instant,
+    timed_out: &AtomicBool,
+) -> rquickjs::Result<Value<'js>> {
+    loop {
+        while ctx.execute_pending_job() {}
+        if let Some(result) = promise.result::<Value<'js>>() {
+            return result;
+        }
+
+        run_due_timers(ctx, timer_dispatch, timers)?;
+        while ctx.execute_pending_job() {}
+        if let Some(result) = promise.result::<Value<'js>>() {
+            return result;
+        }
+
+        let now = Instant::now();
+        if now >= deadline {
+            timed_out.store(true, Ordering::Release);
+            return Err(rquickjs::Error::WouldBlock);
+        }
+        let Some(timer_deadline) = timers.lock().next_deadline() else {
+            return Err(rquickjs::Error::WouldBlock);
+        };
+        let wake_at = timer_deadline.min(deadline);
+        if wake_at > now {
+            thread::sleep(wake_at - now);
+        }
+    }
+}
+
 fn create_kernel(
     bridge: Arc<Mutex<NativeComputerUseClient>>,
     call_output: Arc<Mutex<Option<CallOutput>>>,
@@ -435,6 +481,7 @@ fn create_kernel(
     timed_out: Arc<AtomicBool>,
 ) -> anyhow::Result<Kernel> {
     let runtime = Runtime::new().context("could not create the QuickJS runtime")?;
+    let timers = Arc::new(Mutex::new(TimerQueue::new()));
     let interrupt_deadline = deadline.clone();
     let interrupt_timed_out = timed_out.clone();
     runtime.set_interrupt_handler(Some(Box::new(move || {
@@ -449,102 +496,143 @@ fn create_kernel(
     runtime.set_memory_limit(256 * 1024 * 1024);
     runtime.set_max_stack_size(2 * 1024 * 1024);
     let context = Context::full(&runtime).context("could not create the QuickJS context")?;
-    context.with(|ctx| -> anyhow::Result<()> {
-        let globals = ctx.globals();
+    let (timer_dispatch, request_meta_setter) = context.with(
+        |ctx| -> anyhow::Result<(Persistent<Function<'static>>, Persistent<Function<'static>>)> {
+            let globals = ctx.globals();
 
-        let sky_bridge = bridge.clone();
-        let sky_deadline = deadline.clone();
-        globals.set(
-            "__wakuSkyCall",
-            Function::new(ctx.clone(), move |name: String, arguments: String| {
-                let deadline = *sky_deadline.lock();
-                let result = serde_json::from_str::<JsonValue>(&arguments)
-                    .context("Computer Use arguments are invalid JSON")
-                    .and_then(|arguments| sky_bridge.lock().call_sky(&name, arguments, deadline));
-                match result {
-                    Ok(value) => json!({"ok": true, "value": value}).to_string(),
-                    Err(error) => json!({"ok": false, "error": error.to_string()}).to_string(),
-                }
-            })?,
-        )?;
+            let sky_bridge = bridge.clone();
+            let sky_deadline = deadline.clone();
+            globals.set(
+                "__wakuSkyCall",
+                Function::new(ctx.clone(), move |name: String, arguments: String| {
+                    let deadline = *sky_deadline.lock();
+                    let result = serde_json::from_str::<JsonValue>(&arguments)
+                        .context("Computer Use arguments are invalid JSON")
+                        .and_then(|arguments| {
+                            sky_bridge.lock().call_sky(&name, arguments, deadline)
+                        });
+                    match result {
+                        Ok(value) => json!({"ok": true, "value": value}).to_string(),
+                        Err(error) => json!({"ok": false, "error": error.to_string()}).to_string(),
+                    }
+                })?,
+            )?;
 
-        let write_output = call_output.clone();
-        globals.set(
-            "__wakuWrite",
-            Function::new(ctx.clone(), move |text: String, newline: bool| {
-                let mut active = write_output.lock();
-                let Some(output) = active.as_mut() else {
-                    return false;
-                };
-                output.text.push_str(&text);
-                if newline {
-                    output.text.push('\n');
-                }
-                true
-            })?,
-        )?;
+            let write_output = call_output.clone();
+            globals.set(
+                "__wakuWrite",
+                Function::new(ctx.clone(), move |text: String, newline: bool| {
+                    let mut active = write_output.lock();
+                    let Some(output) = active.as_mut() else {
+                        return false;
+                    };
+                    output.text.push_str(&text);
+                    if newline {
+                        output.text.push('\n');
+                    }
+                    true
+                })?,
+            )?;
 
-        let image_output = call_output.clone();
-        globals.set(
-            "__wakuEmitImage",
-            Function::new(ctx.clone(), move |image: String| {
-                let result = decode_image_reference(&image).and_then(|image| {
-                    let mut active = image_output.lock();
-                    let output = active
-                        .as_mut()
-                        .ok_or_else(|| anyhow!("no JavaScript execution is active"))?;
-                    output.images.push(image);
-                    Ok(())
-                });
-                match result {
-                    Ok(()) => json!({"ok": true}).to_string(),
-                    Err(error) => json!({"ok": false, "error": error.to_string()}).to_string(),
-                }
-            })?,
-        )?;
-
-        let metadata_output = call_output.clone();
-        globals.set(
-            "__wakuSetResponseMeta",
-            Function::new(ctx.clone(), move |metadata: String| {
-                let result = serde_json::from_str::<JsonValue>(&metadata)
-                    .context("response metadata is invalid JSON")
-                    .and_then(|metadata| {
-                        let metadata = metadata
-                            .as_object()
-                            .ok_or_else(|| anyhow!("response metadata must be an object"))?;
-                        let mut active = metadata_output.lock();
+            let image_output = call_output.clone();
+            globals.set(
+                "__wakuEmitImage",
+                Function::new(ctx.clone(), move |image: String| {
+                    let result = decode_image_reference(&image).and_then(|image| {
+                        let mut active = image_output.lock();
                         let output = active
                             .as_mut()
                             .ok_or_else(|| anyhow!("no JavaScript execution is active"))?;
-                        output.response_meta.extend(metadata.clone());
+                        output.images.push(image);
                         Ok(())
                     });
-                match result {
-                    Ok(()) => json!({"ok": true}).to_string(),
-                    Err(error) => json!({"ok": false, "error": error.to_string()}).to_string(),
-                }
-            })?,
-        )?;
+                    match result {
+                        Ok(()) => json!({"ok": true}).to_string(),
+                        Err(error) => json!({"ok": false, "error": error.to_string()}).to_string(),
+                    }
+                })?,
+            )?;
 
-        let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-        let home = dirs::home_dir().unwrap_or_default();
-        let temp = std::env::temp_dir();
-        globals.set("__wakuCwd", cwd.display().to_string())?;
-        globals.set("__wakuHomeDir", home.display().to_string())?;
-        globals.set("__wakuTmpDir", temp.display().to_string())?;
-        ctx.eval::<(), _>(KERNEL_BOOTSTRAP)?;
-        Ok(())
-    })?;
+            let metadata_output = call_output.clone();
+            globals.set(
+                "__wakuSetResponseMeta",
+                Function::new(ctx.clone(), move |metadata: String| {
+                    let result = serde_json::from_str::<JsonValue>(&metadata)
+                        .context("response metadata is invalid JSON")
+                        .and_then(|metadata| {
+                            let metadata = metadata
+                                .as_object()
+                                .ok_or_else(|| anyhow!("response metadata must be an object"))?;
+                            let mut active = metadata_output.lock();
+                            let output = active
+                                .as_mut()
+                                .ok_or_else(|| anyhow!("no JavaScript execution is active"))?;
+                            output.response_meta.extend(metadata.clone());
+                            Ok(())
+                        });
+                    match result {
+                        Ok(()) => json!({"ok": true}).to_string(),
+                        Err(error) => json!({"ok": false, "error": error.to_string()}).to_string(),
+                    }
+                })?,
+            )?;
+
+            let scheduled_timers = timers.clone();
+            globals.set(
+                "__wakuScheduleTimer",
+                Function::new(ctx.clone(), move |delay_ms: u32, repeat: bool| -> u32 {
+                    scheduled_timers
+                        .lock()
+                        .schedule(Duration::from_millis(u64::from(delay_ms)), repeat)
+                })?,
+            )?;
+
+            let cleared_timers = timers.clone();
+            globals.set(
+                "__wakuClearTimer",
+                Function::new(ctx.clone(), move |id: u32| {
+                    cleared_timers.lock().clear(id);
+                })?,
+            )?;
+
+            let refreshed_timers = timers.clone();
+            globals.set(
+                "__wakuRefreshTimer",
+                Function::new(ctx.clone(), move |id: u32| {
+                    refreshed_timers.lock().refresh(id);
+                })?,
+            )?;
+
+            let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+            let home = dirs::home_dir().unwrap_or_default();
+            let temp = std::env::temp_dir();
+            globals.set("__wakuCwd", cwd.display().to_string())?;
+            globals.set("__wakuHomeDir", home.display().to_string())?;
+            globals.set("__wakuTmpDir", temp.display().to_string())?;
+            ctx.eval::<(), _>(KERNEL_BOOTSTRAP)?;
+            let timer_dispatch = globals.get::<_, Function<'_>>("__wakuRunTimer")?;
+            let request_meta_setter = globals.get::<_, Function<'_>>("__wakuSetRequestMeta")?;
+            globals.remove("__wakuRunTimer")?;
+            globals.remove("__wakuSetRequestMeta")?;
+            Ok((
+                Persistent::save(&ctx, timer_dispatch),
+                Persistent::save(&ctx, request_meta_setter),
+            ))
+        },
+    )?;
     Ok(Kernel {
-        _runtime: runtime,
         context,
+        timer_dispatch,
+        request_meta_setter,
+        timers,
+        _runtime: runtime,
     })
 }
 
 fn install_request_meta(
     ctx: &Ctx<'_>,
     call_output: &Arc<Mutex<Option<CallOutput>>>,
+    request_meta_setter: &Persistent<Function<'static>>,
 ) -> rquickjs::Result<()> {
     let request_meta = call_output
         .lock()
@@ -553,9 +641,11 @@ fn install_request_meta(
         .unwrap_or_else(|| json!({}));
     let json = serde_json::to_string(&request_meta).unwrap_or_else(|_| "{}".into());
     let json_literal = serde_json::to_string(&json).unwrap_or_else(|_| "\"{}\"".into());
-    ctx.eval::<(), _>(format!(
-        "globalThis.nodeRepl.requestMeta = JSON.parse({json_literal});"
-    ))
+    let value: Value<'_> = ctx.eval(format!("JSON.parse({json_literal})"))?;
+    request_meta_setter
+        .clone()
+        .restore(ctx)?
+        .call::<_, ()>((value,))
 }
 
 fn javascript_error(ctx: &Ctx<'_>, error: &rquickjs::Error) -> String {
@@ -1004,6 +1094,13 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["js", "js_reset"]
         );
+        assert_eq!(tools[0]["description"], JS_TOOL_DESCRIPTION.trim());
+        assert!(SERVER_INSTRUCTIONS.contains("`waku_js_repl`"));
+        assert!(!SERVER_INSTRUCTIONS.contains("`node_repl`"));
+        assert!(!SERVER_INSTRUCTIONS.contains("nodeRepl.write"));
+        assert!(JS_TOOL_DESCRIPTION.contains("nodeRepl.write"));
+        assert!(!SERVER_INSTRUCTIONS.contains("js_add_node_module_dir"));
+        assert!(JS_TOOL_DESCRIPTION.contains("Module imports are not supported"));
     }
 
     #[test]
@@ -1035,6 +1132,139 @@ mod tests {
     }
 
     #[test]
+    fn repl_supports_awaited_timeouts_and_intervals() {
+        let mut repl = JavaScriptRepl::new().unwrap();
+        let timeout = call(
+            &mut repl,
+            r#"
+                var timeoutValue = await new Promise((resolve) => setTimeout(resolve, 2, "done"));
+                nodeRepl.write(timeoutValue);
+            "#,
+        );
+        assert_eq!(timeout["isError"], false);
+        assert_eq!(timeout["content"][0]["text"], "done");
+
+        let interval = call(
+            &mut repl,
+            r#"
+                var intervalValues = [];
+                await new Promise((resolve) => {
+                  const handle = setInterval((value) => {
+                    intervalValues.push(value);
+                    if (intervalValues.length === 3) {
+                      clearInterval(handle);
+                      resolve();
+                    }
+                  }, 2, "tick");
+                });
+                nodeRepl.write(intervalValues.join(","));
+            "#,
+        );
+        assert_eq!(interval["isError"], false);
+        assert_eq!(interval["content"][0]["text"], "tick,tick,tick");
+    }
+
+    #[test]
+    fn repl_persists_and_clears_scheduled_timers() {
+        let mut repl = JavaScriptRepl::new().unwrap();
+        let scheduled = call(
+            &mut repl,
+            r#"var pendingTimer = setTimeout(() => nodeRepl.write("late"), 2);"#,
+        );
+        assert_eq!(scheduled["isError"], false);
+        assert_eq!(scheduled["content"][0]["text"], "");
+        thread::sleep(Duration::from_millis(5));
+        assert_eq!(
+            call(&mut repl, r#"nodeRepl.write("now");"#)["content"][0]["text"],
+            "latenow"
+        );
+
+        let cancelled = call(
+            &mut repl,
+            r#"
+                var cancelledTimer = setTimeout(() => nodeRepl.write("unexpected"), 2);
+                clearTimeout(cancelledTimer);
+            "#,
+        );
+        assert_eq!(cancelled["isError"], false);
+        thread::sleep(Duration::from_millis(5));
+        assert_eq!(
+            call(&mut repl, r#"nodeRepl.write("cleared");"#)["content"][0]["text"],
+            "cleared"
+        );
+    }
+
+    #[test]
+    fn repl_exposes_the_safe_codex_compatible_globals() {
+        let mut repl = JavaScriptRepl::new().unwrap();
+        let result = call(
+            &mut repl,
+            r#"
+                var compatibilityTimer = setTimeout(() => {}, 1000);
+                var initiallyRefed = compatibilityTimer.hasRef();
+                compatibilityTimer.unref();
+                nodeRepl.write(JSON.stringify({
+                  globalAlias: global === globalThis,
+                  process: typeof process,
+                  require: typeof require,
+                  module: typeof module,
+                  dirname: typeof __dirname,
+                  filename: typeof __filename,
+                  tmpDirAlias: tmpDir === nodeRepl.tmpDir,
+                  nodeReplFrozen: Object.isFrozen(nodeRepl),
+                  envFrozen: Object.isFrozen(nodeRepl.env),
+                  envKeys: Object.keys(nodeRepl.env).length,
+                  buffer: Buffer.from("hello").toString("base64"),
+                  decoded: Buffer.from("aGVsbG8=", "base64").toString(),
+                  text: new TextDecoder().decode(new TextEncoder().encode("hello")),
+                  immediate: typeof setImmediate,
+                  timerConstructor: compatibilityTimer.constructor.name,
+                  timerRefresh: typeof compatibilityTimer.refresh,
+                  initiallyRefed,
+                  unrefed: compatibilityTimer.hasRef(),
+                }));
+                clearTimeout(compatibilityTimer);
+            "#,
+        );
+        assert_eq!(result["isError"], false);
+        let globals: JsonValue =
+            serde_json::from_str(result["content"][0]["text"].as_str().unwrap()).unwrap();
+        assert_eq!(globals["globalAlias"], true);
+        assert_eq!(globals["process"], "undefined");
+        assert_eq!(globals["require"], "undefined");
+        assert_eq!(globals["module"], "undefined");
+        assert_eq!(globals["dirname"], "undefined");
+        assert_eq!(globals["filename"], "undefined");
+        assert_eq!(globals["tmpDirAlias"], true);
+        assert_eq!(globals["nodeReplFrozen"], true);
+        assert_eq!(globals["envFrozen"], true);
+        assert_eq!(globals["envKeys"], 0);
+        assert_eq!(globals["buffer"], "aGVsbG8=");
+        assert_eq!(globals["decoded"], "hello");
+        assert_eq!(globals["text"], "hello");
+        assert_eq!(globals["immediate"], "function");
+        assert_eq!(globals["timerConstructor"], "Timeout");
+        assert_eq!(globals["timerRefresh"], "function");
+        assert_eq!(globals["initiallyRefed"], true);
+        assert_eq!(globals["unrefed"], false);
+    }
+
+    #[test]
+    fn awaited_timer_respects_the_execution_deadline() {
+        let mut repl = JavaScriptRepl::new().unwrap();
+        let result = repl.execute(
+            "await new Promise((resolve) => setTimeout(resolve, 50));",
+            Duration::from_millis(5),
+            json!({}),
+        );
+        assert_eq!(result["isError"], true);
+        assert_eq!(
+            result["content"][0]["text"],
+            "JavaScript execution timed out after 5 ms"
+        );
+    }
+
+    #[test]
     fn repl_interrupts_runaway_javascript() {
         let mut repl = JavaScriptRepl::new().unwrap();
         let result = repl.execute("while (true) {}", Duration::from_millis(10), json!({}));
@@ -1053,6 +1283,7 @@ mod tests {
         let result = repl.execute(
             r#"
                 nodeRepl.write(nodeRepl.requestMeta.label);
+                nodeRepl.write(`:${Object.isFrozen(nodeRepl.requestMeta)}`);
                 nodeRepl.setResponseMeta({ source: "quickjs" });
                 await nodeRepl.emitImage("data:image/png;base64,aGVsbG8=");
             "#,
@@ -1060,7 +1291,7 @@ mod tests {
             json!({"label": "metadata"}),
         );
         assert_eq!(result["isError"], false);
-        assert_eq!(result["content"][0]["text"], "metadata");
+        assert_eq!(result["content"][0]["text"], "metadata:true");
         assert_eq!(result["content"][1]["type"], "image");
         assert_eq!(result["content"][1]["data"], "aGVsbG8=");
         assert_eq!(result["_meta"]["source"], "quickjs");

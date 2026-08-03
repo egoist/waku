@@ -5,6 +5,9 @@ import { Type } from "typebox";
 
 type JsonObject = Record<string, unknown>;
 
+const jsToolDescription =
+  "Run JavaScript in Waku's persistent QuickJS kernel for Computer Use. Initialize `sky` lazily with `await setupComputerUseRuntime({ globals: globalThis })`. Calls time out after 30000 ms (30 seconds) unless `timeout_ms` is provided. Use `nodeRepl.write(...)` for text and `await nodeRepl.emitImage(...)` for images. Bindings and scheduled timers persist until the JavaScript kernel is reset.";
+
 class WakuMcpClient {
   private child: ChildProcessWithoutNullStreams | undefined;
   private starting: Promise<void> | undefined;
@@ -155,8 +158,7 @@ export default function wakuComputerUse(pi: ExtensionAPI) {
   pi.registerTool({
     name: "js",
     label: "JavaScript",
-    description:
-      "Run JavaScript in a persistent QuickJS kernel with top-level await. This is the JavaScript execution tool for Waku Computer Use; initialize `sky` lazily with `await setupComputerUseRuntime({ globals: globalThis })`. If `timeout_ms` is omitted, execution times out after 30000 ms (30 seconds). Use `nodeRepl.write(...)` for text and `await nodeRepl.emitImage(...)` for images. Top-level bindings persist across calls until `js_reset`.",
+    description: jsToolDescription,
     parameters: Type.Object(
       {
         code: Type.String({
