@@ -201,6 +201,9 @@ impl CodexComputerUseConfig {
     }
 }
 
+/// The helper is deliberately not registered as a Codex MCP server. The
+/// node_repl client spawns and owns the stdio MCP connection itself; Codex
+/// only needs the env vars that tell the client where the helper lives.
 fn configure_computer_use_command(command: &mut Command, config: Option<&CodexComputerUseConfig>) {
     if let Some(config) = config {
         command
@@ -242,16 +245,7 @@ fn configure_computer_use_command(command: &mut Command, config: Option<&CodexCo
             .arg(format!(
                 "mcp_servers.node_repl.env.NODE_REPL_TRUSTED_CODE_PATHS={}",
                 config.trusted_code_paths
-            ))
-            .arg("-c")
-            .arg(format!(
-                "mcp_servers.waku_computer_use.command={}",
-                config.server
-            ))
-            .arg("-c")
-            .arg("mcp_servers.waku_computer_use.args=[\"mcp\"]")
-            .arg("-c")
-            .arg("mcp_servers.waku_computer_use.enabled=true");
+            ));
     }
 }
 
@@ -1170,23 +1164,6 @@ fn codex_item_title(item: &Value) -> String {
     {
         return title.to_owned();
     }
-    if item.get("type").and_then(Value::as_str) == Some("mcpToolCall")
-        && item
-            .get("server")
-            .or_else(|| item.get("serverName"))
-            .and_then(Value::as_str)
-            .is_some_and(|server| server.contains("waku"))
-        && let Some(tool) = item
-            .get("tool")
-            .or_else(|| item.get("name"))
-            .and_then(Value::as_str)
-    {
-        return match tool {
-            "get_app_state" => "Inspect app state".into(),
-            "list_apps" => "List apps".into(),
-            _ => split_camel_case(tool),
-        };
-    }
     if let Some(name) = item.get("tool").and_then(Value::as_str) {
         return split_camel_case(name);
     }
@@ -1559,10 +1536,18 @@ mod tests {
             .get_args()
             .map(|argument| argument.to_string_lossy().into_owned())
             .collect::<Vec<_>>();
+        // The helper must never be registered as a Codex MCP server: the
+        // node_repl client owns the helper connection, and direct raw-tool
+        // access would duplicate its schemas in context.
+        assert!(
+            !enabled_arguments
+                .iter()
+                .any(|argument| argument.contains("mcp_servers.waku_computer_use"))
+        );
         assert!(
             enabled_arguments
                 .iter()
-                .any(|argument| argument == "mcp_servers.waku_computer_use.enabled=true")
+                .any(|argument| argument.contains("mcp_servers.node_repl.env.WAKU_COMPUTER_USE_SERVER"))
         );
         assert!(
             enabled_arguments
@@ -1756,7 +1741,7 @@ mod tests {
     fn mcp_tool_title_prefers_the_human_facing_argument() {
         let titled = json!({
             "type": "mcpToolCall",
-            "server": "waku_computer_use",
+            "server": "node_repl",
             "tool": "js",
             "arguments": {
                 "title": "Inspect Helium browser",
@@ -1765,7 +1750,7 @@ mod tests {
         });
         let untitled = json!({
             "type": "mcpToolCall",
-            "server": "waku_computer_use",
+            "server": "node_repl",
             "tool": "js",
             "arguments": { "code": "sky.list_apps()" }
         });
