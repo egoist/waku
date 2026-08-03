@@ -276,6 +276,21 @@ pub fn mcp_server_command() -> anyhow::Result<PathBuf> {
     Ok(helper.join("Contents").join("MacOS").join(executable))
 }
 
+pub fn js_repl_server_path() -> anyhow::Result<PathBuf> {
+    let executable = std::env::current_exe().context("Waku executable path is unavailable")?;
+    let macos = executable
+        .parent()
+        .ok_or_else(|| anyhow!("Waku executable has no parent directory"))?;
+    let contents = macos
+        .parent()
+        .ok_or_else(|| anyhow!("Waku app bundle is malformed"))?;
+    let path = contents.join("Resources").join("waku_js_repl");
+    if !path.is_file() {
+        bail!("Waku JavaScript REPL is missing from this Waku build")
+    }
+    Ok(path)
+}
+
 /// Install the bundled helper as an independent, stable runtime service.
 ///
 /// Screen Recording differs from Accessibility on macOS: it follows the
@@ -356,23 +371,6 @@ fn copy_directory(source: &Path, destination: &Path) -> anyhow::Result<()> {
         }
     }
     Ok(())
-}
-
-pub fn node_repl_client_path() -> anyhow::Result<PathBuf> {
-    let executable = std::env::current_exe().context("Waku executable path is unavailable")?;
-    let macos = executable
-        .parent()
-        .ok_or_else(|| anyhow!("Waku executable has no parent directory"))?;
-    let contents = macos
-        .parent()
-        .ok_or_else(|| anyhow!("Waku app bundle is malformed"))?;
-    let path = contents
-        .join("Resources")
-        .join("Waku Computer Use Client.mjs");
-    if !path.is_file() {
-        bail!("Computer Use node_repl client is missing from this Waku build")
-    }
-    Ok(path)
 }
 
 pub fn skill_root_path() -> anyhow::Result<PathBuf> {

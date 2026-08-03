@@ -9,7 +9,7 @@
     <key>CFBundleExecutable</key>
     <string>Waku Computer Use</string>
     <key>CFBundleIdentifier</key>
-    <string>codes.waku.computer-use</string>
+    <string>sh.waku.computer-use</string>
     <key>CFBundleInfoDictionaryVersion</key>
     <string>6.0</string>
     <key>CFBundleName</key>

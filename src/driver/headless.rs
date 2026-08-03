@@ -1,6 +1,7 @@
 use std::collections::HashMap;
+use std::fs;
 use std::io::{BufRead, BufReader, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -11,6 +12,8 @@ use crossbeam_channel::{Sender, unbounded};
 use serde_json::Value;
 use uuid::Uuid;
 
+use super::{activity, computer_use as computer_use_runtime};
+use crate::computer_use;
 use crate::driver::{DriverControl, DriverStartOptions};
 use crate::model::{
     ActivityKind, DriverEvent, InteractionMode, ProviderKind, ProviderResumeCursor, RuntimeMode,
@@ -24,6 +27,147 @@ enum CommandMessage {
 pub struct HeadlessDriver {
     commands: Sender<CommandMessage>,
     active_pid: Arc<AtomicU32>,
+    computer_use: Option<OpenCodeComputerUseRuntime>,
+}
+
+#[derive(Clone)]
+struct OpenCodeComputerUseConfig {
+    server_path: PathBuf,
+    process_directory: PathBuf,
+    config_content: String,
+}
+
+impl OpenCodeComputerUseConfig {
+    fn load() -> anyhow::Result<Self> {
+        let server_path = computer_use::mcp_server_command()?;
+        let repl_path = computer_use::js_repl_server_path()?;
+        let skill_path = computer_use::skill_root_path()?
+            .join("waku-computer-use")
+            .join("SKILL.md");
+        let process_directory = computer_use_runtime::create_process_directory()?;
+        let existing = match std::env::var("OPENCODE_CONFIG_CONTENT") {
+            Ok(content) => Some(content),
+            Err(std::env::VarError::NotPresent) => None,
+            Err(std::env::VarError::NotUnicode(_)) => {
+                let _ = fs::remove_dir_all(&process_directory);
+                return Err(anyhow!("OPENCODE_CONFIG_CONTENT is not valid UTF-8"));
+            }
+        };
+        let config_content = match build_opencode_computer_use_config(
+            existing.as_deref(),
+            &server_path,
+            &repl_path,
+            &skill_path,
+            &process_directory,
+        ) {
+            Ok(content) => content,
+            Err(error) => {
+                let _ = fs::remove_dir_all(&process_directory);
+                return Err(error);
+            }
+        };
+        Ok(Self {
+            server_path,
+            process_directory,
+            config_content,
+        })
+    }
+}
+
+struct OpenCodeComputerUseRuntime {
+    config: OpenCodeComputerUseConfig,
+    preview_monitor: Option<computer_use_runtime::ComputerUsePreviewMonitor>,
+}
+
+impl OpenCodeComputerUseRuntime {
+    fn start(events: Sender<DriverEvent>) -> anyhow::Result<Self> {
+        let config = OpenCodeComputerUseConfig::load()?;
+        let preview_monitor = computer_use_runtime::ComputerUsePreviewMonitor::start(
+            config.process_directory.clone(),
+            events,
+        )?;
+        Ok(Self {
+            config,
+            preview_monitor: Some(preview_monitor),
+        })
+    }
+
+    fn stop(&self) {
+        computer_use_runtime::stop_registered_processes(
+            &self.config.process_directory,
+            &self.config.server_path,
+        );
+    }
+}
+
+impl Drop for OpenCodeComputerUseRuntime {
+    fn drop(&mut self) {
+        self.stop();
+        drop(self.preview_monitor.take());
+        let _ = fs::remove_dir_all(&self.config.process_directory);
+    }
+}
+
+fn build_opencode_computer_use_config(
+    existing: Option<&str>,
+    server_path: &Path,
+    repl_path: &Path,
+    skill_path: &Path,
+    process_directory: &Path,
+) -> anyhow::Result<String> {
+    let mut config = existing
+        .map(serde_json::from_str::<Value>)
+        .transpose()
+        .context("OPENCODE_CONFIG_CONTENT is invalid JSON")?
+        .unwrap_or_else(|| serde_json::json!({}));
+    let root = config
+        .as_object_mut()
+        .ok_or_else(|| anyhow!("OPENCODE_CONFIG_CONTENT must contain a JSON object"))?;
+    let mcp = root
+        .entry("mcp")
+        .or_insert_with(|| serde_json::json!({}))
+        .as_object_mut()
+        .ok_or_else(|| anyhow!("OPENCODE_CONFIG_CONTENT.mcp must be a JSON object"))?;
+    mcp.insert(
+        "waku_js_repl".into(),
+        serde_json::json!({
+            "type": "local",
+            "command": [repl_path.display().to_string()],
+            "enabled": true,
+            "environment": {
+                "WAKU_COMPUTER_USE_SERVER": server_path.display().to_string(),
+                "WAKU_COMPUTER_USE_PROCESS_DIRECTORY": process_directory.display().to_string(),
+            },
+        }),
+    );
+    let instructions = root
+        .entry("instructions")
+        .or_insert_with(|| serde_json::json!([]))
+        .as_array_mut()
+        .ok_or_else(|| anyhow!("OPENCODE_CONFIG_CONTENT.instructions must be a JSON array"))?;
+    let skill_path = skill_path.display().to_string();
+    if !instructions
+        .iter()
+        .any(|instruction| instruction.as_str() == Some(&skill_path))
+    {
+        instructions.push(Value::String(skill_path));
+    }
+    serde_json::to_string(&config).context("could not encode OpenCode Computer Use configuration")
+}
+
+fn configure_opencode_computer_use_command(
+    command: &mut Command,
+    config: Option<&OpenCodeComputerUseConfig>,
+) {
+    if let Some(config) = config {
+        command
+            .env("OPENCODE_CONFIG_CONTENT", &config.config_content)
+            .env("WAKU_COMPUTER_USE_SERVER", &config.server_path)
+            .env(
+                "WAKU_COMPUTER_USE_PROCESS_DIRECTORY",
+                &config.process_directory,
+            );
+    }
 }
 
 impl HeadlessDriver {
@@ -40,7 +184,7 @@ impl HeadlessDriver {
             model,
             reasoning_effort,
             service_tier,
-            computer_use_enabled: _,
+            computer_use_enabled,
             provider_cursor: existing_cursor,
         } = options;
         if provider == ProviderKind::Amp
@@ -82,6 +226,10 @@ impl HeadlessDriver {
         let (commands, command_rx) = unbounded();
         let active_pid = Arc::new(AtomicU32::new(0));
         let worker_pid = active_pid.clone();
+        let computer_use = (provider == ProviderKind::OpenCode && computer_use_enabled)
+            .then(|| OpenCodeComputerUseRuntime::start(events.clone()))
+            .transpose()?;
+        let worker_computer_use = computer_use.as_ref().map(|runtime| runtime.config.clone());
 
         thread::Builder::new()
             .name(format!("waku-{}-driver", provider.id()))
@@ -151,6 +299,7 @@ impl HeadlessDriver {
                                 prompt,
                                 &events,
                                 &worker_pid,
+                                worker_computer_use.as_ref(),
                             ) {
                                 provider_session_id = Some(session_id);
                                 can_resume = true;
@@ -167,6 +316,7 @@ impl HeadlessDriver {
         Ok(Self {
             commands,
             active_pid,
+            computer_use,
         })
     }
 }
@@ -188,6 +338,12 @@ impl DriverControl for HeadlessDriver {
         }
     }
 
+    fn cancel_computer_use(&self) {
+        if let Some(computer_use) = self.computer_use.as_ref() {
+            computer_use.stop();
+        }
+    }
+
     fn respond(&self, _request_id: String, _option_id: String) {}
 
     fn rollback(&self, _turns: usize) -> anyhow::Result<Option<ProviderResumeCursor>> {
@@ -200,6 +356,7 @@ impl DriverControl for HeadlessDriver {
 impl Drop for HeadlessDriver {
     fn drop(&mut self) {
         self.cancel();
+        self.cancel_computer_use();
         let _ = self.commands.send(CommandMessage::Shutdown);
     }
 }
@@ -219,6 +376,7 @@ fn run_prompt(
     prompt: String,
     events: &Sender<DriverEvent>,
     active_pid: &AtomicU32,
+    open_code_computer_use: Option<&OpenCodeComputerUseConfig>,
 ) -> Option<String> {
     let _ = events.send(DriverEvent::TurnStarted);
     let previous_claude_message = (provider == ProviderKind::Claude)
@@ -290,6 +448,7 @@ fn run_prompt(
             command.arg(&prompt);
         }
         ProviderKind::OpenCode => {
+            configure_opencode_computer_use_command(&mut command, open_code_computer_use);
             command.args(["run", "--format", "json", "--thinking"]);
             if let Some(model) = model {
                 command.args(["--model", model]);
@@ -465,6 +624,7 @@ struct StreamParser {
     amp_tools: HashMap<String, (ActivityKind, String)>,
     claude_tools: HashMap<String, (ActivityKind, String)>,
     cursor_tools: HashMap<String, (ActivityKind, String)>,
+    opencode_tools: HashMap<String, (ActivityKind, String)>,
     grok_tools: HashMap<String, (ActivityKind, String)>,
 }
 
@@ -509,26 +669,28 @@ impl StreamParser {
                             }
                             Some("tool_use") => {
                                 let id = block.get("id").and_then(Value::as_str).map(str::to_owned);
-                                let title = block
+                                let wire_title = block
                                     .get("name")
                                     .and_then(Value::as_str)
                                     .unwrap_or("Tool")
                                     .to_owned();
-                                let kind = classify_tool(&title);
+                                let kind = classify_tool(&wire_title);
+                                let title =
+                                    activity::input_title(block.get("input")).unwrap_or(wire_title);
                                 if let Some(id) = &id {
                                     self.amp_tools.insert(id.clone(), (kind, title.clone()));
                                 }
-                                let detail = block
-                                    .get("input")
-                                    .map(compact_json)
-                                    .filter(|value| !value.is_empty());
-                                let _ = events.send(DriverEvent::Activity {
+                                let item = activity::tool_activity(
                                     id,
                                     kind,
                                     title,
-                                    detail,
-                                    complete: false,
-                                });
+                                    block.get("input"),
+                                    None,
+                                    None,
+                                    false,
+                                    false,
+                                );
+                                let _ = events.send(DriverEvent::RichActivity(item));
                             }
                             // Redacted thinking is provider-private control data.
                             _ => {}
@@ -550,13 +712,18 @@ impl StreamParser {
                             .as_ref()
                             .and_then(|id| self.amp_tools.remove(id))
                             .unwrap_or((ActivityKind::Tool, "Tool".to_owned()));
-                        let _ = events.send(DriverEvent::Activity {
+                        let failed = block.get("is_error").and_then(Value::as_bool) == Some(true);
+                        let item = activity::tool_activity(
                             id,
                             kind,
                             title,
-                            detail: None,
-                            complete: true,
-                        });
+                            None,
+                            block.get("content"),
+                            block.get("content"),
+                            failed,
+                            true,
+                        );
+                        let _ = events.send(DriverEvent::RichActivity(item));
                     }
                 }
             }
@@ -634,26 +801,28 @@ impl StreamParser {
                             }
                             Some("tool_use") => {
                                 let id = block.get("id").and_then(Value::as_str).map(str::to_owned);
-                                let title = block
+                                let wire_title = block
                                     .get("name")
                                     .and_then(Value::as_str)
                                     .unwrap_or("Tool")
                                     .to_owned();
-                                let kind = classify_tool(&title);
+                                let kind = classify_tool(&wire_title);
+                                let title =
+                                    activity::input_title(block.get("input")).unwrap_or(wire_title);
                                 if let Some(id) = &id {
                                     self.claude_tools.insert(id.clone(), (kind, title.clone()));
                                 }
-                                let detail = block
-                                    .get("input")
-                                    .map(compact_json)
-                                    .filter(|value| !value.is_empty());
-                                let _ = events.send(DriverEvent::Activity {
+                                let item = activity::tool_activity(
                                     id,
                                     kind,
                                     title,
-                                    detail,
-                                    complete: false,
-                                });
+                                    block.get("input"),
+                                    None,
+                                    None,
+                                    false,
+                                    false,
+                                );
+                                let _ = events.send(DriverEvent::RichActivity(item));
                             }
                             _ => {}
                         }
@@ -674,14 +843,18 @@ impl StreamParser {
                             .as_ref()
                             .and_then(|id| self.claude_tools.remove(id))
                             .unwrap_or((ActivityKind::Tool, "Tool".to_owned()));
-                        let _ = events.send(DriverEvent::Activity {
+                        let failed = block.get("is_error").and_then(Value::as_bool) == Some(true);
+                        let item = activity::tool_activity(
                             id,
                             kind,
                             title,
-                            // Keep the command input already shown in the row.
-                            detail: None,
-                            complete: true,
-                        });
+                            None,
+                            block.get("content"),
+                            block.get("content"),
+                            failed,
+                            true,
+                        );
+                        let _ = events.send(DriverEvent::RichActivity(item));
                     }
                 }
             }
@@ -737,7 +910,8 @@ impl StreamParser {
                     .and_then(|tools| tools.iter().next())
                     .map(|(name, payload)| (name.as_str(), payload))
                     .unwrap_or(("toolCall", tool_call));
-                let title = cursor_tool_title(wire_name);
+                let title = activity::input_title(payload.get("args"))
+                    .unwrap_or_else(|| cursor_tool_title(wire_name));
                 let kind = classify_tool(wire_name);
                 let complete = value.get("subtype").and_then(Value::as_str) == Some("completed");
                 if !complete && let Some(id) = &id {
@@ -750,20 +924,20 @@ impl StreamParser {
                 } else {
                     (kind, title)
                 };
-                let detail = if complete {
-                    payload.get("result")
-                } else {
-                    payload.get("args")
-                }
-                .filter(|value| !value.is_null())
-                .map(compact_json);
-                let _ = events.send(DriverEvent::Activity {
+                let output = payload.get("result");
+                let failed = value.get("is_error").and_then(Value::as_bool) == Some(true)
+                    || payload.get("isError").and_then(Value::as_bool) == Some(true);
+                let item = activity::tool_activity(
                     id,
                     kind,
                     title,
-                    detail,
+                    payload.get("args"),
+                    output,
+                    output,
+                    failed,
                     complete,
-                });
+                );
+                let _ = events.send(DriverEvent::RichActivity(item));
             }
             "result" if value.get("is_error").and_then(Value::as_bool) == Some(true) => {
                 let message = value
@@ -822,31 +996,60 @@ impl StreamParser {
                 }
             }
             "tool_use" | "tool" | "tool.updated" => {
-                let title = part
+                let wire_title = part
                     .get("tool")
                     .and_then(Value::as_str)
                     .or_else(|| part.get("name").and_then(Value::as_str))
                     .unwrap_or("Tool")
                     .to_owned();
-                let detail = part
-                    .pointer("/state/input")
-                    .or_else(|| part.get("input"))
-                    .map(compact_json);
+                let id = part
+                    .get("callID")
+                    .or_else(|| part.get("id"))
+                    .and_then(Value::as_str)
+                    .map(str::to_owned);
+                let arguments = part.pointer("/state/input").or_else(|| part.get("input"));
+                let requested_title = activity::input_title(arguments);
                 let complete = matches!(
                     part.pointer("/state/status").and_then(Value::as_str),
                     Some("completed" | "error")
                 );
-                let _ = events.send(DriverEvent::Activity {
-                    id: part
-                        .get("callID")
-                        .or_else(|| part.get("id"))
-                        .and_then(Value::as_str)
-                        .map(str::to_owned),
-                    kind: classify_tool(&title),
-                    title,
-                    detail,
-                    complete,
+                let stored = id.as_ref().and_then(|id| {
+                    if complete {
+                        self.opencode_tools.remove(id)
+                    } else {
+                        self.opencode_tools.get(id).cloned()
+                    }
                 });
+                let kind = stored
+                    .as_ref()
+                    .map(|(kind, _)| *kind)
+                    .unwrap_or_else(|| classify_tool(&wire_title));
+                let title = requested_title
+                    .or_else(|| stored.map(|(_, title)| title))
+                    .unwrap_or(wire_title);
+                if !complete && let Some(id) = id.as_ref() {
+                    self.opencode_tools
+                        .insert(id.clone(), (kind, title.clone()));
+                }
+                let failed = opencode_tool_failed(part);
+                let output = part
+                    .pointer("/state/error")
+                    .filter(|value| !value.is_null())
+                    .or_else(|| {
+                        part.pointer("/state/output")
+                            .filter(|value| !value.is_null())
+                    });
+                let item = activity::tool_activity(
+                    id,
+                    kind,
+                    title,
+                    arguments,
+                    output,
+                    part.get("state"),
+                    failed,
+                    complete,
+                );
+                let _ = events.send(DriverEvent::RichActivity(item));
             }
             "error" => {
                 let message = value
@@ -881,62 +1084,66 @@ impl StreamParser {
                     .get("toolCallId")
                     .and_then(Value::as_str)
                     .map(str::to_owned);
-                let title = value
-                    .get("title")
-                    .and_then(Value::as_str)
-                    .filter(|title| !title.is_empty())
-                    .or_else(|| value.get("toolName").and_then(Value::as_str))
-                    .unwrap_or("Tool")
-                    .to_owned();
+                let raw_input = value.get("rawInput").filter(|input| !input.is_null());
+                let title = activity::input_title(raw_input)
+                    .or_else(|| {
+                        value
+                            .get("title")
+                            .and_then(Value::as_str)
+                            .filter(|title| !title.is_empty())
+                            .map(str::to_owned)
+                    })
+                    .or_else(|| {
+                        value
+                            .get("toolName")
+                            .and_then(Value::as_str)
+                            .map(str::to_owned)
+                    })
+                    .unwrap_or_else(|| "Tool".to_owned());
                 let kind = classify_grok_tool(
                     value.get("kind").and_then(Value::as_str),
                     value.get("toolName").and_then(Value::as_str),
                     &title,
                 );
-                if let Some(id) = &id {
-                    self.grok_tools.insert(id.clone(), (kind, title.clone()));
-                }
-                let detail = value
-                    .get("rawInput")
-                    .filter(|input| !input.is_null())
-                    .map(compact_json);
                 let complete = matches!(
                     value.get("status").and_then(Value::as_str),
                     Some("completed" | "failed")
                 );
-                let _ = events.send(DriverEvent::Activity {
-                    id,
-                    kind,
-                    title,
-                    detail,
-                    complete,
-                });
+                if !complete && let Some(id) = &id {
+                    self.grok_tools.insert(id.clone(), (kind, title.clone()));
+                }
+                let output = value.get("rawOutput").filter(|output| !output.is_null());
+                let failed = value.get("status").and_then(Value::as_str) == Some("failed");
+                let item = activity::tool_activity(
+                    id, kind, title, raw_input, output, output, failed, complete,
+                );
+                let _ = events.send(DriverEvent::RichActivity(item));
             }
             Some("tool_call_update") => {
                 let id = value
                     .get("toolCallId")
                     .and_then(Value::as_str)
                     .map(str::to_owned);
-                let (kind, title) = id
-                    .as_ref()
-                    .and_then(|id| self.grok_tools.get(id))
-                    .cloned()
-                    .unwrap_or((ActivityKind::Tool, "Tool".to_owned()));
-                let detail = value
-                    .get("rawOutput")
-                    .filter(|output| !output.is_null())
-                    .map(compact_json);
                 let complete = matches!(
                     value.get("status").and_then(Value::as_str),
                     Some("completed" | "failed")
                 );
-                let _ = events.send(DriverEvent::Activity {
-                    id,
-                    kind,
-                    title,
-                    detail,
-                    complete,
-                });
+                let (kind, title) = id
+                    .as_ref()
+                    .and_then(|id| {
+                        if complete {
+                            self.grok_tools.remove(id)
+                        } else {
+                            self.grok_tools.get(id).cloned()
+                        }
+                    })
+                    .unwrap_or((ActivityKind::Tool, "Tool".to_owned()));
+                let output = value.get("rawOutput").filter(|output| !output.is_null());
+                let failed = value.get("status").and_then(Value::as_str) == Some("failed");
+                let item = activity::tool_activity(
+                    id, kind, title, None, output, output, failed, complete,
+                );
+                let _ = events.send(DriverEvent::RichActivity(item));
             }
             Some("plan") => {
                 let _ = events.send(DriverEvent::Activity {
@@ -978,6 +1185,13 @@ fn compact_json(value: &Value) -> String {
     } else {
         value
     }
+}
+
+fn opencode_tool_failed(part: &Value) -> bool {
+    part.pointer("/state/status").and_then(Value::as_str) == Some("error")
+        || part
+            .pointer("/state/error")
+            .is_some_and(|error| !error.is_null())
 }
 
 fn amp_args(
@@ -1105,6 +1319,101 @@ mod tests {
     use super::*;
 
     #[test]
+    fn opencode_computer_use_config_preserves_existing_inline_config() {
+        let content = build_opencode_computer_use_config(
+            Some(
+                r#"{
+                    "mcp": {
+                        "existing": {
+                            "type": "local",
+                            "command": ["existing-server"],
+                            "enabled": true
+                        }
+                    },
+                    "instructions": ["existing.md"],
+                    "plugin": ["existing-plugin"]
+                }"#,
+            ),
+            Path::new("/Applications/Waku Computer Use"),
+            Path::new("/Applications/Waku.app/Contents/Resources/waku_js_repl"),
+            Path::new(
+                "/Applications/Waku.app/Contents/Resources/skills/waku-computer-use/SKILL.md",
+            ),
+            Path::new("/tmp/waku computer use/session"),
+        )
+        .unwrap();
+        let value: Value = serde_json::from_str(&content).unwrap();
+
+        assert_eq!(
+            value
+                .pointer("/mcp/existing/command/0")
+                .and_then(Value::as_str),
+            Some("existing-server")
+        );
+        assert_eq!(
+            value
+                .pointer("/mcp/waku_js_repl/command/0")
+                .and_then(Value::as_str),
+            Some("/Applications/Waku.app/Contents/Resources/waku_js_repl")
+        );
+        assert_eq!(
+            value
+                .pointer("/mcp/waku_js_repl/environment/WAKU_COMPUTER_USE_SERVER")
+                .and_then(Value::as_str),
+            Some("/Applications/Waku Computer Use")
+        );
+        assert_eq!(
+            value.get("instructions").and_then(Value::as_array).unwrap(),
+            &[
+                Value::String("existing.md".into()),
+                Value::String(
+                    "/Applications/Waku.app/Contents/Resources/skills/waku-computer-use/SKILL.md"
+                        .into(),
+                ),
+            ]
+        );
+        assert_eq!(
+            value.pointer("/plugin/0").and_then(Value::as_str),
+            Some("existing-plugin")
+        );
+        assert!(value.pointer("/mcp/waku_computer_use").is_none());
+    }
+
+    #[test]
+    fn opencode_computer_use_command_is_process_scoped() {
+        let config = OpenCodeComputerUseConfig {
+            server_path: PathBuf::from("/tmp/Waku Computer Use"),
+            process_directory: PathBuf::from("/tmp/waku-computer-use/session"),
+            config_content: r#"{"mcp":{"waku_js_repl":{}}}"#.into(),
+        };
+        let mut command = Command::new("opencode");
+
+        configure_opencode_computer_use_command(&mut command, Some(&config));
+
+        let environment = command
+            .get_envs()
+            .map(|(name, value)| {
+                (
+                    name.to_string_lossy().into_owned(),
+                    value.map(|value| value.to_string_lossy().into_owned()),
+                )
+            })
+            .collect::<HashMap<_, _>>();
+        assert_eq!(
+            environment.get("OPENCODE_CONFIG_CONTENT"),
+            Some(&Some(config.config_content.clone()))
+        );
+        assert_eq!(
+            environment.get("WAKU_COMPUTER_USE_SERVER"),
+            Some(&Some("/tmp/Waku Computer Use".into()))
+        );
+        assert_eq!(
+            environment.get("WAKU_COMPUTER_USE_PROCESS_DIRECTORY"),
+            Some(&Some("/tmp/waku-computer-use/session".into()))
+        );
+    }
+
+    #[test]
     fn amp_cli_args_create_and_resume_the_exact_thread() {
         assert_eq!(
             amp_args(Some("medium"), None, None, None),
@@ -1223,26 +1532,29 @@ mod tests {
             receiver.recv().unwrap(),
             DriverEvent::TextDelta(text) if text == "Before"
         ));
-        assert!(matches!(
-            receiver.recv().unwrap(),
-            DriverEvent::Activity {
-                id: Some(id),
-                kind: ActivityKind::Search,
-                title,
-                complete: false,
-                ..
-            } if id == "tool-1" && title == "Read"
-        ));
-        assert!(matches!(
-            receiver.recv().unwrap(),
-            DriverEvent::Activity {
-                id: Some(id),
-                kind: ActivityKind::Search,
-                title,
-                complete: true,
-                ..
-            } if id == "tool-1" && title == "Read"
-        ));
+        let DriverEvent::RichActivity(started) = receiver.recv().unwrap() else {
+            panic!("expected a rich Cursor tool activity");
+        };
+        assert_eq!(started.source_id.as_deref(), Some("tool-1"));
+        assert_eq!(started.kind, ActivityKind::Search);
+        assert_eq!(started.title, "Read");
+        assert_eq!(
+            started.arguments.as_deref(),
+            Some("{\n  \"path\": \"src/main.rs\"\n}")
+        );
+        assert!(!started.complete);
+        let DriverEvent::RichActivity(completed) = receiver.recv().unwrap() else {
+            panic!("expected a completed rich Cursor tool activity");
+        };
+        assert_eq!(completed.source_id.as_deref(), Some("tool-1"));
+        assert_eq!(completed.title, "Read");
+        assert!(
+            completed
+                .output
+                .as_deref()
+                .is_some_and(|output| output.contains("totalLines"))
+        );
+        assert!(completed.complete);
         assert!(receiver.try_recv().is_err());
     }
 
@@ -1313,24 +1625,24 @@ mod tests {
             receiver.recv().unwrap(),
             DriverEvent::TextDelta(text) if text == "Before"
         ));
-        assert!(matches!(
-            receiver.recv().unwrap(),
-            DriverEvent::Activity {
-                id: Some(id),
-                kind: ActivityKind::FileChange,
-                complete: false,
-                ..
-            } if id == "toolu_amp_1"
-        ));
-        assert!(matches!(
-            receiver.recv().unwrap(),
-            DriverEvent::Activity {
-                id: Some(id),
-                kind: ActivityKind::FileChange,
-                complete: true,
-                ..
-            } if id == "toolu_amp_1"
-        ));
+        let DriverEvent::RichActivity(started) = receiver.recv().unwrap() else {
+            panic!("expected a rich Amp tool activity");
+        };
+        assert_eq!(started.source_id.as_deref(), Some("toolu_amp_1"));
+        assert_eq!(started.kind, ActivityKind::FileChange);
+        assert!(
+            started
+                .arguments
+                .as_deref()
+                .is_some_and(|arguments| arguments.contains("path"))
+        );
+        assert!(!started.complete);
+        let DriverEvent::RichActivity(completed) = receiver.recv().unwrap() else {
+            panic!("expected a completed rich Amp tool activity");
+        };
+        assert_eq!(completed.source_id.as_deref(), Some("toolu_amp_1"));
+        assert_eq!(completed.output.as_deref(), Some("created"));
+        assert!(completed.complete);
         assert!(matches!(
             receiver.recv().unwrap(),
             DriverEvent::TextDelta(text) if text == "After"
@@ -1382,6 +1694,77 @@ mod tests {
             receiver.recv().unwrap(),
             DriverEvent::TextDelta(text) if text == "hello"
         ));
+    }
+
+    #[test]
+    fn opencode_stream_uses_and_retains_the_js_title_argument() {
+        let (events, receiver) = unbounded();
+        let mut parser = StreamParser::default();
+        let code = format!(
+            "await sky.list_apps(); nodeRepl.write(\"{}\");",
+            "full-input-".repeat(30)
+        );
+        parser.parse_opencode(
+            serde_json::json!({
+                "type": "tool",
+                "part": {
+                    "callID": "call-js-1",
+                    "tool": "waku_js_repl_js",
+                    "state": {
+                        "status": "running",
+                        "input": {
+                            "code": code,
+                            "title": "Inspect available Mac apps"
+                        }
+                    }
+                }
+            }),
+            &events,
+        );
+        parser.parse_opencode(
+            serde_json::json!({
+                "type": "tool.updated",
+                "part": {
+                    "callID": "call-js-1",
+                    "tool": "waku_js_repl_js",
+                    "state": {
+                        "status": "completed",
+                        "output": "complete output",
+                        "attachments": [{
+                            "type": "file",
+                            "mime": "image/png",
+                            "url": "data:image/png;base64,aGVsbG8="
+                        }]
+                    }
+                }
+            }),
+            &events,
+        );
+
+        let DriverEvent::RichActivity(started) = receiver.recv().unwrap() else {
+            panic!("expected a rich OpenCode tool activity");
+        };
+        assert_eq!(started.source_id.as_deref(), Some("call-js-1"));
+        assert_eq!(started.title, "Inspect available Mac apps");
+        assert!(
+            started
+                .arguments
+                .as_deref()
+                .is_some_and(|arguments| arguments.contains(&"full-input-".repeat(30)))
+        );
+        assert!(!started.complete);
+        let DriverEvent::RichActivity(completed) = receiver.recv().unwrap() else {
+            panic!("expected a completed rich OpenCode tool activity");
+        };
+        assert_eq!(completed.source_id.as_deref(), Some("call-js-1"));
+        assert_eq!(completed.title, "Inspect available Mac apps");
+        assert_eq!(completed.output.as_deref(), Some("complete output"));
+        assert_eq!(
+            completed.image_urls,
+            ["data:image/png;base64,aGVsbG8=".to_owned()]
+        );
+        assert!(completed.complete);
+        assert!(parser.opencode_tools.is_empty());
     }
 
     #[test]
@@ -1483,25 +1866,25 @@ mod tests {
             &events,
         );
 
-        assert!(matches!(
-            receiver.recv().unwrap(),
-            DriverEvent::Activity {
-                id: Some(id),
-                title,
-                complete: false,
-                ..
-            } if id == "toolu_123" && title == "Bash"
-        ));
-        assert!(matches!(
-            receiver.recv().unwrap(),
-            DriverEvent::Activity {
-                id: Some(id),
-                title,
-                detail: None,
-                complete: true,
-                ..
-            } if id == "toolu_123" && title == "Bash"
-        ));
+        let DriverEvent::RichActivity(started) = receiver.recv().unwrap() else {
+            panic!("expected a rich Claude tool activity");
+        };
+        assert_eq!(started.source_id.as_deref(), Some("toolu_123"));
+        assert_eq!(started.title, "Bash");
+        assert!(
+            started
+                .arguments
+                .as_deref()
+                .is_some_and(|arguments| arguments.contains("cargo test"))
+        );
+        assert!(!started.complete);
+        let DriverEvent::RichActivity(completed) = receiver.recv().unwrap() else {
+            panic!("expected a completed rich Claude tool activity");
+        };
+        assert_eq!(completed.source_id.as_deref(), Some("toolu_123"));
+        assert_eq!(completed.title, "Bash");
+        assert_eq!(completed.output.as_deref(), Some("test result: ok"));
+        assert!(completed.complete);
         assert!(parser.claude_tools.is_empty());
     }
 
@@ -1543,24 +1926,30 @@ mod tests {
             receiver.recv().unwrap(),
             DriverEvent::TextDelta(text) if text == "Before"
         ));
-        assert!(matches!(
-            receiver.recv().unwrap(),
-            DriverEvent::Activity {
-                id: Some(id),
-                title,
-                complete: false,
-                ..
-            } if id == "tool-1" && title == "Read src/main.rs"
-        ));
-        assert!(matches!(
-            receiver.recv().unwrap(),
-            DriverEvent::Activity {
-                id: Some(id),
-                title,
-                complete: true,
-                ..
-            } if id == "tool-1" && title == "Read src/main.rs"
-        ));
+        let DriverEvent::RichActivity(started) = receiver.recv().unwrap() else {
+            panic!("expected a rich Grok tool activity");
+        };
+        assert_eq!(started.source_id.as_deref(), Some("tool-1"));
+        assert_eq!(started.title, "Read src/main.rs");
+        assert!(
+            started
+                .arguments
+                .as_deref()
+                .is_some_and(|arguments| arguments.contains("src/main.rs"))
+        );
+        assert!(!started.complete);
+        let DriverEvent::RichActivity(completed) = receiver.recv().unwrap() else {
+            panic!("expected a completed rich Grok tool activity");
+        };
+        assert_eq!(completed.source_id.as_deref(), Some("tool-1"));
+        assert_eq!(completed.title, "Read src/main.rs");
+        assert!(
+            completed
+                .output
+                .as_deref()
+                .is_some_and(|output| output.contains("12"))
+        );
+        assert!(completed.complete);
         assert!(matches!(
             receiver.recv().unwrap(),
             DriverEvent::TextDelta(text) if text == "After"

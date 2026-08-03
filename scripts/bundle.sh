@@ -2,6 +2,7 @@
 set -eu
 
 profile="${1:-debug}"
+cargo_target_dir="${CARGO_TARGET_DIR:-target}"
 if [ -n "${WAKU_CODESIGN_IDENTITY:-}" ]; then
   codesign_identity="$WAKU_CODESIGN_IDENTITY"
 else
@@ -24,27 +25,33 @@ else
 fi
 case "$profile" in
   debug)
-    cargo build
     app_name="Waku Debug"
     helper_name="Waku Debug Computer Use"
-    bundle_identifier="codes.waku.dev"
+    bundle_identifier="sh.waku.dev"
     ;;
   release)
-    cargo build --release
     app_name="Waku"
     helper_name="Waku Computer Use"
-    bundle_identifier="codes.waku"
+    bundle_identifier="sh.waku"
     ;;
   *)
     echo "usage: scripts/bundle.sh [debug|release]" >&2
     exit 2
     ;;
 esac
+if [ "${WAKU_SKIP_CARGO_BUILD:-0}" != "1" ]; then
+  if [ "$profile" = "release" ]; then
+    cargo build --release --bin waku --bin waku_js_repl
+  else
+    cargo build --bin waku --bin waku_js_repl
+  fi
+fi
 
-bundle="target/$profile/$app_name.app"
+bundle="$cargo_target_dir/$profile/$app_name.app"
 contents="$bundle/Contents"
 helper_bundle="$contents/Helpers/$helper_name.app"
-swift_module_cache="target/$profile/swift-module-cache"
+repl_executable="$contents/Resources/waku_js_repl"
+swift_module_cache="$cargo_target_dir/$profile/swift-module-cache"
 helper_source="resources/computer-use/WakuComputerUse.swift"
 menu_bar_cursor_resource="resources/computer-use/menubar-cursor.png"
 overlay_cursor_resource="resources/computer-use/overlay-cursor.svg"
@@ -54,7 +61,7 @@ helper_fingerprint="$({
     resources/computer-use/Info.plist \
     "$menu_bar_cursor_resource" \
     "$overlay_cursor_resource"
-  printf '%s\n' "standalone-service-v1" "$helper_name" "$bundle_identifier.computer-use" "$codesign_identity" "$(uname -m)-apple-macos13.0"
+  printf '%s\n' "standalone-service-v2" "$helper_name" "$bundle_identifier.computer-use" "$codesign_identity" "$(uname -m)-apple-macos13.0"
   xcrun swiftc -version
 } | shasum -a 256 | awk '{ print $1 }')"
 helper_cache_root=".waku-cache/computer-use/$profile"
@@ -90,6 +97,8 @@ if [ ! -d "$cached_helper_bundle" ]; then
     -o "$cached_helper_contents/MacOS/$helper_name"
   if [ "$codesign_identity" = "-" ]; then
     codesign --force --sign - "$cached_helper_staging"
+  elif [ "$profile" = "release" ]; then
+    codesign --force --options runtime --timestamp --sign "$codesign_identity" "$cached_helper_staging"
   else
     codesign --force --options runtime --sign "$codesign_identity" "$cached_helper_staging"
   fi
@@ -99,19 +108,29 @@ fi
 
 rm -rf "$bundle"
 mkdir -p "$contents/MacOS" "$contents/Resources/skills/waku-computer-use" "$contents/Helpers"
-cp "target/$profile/waku" "$contents/MacOS/$app_name"
+cp "$cargo_target_dir/$profile/waku" "$contents/MacOS/$app_name"
+cp "$cargo_target_dir/$profile/waku_js_repl" "$repl_executable"
+chmod 755 "$repl_executable"
 cp resources/Info.plist "$contents/Info.plist"
 cp resources/computer-use/SKILL.md "$contents/Resources/skills/waku-computer-use/SKILL.md"
-cp resources/computer-use/waku-computer-use-client.mjs "$contents/Resources/Waku Computer Use Client.mjs"
 plutil -replace CFBundleDisplayName -string "$app_name" "$contents/Info.plist"
 plutil -replace CFBundleExecutable -string "$app_name" "$contents/Info.plist"
 plutil -replace CFBundleIdentifier -string "$bundle_identifier" "$contents/Info.plist"
 plutil -replace CFBundleName -string "$app_name" "$contents/Info.plist"
 cp -R "$cached_helper_bundle" "$helper_bundle"
 if [ "$codesign_identity" = "-" ]; then
+  codesign --force --identifier "$bundle_identifier.js-repl" --sign - "$repl_executable"
   codesign --force --sign - "$bundle"
+elif [ "$profile" = "release" ]; then
+  codesign --force --options runtime --timestamp --identifier "$bundle_identifier.js-repl" --sign "$codesign_identity" "$repl_executable"
+  codesign --force --options runtime --timestamp --sign "$codesign_identity" "$bundle"
 else
+  codesign --force --options runtime --identifier "$bundle_identifier.js-repl" --sign "$codesign_identity" "$repl_executable"
   codesign --force --options runtime --sign "$codesign_identity" "$bundle"
+fi
+if [ "$profile" = "release" ]; then
+  codesign --verify --strict --verbose=2 "$repl_executable"
+  codesign --verify --deep --strict --verbose=2 "$bundle"
 fi
 
 echo "$bundle"

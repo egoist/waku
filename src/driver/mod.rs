@@ -1,4 +1,6 @@
+mod activity;
 mod codex;
+mod computer_use;
 mod headless;
 mod pi;
 

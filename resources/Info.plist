@@ -9,7 +9,7 @@
     <key>CFBundleExecutable</key>
     <string>Waku</string>
     <key>CFBundleIdentifier</key>
-    <string>codes.waku</string>
+    <string>sh.waku</string>
     <key>CFBundleInfoDictionaryVersion</key>
     <string>6.0</string>
     <key>CFBundleName</key>

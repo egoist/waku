@@ -3,8 +3,6 @@
 import { $ } from "bun";
 import {
   access,
-  chmod,
-  copyFile,
   cp,
   mkdir,
   mkdtemp,
@@ -17,6 +15,8 @@ import { parseArgs } from "node:util";
 
 const appName = "Waku";
 const executableName = "Waku";
+const jsReplExecutableName = "waku_js_repl";
+const computerUseHelperName = "Waku Computer Use";
 const packageName = "waku";
 const defaultSigningIdentity = "GJE9R5VE87";
 const defaultNotaryProfile = "NOTARY";
@@ -36,7 +36,7 @@ Options:
   --build-number <number>       CFBundleVersion override
                                 (or WAKU_BUILD_NUMBER)
   --volume-name <name>          Mounted DMG name (default: Waku)
-  --skip-build                  Reuse target/release/waku
+  --skip-build                  Reuse target/release/waku and waku_js_repl
   --skip-notarize               Build a signed DMG without notarizing it
   --adhoc                       Ad-hoc sign and skip notarization (local testing)
   --help                        Show this help
@@ -152,8 +152,88 @@ const releaseDirectory = resolve(
   "release",
 );
 const releaseExecutable = join(releaseDirectory, packageName);
+const releaseJsReplExecutable = join(
+  releaseDirectory,
+  jsReplExecutableName,
+);
 const appBundle = join(releaseDirectory, `${appName}.app`);
 const contentsDirectory = join(appBundle, "Contents");
+const bundledJsReplExecutable = join(
+  contentsDirectory,
+  "Resources",
+  jsReplExecutableName,
+);
+const bundledComputerUseSkill = join(
+  contentsDirectory,
+  "Resources",
+  "skills",
+  "waku-computer-use",
+  "SKILL.md",
+);
+const bundledComputerUseHelper = join(
+  contentsDirectory,
+  "Helpers",
+  `${computerUseHelperName}.app`,
+);
+
+async function verifyJavaScriptRepl(executable: string): Promise<void> {
+  const child = Bun.spawn([executable], {
+    stdin: "pipe",
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  const requests = [
+    {
+      jsonrpc: "2.0",
+      id: 1,
+      method: "initialize",
+      params: {
+        protocolVersion: "2025-06-18",
+        capabilities: {},
+        clientInfo: { name: "waku-release", version: "1" },
+      },
+    },
+    { jsonrpc: "2.0", id: 2, method: "tools/list", params: {} },
+    {
+      jsonrpc: "2.0",
+      id: 3,
+      method: "tools/call",
+      params: {
+        name: "js",
+        arguments: { code: "nodeRepl.write(typeof sky);" },
+      },
+    },
+  ];
+  child.stdin.write(
+    `${requests.map((request) => JSON.stringify(request)).join("\n")}\n`,
+  );
+  child.stdin.end();
+  const stdout = await new Response(child.stdout).text();
+  const stderr = await new Response(child.stderr).text();
+  const exitCode = await child.exited;
+  if (exitCode !== 0) {
+    throw new Error(
+      `Bundled JavaScript REPL exited with ${exitCode}: ${stderr.trim()}`,
+    );
+  }
+  const responses = stdout
+    .split("\n")
+    .filter(Boolean)
+    .map((line) => JSON.parse(line));
+  const tools = responses
+    .find((response) => response.id === 2)
+    ?.result?.tools?.map((tool: { name?: string }) => tool.name);
+  if (JSON.stringify(tools) !== JSON.stringify(["js", "js_reset"])) {
+    throw new Error(
+      `Bundled JavaScript REPL exposed unexpected tools: ${stdout}`,
+    );
+  }
+  const lazySky = responses.find((response) => response.id === 3)
+    ?.result?.content?.[0]?.text;
+  if (lazySky !== "undefined") {
+    throw new Error(`Bundled JavaScript REPL initialized sky eagerly: ${stdout}`);
+  }
+}
 
 if (extname(outputPath).toLowerCase() !== ".dmg") {
   throw new Error(`Output path must end in .dmg: ${outputPath}`);
@@ -171,43 +251,50 @@ if (
 let temporaryDirectory: string | undefined;
 let mountedDmg = false;
 let mountDirectory: string | undefined;
+const identity = adhoc ? "-" : signingIdentity!;
 
 try {
-  if (!values["skip-build"]) {
-    logStep("Building the release executable");
-    await $`cargo build --release`;
+  if (values["skip-build"]) {
+    for (const executable of [releaseExecutable, releaseJsReplExecutable]) {
+      try {
+        await access(executable);
+      } catch {
+        throw new Error(
+          `Release executable not found at ${executable}. ` +
+            "Run without --skip-build first.",
+        );
+      }
+    }
   }
 
-  try {
-    await access(releaseExecutable);
-  } catch {
-    throw new Error(
-      `Release executable not found at ${releaseExecutable}. ` +
-        "Run without --skip-build first.",
-    );
-  }
-
-  logStep("Assembling the app bundle");
-  await rm(appBundle, { force: true, recursive: true });
-  await mkdir(join(contentsDirectory, "MacOS"), { recursive: true });
-  await mkdir(join(contentsDirectory, "Resources"), { recursive: true });
-  await copyFile(
-    releaseExecutable,
+  logStep(
+    values["skip-build"]
+      ? "Assembling the app bundle"
+      : "Building and assembling the app bundle",
+  );
+  await $`env WAKU_CODESIGN_IDENTITY=${identity} WAKU_SKIP_CARGO_BUILD=${values["skip-build"] ? "1" : "0"} ${join(projectRoot, "scripts", "bundle.sh")} release`;
+  for (const artifact of [
     join(contentsDirectory, "MacOS", executableName),
-  );
-  await chmod(join(contentsDirectory, "MacOS", executableName), 0o755);
-  await copyFile(
-    join(projectRoot, "resources", "Info.plist"),
-    join(contentsDirectory, "Info.plist"),
-  );
+    bundledJsReplExecutable,
+    bundledComputerUseSkill,
+    bundledComputerUseHelper,
+  ]) {
+    await access(artifact);
+  }
   await $`plutil -replace CFBundleShortVersionString -string ${shortVersion} ${join(contentsDirectory, "Info.plist")}`;
   if (buildNumber) {
     await $`plutil -replace CFBundleVersion -string ${buildNumber} ${join(contentsDirectory, "Info.plist")}`;
   }
   await $`xattr -cr ${appBundle}`;
 
-  const identity = adhoc ? "-" : signingIdentity!;
-  logStep(adhoc ? "Ad-hoc signing the app" : `Signing the app as ${identity}`);
+  await $`codesign --verify --strict --verbose=2 ${bundledJsReplExecutable}`;
+  await $`codesign --verify --deep --strict --verbose=2 ${bundledComputerUseHelper}`;
+  await verifyJavaScriptRepl(bundledJsReplExecutable);
+  logStep(
+    adhoc
+      ? "Ad-hoc signing the final app bundle"
+      : `Signing the final app bundle as ${identity}`,
+  );
   if (adhoc) {
     await $`codesign --force --options runtime --sign - ${appBundle}`;
   } else {
@@ -241,9 +328,32 @@ try {
   await mkdir(mountDirectory);
   await $`diskutil image attach --readOnly --mountOptions nobrowse --mountPoint ${mountDirectory} ${outputPath}`;
   mountedDmg = true;
-  await access(
-    join(mountDirectory, `${appName}.app`, "Contents", "MacOS", executableName),
+  const mountedApp = join(mountDirectory, `${appName}.app`);
+  const mountedContents = join(mountedApp, "Contents");
+  const mountedJsRepl = join(
+    mountedContents,
+    "Resources",
+    jsReplExecutableName,
   );
+  const mountedComputerUseHelper = join(
+    mountedContents,
+    "Helpers",
+    `${computerUseHelperName}.app`,
+  );
+  for (const artifact of [
+    join(mountedContents, "MacOS", executableName),
+    mountedJsRepl,
+    join(
+      mountedContents,
+      "Resources",
+      "skills",
+      "waku-computer-use",
+      "SKILL.md",
+    ),
+    mountedComputerUseHelper,
+  ]) {
+    await access(artifact);
+  }
   await access(join(mountDirectory, ".DS_Store"));
   const applicationsTarget = await readlink(
     join(mountDirectory, "Applications"),
@@ -253,7 +363,10 @@ try {
       `DMG Applications link points to "${applicationsTarget}", expected "/Applications".`,
     );
   }
-  await $`codesign --verify --deep --strict --verbose=2 ${join(mountDirectory, `${appName}.app`)}`;
+  await $`codesign --verify --strict --verbose=2 ${mountedJsRepl}`;
+  await $`codesign --verify --deep --strict --verbose=2 ${mountedComputerUseHelper}`;
+  await $`codesign --verify --deep --strict --verbose=2 ${mountedApp}`;
+  await verifyJavaScriptRepl(mountedJsRepl);
   await $`diskutil eject ${mountDirectory}`;
   mountedDmg = false;
 

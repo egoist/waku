@@ -618,7 +618,7 @@ impl Waku {
         if has_active_turn {
             self.capture_latest_turn_checkpoint_for(session_id);
         }
-        // A Codex runtime owns its node_repl and Computer Use descendants.
+        // A provider runtime owns its Waku JavaScript REPL and Computer Use descendants.
         // Stopping the turn must close that whole process tree so capture,
         // status, and accessibility sessions do not outlive the turn. The
         // next prompt resumes the same provider thread with a fresh runtime.

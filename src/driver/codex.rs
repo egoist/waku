@@ -1,22 +1,20 @@
 use std::collections::HashMap;
-use std::ffi::OsString;
 use std::fs;
 use std::io::{BufRead, BufReader, Write};
-use std::os::unix::ffi::OsStringExt as _;
-use std::os::unix::fs::PermissionsExt as _;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
-use std::time::{Duration, SystemTime};
+use std::time::Duration;
 
 use anyhow::{Context as _, anyhow};
 use crossbeam_channel::{Sender, bounded, unbounded};
 use parking_lot::Mutex;
 use serde_json::{Value, json};
+#[cfg(test)]
 use uuid::Uuid;
 
+use super::computer_use as computer_use_runtime;
 use crate::computer_use;
 use crate::driver::{DriverControl, DriverStartOptions};
 use crate::model::{
@@ -33,6 +31,7 @@ const DISABLE_EXTERNAL_COMPUTER_USE_MCP_COMMAND: &str =
 const DISABLE_EXTERNAL_COMPUTER_USE_MCP: &str = "mcp_servers.computer-use.enabled=false";
 const DISABLE_EXTERNAL_COMPUTER_USE_SKILL: &str =
     r#"skills.config=[{name="computer-use:computer-use",enabled=false}]"#;
+const DISABLE_CODEX_NODE_REPL: &str = "mcp_servers.node_repl.enabled=false";
 
 enum CommandMessage {
     Prompt(String),
@@ -56,154 +55,41 @@ pub struct CodexDriver {
     commands: Sender<CommandMessage>,
     computer_use_process_directory: Option<PathBuf>,
     computer_use_server_path: Option<PathBuf>,
-    computer_use_preview_monitor: Option<ComputerUsePreviewMonitor>,
-}
-
-struct ComputerUsePreviewMonitor {
-    running: Arc<AtomicBool>,
-}
-
-impl ComputerUsePreviewMonitor {
-    fn start(directory: PathBuf, events: Sender<DriverEvent>) -> anyhow::Result<Self> {
-        let running = Arc::new(AtomicBool::new(true));
-        let thread_running = running.clone();
-        thread::Builder::new()
-            .name("waku-computer-use-preview".into())
-            .spawn(move || {
-                let mut seen = HashMap::<PathBuf, (SystemTime, u64)>::new();
-                while thread_running.load(Ordering::Acquire) {
-                    if let Ok(entries) = fs::read_dir(&directory) {
-                        for entry in entries.flatten() {
-                            let path = entry.path();
-                            let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
-                                continue;
-                            };
-                            if !name.starts_with("preview-") || !name.ends_with(".json") {
-                                continue;
-                            }
-                            let Ok(metadata) = entry.metadata() else {
-                                continue;
-                            };
-                            let Ok(modified) = metadata.modified() else {
-                                continue;
-                            };
-                            let revision = (modified, metadata.len());
-                            if seen.get(&path) == Some(&revision) {
-                                continue;
-                            }
-                            seen.insert(path.clone(), revision);
-                            let Ok(data) = fs::read(&path) else {
-                                continue;
-                            };
-                            if let Ok(state) = computer_use::decode_preview_update(&data) {
-                                let _ = events.send(DriverEvent::ComputerUseUpdated(state));
-                            }
-                        }
-                    }
-                    thread::sleep(Duration::from_millis(50));
-                }
-            })
-            .context("failed to start the Computer Use preview monitor")?;
-        Ok(Self { running })
-    }
-}
-
-impl Drop for ComputerUsePreviewMonitor {
-    fn drop(&mut self) {
-        self.running.store(false, Ordering::Release);
-    }
+    computer_use_preview_monitor: Option<computer_use_runtime::ComputerUsePreviewMonitor>,
 }
 
 struct CodexComputerUseConfig {
     server_path: PathBuf,
     server: String,
-    client_path: PathBuf,
-    client: String,
+    repl: String,
     skill_root: PathBuf,
     process_directory: PathBuf,
     process_directory_config: String,
-    node_repl_env_allowlist: String,
-    trusted_code_paths: String,
 }
 
 impl CodexComputerUseConfig {
     fn load() -> anyhow::Result<Self> {
         let server_path = computer_use::mcp_server_command()?;
         let server = toml_string(&server_path.display().to_string());
-        let client_path = computer_use::node_repl_client_path()?;
-        let client = toml_string(&client_path.display().to_string());
+        let repl_path = computer_use::js_repl_server_path()?;
+        let repl = toml_string(&repl_path.display().to_string());
         let skill_root = computer_use::skill_root_path()?;
-        let resources = client_path
-            .parent()
-            .ok_or_else(|| anyhow!("Waku Computer Use client has no resource directory"))?;
-        let process_directory = std::env::temp_dir()
-            .join("waku-computer-use")
-            .join(Uuid::new_v4().simple().to_string());
-        fs::create_dir_all(&process_directory).with_context(|| {
-            format!(
-                "could not create Computer Use process directory {}",
-                process_directory.display()
-            )
-        })?;
-        fs::set_permissions(&process_directory, fs::Permissions::from_mode(0o700)).with_context(
-            || {
-                format!(
-                    "could not secure Computer Use process directory {}",
-                    process_directory.display()
-                )
-            },
-        )?;
+        let process_directory = computer_use_runtime::create_process_directory()?;
         let process_directory_config = toml_string(&process_directory.display().to_string());
-        let codex_home = std::env::var_os("CODEX_HOME")
-            .map(PathBuf::from)
-            .or_else(|| dirs::home_dir().map(|home| home.join(".codex")));
-        let trusted_code_paths = toml_string(
-            &codex_home
-                .into_iter()
-                .chain(std::iter::once(resources.to_path_buf()))
-                .map(|path| path.display().to_string())
-                .collect::<Vec<_>>()
-                .join(":"),
-        );
-        let node_repl_env_allowlist = toml_string(
-            &[
-                "BROWSER_USE_AVAILABLE_BACKENDS",
-                "BROWSER_USE_CODEX_APP_BUILD_FLAVOR",
-                "BROWSER_USE_CODEX_APP_VERSION",
-                "CODEX_CLI_PATH",
-                "CODEX_HOME",
-                "NODE_REPL_INSTRUCTIONS_USE_CASE_BROWSER",
-                "NODE_REPL_INSTRUCTIONS_USE_CASE_CHROME",
-                "NODE_REPL_INSTRUCTIONS_USE_CASE_COMPUTER_USE",
-                "NODE_REPL_NATIVE_PIPE_CONNECT_TIMEOUT_MS",
-                "NODE_REPL_NODE_MODULE_DIRS",
-                "NODE_REPL_NODE_PATH",
-                "NODE_REPL_TRUSTED_BROWSER_CLIENT_SHA256S",
-                "NODE_REPL_TRUSTED_CODE_PATHS",
-                "SKY_CUA_SERVICE_PATH",
-                "WAKU_COMPUTER_USE_CLIENT",
-                "WAKU_COMPUTER_USE_PROCESS_DIRECTORY",
-                "WAKU_COMPUTER_USE_SERVER",
-            ]
-            .join(","),
-        );
         Ok(Self {
             server_path,
             server,
-            client_path,
-            client,
+            repl,
             skill_root,
             process_directory,
             process_directory_config,
-            node_repl_env_allowlist,
-            trusted_code_paths,
         })
     }
 }
 
-/// The helper is deliberately not registered as a Codex MCP server. The
-/// node_repl client spawns and owns the stdio MCP connection itself; Codex
-/// only needs the env vars that tell the client where the helper lives.
+/// Register Waku's long-lived QuickJS MCP server and keep the raw native helper
+/// private behind its built-in `sky` object. Codex sees only the compact
+/// `js` / `js_reset` execution surface.
 fn configure_computer_use_command(command: &mut Command, config: Option<&CodexComputerUseConfig>) {
     if let Some(config) = config {
         command
@@ -215,36 +101,26 @@ fn configure_computer_use_command(command: &mut Command, config: Option<&CodexCo
             .arg(DISABLE_EXTERNAL_COMPUTER_USE_MCP)
             .arg("-c")
             .arg(DISABLE_EXTERNAL_COMPUTER_USE_SKILL)
+            .arg("-c")
+            .arg(DISABLE_CODEX_NODE_REPL)
             .env("WAKU_COMPUTER_USE_SERVER", &config.server_path)
-            .env("WAKU_COMPUTER_USE_CLIENT", &config.client_path)
             .env(
                 "WAKU_COMPUTER_USE_PROCESS_DIRECTORY",
                 &config.process_directory,
             )
             .arg("-c")
+            .arg(format!("mcp_servers.waku_js_repl.command={}", config.repl))
+            .arg("-c")
+            .arg("mcp_servers.waku_js_repl.args=[]")
+            .arg("-c")
             .arg(format!(
-                "mcp_servers.node_repl.env.WAKU_COMPUTER_USE_SERVER={}",
+                "mcp_servers.waku_js_repl.env.WAKU_COMPUTER_USE_SERVER={}",
                 config.server
             ))
             .arg("-c")
             .arg(format!(
-                "mcp_servers.node_repl.env.WAKU_COMPUTER_USE_CLIENT={}",
-                config.client
-            ))
-            .arg("-c")
-            .arg(format!(
-                "mcp_servers.node_repl.env.WAKU_COMPUTER_USE_PROCESS_DIRECTORY={}",
+                "mcp_servers.waku_js_repl.env.WAKU_COMPUTER_USE_PROCESS_DIRECTORY={}",
                 config.process_directory_config
-            ))
-            .arg("-c")
-            .arg(format!(
-                "mcp_servers.node_repl.env.NODE_REPL_UNTRUSTED_ENV_ALLOWLIST={}",
-                config.node_repl_env_allowlist
-            ))
-            .arg("-c")
-            .arg(format!(
-                "mcp_servers.node_repl.env.NODE_REPL_TRUSTED_CODE_PATHS={}",
-                config.trusted_code_paths
             ));
     }
 }
@@ -309,7 +185,12 @@ impl CodexDriver {
             .ok_or_else(|| anyhow!("Codex stderr unavailable"))?;
         let computer_use_preview_monitor = computer_use_process_directory
             .as_ref()
-            .map(|directory| ComputerUsePreviewMonitor::start(directory.clone(), events.clone()))
+            .map(|directory| {
+                computer_use_runtime::ComputerUsePreviewMonitor::start(
+                    directory.clone(),
+                    events.clone(),
+                )
+            })
             .transpose()?;
         let (commands, command_rx) = unbounded();
         let thread_id = Arc::new(Mutex::new(None::<String>));
@@ -695,7 +576,7 @@ impl DriverControl for CodexDriver {
             self.computer_use_process_directory.as_deref(),
             self.computer_use_server_path.as_deref(),
         ) {
-            stop_registered_computer_use_processes(directory, server_path);
+            computer_use_runtime::stop_registered_processes(directory, server_path);
         }
     }
 
@@ -749,51 +630,6 @@ impl Drop for CodexDriver {
         }
         let _ = self.commands.send(CommandMessage::Shutdown);
     }
-}
-
-fn stop_registered_computer_use_processes(directory: &Path, helper_executable: &Path) {
-    let expected_executable =
-        fs::canonicalize(helper_executable).unwrap_or_else(|_| helper_executable.to_path_buf());
-    for (pid, registration) in registered_computer_use_processes(directory) {
-        if process_executable(pid).as_deref() == Some(expected_executable.as_path()) {
-            unsafe {
-                libc::kill(pid, libc::SIGTERM);
-            }
-        }
-        let _ = fs::remove_file(registration);
-    }
-}
-
-fn registered_computer_use_processes(directory: &Path) -> Vec<(i32, PathBuf)> {
-    let Ok(entries) = fs::read_dir(directory) else {
-        return Vec::new();
-    };
-    entries
-        .filter_map(Result::ok)
-        .filter_map(|entry| {
-            if !entry.file_type().ok()?.is_file() {
-                return None;
-            }
-            let pid = entry.file_name().to_str()?.parse::<i32>().ok()?;
-            (pid > 1).then_some((pid, entry.path()))
-        })
-        .collect()
-}
-
-fn process_executable(pid: i32) -> Option<PathBuf> {
-    let mut buffer = vec![0_u8; libc::PROC_PIDPATHINFO_MAXSIZE as usize];
-    let length = unsafe {
-        libc::proc_pidpath(
-            pid,
-            buffer.as_mut_ptr().cast(),
-            libc::PROC_PIDPATHINFO_MAXSIZE as u32,
-        )
-    };
-    if length <= 0 {
-        return None;
-    }
-    buffer.truncate(length as usize);
-    Some(PathBuf::from(OsString::from_vec(buffer)))
 }
 
 fn write_json_line(writer: &mut impl Write, value: &Value) -> std::io::Result<()> {
@@ -1522,13 +1358,10 @@ mod tests {
         let config = CodexComputerUseConfig {
             server_path: PathBuf::from("/tmp/waku-computer-use-server"),
             server: toml_string("/tmp/waku-computer-use-server"),
-            client_path: PathBuf::from("/tmp/waku-computer-use-client.mjs"),
-            client: toml_string("/tmp/waku-computer-use-client.mjs"),
+            repl: toml_string("/tmp/waku"),
             skill_root: PathBuf::from("/tmp/waku-computer-use-skill"),
             process_directory: PathBuf::from("/tmp/waku-computer-use-processes"),
             process_directory_config: toml_string("/tmp/waku-computer-use-processes"),
-            node_repl_env_allowlist: toml_string("WAKU_COMPUTER_USE_SERVER"),
-            trusted_code_paths: toml_string("/tmp"),
         };
         let mut enabled = Command::new("/usr/bin/true");
         configure_computer_use_command(&mut enabled, Some(&config));
@@ -1536,9 +1369,8 @@ mod tests {
             .get_args()
             .map(|argument| argument.to_string_lossy().into_owned())
             .collect::<Vec<_>>();
-        // The helper must never be registered as a Codex MCP server: the
-        // node_repl client owns the helper connection, and direct raw-tool
-        // access would duplicate its schemas in context.
+        // The raw helper must never be registered as a Codex MCP server: the
+        // Waku REPL owns it and exposes only `sky` inside JavaScript.
         assert!(
             !enabled_arguments
                 .iter()
@@ -1547,7 +1379,12 @@ mod tests {
         assert!(
             enabled_arguments
                 .iter()
-                .any(|argument| argument.contains("mcp_servers.node_repl.env.WAKU_COMPUTER_USE_SERVER"))
+                .any(|argument| argument.contains("mcp_servers.waku_js_repl.command"))
+        );
+        assert!(
+            enabled_arguments
+                .iter()
+                .any(|argument| { argument == "mcp_servers.waku_js_repl.args=[]" })
         );
         assert!(
             enabled_arguments
@@ -1563,6 +1400,11 @@ mod tests {
             enabled_arguments
                 .iter()
                 .any(|argument| argument == DISABLE_EXTERNAL_COMPUTER_USE_SKILL)
+        );
+        assert!(
+            enabled_arguments
+                .iter()
+                .any(|argument| argument == DISABLE_CODEX_NODE_REPL)
         );
         assert!(
             enabled
@@ -1581,7 +1423,7 @@ mod tests {
         fs::write(directory.join("123"), []).unwrap();
         fs::write(directory.join("not-a-pid"), []).unwrap();
 
-        let processes = registered_computer_use_processes(&directory);
+        let processes = computer_use_runtime::registered_processes(&directory);
         assert_eq!(processes.len(), 1);
         assert_eq!(processes[0].0, 123);
         assert_eq!(processes[0].1, directory.join("123"));
@@ -1592,7 +1434,10 @@ mod tests {
     #[test]
     fn computer_use_cleanup_verifies_the_registered_executable() {
         let current = fs::canonicalize(std::env::current_exe().unwrap()).unwrap();
-        assert_eq!(process_executable(std::process::id() as i32), Some(current));
+        assert_eq!(
+            computer_use_runtime::process_executable(std::process::id() as i32),
+            Some(current)
+        );
     }
 
     #[test]
@@ -1741,7 +1586,7 @@ mod tests {
     fn mcp_tool_title_prefers_the_human_facing_argument() {
         let titled = json!({
             "type": "mcpToolCall",
-            "server": "node_repl",
+            "server": "waku_js_repl",
             "tool": "js",
             "arguments": {
                 "title": "Inspect Helium browser",
@@ -1750,7 +1595,7 @@ mod tests {
         });
         let untitled = json!({
             "type": "mcpToolCall",
-            "server": "node_repl",
+            "server": "waku_js_repl",
             "tool": "js",
             "arguments": { "code": "sky.list_apps()" }
         });

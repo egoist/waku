@@ -2771,7 +2771,7 @@ private func signingInformation(pid: pid_t) -> [String: Any]? {
 private func isBlocked(bundleId: String) -> Bool {
     let bundle = bundleId.lowercased()
     if [
-        "codes.waku",
+        "sh.waku",
         "com.openai.codex",
         "com.openai.sky.",
         "com.1password.",
@@ -2946,7 +2946,7 @@ private final class WindowCaptureSession {
         )
         configuration.showsCursor = false
         configuration.capturesAudio = false
-        outputQueue = DispatchQueue(label: "codes.waku.computer-use.capture.\(window.windowID)")
+        outputQueue = DispatchQueue(label: "sh.waku.computer-use.capture.\(window.windowID)")
         stream = SCStream(filter: filter, configuration: configuration, delegate: output)
         try stream.addStreamOutput(output, type: .screen, sampleHandlerQueue: outputQueue)
     }

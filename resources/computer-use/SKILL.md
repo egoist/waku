@@ -3,30 +3,27 @@ name: waku-computer-use
 description: Control local Mac apps through Waku Computer Use for tasks that require reading or operating app UI. Prefer purpose-built connectors, APIs, or CLIs when available.
 ---
 
-## node_repl + Waku Computer Use
+## waku_js_repl + Waku Computer Use
 
-* Use `node_repl` (JavaScript) for all Computer Use actions.
-* Do not use other technologies besides `node_repl` for computer interactions, unless specifically requested by the user (e.g. AppleScript, `osascript`, JXA, System Events, CGEvent synthesis).
+* Use the `js` tool from `waku_js_repl` for all Computer Use actions.
+* Do not use other technologies besides `waku_js_repl` for computer interactions, unless specifically requested by the user (e.g. AppleScript, `osascript`, JXA, System Events, CGEvent synthesis).
 * Prefer a dedicated plugin or skill when it can complete the task; use Computer Use for app interactions that are not exposed through a more specific interface.
-* `node_repl` state is persistent across calls.
+* The QuickJS state is persistent across `js` calls.
 * For text output, use `nodeRepl.write(...)`. `nodeRepl.write(...)` takes a string. If you would like to read a whole object, wrap it with `JSON.stringify(...)`.
 
 ## Bootstrap
 
-Load Computer Use through the wrapper injected by Waku. Do not import `@oai/sky` directly from the JavaScript session or call the Computer Use MCP tools directly when the `sky` facade is available.
+Waku exposes the native Computer Use runtime directly to QuickJS, but initializes `sky` lazily. Do not import `@oai/sky` or call the raw Computer Use helper.
 
-Run this once per fresh `node_repl` session:
+Run this once per fresh `waku_js_repl` session:
 
 ```js
 if (!globalThis.sky) {
-  const env = globalThis.nodeRepl?.env;
-  if (!env?.WAKU_COMPUTER_USE_CLIENT) {
-    throw new Error("Waku Computer Use requires nodeRepl.env.WAKU_COMPUTER_USE_CLIENT");
-  }
-  const { setupComputerUseRuntime } = await import(env.WAKU_COMPUTER_USE_CLIENT);
   await setupComputerUseRuntime({ globals: globalThis });
 }
 ```
+
+After `js_reset`, run the bootstrap again before using `sky`.
 
 ## API surface
 
@@ -128,12 +125,7 @@ Screenshot URLs are in `screenshot.url`, and Waku returns them as base64-encoded
 ```js
 var state = await sky.get_app_state({ app: "com.google.Chrome" });
 if (state.screenshot) {
-  var match = /^data:([^;,]+);base64,(.*)$/s.exec(state.screenshot.url);
-  if (!match) throw new Error("Waku Computer Use returned an invalid screenshot URL");
-  await nodeRepl.emitImage({
-    bytes: Buffer.from(match[2], "base64"),
-    mimeType: match[1],
-  });
+  await nodeRepl.emitImage(state.screenshot.url);
 }
 ```
 

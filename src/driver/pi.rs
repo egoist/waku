@@ -11,6 +11,7 @@ use crossbeam_channel::{Sender, bounded, unbounded};
 use parking_lot::Mutex;
 use serde_json::{Value, json};
 
+use super::activity;
 use crate::driver::{DriverControl, DriverStartOptions};
 use crate::model::{ActivityKind, DriverEvent, InteractionMode, ProviderResumeCursor, RuntimeMode};
 
@@ -618,32 +619,42 @@ fn handle_pi_message(
                 .get("toolName")
                 .and_then(Value::as_str)
                 .unwrap_or("Tool");
-            let (kind, title) = id
+            let (kind, mut title) = id
                 .as_ref()
                 .and_then(|id| state.tools.get(id))
                 .cloned()
                 .unwrap_or_else(|| (classify_tool(tool_name), tool_title(tool_name)));
             if event_type == "tool_execution_start"
+                && let Some(input_title) = activity::input_title(value.get("args"))
+            {
+                title = input_title;
+            }
+            if event_type == "tool_execution_start"
                 && let Some(id) = id.as_ref()
             {
                 state.tools.insert(id.clone(), (kind, title.clone()));
             }
-            let detail = match event_type {
-                "tool_execution_start" => value.get("args"),
+            let arguments = (event_type == "tool_execution_start")
+                .then(|| value.get("args"))
+                .flatten();
+            let output = match event_type {
                 "tool_execution_update" => value.get("partialResult"),
                 "tool_execution_end" => value.get("result"),
                 _ => None,
-            }
-            .filter(|value| !value.is_null())
-            .map(compact_json);
+            };
             let complete = event_type == "tool_execution_end";
-            let _ = events.send(DriverEvent::Activity {
-                id: id.clone(),
+            let failed = value.get("isError").and_then(Value::as_bool) == Some(true);
+            let item = activity::tool_activity(
+                id.clone(),
                 kind,
                 title,
-                detail,
+                arguments,
+                output,
+                output,
+                failed,
                 complete,
-            });
+            );
+            let _ = events.send(DriverEvent::RichActivity(item));
             if complete && let Some(id) = id {
                 state.tools.remove(&id);
             }
@@ -732,15 +743,6 @@ fn pi_error_message(value: &Value) -> String {
         .or_else(|| value.get("reason").and_then(Value::as_str))
         .unwrap_or("Pi reported an error")
         .to_owned()
-}
-
-fn compact_json(value: &Value) -> String {
-    let value = serde_json::to_string(value).unwrap_or_default();
-    if value.chars().count() > 180 {
-        format!("{}…", value.chars().take(179).collect::<String>())
-    } else {
-        value
-    }
 }
 
 fn classify_tool(name: &str) -> ActivityKind {
@@ -846,14 +848,27 @@ mod tests {
             event_rx.recv().unwrap(),
             DriverEvent::ReasoningDelta(value) if value == "checking"
         ));
-        assert!(matches!(
-            event_rx.recv().unwrap(),
-            DriverEvent::Activity { complete: false, title, .. } if title == "Read file"
-        ));
-        assert!(matches!(
-            event_rx.recv().unwrap(),
-            DriverEvent::Activity { complete: true, .. }
-        ));
+        let DriverEvent::RichActivity(started) = event_rx.recv().unwrap() else {
+            panic!("expected a rich Pi tool activity");
+        };
+        assert_eq!(started.title, "Read file");
+        assert!(
+            started
+                .arguments
+                .as_deref()
+                .is_some_and(|arguments| arguments.contains("src/main.rs"))
+        );
+        assert!(!started.complete);
+        let DriverEvent::RichActivity(completed) = event_rx.recv().unwrap() else {
+            panic!("expected a completed rich Pi tool activity");
+        };
+        assert!(
+            completed
+                .output
+                .as_deref()
+                .is_some_and(|output| output.contains("..."))
+        );
+        assert!(completed.complete);
         assert!(matches!(
             event_rx.recv().unwrap(),
             DriverEvent::TextDelta(value) if value == "done"
@@ -936,10 +951,16 @@ mod tests {
         }
 
         assert!(matches!(event_rx.recv().unwrap(), DriverEvent::TurnStarted));
-        assert!(matches!(
-            event_rx.recv().unwrap(),
-            DriverEvent::Activity { complete: true, .. }
-        ));
+        let DriverEvent::RichActivity(completed) = event_rx.recv().unwrap() else {
+            panic!("expected a completed rich Pi tool activity");
+        };
+        assert!(completed.failed);
+        assert!(
+            completed
+                .output
+                .as_deref()
+                .is_some_and(|output| output.contains("missing"))
+        );
         assert!(matches!(
             event_rx.recv().unwrap(),
             DriverEvent::TurnFinished { success: true, .. }

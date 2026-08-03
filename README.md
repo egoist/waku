@@ -63,9 +63,9 @@ Do not run `scripts/bundle.sh debug`, launch a second watcher, or manually
 quit/relaunch `Waku Debug.app` unless recovering a watcher that is confirmed to
 be unavailable.
 
-Debug builds use the app name `Waku Debug`, bundle identifier `codes.waku.dev`,
+Debug builds use the app name `Waku Debug`, bundle identifier `sh.waku.dev`,
 and their own `Waku Debug/state.json` local data directory. Release builds use
-`Waku`, bundle identifier `codes.waku`, and `Waku/state.json`, so both apps can
+`Waku`, bundle identifier `sh.waku`, and `Waku/state.json`, so both apps can
 be installed and used without sharing state.
 
 Running `cargo run` directly is useful for quick terminal debugging, but it
