@@ -690,6 +690,7 @@ struct WakuComputerUse {
         output: FileHandle,
         authorizationFailure: String? = nil
     ) async throws {
+        defer { TargetProcessInputRouting.deactivateCurrentRoute() }
         while let payload = try readFrame(from: input) {
             let response: Response
             do {
@@ -828,6 +829,11 @@ struct WakuComputerUse {
     }
 
     static func serveMCP(input: FileHandle, output: FileHandle) async throws {
+        // The inactive-window route is intentionally shared by every action in
+        // this MCP session. Tear it down once when the session ends, never once
+        // per pen stroke; per-action activation/deactivation repaints Chromium
+        // browser chrome and is visible as toolbar blinking.
+        defer { TargetProcessInputRouting.deactivateCurrentRoute() }
         while let line = readLine(from: input) {
             guard let data = line.data(using: .utf8),
                   let message = try JSONSerialization.jsonObject(with: data) as? [String: Any],
@@ -959,9 +965,7 @@ struct WakuComputerUse {
                 throw HelperError.missingPermission("Accessibility")
             }
             let app = try requiredString(arguments, "app")
-            let frontmost = FrontmostApplicationSnapshot()
             let resolved = try await resolveAppWindow(app)
-            defer { frontmost.restore(ifControlledProcessID: resolved.processID) }
             let state = try await captureAppState(
                 resolved,
                 disableDiff: (arguments["disableDiff"] as? Bool) ?? false
@@ -982,9 +986,7 @@ struct WakuComputerUse {
                 throw HelperError.missingPermission("Accessibility")
             }
             let app = try requiredString(arguments, "app")
-            let frontmost = FrontmostApplicationSnapshot()
             let resolved = try await resolveAppWindow(app)
-            defer { frontmost.restore(ifControlledProcessID: resolved.processID) }
             if name == "click", let rawIndex = arguments["element_index"] {
                 let index = try elementIndex(rawIndex)
                 guard AccessibilityRegistry.shared.belongs(
@@ -1035,9 +1037,7 @@ struct WakuComputerUse {
                 throw HelperError.missingPermission("Accessibility")
             }
             let app = try requiredString(arguments, "app")
-            let frontmost = FrontmostApplicationSnapshot()
             let resolved = try await resolveAppWindow(app)
-            defer { frontmost.restore(ifControlledProcessID: resolved.processID) }
             let index = try elementIndex(arguments["element_index"] as Any)
             guard AccessibilityRegistry.shared.belongs(
                 bundleID: resolved.target.bundleId,
@@ -1790,23 +1790,6 @@ private func listTargetableApps() -> [[String: Any]] {
         ($0["displayName"] as? String ?? "").localizedCaseInsensitiveCompare(
             $1["displayName"] as? String ?? ""
         ) == .orderedAscending
-    }
-}
-
-private struct FrontmostApplicationSnapshot {
-    private let application = NSWorkspace.shared.frontmostApplication
-
-    func restore(ifControlledProcessID processID: pid_t) {
-        guard let application,
-              application.processIdentifier != processID else {
-            return
-        }
-        // Never override a user switch to a third app. Restore only when the
-        // controlled process itself took frontmost status during the call.
-        guard NSWorkspace.shared.frontmostApplication?.processIdentifier == processID else {
-            return
-        }
-        application.activate(options: [.activateIgnoringOtherApps])
     }
 }
 
@@ -3028,9 +3011,14 @@ private func perform(_ actions: [Action], in window: SCWindow, coordinateSpace: 
             )
         case "drag":
             updateVirtualCursor(action.toX, action.toY, window: window, coordinateSpace: coordinateSpace)
+            let start = try point(action.x, action.y)
+            let end = try point(action.toX, action.toY)
             try drag(
-                from: point(action.x, action.y),
-                to: point(action.toX, action.toY),
+                from: start,
+                to: end,
+                fromLocal: CGPoint(x: start.x - frame.minX, y: start.y - frame.minY),
+                toLocal: CGPoint(x: end.x - frame.minX, y: end.y - frame.minY),
+                windowID: window.windowID,
                 processID: processID
             )
         case "scroll":
@@ -3073,14 +3061,349 @@ private func updateVirtualCursor(
     )
 }
 
+private enum WindowServerEventBridge {
+    typealias SetWindowLocation = @convention(c) (UnsafeMutableRawPointer?, Double, Double) -> Void
+
+    private static let handle = dlopen(
+        "/System/Library/PrivateFrameworks/SkyLight.framework/SkyLight",
+        RTLD_LAZY | RTLD_GLOBAL
+    )
+
+    private static func resolve<T>(_ name: String, as type: T.Type) -> T? {
+        guard let symbol = name.withCString({ dlsym(handle, $0) }) else {
+            return nil
+        }
+        return unsafeBitCast(symbol, to: type)
+    }
+
+    private static let setWindowLocation = resolve(
+        "CGEventSetWindowLocation",
+        as: SetWindowLocation.self
+    )
+
+    static func setLocalLocation(_ localPoint: CGPoint, on event: CGEvent) {
+        let pointer = Unmanaged.passUnretained(event).toOpaque()
+        setWindowLocation?(pointer, localPoint.x, localPoint.y)
+    }
+}
+
+private enum TargetProcessInputRouting {
+    private static let processNotificationType: UInt = 21
+    private static let appKitDefinedType: UInt = 13
+    private static let keyFocusReturnedSubtype: UInt16 = 0x8000
+    private static let inactiveWindowActivatedSubtype: UInt16 = 1
+    private static let appDeactivatedSubtype: UInt16 = 2
+    private static let inactiveWindowModifiers = NSEvent.ModifierFlags(rawValue: 0xC0000)
+    private static let lock = NSLock()
+    private static var currentRoute: Route?
+
+    private struct Route {
+        let processID: pid_t
+        let windowID: CGWindowID
+        let observedFrontmostProcessID: pid_t?
+    }
+
+    static func ensureInactiveWindowRouting(
+        processID: pid_t,
+        windowID: CGWindowID,
+        guardedBy _: FocusStealSuppression
+    ) throws {
+        lock.lock()
+        defer { lock.unlock() }
+
+        let frontmostProcessID = NSWorkspace.shared.frontmostApplication?.processIdentifier
+
+        // Real user focus always wins. If the controlled app is genuinely
+        // frontmost, it needs no synthetic route. Do not post a synthetic
+        // deactivation here; that would fight the user's focus change.
+        if frontmostProcessID == processID {
+            currentRoute = nil
+            return
+        }
+
+        if let currentRoute,
+           currentRoute.processID == processID,
+           currentRoute.windowID == windowID,
+           currentRoute.observedFrontmostProcessID == frontmostProcessID {
+            return
+        }
+
+        // A route is MCP-session state, like Codex's
+        // SyntheticAppFocusEnforcer. Rebuild it only when the target window or
+        // the user's real frontmost app changed. Tearing it down after every
+        // drag is what makes Chromium toolbars flash active/inactive.
+        deactivateCurrentRouteLocked()
+
+        // Codex first marks the PID as synthetically active without naming a
+        // window. The following window-scoped marker then carries the private
+        // inactive-window mask. Keep this ordering; sending subtype 1 directly
+        // to a window with empty flags is the unsafe foregrounding variant.
+        try post(
+            type: appKitDefinedType,
+            subtype: inactiveWindowActivatedSubtype,
+            windowNumber: 0,
+            modifierFlags: [],
+            to: processID
+        )
+        try post(
+            type: processNotificationType,
+            subtype: keyFocusReturnedSubtype,
+            windowNumber: 0,
+            modifierFlags: [],
+            to: processID
+        )
+
+        // This is the exact distinction between Codex's background route and
+        // the unsafe experiment that foregrounded Helium. A window-scoped
+        // subtype-1 event with empty flags is a real activation request. The
+        // 0xC0000 mask marks Codex's inactive-window route. Do not remove the
+        // mask, use window 0, or replace this with NSRunningApplication.activate.
+        try post(
+            type: appKitDefinedType,
+            subtype: inactiveWindowActivatedSubtype,
+            windowNumber: Int(windowID),
+            modifierFlags: inactiveWindowModifiers,
+            to: processID
+        )
+        currentRoute = Route(
+            processID: processID,
+            windowID: windowID,
+            observedFrontmostProcessID: frontmostProcessID
+        )
+    }
+
+    static func deactivateCurrentRoute() {
+        lock.lock()
+        defer { lock.unlock() }
+        deactivateCurrentRouteLocked()
+    }
+
+    private static func deactivateCurrentRouteLocked() {
+        guard let route = currentRoute else { return }
+        currentRoute = nil
+
+        // Do not send a synthetic deactivation over a real user activation.
+        guard NSWorkspace.shared.frontmostApplication?.processIdentifier
+            != route.processID else {
+            return
+        }
+        try? post(
+            type: appKitDefinedType,
+            subtype: appDeactivatedSubtype,
+            windowNumber: 0,
+            modifierFlags: [],
+            to: route.processID
+        )
+    }
+
+    private static func post(
+        type: UInt,
+        subtype: UInt16,
+        windowNumber: Int,
+        modifierFlags: NSEvent.ModifierFlags,
+        to processID: pid_t
+    ) throws {
+        guard let eventType = NSEvent.EventType(rawValue: type),
+              let nsEvent = NSEvent.otherEvent(
+                with: eventType,
+                location: .zero,
+                modifierFlags: modifierFlags,
+                timestamp: 0,
+                windowNumber: windowNumber,
+                context: nil,
+                subtype: Int16(bitPattern: subtype),
+                data1: 0,
+                data2: 0
+              ), let event = nsEvent.cgEvent else {
+            throw HelperError.eventCreationFailed
+        }
+        event.timestamp = CGEventTimestamp(mach_absolute_time())
+        event.postToPid(processID)
+    }
+}
+
+private final class FocusStealSuppressionState {
+    let targetProcessID: pid_t
+    let ready = DispatchSemaphore(value: 0)
+    let stopped = DispatchSemaphore(value: 0)
+    var eventTap: CFMachPort?
+    var runLoop: CFRunLoop?
+
+    init(targetProcessID: pid_t) {
+        self.targetProcessID = targetProcessID
+    }
+}
+
+private let focusStealSuppressionCallback: CGEventTapCallBack = {
+    _, type, event, userInfo in
+    guard let userInfo else {
+        return Unmanaged.passUnretained(event)
+    }
+    let state = Unmanaged<FocusStealSuppressionState>
+        .fromOpaque(userInfo)
+        .takeUnretainedValue()
+
+    if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
+        if let eventTap = state.eventTap {
+            CGEvent.tapEnable(tap: eventTap, enable: true)
+        }
+        return Unmanaged.passUnretained(event)
+    }
+
+    guard type.rawValue == 21,
+          let targetProcessField = CGEventField(rawValue: 40),
+          let sourceProcessField = CGEventField(rawValue: 41),
+          let subtypeField = CGEventField(rawValue: 64),
+          let subjectProcessField = CGEventField(rawValue: 73) else {
+        return Unmanaged.passUnretained(event)
+    }
+    let targetProcessID = pid_t(event.getIntegerValueField(targetProcessField))
+    let sourceProcessID = pid_t(event.getIntegerValueField(sourceProcessField))
+    let subjectProcessID = pid_t(event.getIntegerValueField(subjectProcessField))
+    let subtype = UInt16(truncatingIfNeeded: event.getIntegerValueField(subtypeField))
+
+    // PID-targeted AppKit mouse delivery may produce a helper-origin
+    // key-focus-returned routing event. Codex permits exactly this subtype and
+    // it does not activate or repaint the target as active. Everything emitted
+    // by the controlled process remains blocked: a later NewFront request may
+    // identify Helium as its source, target, or subject PID.
+    if sourceProcessID == getpid() && subtype == 0x8000 {
+        return Unmanaged.passUnretained(event)
+    }
+    if sourceProcessID == state.targetProcessID
+        || targetProcessID == state.targetProcessID
+        || subjectProcessID == state.targetProcessID {
+        return nil
+    }
+    return Unmanaged.passUnretained(event)
+}
+
+private final class FocusStealSuppression {
+    private let state: FocusStealSuppressionState
+
+    init?(targetProcessID: pid_t) {
+        let state = FocusStealSuppressionState(targetProcessID: targetProcessID)
+        self.state = state
+        Thread {
+            let mask = CGEventMask(1) << CGEventType(rawValue: 21)!.rawValue
+            guard let eventTap = CGEvent.tapCreate(
+                tap: .cgAnnotatedSessionEventTap,
+                place: .headInsertEventTap,
+                options: .defaultTap,
+                eventsOfInterest: mask,
+                callback: focusStealSuppressionCallback,
+                userInfo: Unmanaged.passUnretained(state).toOpaque()
+            ) else {
+                state.ready.signal()
+                state.stopped.signal()
+                return
+            }
+            let runLoop = CFRunLoopGetCurrent()
+            let source = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, eventTap, 0)
+            state.eventTap = eventTap
+            state.runLoop = runLoop
+            CFRunLoopAddSource(runLoop, source, .commonModes)
+            CGEvent.tapEnable(tap: eventTap, enable: true)
+            state.ready.signal()
+            CFRunLoopRun()
+            CGEvent.tapEnable(tap: eventTap, enable: false)
+            CFRunLoopRemoveSource(runLoop, source, .commonModes)
+            state.stopped.signal()
+        }.start()
+
+        guard state.ready.wait(timeout: .now() + 1) == .success,
+              state.eventTap != nil else {
+            return nil
+        }
+    }
+
+    func stop() {
+        guard let runLoop = state.runLoop else { return }
+        CFRunLoopStop(runLoop)
+        _ = state.stopped.wait(timeout: .now() + 1)
+        state.runLoop = nil
+        state.eventTap = nil
+    }
+
+    deinit {
+        stop()
+    }
+}
+
+private enum SyntheticMouseEventNumbers {
+    private static let lock = NSLock()
+    private static var value: Int64 = 0
+
+    static func next() -> Int64 {
+        lock.lock()
+        defer { lock.unlock() }
+        let result = value
+        value &+= 1
+        return result
+    }
+}
+
+private func windowTargetedMouseEvent(
+    type: NSEvent.EventType,
+    at globalPoint: CGPoint,
+    localPoint: CGPoint,
+    button: CGMouseButton,
+    windowID: CGWindowID,
+    eventNumber: Int64,
+    clickCount: Int
+) throws -> CGEvent {
+    // Match Codex's inactive-window pointer construction. Creating an NSEvent
+    // with the real target window number supplies AppKit metadata that a raw
+    // HID-state CGEvent lacks. TargetProcessInputRouting separately brackets
+    // this pointer stream with Codex's guarded background markers. Do not add
+    // an unguarded or empty-flags window activation here: that makes browser
+    // chrome blink and can bring the controlled app to the front.
+    guard let nsEvent = NSEvent.mouseEvent(
+        with: type,
+        location: globalPoint,
+        modifierFlags: [],
+        timestamp: 0,
+        windowNumber: Int(windowID),
+        context: nil,
+        eventNumber: Int(eventNumber),
+        clickCount: clickCount,
+        pressure: 1
+    ), let event = nsEvent.cgEvent else {
+        throw HelperError.eventCreationFailed
+    }
+
+    event.flags = []
+    event.location = globalPoint
+    event.setIntegerValueField(CGEventField(rawValue: 3)!, value: Int64(button.rawValue))
+    event.setIntegerValueField(CGEventField(rawValue: 7)!, value: 3)
+    let windowValue = Int64(windowID)
+    event.setIntegerValueField(.mouseEventWindowUnderMousePointer, value: windowValue)
+    event.setIntegerValueField(
+        .mouseEventWindowUnderMousePointerThatCanHandleThisEvent,
+        value: windowValue
+    )
+    WindowServerEventBridge.setLocalLocation(localPoint, on: event)
+    return event
+}
+
 private func mouseEvent(type: CGEventType, at point: CGPoint, button: CGMouseButton) throws -> CGEvent {
-    guard let event = CGEvent(mouseEventSource: nil, mouseType: type, mouseCursorPosition: point, mouseButton: button) else {
+    guard let source = CGEventSource(stateID: .hidSystemState),
+          let event = CGEvent(
+              mouseEventSource: source,
+              mouseType: type,
+              mouseCursorPosition: point,
+              mouseButton: button
+          ) else {
         throw HelperError.eventCreationFailed
     }
     return event
 }
 
 private func post(_ event: CGEvent, to processID: pid_t) {
+    // Computer Use must never activate the controlled app or post pointer
+    // input to a global event tap. PID-targeted delivery is what lets Waku
+    // operate another app without stealing the user's focus.
+    event.timestamp = CGEventTimestamp(mach_absolute_time())
     event.postToPid(processID)
 }
 
@@ -3118,19 +3441,94 @@ private func click(at point: CGPoint, count: Int64, button: CGMouseButton, proce
     }
 }
 
-private func drag(from start: CGPoint, to end: CGPoint, processID: pid_t) throws {
-    let down = try mouseEvent(type: .leftMouseDown, at: start, button: .left)
+private func drag(
+    from start: CGPoint,
+    to end: CGPoint,
+    fromLocal: CGPoint,
+    toLocal: CGPoint,
+    windowID: CGWindowID,
+    processID: pid_t
+) throws {
+    // A drag must remain PID-scoped. The only activation-shaped events allowed
+    // are the guarded, specially flagged markers in TargetProcessInputRouting.
+    // Never replace them with real app activation, empty-flags window markers,
+    // or CGEvent.post(tap:): those change the controlled app's visible active
+    // state. Restoring focus later is not equivalent because the browser has
+    // already blinked or moved front.
+    guard let focusStealSuppression = FocusStealSuppression(targetProcessID: processID) else {
+        throw HelperError.eventCreationFailed
+    }
+    defer {
+        // Keep blocking a delayed target-originated NewFront request briefly
+        // after mouse-up, then remove the tap. This does not synthesize focus.
+        usleep(100_000)
+        focusStealSuppression.stop()
+    }
+
+    try TargetProcessInputRouting.ensureInactiveWindowRouting(
+        processID: processID,
+        windowID: windowID,
+        guardedBy: focusStealSuppression
+    )
+
+    // Codex uses one event number for down/up and a second shared number for
+    // every dragged sample. Preserve that AppKit gesture identity.
+    let clickEventNumber = SyntheticMouseEventNumbers.next()
+    let dragEventNumber = SyntheticMouseEventNumbers.next()
+    let down = try windowTargetedMouseEvent(
+        type: .leftMouseDown,
+        at: start,
+        localPoint: fromLocal,
+        button: .left,
+        windowID: windowID,
+        eventNumber: clickEventNumber,
+        clickCount: 1
+    )
     post(down, to: processID)
+
+    let initialDrag = try windowTargetedMouseEvent(
+        type: .leftMouseDragged,
+        at: start,
+        localPoint: fromLocal,
+        button: .left,
+        windowID: windowID,
+        eventNumber: dragEventNumber,
+        clickCount: 0
+    )
+    post(initialDrag, to: processID)
+
     for step in 1...12 {
         let progress = Double(step) / 12
         let point = CGPoint(
             x: start.x + (end.x - start.x) * progress,
             y: start.y + (end.y - start.y) * progress
         )
-        try post(mouseEvent(type: .leftMouseDragged, at: point, button: .left), to: processID)
-        usleep(12_000)
+        let localPoint = CGPoint(
+            x: fromLocal.x + (toLocal.x - fromLocal.x) * progress,
+            y: fromLocal.y + (toLocal.y - fromLocal.y) * progress
+        )
+        let event = try windowTargetedMouseEvent(
+            type: .leftMouseDragged,
+            at: point,
+            localPoint: localPoint,
+            button: .left,
+            windowID: windowID,
+            eventNumber: dragEventNumber,
+            clickCount: 0
+        )
+        post(event, to: processID)
     }
-    try post(mouseEvent(type: .leftMouseUp, at: end, button: .left), to: processID)
+
+    let up = try windowTargetedMouseEvent(
+        type: .leftMouseUp,
+        at: end,
+        localPoint: toLocal,
+        button: .left,
+        windowID: windowID,
+        eventNumber: clickEventNumber,
+        clickCount: 1
+    )
+    post(up, to: processID)
 }
 
 private func scroll(
