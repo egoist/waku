@@ -204,6 +204,14 @@ impl CodexComputerUseConfig {
 fn configure_computer_use_command(command: &mut Command, config: Option<&CodexComputerUseConfig>) {
     if let Some(config) = config {
         command
+            .arg("-c")
+            .arg(DISABLE_EXTERNAL_COMPUTER_USE_PLUGIN)
+            .arg("-c")
+            .arg(DISABLE_EXTERNAL_COMPUTER_USE_MCP_COMMAND)
+            .arg("-c")
+            .arg(DISABLE_EXTERNAL_COMPUTER_USE_MCP)
+            .arg("-c")
+            .arg(DISABLE_EXTERNAL_COMPUTER_USE_SKILL)
             .env("WAKU_COMPUTER_USE_SERVER", &config.server_path)
             .env("WAKU_COMPUTER_USE_CLIENT", &config.client_path)
             .env(
@@ -244,10 +252,6 @@ fn configure_computer_use_command(command: &mut Command, config: Option<&CodexCo
             .arg("mcp_servers.waku_computer_use.args=[\"mcp\"]")
             .arg("-c")
             .arg("mcp_servers.waku_computer_use.enabled=true");
-    } else {
-        command
-            .arg("-c")
-            .arg("mcp_servers.waku_computer_use.enabled=false");
     }
 }
 
@@ -287,16 +291,7 @@ impl CodexDriver {
             .as_ref()
             .map(|config| config.server_path.clone());
         let mut command = crate::command_env::command(binary);
-        command
-            .args(["app-server", "--stdio"])
-            .arg("-c")
-            .arg(DISABLE_EXTERNAL_COMPUTER_USE_PLUGIN)
-            .arg("-c")
-            .arg(DISABLE_EXTERNAL_COMPUTER_USE_MCP_COMMAND)
-            .arg("-c")
-            .arg(DISABLE_EXTERNAL_COMPUTER_USE_MCP)
-            .arg("-c")
-            .arg(DISABLE_EXTERNAL_COMPUTER_USE_SKILL);
+        command.args(["app-server", "--stdio"]);
         configure_computer_use_command(&mut command, computer_use.as_ref());
         let mut child = command
             .current_dir(&cwd)
@@ -1540,11 +1535,7 @@ mod tests {
             .get_args()
             .map(|argument| argument.to_string_lossy().into_owned())
             .collect::<Vec<_>>();
-        assert!(
-            disabled_arguments
-                .iter()
-                .any(|argument| argument == "mcp_servers.waku_computer_use.enabled=false")
-        );
+        assert!(disabled_arguments.is_empty());
         assert!(
             disabled
                 .get_envs()
@@ -1572,6 +1563,21 @@ mod tests {
             enabled_arguments
                 .iter()
                 .any(|argument| argument == "mcp_servers.waku_computer_use.enabled=true")
+        );
+        assert!(
+            enabled_arguments
+                .iter()
+                .any(|argument| argument == DISABLE_EXTERNAL_COMPUTER_USE_PLUGIN)
+        );
+        assert!(
+            enabled_arguments
+                .iter()
+                .any(|argument| argument == DISABLE_EXTERNAL_COMPUTER_USE_MCP)
+        );
+        assert!(
+            enabled_arguments
+                .iter()
+                .any(|argument| argument == DISABLE_EXTERNAL_COMPUTER_USE_SKILL)
         );
         assert!(
             enabled
