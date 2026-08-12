@@ -167,6 +167,24 @@ fn transcript_link_route(target: &str, workspace: Option<&Path>) -> TranscriptLi
     }
 }
 
+fn text_offset_for_location(content: &str, line: usize, column: Option<usize>) -> usize {
+    let mut line_start = 0;
+    for _ in 1..line {
+        let Some(newline) = content[line_start..].find('\n') else {
+            return content.len();
+        };
+        line_start += newline + 1;
+    }
+    let line_end = content[line_start..]
+        .find('\n')
+        .map_or(content.len(), |newline| line_start + newline);
+    let character = column.unwrap_or(1).saturating_sub(1);
+    content[line_start..line_end]
+        .char_indices()
+        .nth(character)
+        .map_or(line_end, |(offset, _)| line_start + offset)
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) enum ReviewDiffTreeRow {
     Directory {
@@ -935,6 +953,17 @@ mod tests {
         );
     }
 
+    #[test]
+    fn file_locations_map_one_based_lines_and_columns_to_byte_offsets() {
+        let content = "first\nαlpha\nlast";
+
+        assert_eq!(text_offset_for_location(content, 1, None), 0);
+        assert_eq!(text_offset_for_location(content, 2, None), 6);
+        assert_eq!(text_offset_for_location(content, 2, Some(2)), 8);
+        assert_eq!(text_offset_for_location(content, 2, Some(99)), 12);
+        assert_eq!(text_offset_for_location(content, 99, None), content.len());
+    }
+
     fn review_file(path: &str) -> crate::review_diff::File {
         crate::review_diff::File {
             path: path.into(),
@@ -1473,6 +1502,30 @@ impl Waku {
         true
     }
 
+    fn open_terminal_file(&mut self, location: TerminalFileLocation, cx: &mut Context<Self>) {
+        let relative_path = self
+            .selected_workspace_path()
+            .and_then(|workspace| workspace_relative_file_path(workspace, &location.path));
+        let Some(relative_path) = relative_path else {
+            crate::platform::reveal_in_finder(&location.path);
+            return;
+        };
+
+        if let Some(line) = location.line {
+            self.right_panel_pending_file_location = Some(PendingFileLocation {
+                relative_path: relative_path.clone(),
+                line,
+                column: location.column,
+                offset: None,
+            });
+        } else {
+            self.right_panel_pending_file_location = None;
+        }
+        self.right_panel_pending_file_focus = Some(relative_path.clone());
+        self.open_right_panel_file(relative_path, cx);
+        self.apply_pending_file_location(cx);
+    }
+
     pub(super) fn store_selected_right_panel_state(&mut self) {
         let Some(session_id) = self.state.selected_session else {
             return;
@@ -1560,6 +1613,8 @@ impl Waku {
     }
 
     fn replace_active_right_panel_state(&mut self, state: RightPanelSessionState) {
+        self.right_panel_pending_file_focus = None;
+        self.right_panel_pending_file_location = None;
         self.right_panel_visible = state.visible;
         self.right_panel_surfaces = state.surfaces;
         self.right_panel_active_surface = state.active_surface;
@@ -2013,10 +2068,17 @@ impl Waku {
             .get(&terminal_id)
             .is_some_and(|terminal| terminal.read(cx).working_directory() == working_directory);
         if !matches_project {
-            self.right_panel_terminals.insert(
-                terminal_id,
-                cx.new(|cx| TerminalView::new(working_directory.clone(), cx)),
-            );
+            let terminal = cx.new(|cx| TerminalView::new(working_directory.clone(), cx));
+            cx.subscribe(
+                &terminal,
+                |this: &mut Self, _, event: &TerminalEvent, cx| match event {
+                    TerminalEvent::OpenFile(location) => {
+                        this.open_terminal_file(location.clone(), cx)
+                    }
+                },
+            )
+            .detach();
+            self.right_panel_terminals.insert(terminal_id, terminal);
         }
     }
 
@@ -2518,6 +2580,10 @@ impl Waku {
         let file_tree_width = fitted_file_tree_width(panel_width, self.right_panel_file_tree_width);
         let (editor_state, writable, _) =
             self.ensure_right_panel_file_editor(&relative_path, window, cx);
+        if self.right_panel_pending_file_focus.as_deref() == Some(relative_path.as_str()) {
+            window.focus(&editor_state.read(cx).focus(), cx);
+            self.right_panel_pending_file_focus = None;
+        }
 
         let editor = div()
             .flex_1()
@@ -2729,20 +2795,18 @@ impl Waku {
                 editor.reading = false;
                 // An edit landed while the read was in flight; the user's text
                 // wins over the copy on disk.
-                if editor.dirty {
-                    return;
+                if !editor.dirty && (editor.disk_content != content || editor.writable != writable)
+                {
+                    editor.disk_content = content.clone();
+                    editor.writable = writable;
+                    editor.dirty = false;
+                    let state = editor.state.clone();
+                    state.update(cx, |state, cx| {
+                        state.set_read_only(!writable);
+                        state.set_content(content, cx);
+                    });
                 }
-                if editor.disk_content == content && editor.writable == writable {
-                    return;
-                }
-                editor.disk_content = content.clone();
-                editor.writable = writable;
-                editor.dirty = false;
-                let state = editor.state.clone();
-                state.update(cx, |state, cx| {
-                    state.set_read_only(!writable);
-                    state.set_content(content, cx);
-                });
+                waku.apply_pending_file_location(cx);
                 cx.notify();
             })
             .ok();
@@ -2779,6 +2843,18 @@ impl Waku {
         // visible file actually changes.
         self.sync_file_search_target(relative_path, cx);
         let find_bar = self.render_file_search_bar(pane_width, writable, window, cx);
+        if self
+            .right_panel_pending_file_location
+            .as_ref()
+            .is_some_and(|location| {
+                location.relative_path == relative_path && location.offset.is_some()
+            })
+        {
+            let weak = cx.entity().downgrade();
+            window.on_next_frame(move |_, cx| {
+                let _ = weak.update(cx, |this, cx| this.reveal_pending_file_location(cx));
+            });
+        }
 
         let theme = Theme::current(cx);
         let field = editor_state.read(cx);
@@ -2885,6 +2961,63 @@ impl Waku {
                         &self.right_panel_editor_scrollbar,
                     )),
             )
+    }
+
+    fn apply_pending_file_location(&mut self, cx: &mut Context<Self>) {
+        let Some(location) = self.right_panel_pending_file_location.as_ref() else {
+            return;
+        };
+        let Some(editor) = self
+            .right_panel_file_editors
+            .get(&location.relative_path)
+            .filter(|editor| !editor.reading)
+            .map(|editor| editor.state.clone())
+        else {
+            return;
+        };
+        let offset =
+            text_offset_for_location(editor.read(cx).content(), location.line, location.column);
+        editor.update(cx, |editor, cx| editor.select_range(offset..offset, cx));
+        if let Some(location) = self.right_panel_pending_file_location.as_mut() {
+            location.offset = Some(offset);
+        }
+        cx.notify();
+    }
+
+    fn reveal_pending_file_location(&mut self, cx: &mut Context<Self>) {
+        let Some(location) = self.right_panel_pending_file_location.as_ref() else {
+            return;
+        };
+        let Some(offset) = location.offset else {
+            return;
+        };
+        let Some(editor) = self
+            .right_panel_file_editors
+            .get(&location.relative_path)
+            .map(|editor| editor.state.clone())
+        else {
+            return;
+        };
+        let Some((position, line_height)) = editor.read(cx).position_for_offset(offset) else {
+            cx.notify();
+            return;
+        };
+
+        let scroll = &self.right_panel_editor_scroll_handle;
+        let viewport = scroll.bounds();
+        let current = scroll.offset();
+        if viewport.bottom() > viewport.top() {
+            let target = viewport.top() + (viewport.bottom() - viewport.top()) * 0.35;
+            let next =
+                (current.y + (target - position.y)).clamp(-scroll.max_offset().y, Pixels::ZERO);
+            if position.y < viewport.top() + line_height
+                || position.y + line_height > viewport.bottom() - line_height
+            {
+                scroll.set_offset(point(current.x, next));
+            }
+        }
+        self.right_panel_pending_file_location = None;
+        cx.notify();
     }
 
     /// Picks up an external edit to a file the user has not modified here.
