@@ -1176,6 +1176,14 @@ impl CodexStreamState {
     }
 
     pub(crate) fn capture_citations(&mut self, item: &Value) {
+        // A live app-server item spells the type in camelCase, a rollout
+        // record keeps the API's snake_case. Both carry the same results.
+        if !matches!(
+            item.get("type").and_then(Value::as_str),
+            Some("webSearch" | "web_search_call")
+        ) {
+            return;
+        }
         let Some(results) = item.get("results").and_then(Value::as_array) else {
             return;
         };
@@ -1195,7 +1203,20 @@ impl CodexStreamState {
         }
     }
 
+    /// Rewrites one whole recorded message, for the offline importer. No
+    /// later delta will terminate a partial marker, so whatever it parked in
+    /// the buffer is marker payload and is dropped, never shown.
+    pub(crate) fn rewrite_message(&mut self, text: &str) -> String {
+        let output = self.rewrite_citation_delta(text);
+        self.citation_buffer.clear();
+        output
+    }
+
     pub(crate) fn rewrite_citation_delta(&mut self, delta: &str) -> String {
+        // Most deltas carry no marker, so skip the buffer round-trip for them.
+        if self.citation_buffer.is_empty() && !delta.contains(CODEX_CITATION_START) {
+            return delta.to_owned();
+        }
         self.citation_buffer.push_str(delta);
         let mut input = std::mem::take(&mut self.citation_buffer);
         let mut output = String::with_capacity(input.len());
@@ -1637,9 +1658,7 @@ fn handle_codex_message(
         }
         "item/started" | "item/completed" => {
             if let Some(item) = params.get("item") {
-                if item.get("type").and_then(Value::as_str) == Some("webSearch") {
-                    stream_state.capture_citations(item);
-                }
+                stream_state.capture_citations(item);
                 let complete = method == "item/completed";
                 if let Some(work) = codex_command_work(item, complete) {
                     let _ = events.send(DriverEvent::BackgroundWork(BackgroundWorkEvent::Upsert(

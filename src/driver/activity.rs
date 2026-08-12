@@ -49,7 +49,7 @@ pub(crate) fn tool_activity(
         .with_failed(failed)
 }
 
-pub(super) fn input_title(value: Option<&Value>) -> Option<String> {
+pub(crate) fn input_title(value: Option<&Value>) -> Option<String> {
     let value = value?;
     value
         .get("title")

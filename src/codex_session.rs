@@ -1,18 +1,17 @@
 //! Converts Codex CLI rollout files into records a Waku session can be built
 //! from. Wired to `/resume` in a follow-up, so until then only its tests call
 //! in.
-#![allow(dead_code)]
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::fs;
-use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context as _, anyhow};
 use serde_json::Value;
 use uuid::Uuid;
 
-use crate::driver::codex::CodexStreamState;
+use crate::driver::CodexStreamState;
 use crate::model::{ActivityItem, ActivityKind, ReasoningBlock};
 
 /// One piece of an imported conversation, in transcript order. Not
@@ -31,6 +30,8 @@ pub enum ImportedRecord {
 /// compacted session imports as it looks now. Tool calls and their outputs
 /// are separate records, so outputs are indexed first and folded into the
 /// call they answer, which is how the live stream presents them.
+// Until the follow-up wires `/resume`, only the tests below call in.
+#[allow(dead_code)]
 pub fn imported_transcript(session_id: &str) -> anyhow::Result<Vec<ImportedRecord>> {
     imported_transcript_in(&sessions_directory()?, session_id)
 }
@@ -39,8 +40,10 @@ pub fn imported_transcript_in(
     sessions_directory: &Path,
     session_id: &str,
 ) -> anyhow::Result<Vec<ImportedRecord>> {
-    let entries = read_entries(&find_session_file(sessions_directory, session_id)?)?;
-    let items = effective_items(&entries);
+    let items = effective_items(crate::claude_session::read_entries(&find_session_file(
+        sessions_directory,
+        session_id,
+    )?)?);
     let outputs = items
         .iter()
         .filter(|item| {
@@ -52,7 +55,7 @@ pub fn imported_transcript_in(
         .filter_map(|item| {
             item.get("call_id")
                 .and_then(Value::as_str)
-                .map(|id| (id, *item))
+                .map(|id| (id, item))
         })
         .collect::<HashMap<_, _>>();
 
@@ -61,7 +64,7 @@ pub fn imported_transcript_in(
     // reply renders them as links.
     let mut citations = CodexStreamState::default();
     let mut imported = Vec::new();
-    for item in items {
+    for item in &items {
         match item.get("type").and_then(Value::as_str) {
             Some("message") => match item.get("role").and_then(Value::as_str) {
                 Some("user") => {
@@ -70,13 +73,14 @@ pub fn imported_transcript_in(
                         imported.push(ImportedRecord::Prompt(prompt));
                     }
                 }
-                Some("assistant") => imported.extend(reply_text(item).map(|text| {
-                    ImportedRecord::Assistant(citations.rewrite_citation_delta(&text))
-                })),
+                Some("assistant") => imported.extend(
+                    reply_text(item)
+                        .map(|text| ImportedRecord::Assistant(citations.rewrite_message(&text))),
+                ),
                 _ => {}
             },
             Some("reasoning") => imported.extend(reasoning_record(item)),
-            Some("function_call") | Some("custom_tool_call") => {
+            Some("function_call" | "custom_tool_call") => {
                 imported.extend(tool_record(item, &outputs));
             }
             Some("web_search_call") => {
@@ -110,48 +114,39 @@ fn find_session_file(sessions_directory: &Path, session_id: &str) -> anyhow::Res
 /// recent, and exactly three levels down, so a miss never scans past the
 /// date tree.
 fn find_rollout(directory: &Path, suffix: &str, depth: u8) -> Option<PathBuf> {
-    let mut paths = fs::read_dir(directory)
-        .ok()?
-        .flatten()
-        .map(|entry| entry.path())
-        .collect::<Vec<_>>();
+    let entries = fs::read_dir(directory).ok()?.flatten();
+    if depth == 0 {
+        // A day holds many rollouts but only one match, so scan unordered.
+        return entries.map(|entry| entry.path()).find(|path| {
+            path.to_str().is_some_and(|path| path.ends_with(suffix))
+                && path.metadata().is_ok_and(|metadata| metadata.len() > 0)
+        });
+    }
+    let mut paths = entries.map(|entry| entry.path()).collect::<Vec<_>>();
     paths.sort_unstable();
-    paths.into_iter().rev().find_map(|path| {
-        if depth > 0 {
-            find_rollout(&path, suffix, depth - 1)
-        } else {
-            (path.to_str().is_some_and(|path| path.ends_with(suffix))
-                && path.metadata().is_ok_and(|metadata| metadata.len() > 0))
-            .then_some(path)
-        }
-    })
-}
-
-fn read_entries(path: &Path) -> anyhow::Result<Vec<Value>> {
-    let file = fs::File::open(path)
-        .with_context(|| format!("could not open Codex session {}", path.display()))?;
-    Ok(BufReader::new(file)
-        .lines()
-        .map_while(Result::ok)
-        .filter_map(|line| serde_json::from_str::<Value>(&line).ok())
-        .collect())
+    paths
+        .into_iter()
+        .rev()
+        .find_map(|path| find_rollout(&path, suffix, depth - 1))
 }
 
 /// The response items a resumed session would replay: rollout order, with a
 /// `compacted` record's replacement history standing in for everything
-/// recorded before it.
-fn effective_items(entries: &[Value]) -> Vec<&Value> {
+/// recorded before it. Takes the payloads and drops the rest, since a rollout
+/// carries event and telemetry records several times their size.
+fn effective_items(entries: Vec<Value>) -> Vec<Value> {
     let mut items = Vec::new();
-    for entry in entries {
+    for mut entry in entries {
         match entry.get("type").and_then(Value::as_str) {
-            Some("response_item") => items.extend(entry.get("payload")),
+            Some("response_item") => items.extend(entry.get_mut("payload").map(Value::take)),
             Some("compacted") => {
-                items = entry
-                    .pointer("/payload/replacement_history")
-                    .and_then(Value::as_array)
-                    .into_iter()
-                    .flatten()
-                    .collect();
+                items = match entry
+                    .pointer_mut("/payload/replacement_history")
+                    .map(Value::take)
+                {
+                    Some(Value::Array(history)) => history,
+                    _ => Vec::new(),
+                };
             }
             _ => {}
         }
@@ -171,21 +166,20 @@ fn prompt_text(item: &Value) -> Option<String> {
     (!text.is_empty()).then_some(text)
 }
 
-fn typed_text(block: &str) -> Option<String> {
+fn typed_text(block: &str) -> Option<&str> {
     let text = block.trim();
     // The VS Code extension wraps the typed request inside its IDE context.
     if text.starts_with("# Context from my IDE setup") {
         return text
             .split_once("## My request for Codex:")
             .map(|(_, request)| request.trim())
-            .filter(|request| !request.is_empty())
-            .map(str::to_owned);
+            .filter(|request| !request.is_empty());
     }
     (!text.is_empty()
         && !text.starts_with('<')
         && !text.starts_with("# AGENTS.md instructions")
         && !text.starts_with("The following is the Codex agent history"))
-    .then(|| text.to_owned())
+    .then_some(text)
 }
 
 fn reply_text(item: &Value) -> Option<String> {
@@ -205,23 +199,25 @@ fn text_blocks<'a>(item: &'a Value, block_type: &'a str) -> impl Iterator<Item =
         .filter_map(|block| block.get("text").and_then(Value::as_str))
 }
 
+/// The non-empty `text` blocks under `key`, joined as one display string.
+fn joined_blocks(item: &Value, key: &str) -> Option<String> {
+    let text = item
+        .get(key)
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|block| block.get("text").and_then(Value::as_str))
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    (!text.is_empty()).then_some(text)
+}
+
 /// Codex encrypts its reasoning and records only the display summary, so the
 /// summary is what imports, and an encrypted-only record has nothing to show.
 fn reasoning_record(item: &Value) -> Option<ImportedRecord> {
-    let text = ["summary", "content"]
-        .iter()
-        .map(|key| {
-            item.get(key)
-                .and_then(Value::as_array)
-                .into_iter()
-                .flatten()
-                .filter_map(|block| block.get("text").and_then(Value::as_str))
-                .map(str::trim)
-                .filter(|text| !text.is_empty())
-                .collect::<Vec<_>>()
-                .join("\n\n")
-        })
-        .find(|text| !text.is_empty())?;
+    let text = joined_blocks(item, "summary").or_else(|| joined_blocks(item, "content"))?;
     Some(ImportedRecord::Activity(ActivityItem::from_reasoning(
         ReasoningBlock {
             content: text,
@@ -253,28 +249,18 @@ fn tool_record(item: &Value, outputs: &HashMap<&str, &Value>) -> Option<Imported
         ActivityKind::from_tool_name(name)
     };
     let title = command
-        .or_else(|| {
-            arguments
-                .as_ref()
-                .and_then(|arguments| arguments.get("title"))
-                .and_then(Value::as_str)
-                .map(str::trim)
-                .filter(|title| !title.is_empty())
-                .map(str::to_owned)
-        })
+        .or_else(|| crate::driver::input_title(arguments.as_ref()))
         .unwrap_or_else(|| name.to_owned());
-    Some(ImportedRecord::Activity(
-        crate::driver::activity::tool_activity(
-            call_id.map(str::to_owned),
-            kind,
-            title,
-            arguments.as_ref(),
-            output.as_ref(),
-            None,
-            output.as_ref().is_some_and(output_failed),
-            true,
-        ),
-    ))
+    Some(ImportedRecord::Activity(crate::driver::tool_activity(
+        call_id.map(str::to_owned),
+        kind,
+        title,
+        arguments.as_ref(),
+        output.as_deref(),
+        None,
+        output.as_deref().is_some_and(output_failed),
+        true,
+    )))
 }
 
 /// The command a shell-like call runs, which titles its row the way the live
@@ -294,21 +280,23 @@ fn command_text(arguments: &Value) -> Option<String> {
 }
 
 /// A shell call's output string is itself JSON carrying the text and exit
-/// metadata, while a custom tool's output arrives as text blocks.
-fn output_value(item: &Value) -> Option<Value> {
-    match item.get("output")? {
-        Value::String(output) => {
-            Some(serde_json::from_str(output).unwrap_or_else(|_| Value::String(output.clone())))
-        }
-        Value::Array(blocks) => Some(Value::String(
+/// metadata, while a custom tool's output arrives as text blocks. Borrowed
+/// when the record's own value serves as is, since outputs run to megabytes.
+fn output_value(item: &Value) -> Option<Cow<'_, Value>> {
+    let output = item.get("output")?;
+    Some(match output {
+        Value::String(text) => serde_json::from_str(text)
+            .map(Cow::Owned)
+            .unwrap_or(Cow::Borrowed(output)),
+        Value::Array(blocks) => Cow::Owned(Value::String(
             blocks
                 .iter()
                 .filter_map(|block| block.get("text").and_then(Value::as_str))
                 .collect::<Vec<_>>()
                 .concat(),
         )),
-        other => Some(other.clone()),
-    }
+        other => Cow::Borrowed(other),
+    })
 }
 
 fn output_failed(output: &Value) -> bool {
@@ -319,10 +307,10 @@ fn output_failed(output: &Value) -> bool {
 }
 
 fn search_record(item: &Value) -> ImportedRecord {
-    ImportedRecord::Activity(crate::driver::activity::tool_activity(
+    ImportedRecord::Activity(crate::driver::tool_activity(
         item.get("id").and_then(Value::as_str).map(str::to_owned),
         ActivityKind::Search,
-        crate::driver::codex::codex_web_search_title(item),
+        crate::driver::codex_web_search_title(item),
         item.get("action"),
         item.get("results"),
         None,

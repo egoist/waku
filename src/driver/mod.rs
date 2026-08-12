@@ -1,13 +1,17 @@
 mod acp;
-pub(crate) mod activity;
+mod activity;
 mod amp;
 mod claude;
-pub(crate) mod codex;
+mod codex;
 mod computer_use;
 mod opencode;
 mod pi;
 mod support;
 mod title_refresh;
+
+// The offline importers' whole window into the driver internals.
+pub(crate) use activity::{input_title, tool_activity};
+pub(crate) use codex::{CodexStreamState, codex_web_search_title};
 
 use std::path::PathBuf;
 use std::sync::Arc;
