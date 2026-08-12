@@ -272,12 +272,14 @@ fn parse_grok_models(output: &str) -> Vec<ProviderModel> {
             if !in_models {
                 return None;
             }
-            let id = line
+            // The default is starred and the rest are dashed:
+            //   * grok-4.6 (default)
+            //   - grok-4.5
+            let entry = line
                 .strip_prefix('*')
-                .map(str::trim)?
-                .strip_suffix(" (default)")
-                .unwrap_or_else(|| line.strip_prefix('*').unwrap_or(line).trim())
+                .or_else(|| line.strip_prefix('-'))?
                 .trim();
+            let id = entry.strip_suffix("(default)").unwrap_or(entry).trim();
             if id.is_empty() || id.chars().any(char::is_whitespace) {
                 return None;
             }
@@ -845,11 +847,13 @@ mod tests {
     #[test]
     fn parses_grok_default_and_available_models() {
         let models = parse_grok_models(
-            "Default model: grok-4.5\n\nAvailable models:\n  * grok-4.5 (default)\n",
+            "You are logged in with grok.com.\n\nDefault model: grok-4.6\n\nAvailable models:\n  * grok-4.6 (default)\n  - grok-4.5\n",
         );
-        assert_eq!(models.len(), 1);
-        assert_eq!(models[0].id, "grok-4.5");
+        assert_eq!(models.len(), 2);
+        assert_eq!(models[0].id, "grok-4.6");
         assert!(models[0].is_default);
+        assert_eq!(models[1].id, "grok-4.5");
+        assert!(!models[1].is_default);
     }
 
     #[test]

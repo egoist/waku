@@ -367,7 +367,7 @@ mod tests {
         permissions.set_mode(0o700);
         fs::set_permissions(&shell, permissions).expect("make shell fixture executable");
 
-        let path = capture_shell_path(&shell, &["-i", "-l", "-c"], Duration::from_secs(1));
+        let path = capture_shell_path(&shell, &["-i", "-l", "-c"], LOGIN_SHELL_PATH_TIMEOUT);
 
         assert_eq!(
             path.as_deref(),
