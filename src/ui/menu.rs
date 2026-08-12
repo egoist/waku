@@ -750,7 +750,9 @@ where
             cx.stop_propagation();
         })
         .on_key_down(move |event: &KeyDownEvent, window, cx| {
-            if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+            if key_handle.trigger_focus.is_focused(window)
+                && matches!(event.keystroke.key.as_str(), "enter" | "space")
+            {
                 toggle_anchored_surface(&key_handle, align, focus_target, window, cx);
                 cx.stop_propagation();
             }
@@ -1141,6 +1143,11 @@ mod tests {
         surface: Surface,
     }
 
+    struct FocusedPopoverHarness {
+        handle: ContextMenuHandle,
+        descendant_focus: FocusHandle,
+    }
+
     #[test]
     fn floating_surface_keeps_a_preferred_side_that_fits() {
         let placement = resolve_floating_placement(
@@ -1230,6 +1237,24 @@ mod tests {
         }
     }
 
+    impl Render for FocusedPopoverHarness {
+        fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+            let descendant_focus = self.descendant_focus.clone();
+            popover(
+                div().w(px(120.0)).h(px(32.0)),
+                &self.handle,
+                MenuAlign::BelowLeft,
+                move |_, _, _| {
+                    div()
+                        .track_focus(&descendant_focus)
+                        .w(px(200.0))
+                        .h(px(100.0))
+                        .into_any_element()
+                },
+            )
+        }
+    }
+
     /// The trigger sits at the window origin, 120×32; the card hangs below it,
     /// so a point inside the trigger is outside the card and vice versa.
     fn assert_trigger_toggles(surface: Surface, cx: &mut TestAppContext) {
@@ -1301,6 +1326,32 @@ mod tests {
     #[gpui::test]
     fn popover_trigger_is_keyboard_operable(cx: &mut TestAppContext) {
         assert_trigger_opens_from_keyboard(Surface::Popover, cx);
+    }
+
+    #[gpui::test]
+    fn popover_descendant_space_does_not_toggle_trigger(cx: &mut TestAppContext) {
+        let handle = cx.update(ContextMenuHandle::new);
+        let descendant_focus = cx.update(|cx| cx.focus_handle());
+        let harness = FocusedPopoverHarness {
+            handle: handle.clone(),
+            descendant_focus: descendant_focus.clone(),
+        };
+        let (_view, cx) = cx.add_window_view(|_, _| harness);
+
+        cx.simulate_mouse_down(
+            point(px(10.0), px(10.0)),
+            MouseButton::Left,
+            Modifiers::none(),
+        );
+        assert!(handle.is_open());
+        cx.run_until_parked();
+        cx.update(|window, cx| window.focus(&descendant_focus, cx));
+        cx.simulate_keystrokes("space");
+
+        assert!(
+            handle.is_open(),
+            "space from focused popover content must not toggle the trigger"
+        );
     }
 
     #[gpui::test]
