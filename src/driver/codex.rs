@@ -210,13 +210,13 @@ impl CodexDriver {
         let mut command = crate::command_env::command(&binary);
         command.args(["app-server", "--stdio"]);
         configure_computer_use_command(&mut command, computer_use.as_ref());
-        let mut child = command
+        let command = command
             .current_dir(&cwd)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .context("failed to start `codex app-server`")?;
+            .stderr(Stdio::piped());
+        let mut child =
+            crate::command_env::spawn(command).context("failed to start `codex app-server`")?;
 
         let stdin = child
             .stdin
@@ -973,14 +973,15 @@ fn codex_title_turn_params(thread_id: &str, user_message: &str) -> Value {
 /// Codex Desktop's client-owned behavior with an isolated ephemeral turn, then
 /// hand the result back to the main writer for `thread/name/set`.
 fn generate_codex_title(binary: &Path, cwd: &Path, prompt: &str) -> anyhow::Result<String> {
-    let mut child = crate::command_env::command(binary)
+    let mut command = crate::command_env::command(binary);
+    let command = command
         .args(["app-server", "--stdio"])
         .current_dir(cwd)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .context("failed to start Codex title generation")?;
+        .stderr(Stdio::null());
+    let mut child =
+        crate::command_env::spawn(command).context("failed to start Codex title generation")?;
     let mut stdin = child
         .stdin
         .take()

@@ -88,6 +88,12 @@ impl Waku {
             self.ensure_right_panel_terminals(cx);
         }
         self.reset_visible_state();
+        if session_changed {
+            // Each materialized worktree has its own cache entry. A task that
+            // finished while another session was selected could otherwise
+            // retain the clean snapshot captured before its agent made edits.
+            self.refresh_selected_branch_snapshot(cx);
+        }
         self.refresh_composer_sources(cx);
         self.reset_transcript_rows(self.transcript_row_count());
         self.save();
@@ -619,26 +625,52 @@ impl Waku {
         }
     }
 
+    fn remember_selected_model_traits(&mut self) {
+        let Some((provider, model, reasoning_effort, service_tier)) =
+            self.selected_session().and_then(|session| {
+                Some((
+                    session.provider,
+                    self.model_for_session(session)?.to_owned(),
+                    session.reasoning_effort.clone(),
+                    session.service_tier.clone(),
+                ))
+            })
+        else {
+            return;
+        };
+        self.state
+            .remember_model_traits(provider, &model, reasoning_effort, service_tier);
+    }
+
     pub(super) fn choose_model(
         &mut self,
         provider: ProviderKind,
         model: String,
         cx: &mut Context<Self>,
     ) {
-        if let Some(session) = self.selected_session_mut()
-            && session.can_choose_model(provider)
-            && (session.provider != provider || session.model.as_deref() != Some(model.as_str()))
-        {
-            let session_id = session.id;
-            let provider_changed = session.provider != provider;
+        let Some((session_id, provider_changed)) = self
+            .selected_session()
+            .filter(|session| {
+                session.can_choose_model(provider)
+                    && (session.provider != provider
+                        || session.model.as_deref() != Some(model.as_str()))
+            })
+            .map(|session| (session.id, session.provider != provider))
+        else {
+            return;
+        };
+
+        self.remember_selected_model_traits();
+        let (reasoning_effort, service_tier) = self.state.model_traits_for(provider, &model);
+        if let Some(session) = self.selected_session_mut() {
             session.provider = provider;
             session.model = Some(model.clone());
-            session.reasoning_effort = None;
-            session.service_tier = None;
+            session.reasoning_effort.clone_from(&reasoning_effort);
+            session.service_tier.clone_from(&service_tier);
             self.state.last_provider = provider;
             self.state.last_model = Some(model);
-            self.state.last_reasoning_effort = None;
-            self.state.last_service_tier = None;
+            self.state.last_reasoning_effort = reasoning_effort;
+            self.state.last_service_tier = service_tier;
             self.model_picker_tab = ModelPickerTab::Provider(provider);
             // A different provider is a different binary and protocol; only a
             // model change within one provider can be applied in session.
@@ -761,6 +793,7 @@ impl Waku {
             let session_id = session.id;
             session.reasoning_effort = Some(effort.clone());
             self.state.last_reasoning_effort = Some(effort);
+            self.remember_selected_model_traits();
             self.apply_session_options(session_id);
             self.save();
             cx.notify();
@@ -774,6 +807,7 @@ impl Waku {
             let session_id = session.id;
             session.service_tier = Some(tier.clone());
             self.state.last_service_tier = Some(tier);
+            self.remember_selected_model_traits();
             self.apply_session_options(session_id);
             self.save();
             cx.notify();

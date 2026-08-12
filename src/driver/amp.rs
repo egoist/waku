@@ -124,11 +124,11 @@ impl AmpDriver {
             service_tier.as_deref(),
             thread_id.as_deref(),
         ));
-        let mut child = command
+        let command = command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
+            .stderr(Stdio::piped());
+        let mut child = crate::command_env::spawn(command)
             .context("failed to start `amp` in streaming-input mode")?;
         let stdin = child
             .stdin

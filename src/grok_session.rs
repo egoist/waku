@@ -249,13 +249,14 @@ struct GrokRpc {
 
 impl GrokRpc {
     fn start(binary: &Path) -> anyhow::Result<Self> {
-        let mut child = crate::command_env::command(binary)
+        let mut command = crate::command_env::command(binary);
+        let command = command
             .args(["agent", "--always-approve", "--no-leader", "stdio"])
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()
-            .context("failed to start Grok's ACP server")?;
+            .stderr(Stdio::null());
+        let mut child =
+            crate::command_env::spawn(command).context("failed to start Grok's ACP server")?;
         let stdin = child
             .stdin
             .take()

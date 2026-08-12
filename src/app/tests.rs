@@ -14,11 +14,11 @@ use super::{
     message_starts_followup_turn, navigation_preview_snippet, navigation_rail_height,
     navigation_rail_scale, navigation_rail_tick_count, navigation_rail_tick_turn,
     navigation_rail_turn_tick, paused_toast_duration, pop_stream_chunk, push_transcript_activity,
-    session_is_reapable, should_show_navigation_rail, should_show_scroll_to_bottom,
-    take_stream_prefix, task_id_from_notification_tag, task_notification_tag,
-    transcript_anchor_end_space, transcript_navigation_turns, transcript_row_kinds,
-    transcript_row_splice, transcript_rows_fingerprint, widened_panel_width_for_file_editor,
-    widened_panel_width_for_review,
+    session_is_reapable, should_refresh_branch_after_activity, should_show_navigation_rail,
+    should_show_scroll_to_bottom, take_stream_prefix, task_id_from_notification_tag,
+    task_notification_tag, transcript_anchor_end_space, transcript_navigation_turns,
+    transcript_row_kinds, transcript_row_splice, transcript_rows_fingerprint,
+    widened_panel_width_for_file_editor, widened_panel_width_for_review,
 };
 use crate::git_branch::BranchEntry;
 use crate::model::{
@@ -72,6 +72,26 @@ fn composer_only_offers_stop_after_submission_preparation() {
         composer_submit_action(Some(SessionStatus::Failed), false),
         ComposerSubmitAction::Send
     );
+}
+
+#[test]
+fn completed_mutating_activities_refresh_git_status() {
+    assert!(should_refresh_branch_after_activity(
+        ActivityKind::FileChange,
+        true
+    ));
+    assert!(should_refresh_branch_after_activity(
+        ActivityKind::Command,
+        true
+    ));
+    assert!(!should_refresh_branch_after_activity(
+        ActivityKind::FileChange,
+        false
+    ));
+    assert!(!should_refresh_branch_after_activity(
+        ActivityKind::FileRead,
+        true
+    ));
 }
 
 #[test]

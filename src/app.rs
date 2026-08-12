@@ -2393,9 +2393,10 @@ impl Waku {
             // The autocomplete indexes prefetch alongside, so typing `/` or
             // `@` into the very first prompt already has data to draw.
             this.refresh_composer_sources(cx);
-            // Re-detect providers after resolving the user's login-shell PATH
-            // off-thread. Detection then starts model and version discovery
-            // for every CLI it finds, including nvm/fnm-managed installs.
+            // Re-detect providers after resolving the user's login-shell
+            // environment off-thread. Detection then starts model and version
+            // discovery for every CLI it finds, including nvm/fnm-managed
+            // installs.
             this.refresh_provider_detection(None);
             // The skill library too: the Skills settings page must open onto
             // data, not a scan.

@@ -142,7 +142,7 @@ impl OpenCodeServer {
         for (name, value) in environment {
             command.env(name, value);
         }
-        let child = command
+        let command = command
             .args([
                 "serve",
                 "--hostname",
@@ -155,9 +155,9 @@ impl OpenCodeServer {
             .current_dir(cwd)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .context("failed to start `opencode serve`")?;
+            .stderr(Stdio::null());
+        let child =
+            crate::command_env::spawn(command).context("failed to start `opencode serve`")?;
         let pid = child.id();
         let mut server = Self { child, port, pid };
         let started_at = Instant::now();
