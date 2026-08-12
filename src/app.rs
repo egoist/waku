@@ -36,6 +36,7 @@ use crate::model::{
     QueuedMessage, ReasoningBlock, RuntimeMode, SessionStatus, SessionWorkspace, TranscriptBlock,
     TurnStatus, compact_path, unix_time, unix_time_millis,
 };
+use crate::provider_sessions::ResumableSession;
 use unicode_segmentation::UnicodeSegmentation;
 
 use crate::md::render::{
@@ -952,6 +953,12 @@ pub struct Waku {
     /// provider's list.
     slash_command_index: Rc<Vec<SlashCommand>>,
     slash_command_index_key: Option<(ProviderKind, PathBuf)>,
+    /// Provider sessions `/resume` can attach to, per (provider, project
+    /// root). Scanned off-thread like the command index above, and already
+    /// filtered to the ones no Waku session is holding.
+    resumable_sessions: QueryCache<(ProviderKind, PathBuf), Vec<ResumableSession>>,
+    resume_session_index: Rc<Vec<ResumableSession>>,
+    resume_session_index_key: Option<(ProviderKind, PathBuf)>,
     /// Workspace file index per project root, for `@` mentions.
     mention_files: QueryCache<PathBuf, Vec<FileEntry>>,
     mention_file_index: Rc<Vec<FileEntry>>,
@@ -2224,6 +2231,9 @@ impl Waku {
                 slash_commands: QueryCache::new(2 * MAX_CACHED_WORKSPACES),
                 slash_command_index: Rc::new(Vec::new()),
                 slash_command_index_key: None,
+                resumable_sessions: QueryCache::new(2 * MAX_CACHED_WORKSPACES),
+                resume_session_index: Rc::new(Vec::new()),
+                resume_session_index_key: None,
                 mention_files: QueryCache::new(MAX_CACHED_WORKSPACES),
                 mention_file_index: Rc::new(Vec::new()),
                 mention_file_index_path: None,

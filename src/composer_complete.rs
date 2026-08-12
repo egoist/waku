@@ -14,6 +14,7 @@ use nucleo_matcher::pattern::{CaseMatching, Normalization, Pattern};
 use nucleo_matcher::{Matcher, Utf32Str};
 
 use crate::model::{ProviderKind, ReportedCommand};
+use crate::provider_sessions::ResumableSession;
 
 /// How many rows a filter pass returns. The popup shows a screenful and the
 /// keyboard walks the rest; past this the tail is noise, not choice.
@@ -33,6 +34,8 @@ const WALK_MAX_DEPTH: usize = 8;
 pub enum TriggerKind {
     Command,
     File,
+    /// `/resume `'s argument: the session to resume, not text to insert.
+    ResumeSession,
 }
 
 /// An autocompletion site under the caret: the token being typed, and the byte
@@ -58,6 +61,19 @@ pub fn detect_trigger(text: &str, cursor: usize) -> Option<Trigger> {
     let line_start = text[..cursor].rfind('\n').map_or(0, |index| index + 1);
     let line_prefix = &text[line_start..cursor];
     if let Some(query) = line_prefix.strip_prefix('/') {
+        // `/resume` is the one command whose argument Waku resolves itself,
+        // so its space does not end the trigger the way it does for a command
+        // whose arguments are free text.
+        if let Some(session) = query
+            .strip_prefix(RESUME_COMMAND)
+            .and_then(|rest| rest.strip_prefix(char::is_whitespace))
+        {
+            return Some(Trigger {
+                kind: TriggerKind::ResumeSession,
+                query: session.to_owned(),
+                range: line_start..cursor,
+            });
+        }
         if !query.chars().any(char::is_whitespace) {
             return Some(Trigger {
                 kind: TriggerKind::Command,
@@ -118,6 +134,20 @@ pub struct SlashCommand {
     pub template: Option<String>,
 }
 
+/// The one built-in Waku resolves against its own state rather than sending
+/// anywhere. Its argument is a session identifier, chosen from the popup.
+pub const RESUME_COMMAND: &str = "resume";
+
+/// `true` when `prompt` invokes `/resume`, whose argument names a provider
+/// session rather than describing work. Nothing here may reach a provider:
+/// the CLI would read it as a message rather than as a command.
+pub fn is_resume_invocation(prompt: &str) -> bool {
+    prompt.trim_start().strip_prefix('/').is_some_and(|rest| {
+        rest.strip_prefix(RESUME_COMMAND)
+            .is_some_and(|rest| rest.is_empty() || rest.starts_with(char::is_whitespace))
+    })
+}
+
 /// Waku's own built-ins, available on every provider. Each is a plain prompt
 /// template Waku expands at submit, so they work over any transport — unlike
 /// a CLI's native built-ins, which only its own TUI understands. A provider's
@@ -165,6 +195,17 @@ fn builtin_waku_commands(provider: ProviderKind) -> Vec<SlashCommand> {
         argument_hint: None,
         template: Some(template),
     })
+    .chain(
+        // Only a CLI that records a transcript can be resumed, and it resumes
+        // by identifier rather than by replaying the transcript.
+        provider.records_resumable_sessions().then(|| SlashCommand {
+            name: RESUME_COMMAND.to_owned(),
+            description: tr!("commands.resume_description"),
+            scope: CommandScope::Builtin,
+            argument_hint: Some(tr!("commands.resume_argument")),
+            template: None,
+        }),
+    )
     .collect()
 }
 
@@ -829,6 +870,25 @@ pub fn filter_commands(
         .collect()
 }
 
+/// Sessions matching `query`, kept newest first when nothing is typed yet.
+pub fn filter_sessions(
+    sessions: &[ResumableSession],
+    query: &str,
+    matcher: &mut Matcher,
+) -> Vec<Scored<ResumableSession>> {
+    let labels = sessions
+        .iter()
+        .map(|session| session.label.as_str())
+        .collect::<Vec<_>>();
+    filter_scored(&labels, query, matcher, FILTER_CAP)
+        .into_iter()
+        .map(|(index, positions)| Scored {
+            item: sessions[index].clone(),
+            positions,
+        })
+        .collect()
+}
+
 pub fn filter_files(
     files: &[FileEntry],
     query: &str,
@@ -906,6 +966,31 @@ mod tests {
         assert!(detect_trigger("see @src done", 13).is_none());
         // Cursor before the sigil is not inside the token.
         assert!(detect_trigger("@src", 0).is_none());
+    }
+
+    #[test]
+    fn resume_keeps_its_trigger_open_past_the_space_that_ends_other_commands() {
+        let trigger = detect_trigger("/resume parser", 14).expect("resume takes an argument");
+        assert_eq!(trigger.kind, TriggerKind::ResumeSession);
+        assert_eq!(trigger.query, "parser");
+        assert_eq!(trigger.range, 0..14);
+
+        // Still the command itself until the space arrives, and every other
+        // command still ends at its first space.
+        assert_eq!(
+            detect_trigger("/resume", 7).map(|trigger| trigger.kind),
+            Some(TriggerKind::Command)
+        );
+        assert!(detect_trigger("/review the diff", 16).is_none());
+    }
+
+    #[test]
+    fn resume_is_recognised_only_as_a_whole_command() {
+        assert!(is_resume_invocation("/resume"));
+        assert!(is_resume_invocation("/resume 019f-thread"));
+        assert!(!is_resume_invocation("/resumes"));
+        assert!(!is_resume_invocation("resume the work"));
+        assert!(!is_resume_invocation("/review"));
     }
 
     #[test]

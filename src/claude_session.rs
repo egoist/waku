@@ -39,12 +39,8 @@ pub fn fork_session_at(
 }
 
 fn projects_directory() -> anyhow::Result<PathBuf> {
-    let config_directory = std::env::var_os("CLAUDE_CONFIG_DIR")
-        .filter(|value| !value.is_empty())
-        .map(PathBuf::from)
-        .or_else(|| dirs::home_dir().map(|home| home.join(".claude")))
-        .ok_or_else(|| anyhow!("Claude's configuration directory could not be located"))?;
-    Ok(config_directory.join("projects"))
+    crate::provider_sessions::transcript_root(crate::model::ProviderKind::Claude)
+        .ok_or_else(|| anyhow!("Claude's configuration directory could not be located"))
 }
 
 fn find_session_file(projects_directory: &Path, session_id: &str) -> anyhow::Result<PathBuf> {
@@ -144,7 +140,9 @@ fn session_metadata_in(
     })
 }
 
-fn claude_title(entry: &Value) -> Option<String> {
+/// The session's own title, as Claude Code records it when one is generated or
+/// the user renames the session. `/resume` labels its rows with these.
+pub fn claude_title(entry: &Value) -> Option<String> {
     let field = match entry.get("type").and_then(Value::as_str) {
         Some("ai-title") => "aiTitle",
         Some("custom-title") => "customTitle",
@@ -186,7 +184,7 @@ fn message_id_for_turn_in(
         .ok_or_else(|| anyhow!("Claude's message checkpoint for that turn was not found"))
 }
 
-fn is_user_prompt(entry: &Map<String, Value>) -> bool {
+pub(crate) fn is_user_prompt(entry: &Map<String, Value>) -> bool {
     if entry.get("isMeta").and_then(Value::as_bool) == Some(true) {
         return false;
     }
@@ -503,5 +501,230 @@ mod tests {
                 .contains(&fork.session_id)
         );
         fs::remove_dir_all(root).ok();
+    }
+}
+
+/* ------------------------------------------------------------------------- */
+/* Import                                                                    */
+/* ------------------------------------------------------------------------- */
+
+/// One piece of an imported conversation, in transcript order.
+///
+/// Deliberately not [`crate::model::Message`]. Assembling a Waku transcript
+/// needs the app's own accumulators, and those live above this module, so this
+/// carries only what a record actually said.
+pub enum ImportedRecord {
+    /// A prompt the person typed, which opens a turn.
+    Prompt(String),
+    Assistant(String),
+    Activity(crate::model::ActivityItem),
+}
+
+/// Reads `session_id`'s transcript as records a Waku session can be built
+/// from. Blocking, so background executor only.
+///
+/// Only the active branch is read ([`active_chain`]), so a session that was
+/// rewound imports what it looks like now rather than every path it took.
+/// Tool calls and their results are separate records, so results are indexed
+/// first and folded into the call they answer, which is how the live stream
+/// presents them.
+pub fn imported_transcript(session_id: &str) -> anyhow::Result<Vec<ImportedRecord>> {
+    let entries = read_entries(&find_session_file(&projects_directory()?, session_id)?)?;
+    let chain = active_chain(&entries);
+    let mut results = HashMap::new();
+    for entry in &chain {
+        for block in tool_result_blocks(entry) {
+            if let Some(id) = block.get("tool_use_id").and_then(Value::as_str) {
+                results.insert(id.to_owned(), block);
+            }
+        }
+    }
+
+    let mut imported = Vec::new();
+    for entry in &chain {
+        // `is_user_prompt` answers "is this record a prompt rather than a tool
+        // result", which is only a question about a user record. An assistant
+        // record carries blocks too and would pass it.
+        let kind = entry.get("type").and_then(Value::as_str);
+        if kind == Some("user") {
+            if is_user_prompt(entry)
+                && let Some(text) = prompt_text(entry)
+            {
+                imported.push(ImportedRecord::Prompt(text));
+            }
+            continue;
+        }
+        if kind != Some("assistant") {
+            continue;
+        }
+        // A subagent's own turns are echoed here with a parent tool id, and
+        // the task's activity row already stands for that work.
+        if entry
+            .get("parent_tool_use_id")
+            .and_then(Value::as_str)
+            .is_some()
+        {
+            continue;
+        }
+        for block in entry
+            .get("message")
+            .and_then(|message| message.get("content"))
+            .and_then(Value::as_array)
+            .map(Vec::as_slice)
+            .unwrap_or_default()
+        {
+            imported.extend(imported_block(block, &results));
+        }
+    }
+    Ok(imported)
+}
+
+fn tool_result_blocks(entry: &Map<String, Value>) -> impl Iterator<Item = &Map<String, Value>> {
+    entry
+        .get("message")
+        .and_then(|message| message.get("content"))
+        .and_then(Value::as_array)
+        .map_or([].as_slice(), Vec::as_slice)
+        .iter()
+        .filter_map(Value::as_object)
+        .filter(|block| block.get("type").and_then(Value::as_str) == Some("tool_result"))
+}
+
+/// The typed text of a prompt record. Claude writes plain prompts as a string
+/// and richer ones as content blocks, and it replays its own command
+/// invocations and hook output through the same role. Those open with a tag
+/// and were never the person's words, so they are passed over.
+pub(crate) fn prompt_text(entry: &Map<String, Value>) -> Option<String> {
+    let content = entry.get("message")?.get("content")?;
+    let text = match content {
+        Value::String(text) => text.clone(),
+        Value::Array(blocks) => blocks
+            .iter()
+            .filter(|block| block.get("type").and_then(Value::as_str) == Some("text"))
+            .filter_map(|block| block.get("text").and_then(Value::as_str))
+            .collect::<Vec<_>>()
+            .join("\n"),
+        _ => return None,
+    };
+    let text = text.trim();
+    (!text.is_empty() && !text.starts_with('<')).then(|| text.to_owned())
+}
+
+/// One assistant content block as an imported record. Text and thinking carry
+/// themselves. A tool call is converted by the same helper the live stream
+/// uses, so an imported row is built exactly like a streamed one.
+fn imported_block(
+    block: &Value,
+    results: &HashMap<String, &Map<String, Value>>,
+) -> Option<ImportedRecord> {
+    match block.get("type").and_then(Value::as_str) {
+        Some("text") => block
+            .get("text")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|text| !text.is_empty())
+            .map(|text| ImportedRecord::Assistant(text.to_owned())),
+        Some("thinking") => block
+            .get("thinking")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|text| !text.is_empty())
+            .map(|text| {
+                ImportedRecord::Activity(crate::model::ActivityItem::from_reasoning(
+                    crate::model::ReasoningBlock {
+                        content: text.to_owned(),
+                        started_at_ms: 0,
+                        finished_at_ms: 0,
+                    },
+                    true,
+                ))
+            }),
+        Some("tool_use") => {
+            let id = block.get("id").and_then(Value::as_str).map(str::to_owned);
+            let name = block
+                .get("name")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+                .unwrap_or_else(|| tr!("activity.tool"));
+            let result = id.as_ref().and_then(|id| results.get(id));
+            let output = result.and_then(|result| result.get("content"));
+            Some(ImportedRecord::Activity(
+                crate::driver::activity::tool_activity(
+                    id,
+                    crate::driver::support::classify_tool(&name),
+                    crate::driver::activity::tool_title(block, &name),
+                    block.get("input"),
+                    output,
+                    output,
+                    result.is_some_and(|result| {
+                        result.get("is_error").and_then(Value::as_bool) == Some(true)
+                    }),
+                    true,
+                ),
+            ))
+        }
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod import_tests {
+    use super::*;
+
+    fn entry(line: &str) -> Map<String, Value> {
+        serde_json::from_str(line).expect("valid record")
+    }
+
+    #[test]
+    fn a_prompt_record_keeps_typed_text_and_drops_replayed_tags() {
+        let typed =
+            entry(r#"{"type":"user","message":{"role":"user","content":"fix the parser"}}"#);
+        assert_eq!(prompt_text(&typed).as_deref(), Some("fix the parser"));
+
+        let blocks = entry(
+            r#"{"type":"user","message":{"role":"user","content":[{"type":"text","text":"look at @a.rs"}]}}"#,
+        );
+        assert_eq!(prompt_text(&blocks).as_deref(), Some("look at @a.rs"));
+
+        let replayed = entry(
+            r#"{"type":"user","message":{"role":"user","content":"<command-name>/init</command-name>"}}"#,
+        );
+        assert_eq!(prompt_text(&replayed), None);
+    }
+
+    #[test]
+    fn a_tool_call_imports_with_the_output_of_the_result_answering_it() {
+        let result: Map<String, Value> = serde_json::from_str(
+            r#"{"type":"tool_result","tool_use_id":"toolu_1","content":"main.rs\nlib.rs","is_error":false}"#,
+        )
+        .expect("valid block");
+        let results = HashMap::from([("toolu_1".to_owned(), &result)]);
+        let call: Value = serde_json::from_str(
+            r#"{"type":"tool_use","id":"toolu_1","name":"Bash","input":{"command":"ls"}}"#,
+        )
+        .expect("valid block");
+
+        let Some(ImportedRecord::Activity(item)) = imported_block(&call, &results) else {
+            panic!("a tool call imports as an activity");
+        };
+        assert_eq!(item.kind, crate::model::ActivityKind::Command);
+        assert!(item.complete);
+        assert!(!item.failed);
+        assert!(item.output.is_some_and(|output| output.contains("main.rs")));
+    }
+
+    #[test]
+    fn thinking_imports_as_a_finished_reasoning_activity() {
+        let block: Value =
+            serde_json::from_str(r#"{"type":"thinking","thinking":"weigh the options"}"#)
+                .expect("valid block");
+        let Some(ImportedRecord::Activity(item)) = imported_block(&block, &HashMap::new()) else {
+            panic!("thinking imports as an activity");
+        };
+        assert!(item.complete);
+        assert_eq!(
+            item.reasoning.map(|reasoning| reasoning.content).as_deref(),
+            Some("weigh the options")
+        );
     }
 }

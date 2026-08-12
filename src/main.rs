@@ -45,6 +45,7 @@ mod opencode_session;
 mod persistence;
 mod platform;
 mod projectless;
+mod provider_sessions;
 mod query;
 mod review_diff;
 mod skills;

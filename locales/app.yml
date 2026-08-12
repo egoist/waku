@@ -754,6 +754,10 @@ commands.review_description:
   en: Review the pending changes on this branch
 commands.commit_description:
   en: Stage and commit the current changes
+commands.resume_description:
+  en: Continue a session you started in the CLI
+commands.resume_argument:
+  en: <session>
 commands.claude_compact:
   en: Free up context by summarizing the conversation
 commands.claude_context:
@@ -964,6 +968,12 @@ session.response_unavailable:
   en: That response is no longer available
 session.response_cannot_fork:
   en: That response cannot be forked right now
+session.resumed_note:
+  en: Resuming a %{provider} session
+session.resume_scanning:
+  en: Still looking for sessions to resume
+session.resume_none_found:
+  en: No %{provider} sessions recorded for this project yet
 session.response_fork_in_progress:
   en: Wait for the task fork to finish before removing its source task
 session.response_cannot_copy:

@@ -1484,6 +1484,35 @@ impl Waku {
         .detach();
     }
 
+    /// `true` when the prompt is a `/resume` invocation, which names a session
+    /// for Waku to bind rather than work for a provider to do.
+    ///
+    /// Refusing it here is what keeps the draft and its attachments intact:
+    /// every send path builds its submission before clearing the composer, so
+    /// no submission means nothing was consumed. Reaching this point means the
+    /// popup offered nothing to confirm, which is either a scan still running
+    /// or a project the CLI has no session for.
+    fn refuse_resume_invocation(&mut self, prompt: &str) -> bool {
+        let Some(provider) = self
+            .selected_session()
+            .map(|session| session.provider)
+            .filter(|provider| provider.records_resumable_sessions())
+        else {
+            return false;
+        };
+        if !crate::composer_complete::is_resume_invocation(prompt) {
+            return false;
+        }
+        self.show_toast(match self.resume_session_index_key {
+            Some(_) => tr!(
+                "session.resume_none_found",
+                provider = provider.display_name()
+            ),
+            None => tr!("session.resume_scanning"),
+        });
+        true
+    }
+
     /// The text and attachment presentation accepted from the composer. The
     /// exact provider prompt keeps its `@` mentions, while sent-message UI uses
     /// `display_content` and the retained attachment metadata.
@@ -1492,6 +1521,9 @@ impl Waku {
         prompt: &str,
         cx: &mut Context<Self>,
     ) -> Option<ComposerSubmission> {
+        if self.refuse_resume_invocation(prompt) {
+            return None;
+        }
         let attachments = self
             .composer_attachments
             .drain(..)

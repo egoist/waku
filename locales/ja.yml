@@ -392,6 +392,8 @@ skills.empty_description: スキルは SKILL.md を含むフォルダです。�
 commands.init_description: このプロジェクトの %{instructions_file} を作成または更新
 commands.review_description: このブランチの保留中の変更をレビュー
 commands.commit_description: 現在の変更をステージしてコミット
+commands.resume_description: CLI で始めたセッションを再開
+commands.resume_argument: <セッション>
 commands.claude_compact: 会話を要約してコンテキストを空ける
 commands.claude_context: コンテキストウインドウの使用状況を表示
 commands.claude_cost: このセッションのトークン使用量とコストを表示
@@ -501,6 +503,9 @@ errors.pi_reported_error: Pi からエラーが報告されました
 
 session.response_unavailable: その回答は利用できなくなりました
 session.response_cannot_fork: その回答からは現在タスクをフォークできません
+session.resumed_note: "%{provider} のセッションを再開します"
+session.resume_scanning: 再開できるセッションを検索しています
+session.resume_none_found: このプロジェクトにはまだ %{provider} のセッションがありません
 session.response_fork_in_progress: フォーク元のタスクを削除する前に、タスクのフォークが完了するまでお待ちください
 session.response_cannot_copy: その回答を新しいタスクにコピーできませんでした
 session.forked_with_checkpoint_warning: "タスクをフォークしましたが、一部の Git チェックポイントをコピーできませんでした：%{error}"

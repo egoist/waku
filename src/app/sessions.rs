@@ -1,4 +1,5 @@
 use super::*;
+use crate::claude_session::ImportedRecord;
 
 fn retain_runtime_after_cancel(provider: ProviderKind) -> bool {
     // Codex's app-server owns the Computer Use process tree, and Amp offers no
@@ -132,6 +133,143 @@ impl Waku {
         let id = session.id;
         self.state.push_session(session);
         self.select_session(id, cx);
+    }
+
+    /// Bind the selected task to a session the CLI already recorded,
+    /// so its next prompt continues that conversation instead of starting a
+    /// new one. The cursor is read once at driver startup, which is why this
+    /// only sets it and leaves sending to the user.
+    ///
+    /// The recorded transcript is then imported in the background so the
+    /// conversation reads the way it did in the CLI, and the note stands in
+    /// until it lands.
+    pub(super) fn resume_provider_session(
+        &mut self,
+        resumable: crate::provider_sessions::ResumableSession,
+        cx: &mut Context<Self>,
+    ) {
+        let cursor = resumable.cursor;
+        let provider = cursor.provider();
+        let Some(session) = self.selected_session() else {
+            return;
+        };
+        let (project_id, started) = (session.project_id, session.has_started());
+        // A started task owns a provider thread of its own, and a second
+        // cursor on it would contradict the transcript already drawn.
+        if started {
+            self.create_session_for(project_id, provider, cx);
+        }
+        let Some(session) = self.selected_session_mut() else {
+            return;
+        };
+        if session.provider != provider {
+            // The draft's model belongs to the provider it was drafted for,
+            // the same reason a model change across providers clears it.
+            session.model = None;
+            session.reasoning_effort = None;
+            session.service_tier = None;
+        }
+        session.provider = provider;
+        session.provider_cursor = Some(cursor.clone());
+        // The CLI's own name for the session, so the task reads in the sidebar
+        // the way it read in the CLI.
+        session.auto_title = Some(resumable.label);
+        session.push_message(
+            MessageRole::System,
+            tr!("session.resumed_note", provider = provider.display_name()),
+        );
+        session.updated_at = unix_time();
+        let session_id = session.id;
+        self.state.last_provider = provider;
+        if let ProviderResumeCursor::Claude {
+            session_id: native_id,
+            ..
+        } = &cursor
+        {
+            self.import_claude_transcript(session_id, native_id.clone(), cx);
+        }
+        // A cursor this task now holds must leave the picker, or the next
+        // `/resume` would offer one provider thread to a second task.
+        self.refresh_composer_sources(cx);
+        self.save();
+        cx.notify();
+    }
+
+    /// Replace a just-resumed task's transcript with the conversation Claude
+    /// Code recorded for it.
+    ///
+    /// Reading and converting a transcript walks a file that reaches tens of
+    /// megabytes, so all of it happens on the background executor and the
+    /// frame only sees the finished result. The install is skipped when the
+    /// task has moved on in the meantime: a prompt sent while the read was in
+    /// flight owns the transcript, and overwriting it would delete what the
+    /// user just said.
+    fn import_claude_transcript(
+        &mut self,
+        session_id: Uuid,
+        native_id: String,
+        cx: &mut Context<Self>,
+    ) {
+        cx.spawn(async move |waku, cx| {
+            let imported = cx
+                .background_executor()
+                .spawn(async move { crate::claude_session::imported_transcript(&native_id) })
+                .await;
+            let Ok(imported) = imported else {
+                return;
+            };
+            waku.update(cx, |waku, cx| {
+                waku.install_imported_transcript(session_id, imported, cx);
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn install_imported_transcript(
+        &mut self,
+        session_id: Uuid,
+        imported: Vec<ImportedRecord>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(session) = self.state.session_mut(session_id) else {
+            return;
+        };
+        // The resume note is the only thing a freshly bound task holds. More
+        // than that means the user started their own turn while the read was
+        // in flight, and that transcript is theirs.
+        if !session.turns.is_empty() || session.messages.len() > 1 || imported.is_empty() {
+            return;
+        }
+        session.messages.clear();
+        session.transcript_blocks.clear();
+        // Every imported block is already whole, so each one is its own
+        // message rather than a delta accumulated into the previous.
+        let mut continuing_work = false;
+        for record in imported {
+            match record {
+                ImportedRecord::Prompt(text) => {
+                    session.begin_turn_with_presentation(text, None, Vec::new());
+                    continuing_work = false;
+                }
+                ImportedRecord::Assistant(text) => {
+                    session.push_message(MessageRole::Assistant, text);
+                    continuing_work = false;
+                }
+                ImportedRecord::Activity(item) => {
+                    super::streaming::push_transcript_activity(session, item, continuing_work);
+                    continuing_work = true;
+                }
+            }
+        }
+        for turn in &mut session.turns {
+            turn.status = TurnStatus::Completed;
+            turn.completed_at = Some(turn.started_at);
+            turn.provider_turn_started = true;
+        }
+        session.updated_at = unix_time();
+        self.save();
+        cx.notify();
     }
 
     pub(super) fn select_workspace(&mut self, workspace: SessionWorkspace, cx: &mut Context<Self>) {

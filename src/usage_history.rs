@@ -565,61 +565,13 @@ pub struct FileCacheEntry {
 
 pub type ScanCache = HashMap<PathBuf, FileCacheEntry>;
 
-/// The transcript root scanned for one provider.
+/// The transcript root scanned for one provider. The layout is a property of
+/// the CLI rather than of this page, so `/resume` reads the same resolver.
 fn provider_root(provider: UsageProvider) -> Option<PathBuf> {
-    match provider {
-        UsageProvider::Claude => match std::env::var_os("CLAUDE_CONFIG_DIR") {
-            Some(dir) if !dir.is_empty() => Some(PathBuf::from(dir).join("projects")),
-            _ => dirs::home_dir().map(|home| home.join(".claude/projects")),
-        },
-        UsageProvider::Codex => match std::env::var_os("CODEX_HOME") {
-            Some(dir) if !dir.is_empty() => Some(PathBuf::from(dir).join("sessions")),
-            _ => dirs::home_dir().map(|home| home.join(".codex/sessions")),
-        },
-    }
-}
-
-/// Lists `.jsonl` transcripts under `root` modified at or after `since_ms`.
-/// Errors on individual entries are swallowed: session files rotate and get
-/// removed while the walk is in flight, and a partial listing beats failing
-/// the page. Returns the number of files skipped by the mtime prefilter.
-fn list_transcript_files(
-    root: &Path,
-    since_ms: i64,
-    found: &mut Vec<(PathBuf, u64, i64)>,
-) -> usize {
-    let mut skipped = 0;
-    let Ok(entries) = std::fs::read_dir(root) else {
-        return 0;
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        let Ok(file_type) = entry.file_type() else {
-            continue;
-        };
-        if file_type.is_dir() {
-            skipped += list_transcript_files(&path, since_ms, found);
-            continue;
-        }
-        if path.extension().and_then(|extension| extension.to_str()) != Some("jsonl") {
-            continue;
-        }
-        let Ok(metadata) = entry.metadata() else {
-            continue;
-        };
-        let mtime_ms = metadata
-            .modified()
-            .ok()
-            .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
-            .map(|elapsed| elapsed.as_millis() as i64)
-            .unwrap_or(0);
-        if mtime_ms < since_ms {
-            skipped += 1;
-            continue;
-        }
-        found.push((path, metadata.len(), mtime_ms));
-    }
-    skipped
+    crate::provider_sessions::transcript_root(match provider {
+        UsageProvider::Claude => crate::model::ProviderKind::Claude,
+        UsageProvider::Codex => crate::model::ProviderKind::Codex,
+    })
 }
 
 /// Streams one transcript and returns the usage records it contains, already
@@ -1000,7 +952,8 @@ pub fn scan(
             continue;
         }
         let mut files = Vec::new();
-        skipped_files += list_transcript_files(&root, mtime_cutoff_ms, &mut files);
+        skipped_files +=
+            crate::provider_sessions::list_transcripts(&root, mtime_cutoff_ms, &mut files);
         if files.is_empty() && std::fs::read_dir(&root).is_err() {
             errors.push(format!(
                 "{} transcripts at {} could not be read.",
