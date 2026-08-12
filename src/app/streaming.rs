@@ -284,15 +284,26 @@ impl Waku {
                 complete,
             } => {
                 if self.accepts_turn_output(session_id) {
+                    let refresh_branch = should_refresh_branch_after_activity(kind, complete)
+                        && self.state.selected_session == Some(session_id);
                     let item = ActivityItem::new(id, kind, title, detail, complete);
                     self.observe_foreground_command_activity(session_id, &item);
                     self.update_activity(session_id, runtime, item);
+                    if refresh_branch {
+                        self.refresh_selected_branch_snapshot(cx);
+                    }
                 }
             }
             DriverEvent::RichActivity(item) => {
                 if self.accepts_turn_output(session_id) {
+                    let refresh_branch =
+                        should_refresh_branch_after_activity(item.kind, item.complete)
+                            && self.state.selected_session == Some(session_id);
                     self.observe_foreground_command_activity(session_id, &item);
                     self.update_activity(session_id, runtime, item);
+                    if refresh_branch {
+                        self.refresh_selected_branch_snapshot(cx);
+                    }
                 }
             }
             DriverEvent::BackgroundWork(event) => {
@@ -645,6 +656,20 @@ impl Waku {
         }
         runtime.computer_use_previews.push(state);
     }
+}
+
+/// A completed edit or shell command is the earliest provider-neutral point at
+/// which its filesystem effects are stable enough to re-read. The actual Git
+/// work remains behind the branch cache's background fetch.
+pub(super) fn should_refresh_branch_after_activity(
+    kind: crate::model::ActivityKind,
+    complete: bool,
+) -> bool {
+    complete
+        && matches!(
+            kind,
+            crate::model::ActivityKind::Command | crate::model::ActivityKind::FileChange
+        )
 }
 
 pub(super) fn push_transcript_activity(

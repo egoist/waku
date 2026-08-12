@@ -16,6 +16,14 @@ the original feature bullet instead of adding separate entries for them.
 
 ## [unreleased]
 
+## [0.0.12]
+
+- Inherit the login-shell environment for provider commands
+- Fix model traits across provider switches
+- Keep branch change counts current and include untracked files
+- Normalize SIGCHLD for provider children
+- Fix Grok model discovery
+
 ## [0.0.11]
 
 - Fix provider detection for CLIs installed through shell PATH managers such as
