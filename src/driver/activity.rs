@@ -49,9 +49,8 @@ pub(crate) fn tool_activity(
         .with_failed(failed)
 }
 
-/// A tool row's title: whatever the call names itself, else the tool's own
-/// name. The Agent tool names its work in `description` instead, and without
-/// that fallback the row reads as a bare "Agent".
+/// A tool row's title: whatever the call names itself, else the tool's name.
+/// The Agent tool names its work in `description`, so that counts too.
 pub(crate) fn tool_title(block: &Value, name: &str) -> String {
     input_title(block.get("input"))
         .or_else(|| {

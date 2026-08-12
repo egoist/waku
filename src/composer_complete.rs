@@ -8,7 +8,7 @@
 
 use std::collections::BTreeSet;
 use std::ops::Range;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use nucleo_matcher::pattern::{CaseMatching, Normalization, Pattern};
 use nucleo_matcher::{Matcher, Utf32Str};
@@ -61,9 +61,8 @@ pub fn detect_trigger(text: &str, cursor: usize) -> Option<Trigger> {
     let line_start = text[..cursor].rfind('\n').map_or(0, |index| index + 1);
     let line_prefix = &text[line_start..cursor];
     if let Some(query) = line_prefix.strip_prefix('/') {
-        // `/resume` is the one command whose argument Waku resolves itself,
-        // so its space does not end the trigger the way it does for a command
-        // whose arguments are free text.
+        // `/resume` resolves its own argument, so its space does not end the
+        // trigger.
         if let Some(session) = query
             .strip_prefix(RESUME_COMMAND)
             .and_then(|rest| rest.strip_prefix(char::is_whitespace))
@@ -138,9 +137,8 @@ pub struct SlashCommand {
 /// anywhere. Its argument is a session identifier, chosen from the popup.
 pub const RESUME_COMMAND: &str = "resume";
 
-/// `true` when `prompt` invokes `/resume`, whose argument names a provider
-/// session rather than describing work. Nothing here may reach a provider:
-/// the CLI would read it as a message rather than as a command.
+/// `true` when `prompt` invokes `/resume`, whose argument names a session
+/// rather than work. The CLI would read it as a message.
 pub fn is_resume_invocation(prompt: &str) -> bool {
     prompt.trim_start().strip_prefix('/').is_some_and(|rest| {
         rest.strip_prefix(RESUME_COMMAND)
@@ -267,11 +265,7 @@ fn builtin_claude_commands() -> Vec<SlashCommand> {
 /// and ACP's `available_commands_update` for Cursor and Grok.
 pub fn discover_slash_commands(provider: ProviderKind, project_root: &Path) -> Vec<SlashCommand> {
     let home = dirs::home_dir();
-    let claude_config_dir = std::env::var("CLAUDE_CONFIG_DIR")
-        .ok()
-        .map(PathBuf::from)
-        .filter(|path| path.is_absolute())
-        .or_else(|| home.as_deref().map(|home| home.join(".claude")));
+    let claude_config_dir = crate::claude_session::claude_config_dir();
     let mut commands = Vec::new();
     match provider {
         ProviderKind::Claude => {

@@ -1,9 +1,8 @@
 //! Sessions Claude Code recorded outside Waku, for `/resume`.
 //!
-//! The CLI still holds each conversation, so all this needs from a transcript
-//! is the identifier to resume by, the `cwd` proving it belongs to the open
-//! project, and a title for the picker. Reading one for its content is
-//! [`crate::claude_session`]'s job.
+//! The CLI still holds each conversation, so a transcript is read only for the
+//! identifier to resume by, the `cwd` placing it in the open project, and a
+//! title. Reading one for its content is [`crate::claude_session`]'s job.
 //!
 //! Every function here reads the filesystem: background executor only.
 
@@ -28,16 +27,15 @@ const TAIL_WINDOWS: [u64; 3] = [64 * 1024, 512 * 1024, 2 * 1024 * 1024];
 
 /// Where a provider keeps its transcripts, honouring the CLI's own override.
 pub fn transcript_root(provider: ProviderKind) -> Option<PathBuf> {
-    let overridden = |variable: &str, suffix: &str| {
-        std::env::var_os(variable)
-            .filter(|value| !value.is_empty())
-            .map(|dir| PathBuf::from(dir).join(suffix))
-    };
     match provider {
-        ProviderKind::Claude => overridden("CLAUDE_CONFIG_DIR", "projects")
-            .or_else(|| dirs::home_dir().map(|home| home.join(".claude/projects"))),
-        ProviderKind::Codex => overridden("CODEX_HOME", "sessions")
-            .or_else(|| dirs::home_dir().map(|home| home.join(".codex/sessions"))),
+        ProviderKind::Claude => {
+            crate::claude_session::claude_config_dir().map(|dir| dir.join("projects"))
+        }
+        ProviderKind::Codex => std::env::var_os("CODEX_HOME")
+            .map(PathBuf::from)
+            .filter(|path| path.is_absolute())
+            .or_else(|| dirs::home_dir().map(|home| home.join(".codex")))
+            .map(|dir| dir.join("sessions")),
         _ => None,
     }
 }
@@ -54,9 +52,8 @@ pub struct ResumableSession {
 
 /// The sessions Claude Code recorded for `project_root`, newest first.
 ///
-/// The match is on the recorded `cwd` and is exact rather than by containment:
-/// the CLI resumes into the directory Waku launches it in, so a session
-/// recorded in a subdirectory would move the agent's working directory.
+/// The recorded `cwd` must match exactly: the CLI resumes into the directory
+/// Waku launches it in, so a subdirectory session would move the agent.
 ///
 /// Blocking, so background executor only.
 pub fn list_claude_sessions(project_root: &Path) -> Vec<ResumableSession> {
@@ -85,13 +82,8 @@ pub fn list_claude_sessions(project_root: &Path) -> Vec<ResumableSession> {
             continue;
         };
         sessions.push(ResumableSession {
+            label: session_label(&head, &path, length).unwrap_or_else(|| id.clone()),
             cursor: ProviderResumeCursor::from_session_id(ProviderKind::Claude, id),
-            label: session_label(&head, &path, length).unwrap_or_else(|| {
-                path.file_stem()
-                    .unwrap_or_default()
-                    .to_string_lossy()
-                    .into_owned()
-            }),
             modified_ms,
         });
         if sessions.len() == LIST_CAP {
@@ -102,8 +94,7 @@ pub fn list_claude_sessions(project_root: &Path) -> Vec<ResumableSession> {
 }
 
 /// Claude Code names each project directory after its working directory, one
-/// dash per non-alphanumeric character. The prefix only narrows the candidates,
-/// since the recorded `cwd` is the exact check that follows.
+/// dash per non-alphanumeric character. Only a prefix, since `cwd` decides.
 fn claude_candidates(root: &Path, project_root: &Path) -> Vec<(PathBuf, u64, i64)> {
     let prefix = project_root
         .to_string_lossy()
@@ -132,10 +123,9 @@ fn claude_candidates(root: &Path, project_root: &Path) -> Vec<(PathBuf, u64, i64
         .collect()
 }
 
-/// Lists `.jsonl` transcripts in `root` (and below it when `recurse`) modified
-/// at or after `since_ms`, as
-/// `(path, length, modified)`. Entries that error are skipped, since files
-/// rotate mid-walk. Returns how many the mtime prefilter dropped.
+/// Lists `.jsonl` transcripts in `root`, and below it when `recurse`, modified
+/// at or after `since_ms`, as `(path, length, modified)`. Entries that error
+/// are skipped, since files rotate mid-walk. Returns how many `since_ms` cut.
 pub fn list_transcripts(
     root: &Path,
     since_ms: i64,
@@ -228,11 +218,8 @@ fn recorded_cwd(records: &[String]) -> Option<String> {
         })
 }
 
-/// How the picker names one session.
-///
-/// The session's own title is what the CLI shows, and it is appended again on
-/// every rename, so the newest one reachable wins. A session too short to have
-/// been titled falls back to its newest typed prompt.
+/// How the picker names one session: the newest title reachable, since one is
+/// appended on every rename, else the newest typed prompt.
 fn session_label(head: &[String], path: &Path, length: u64) -> Option<String> {
     // A title lands as the session is titled or renamed, so it is among the
     // last records or the first, and no wider read finds one.
@@ -264,9 +251,8 @@ fn newest_title(records: &[String]) -> Option<String> {
         })
 }
 
-/// The newest typed prompt in `records`, as the picker's label. Newest rather
-/// than first: a session opens by replaying instruction files through the user
-/// role, which reads the same in every session.
+/// The newest typed prompt in `records`. Newest rather than first, since a
+/// session opens by replaying instruction files through the user role.
 fn latest_prompt(records: &[String]) -> Option<String> {
     records
         .iter()
@@ -275,18 +261,16 @@ fn latest_prompt(records: &[String]) -> Option<String> {
         .find_map(|line| {
             let record = serde_json::from_str::<Value>(line).ok()?;
             let entry = record.as_object()?;
-            (entry.get("type").and_then(Value::as_str) == Some("user")
-                && crate::claude_session::is_user_prompt(entry))
-            .then(|| crate::claude_session::prompt_text(entry))
-            .flatten()
-            .as_deref()
-            .and_then(first_prompt_line)
+            (entry.get("type").and_then(Value::as_str) == Some("user"))
+                .then(|| crate::claude_session::typed_prompt(entry))
+                .flatten()
+                .as_deref()
+                .and_then(first_prompt_line)
         })
 }
 
 /// The first line of a typed prompt, as a picker label. A replayed instruction
-/// file opens with a heading and is passed over, since it would label every
-/// session identically.
+/// file opens with a heading and would label every session alike.
 fn first_prompt_line(prompt: &str) -> Option<String> {
     if prompt.starts_with('#') {
         return None;

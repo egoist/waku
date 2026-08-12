@@ -963,9 +963,8 @@ pub struct Waku {
     /// provider's list.
     slash_command_index: Rc<Vec<SlashCommand>>,
     slash_command_index_key: Option<(ProviderKind, PathBuf)>,
-    /// Provider sessions `/resume` can attach to, per (provider, project
-    /// root). Scanned off-thread like the command index above, and already
-    /// filtered to the ones no Waku session is holding.
+    /// Sessions `/resume` can attach to, per (provider, project root). Scanned
+    /// off-thread, already filtered to the ones no Waku task holds.
     resumable_sessions: QueryCache<(ProviderKind, PathBuf), Vec<ResumableSession>>,
     resume_session_index: Rc<Vec<ResumableSession>>,
     resume_session_index_key: Option<(ProviderKind, PathBuf)>,

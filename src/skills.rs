@@ -169,11 +169,7 @@ impl SkillsCatalog {
 /// filesystem access — so this is safe to call while building a frame.
 pub fn user_skill_locations() -> Vec<SkillLocation> {
     let home = dirs::home_dir();
-    let claude_config_dir = std::env::var("CLAUDE_CONFIG_DIR")
-        .ok()
-        .map(PathBuf::from)
-        .filter(|path| path.is_absolute())
-        .or_else(|| home.as_deref().map(|home| home.join(".claude")));
+    let claude_config_dir = crate::claude_session::claude_config_dir();
     let mut locations = Vec::new();
     let mut push = |source: SkillSource, root: Option<PathBuf>| {
         if let Some(root) = root {

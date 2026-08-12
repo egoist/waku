@@ -140,6 +140,16 @@ fn session_metadata_in(
     })
 }
 
+/// Claude Code's configuration directory, which `CLAUDE_CONFIG_DIR` overrides
+/// when it names an absolute path.
+pub fn claude_config_dir() -> Option<PathBuf> {
+    std::env::var("CLAUDE_CONFIG_DIR")
+        .ok()
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute())
+        .or_else(|| dirs::home_dir().map(|home| home.join(".claude")))
+}
+
 /// The session's own title, as Claude Code records it when one is generated or
 /// the user renames the session. `/resume` labels its rows with these.
 pub fn claude_title(entry: &Value) -> Option<String> {
@@ -508,9 +518,8 @@ mod tests {
 /* Import                                                                    */
 /* ------------------------------------------------------------------------- */
 
-/// One piece of an imported conversation, in transcript order. Not
-/// [`crate::model::Message`]: assembling a transcript needs the app's own
-/// accumulators, so this carries only what a record said.
+/// One piece of an imported conversation, in transcript order. Not a
+/// [`crate::model::Message`], which needs the app's own accumulators.
 pub enum ImportedRecord {
     /// A prompt the person typed, which opens a turn.
     Prompt(String),
@@ -519,11 +528,9 @@ pub enum ImportedRecord {
 }
 
 /// Reads `session_id`'s transcript as records a Waku session can be built
-/// from. Blocking, so background executor only. Only the active branch is read
-/// ([`active_chain`]), so a rewound session imports as it looks now.
-/// Tool calls and their results are separate records, so results are indexed
-/// first and folded into the call they answer, which is how the live stream
-/// presents them.
+/// from, active branch only. Blocking, so background executor only.
+/// Calls and results are separate records, so results are indexed first and
+/// folded into the call they answer, the way the live stream presents them.
 pub fn imported_transcript(session_id: &str) -> anyhow::Result<Vec<ImportedRecord>> {
     let entries = read_entries(&find_session_file(&projects_directory()?, session_id)?)?;
     let chain = active_chain(&entries);
@@ -538,28 +545,14 @@ pub fn imported_transcript(session_id: &str) -> anyhow::Result<Vec<ImportedRecor
 
     let mut imported = Vec::new();
     for entry in &chain {
-        // `is_user_prompt` answers "is this record a prompt rather than a tool
-        // result", which is only a question about a user record. An assistant
-        // record carries blocks too and would pass it.
         let kind = entry.get("type").and_then(Value::as_str);
         if kind == Some("user") {
-            if is_user_prompt(entry)
-                && let Some(text) = prompt_text(entry)
-            {
+            if let Some(text) = typed_prompt(entry) {
                 imported.push(ImportedRecord::Prompt(text));
             }
             continue;
         }
         if kind != Some("assistant") {
-            continue;
-        }
-        // A subagent's own turns are echoed here with a parent tool id, and
-        // the task's activity row already stands for that work.
-        if entry
-            .get("parent_tool_use_id")
-            .and_then(Value::as_str)
-            .is_some()
-        {
             continue;
         }
         for block in entry
@@ -586,11 +579,16 @@ fn tool_result_blocks(entry: &Map<String, Value>) -> impl Iterator<Item = &Map<S
         .filter(|block| block.get("type").and_then(Value::as_str) == Some("tool_result"))
 }
 
-/// The typed text of a prompt record. Claude writes plain prompts as a string
-/// and richer ones as content blocks, and it replays its own command
-/// invocations and hook output through the same role. Those open with a tag
-/// and were never the person's words, so they are passed over.
-pub(crate) fn prompt_text(entry: &Map<String, Value>) -> Option<String> {
+/// The typed text of a prompt record, written as a string or as blocks.
+/// Replayed commands and hook output open with a tag and are passed over.
+/// The text of a user record that is a typed prompt, if it is one. The record
+/// type is checked by the caller, since `is_user_prompt` only rules out tool
+/// results and an assistant record carrying blocks would also pass it.
+pub(crate) fn typed_prompt(entry: &Map<String, Value>) -> Option<String> {
+    is_user_prompt(entry).then(|| prompt_text(entry)).flatten()
+}
+
+fn prompt_text(entry: &Map<String, Value>) -> Option<String> {
     let content = entry.get("message")?.get("content")?;
     let text = match content {
         Value::String(text) => text.clone(),
@@ -606,9 +604,8 @@ pub(crate) fn prompt_text(entry: &Map<String, Value>) -> Option<String> {
     (!text.is_empty() && !text.starts_with('<')).then(|| text.to_owned())
 }
 
-/// One assistant content block as an imported record. Text and thinking carry
-/// themselves. A tool call is converted by the same helper the live stream
-/// uses, so an imported row is built exactly like a streamed one.
+/// One assistant content block as an imported record. A tool call goes through
+/// the same helper the live stream uses, so the rows are built alike.
 fn imported_block(
     block: &Value,
     results: &HashMap<String, &Map<String, Value>>,

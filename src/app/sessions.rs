@@ -137,10 +137,7 @@ impl Waku {
 
     /// Bind the selected task to a session the CLI already recorded, so its
     /// next prompt continues that conversation. The cursor is read at driver
-    /// startup, so this only sets it and leaves sending to the user.
-    ///
-    /// The transcript is imported in the background, and the note stands in
-    /// until it lands.
+    /// startup, so this only sets it and imports the transcript behind it.
     pub(super) fn resume_provider_session(
         &mut self,
         resumable: crate::provider_sessions::ResumableSession,
@@ -192,11 +189,8 @@ impl Waku {
     }
 
     /// Replace a just-resumed task's transcript with the conversation Claude
-    /// Code recorded for it.
-    ///
-    /// A transcript reaches tens of megabytes, so the read and the conversion
-    /// both run on the background executor. The install is skipped when the
-    /// task moved on meanwhile, since that transcript is the user's.
+    /// Code recorded for it. Tens of megabytes, so the read and the conversion
+    /// both run on the background executor.
     fn import_claude_transcript(
         &mut self,
         session_id: Uuid,

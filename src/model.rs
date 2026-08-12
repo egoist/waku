@@ -836,9 +836,8 @@ impl AgentSession {
         true
     }
 
-    /// A bound cursor names one CLI's conversation, so a task holding one can
-    /// change model within that provider but never across providers: the other
-    /// provider's driver has nothing to resume from.
+    /// A bound cursor names one CLI's conversation, so the model may change
+    /// within that provider but never across providers.
     pub fn can_choose_model(&self, provider: ProviderKind) -> bool {
         !self.status.is_busy()
             && (self.messages.is_empty() || self.provider == provider)
