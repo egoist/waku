@@ -20,6 +20,7 @@ use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
 use std::process::Stdio;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::Duration;
 
@@ -52,7 +53,56 @@ enum CommandMessage {
     Shutdown,
 }
 
-type PendingResponses = Arc<Mutex<HashMap<u64, Sender<Result<Value, String>>>>>;
+struct PendingResponse {
+    sender: Sender<Result<Value, String>>,
+    suppress_session_updates: bool,
+}
+
+#[derive(Default)]
+struct PendingRequests {
+    responses: Mutex<HashMap<u64, PendingResponse>>,
+    suppress_session_updates: AtomicBool,
+}
+
+impl PendingRequests {
+    fn insert(
+        &self,
+        id: u64,
+        sender: Sender<Result<Value, String>>,
+        suppress_session_updates: bool,
+    ) {
+        if suppress_session_updates {
+            self.suppress_session_updates.store(true, Ordering::Release);
+        }
+        self.responses.lock().insert(
+            id,
+            PendingResponse {
+                sender,
+                suppress_session_updates,
+            },
+        );
+    }
+
+    fn take(&self, id: u64) -> Option<PendingResponse> {
+        let response = self.responses.lock().remove(&id);
+        if response
+            .as_ref()
+            .is_some_and(|response| response.suppress_session_updates)
+        {
+            // Clear this before waking the writer. The reader owns stdout
+            // ordering, so any update after the load response is live again.
+            self.suppress_session_updates
+                .store(false, Ordering::Release);
+        }
+        response
+    }
+
+    fn session_updates_are_suppressed(&self) -> bool {
+        self.suppress_session_updates.load(Ordering::Acquire)
+    }
+}
+
+type PendingResponses = Arc<PendingRequests>;
 
 pub struct AcpDriver {
     commands: Sender<CommandMessage>,
@@ -167,7 +217,7 @@ impl AcpDriver {
             .ok_or_else(|| anyhow!("{} stderr unavailable", provider.display_name()))?;
 
         let (commands, command_rx) = unbounded();
-        let pending: PendingResponses = Arc::new(Mutex::new(HashMap::new()));
+        let pending: PendingResponses = Arc::new(PendingRequests::default());
         // Prompt requests stay open for the whole turn, so they are tracked
         // apart from the blocking request table: the writer must stay free to
         // send a cancel while they are outstanding. More than one is open
@@ -261,63 +311,26 @@ impl AcpDriver {
                             }
                         }),
                     )?;
-                    let can_load = initialize
-                        .pointer("/result/agentCapabilities/loadSession")
-                        .and_then(Value::as_bool)
-                        == Some(true);
-                    let new_session = json!({"cwd": cwd, "mcpServers": []});
-                    let opened = match resume_session_id.as_deref() {
-                        Some(session_id) if can_load => {
-                            let loaded = request(
-                                &mut stdin,
-                                &writer_pending,
-                                &mut next_id,
-                                "session/load",
-                                json!({
-                                    "sessionId": session_id,
-                                    "cwd": cwd,
-                                    "mcpServers": []
-                                }),
-                            );
-                            match loaded {
-                                // A resume that the agent no longer recognizes
-                                // must not strand the task: start fresh and let
-                                // the new session id replace the stale cursor.
-                                Ok(_) => return Ok(session_id.to_owned()),
-                                Err(_) => request(
+                    establish_session(
+                        &initialize,
+                        resume_session_id.as_deref(),
+                        &cwd,
+                        mode,
+                        interaction_mode,
+                        |method, params, suppress_session_updates| {
+                            if suppress_session_updates {
+                                request_suppressing_session_updates(
                                     &mut stdin,
                                     &writer_pending,
                                     &mut next_id,
-                                    "session/new",
-                                    new_session,
-                                )?,
+                                    method,
+                                    params,
+                                )
+                            } else {
+                                request(&mut stdin, &writer_pending, &mut next_id, method, params)
                             }
-                        }
-                        _ => request(
-                            &mut stdin,
-                            &writer_pending,
-                            &mut next_id,
-                            "session/new",
-                            new_session,
-                        )?,
-                    };
-                    let session_id = opened
-                        .pointer("/result/sessionId")
-                        .and_then(Value::as_str)
-                        .map(str::to_owned)
-                        .ok_or_else(|| "the ACP agent returned no session id".to_owned())?;
-                    if let Some(mode) = desired_mode(&opened, mode, interaction_mode) {
-                        // Not fatal: an agent without the mode still runs, it
-                        // just runs with its default posture.
-                        let _ = request(
-                            &mut stdin,
-                            &writer_pending,
-                            &mut next_id,
-                            "session/set_mode",
-                            json!({"sessionId": session_id, "modeId": mode}),
-                        );
-                    }
-                    Ok(session_id)
+                        },
+                    )
                 })();
 
                 let session_id = match session {
@@ -607,6 +620,76 @@ fn desired_mode(
     (modes.get("currentModeId").and_then(Value::as_str) != Some(plan.as_str())).then_some(plan)
 }
 
+/// Opens a fresh session or restores the provider cursor negotiated during
+/// `initialize`. `session/resume` is preferred because ACP forbids history
+/// replay there. Older agents fall back to `session/load`, whose replay is
+/// suppressed until its response because Waku already restored the transcript
+/// from SQLite.
+fn establish_session(
+    initialize: &Value,
+    resume_session_id: Option<&str>,
+    cwd: &std::path::Path,
+    mode: RuntimeMode,
+    interaction_mode: InteractionMode,
+    mut send_request: impl FnMut(&str, Value, bool) -> Result<Value, String>,
+) -> Result<String, String> {
+    let can_resume = initialize
+        .pointer("/result/agentCapabilities/sessionCapabilities/resume")
+        .is_some_and(Value::is_object);
+    let can_load = initialize
+        .pointer("/result/agentCapabilities/loadSession")
+        .and_then(Value::as_bool)
+        == Some(true);
+
+    let restored = resume_session_id.and_then(|session_id| {
+        let (method, suppress_session_updates) = if can_resume {
+            ("session/resume", false)
+        } else if can_load {
+            ("session/load", true)
+        } else {
+            return None;
+        };
+        send_request(
+            method,
+            json!({
+                "sessionId": session_id,
+                "cwd": cwd,
+                "mcpServers": []
+            }),
+            suppress_session_updates,
+        )
+        .ok()
+        .map(|response| (session_id.to_owned(), response))
+    });
+
+    let (session_id, opened) = match restored {
+        Some(restored) => restored,
+        None => {
+            // A cursor the agent no longer recognizes must not strand the
+            // task: start fresh and let this id replace the stale cursor.
+            let opened = send_request("session/new", json!({"cwd": cwd, "mcpServers": []}), false)?;
+            let session_id = opened
+                .pointer("/result/sessionId")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+                .ok_or_else(|| "the ACP agent returned no session id".to_owned())?;
+            (session_id, opened)
+        }
+    };
+
+    if let Some(mode) = desired_mode(&opened, mode, interaction_mode) {
+        // Not fatal: an agent without the mode still runs, it just runs with
+        // its default posture. Restoration responses carry the same optional
+        // mode state as new-session responses, so this must run for both.
+        let _ = send_request(
+            "session/set_mode",
+            json!({"sessionId": session_id, "modeId": mode}),
+            false,
+        );
+    }
+    Ok(session_id)
+}
+
 fn apply_model(
     stdin: &mut impl Write,
     pending: &PendingResponses,
@@ -652,19 +735,40 @@ fn request(
     method: &str,
     params: Value,
 ) -> Result<Value, String> {
+    request_with_update_policy(stdin, pending, next_id, method, params, false)
+}
+
+fn request_suppressing_session_updates(
+    stdin: &mut impl Write,
+    pending: &PendingResponses,
+    next_id: &mut u64,
+    method: &str,
+    params: Value,
+) -> Result<Value, String> {
+    request_with_update_policy(stdin, pending, next_id, method, params, true)
+}
+
+fn request_with_update_policy(
+    stdin: &mut impl Write,
+    pending: &PendingResponses,
+    next_id: &mut u64,
+    method: &str,
+    params: Value,
+    suppress_session_updates: bool,
+) -> Result<Value, String> {
     *next_id += 1;
     let id = *next_id;
     let (response_tx, response_rx) = bounded(1);
-    pending.lock().insert(id, response_tx);
+    pending.insert(id, response_tx, suppress_session_updates);
     let message = json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params});
     if let Err(error) = write_line(stdin, &message) {
-        pending.lock().remove(&id);
+        pending.take(id);
         return Err(format!("transport write failed: {error}"));
     }
     match response_rx.recv_timeout(HANDSHAKE_TIMEOUT) {
         Ok(response) => response,
         Err(_) => {
-            pending.lock().remove(&id);
+            pending.take(id);
             Err(format!("{method} timed out"))
         }
     }
@@ -677,8 +781,11 @@ fn write_line(writer: &mut impl Write, value: &Value) -> std::io::Result<()> {
 }
 
 fn fail_pending(pending: &PendingResponses, message: &str) {
-    for (_, response) in pending.lock().drain() {
-        let _ = response.send(Err(message.to_owned()));
+    pending
+        .suppress_session_updates
+        .store(false, Ordering::Release);
+    for (_, response) in pending.responses.lock().drain() {
+        let _ = response.sender.send(Err(message.to_owned()));
     }
 }
 
@@ -724,8 +831,8 @@ fn handle_message(
             .pointer("/error/message")
             .and_then(Value::as_str)
             .map_or_else(|| Ok(value.clone()), |error| Err(error.to_owned()));
-        if let Some(response) = pending.lock().remove(&id) {
-            let _ = response.send(result);
+        if let Some(response) = pending.take(id) {
+            let _ = response.sender.send(result);
         }
         return None;
     }
@@ -746,6 +853,9 @@ fn handle_message(
     if method != "session/update" {
         // Everything else on this channel is agent-private control traffic
         // (`_x.ai/*` and friends). It must never reach the transcript.
+        return None;
+    }
+    if pending.session_updates_are_suppressed() {
         return None;
     }
     let update = params.get("update").unwrap_or(&Value::Null);
@@ -1057,7 +1167,7 @@ mod tests {
         let (commands, command_rx) = unbounded();
         let (events, event_rx) = unbounded();
         (
-            Arc::new(Mutex::new(HashMap::new())),
+            Arc::new(PendingRequests::default()),
             Mutex::new(Vec::new()),
             commands,
             command_rx,
@@ -1065,6 +1175,137 @@ mod tests {
             event_rx,
             AcpStreamState::default(),
         )
+    }
+
+    #[test]
+    fn resume_is_preferred_when_the_agent_advertises_it() {
+        let initialize = json!({
+            "result": {
+                "agentCapabilities": {
+                    "loadSession": true,
+                    "sessionCapabilities": {"resume": {}}
+                }
+            }
+        });
+        let mut calls = Vec::new();
+        let session_id = establish_session(
+            &initialize,
+            Some("existing-session"),
+            std::path::Path::new("/tmp/project"),
+            RuntimeMode::FullAccess,
+            InteractionMode::Build,
+            |method, params, suppress_session_updates| {
+                calls.push((method.to_owned(), params, suppress_session_updates));
+                Ok(json!({"result": {}}))
+            },
+        )
+        .unwrap();
+
+        assert_eq!(session_id, "existing-session");
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, "session/resume");
+        assert!(!calls[0].2);
+        assert_eq!(calls[0].1["sessionId"], "existing-session");
+    }
+
+    #[test]
+    fn legacy_load_suppresses_replay_and_still_applies_plan_mode() {
+        let initialize = json!({
+            "result": {"agentCapabilities": {"loadSession": true}}
+        });
+        let mut calls = Vec::new();
+        let session_id = establish_session(
+            &initialize,
+            Some("existing-session"),
+            std::path::Path::new("/tmp/project"),
+            RuntimeMode::FullAccess,
+            InteractionMode::Plan,
+            |method, params, suppress_session_updates| {
+                calls.push((method.to_owned(), params, suppress_session_updates));
+                match method {
+                    "session/load" => Ok(json!({
+                        "result": {
+                            "modes": {
+                                "currentModeId": "agent",
+                                "availableModes": [
+                                    {"id": "agent"},
+                                    {"id": "plan"}
+                                ]
+                            }
+                        }
+                    })),
+                    "session/set_mode" => Ok(json!({"result": {}})),
+                    other => panic!("unexpected ACP request: {other}"),
+                }
+            },
+        )
+        .unwrap();
+
+        assert_eq!(session_id, "existing-session");
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0].0, "session/load");
+        assert!(calls[0].2, "history replay must be suppressed");
+        assert_eq!(calls[1].0, "session/set_mode");
+        assert!(!calls[1].2);
+        assert_eq!(calls[1].1["sessionId"], "existing-session");
+        assert_eq!(calls[1].1["modeId"], "plan");
+    }
+
+    #[test]
+    fn session_load_replay_is_dropped_until_the_response_arrives() {
+        let (pending, prompt, commands, _command_rx, events, event_rx, mut state) = harness();
+        let (response_tx, response_rx) = bounded(1);
+        pending.insert(7, response_tx, true);
+
+        let update = |text| {
+            json!({
+                "jsonrpc": "2.0",
+                "method": "session/update",
+                "params": {
+                    "sessionId": "s",
+                    "update": {
+                        "sessionUpdate": "agent_message_chunk",
+                        "content": {"type": "text", "text": text}
+                    }
+                }
+            })
+        };
+        handle_message(
+            update("old answer"),
+            &pending,
+            &prompt,
+            &commands,
+            &events,
+            true,
+            &mut state,
+        );
+        assert!(event_rx.try_recv().is_err());
+
+        handle_message(
+            json!({"jsonrpc": "2.0", "id": 7, "result": {}}),
+            &pending,
+            &prompt,
+            &commands,
+            &events,
+            true,
+            &mut state,
+        );
+        assert!(response_rx.try_recv().is_ok());
+        assert!(!pending.session_updates_are_suppressed());
+
+        handle_message(
+            update("new answer"),
+            &pending,
+            &prompt,
+            &commands,
+            &events,
+            true,
+            &mut state,
+        );
+        assert!(matches!(
+            event_rx.try_recv().unwrap(),
+            DriverEvent::TextDelta(text) if text == "new answer"
+        ));
     }
 
     /// Drives a real agent through the actual driver. Ignored by default: it
