@@ -758,10 +758,10 @@ impl Waku {
         for (index, kind) in ProviderKind::ALL.into_iter().enumerate() {
             let probe = self.provider_probe(kind);
             let installed = probe.is_some_and(|probe| probe.installed);
-            let compacted_path = probe
+            let binary_path = probe
                 .filter(|probe| probe.installed)
                 .and_then(|probe| probe.path.as_deref())
-                .map(compact_path);
+                .map(|path| abbreviate_home_path(path, self.home_directory.as_deref()));
             let model_count = probe.map(|probe| probe.models.len()).unwrap_or(0);
             let version = self
                 .provider_versions
@@ -779,7 +779,7 @@ impl Waku {
 
             let detail: AnyElement = if installed {
                 let mut parts = Vec::new();
-                if let Some(path) = compacted_path {
+                if let Some(path) = binary_path {
                     parts.push(path);
                 }
                 if disabled {
@@ -1649,6 +1649,15 @@ fn detection_checked_label(elapsed: Duration) -> String {
     }
 }
 
+/// Keep the full binary path, abbreviating only the user's home directory.
+fn abbreviate_home_path(path: &Path, home: Option<&Path>) -> String {
+    match home.and_then(|home| path.strip_prefix(home).ok()) {
+        Some(relative) if relative.as_os_str().is_empty() => "~".to_owned(),
+        Some(relative) => format!("~/{}", relative.display()),
+        None => path.display().to_string(),
+    }
+}
+
 fn permission_status_row(
     name: String,
     description: String,
@@ -1719,4 +1728,24 @@ fn permission_status_row(
                 ),
         )
         .child(status)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::abbreviate_home_path;
+    use std::path::Path;
+
+    #[test]
+    fn provider_paths_abbreviate_only_the_home_prefix() {
+        let home = Path::new("/Users/example");
+
+        assert_eq!(
+            abbreviate_home_path(Path::new("/Users/example/.local/bin/amp"), Some(home)),
+            "~/.local/bin/amp"
+        );
+        assert_eq!(
+            abbreviate_home_path(Path::new("/opt/homebrew/bin/codex"), Some(home)),
+            "/opt/homebrew/bin/codex"
+        );
+    }
 }
