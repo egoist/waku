@@ -182,7 +182,7 @@ settings.automatic_updates_description:
 settings.share_anonymous_usage_data:
   en: Share anonymous usage data
 settings.share_anonymous_usage_data_description:
-  en: Help improve Waku by sharing feature usage and reliability data. Prompts, responses, project names, file paths, and other perosnal data are never included
+  en: Help improve Waku by sharing feature usage and reliability data. Prompts, responses, project names, file paths, and other personal data are never included
 
 providers.coding_agents:
   en: Coding agents
