@@ -161,13 +161,21 @@ fn resolve_path(path: Option<PathBuf>) -> Result<PathBuf, String> {
 
 fn run_offline(request: ControlRequest) -> Result<ControlResponse, String> {
     let store = StateStore::new(StateStore::default_path());
-    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    let mut state = store.load_or_fresh(cwd);
+    let mut state = load_cli_state(&store);
     let data = apply_to_state(&mut state, request)?;
     store
         .save(&mut state)
         .map_err(|error| format!("save state: {error}"))?;
     Ok(ControlResponse::ok_data(data))
+}
+
+/// Load persisted state for CLI use without inventing a runtime draft session.
+fn load_cli_state(store: &StateStore) -> PersistedState {
+    let mut state = store.load().unwrap_or_else(|_| PersistedState::empty());
+    for session in &mut state.sessions {
+        let _ = store.hydrate(session);
+    }
+    state
 }
 
 /// Apply a control request to persisted state. Shared by the offline CLI path
@@ -197,10 +205,7 @@ pub fn apply_to_state(
             let id = project.id;
             let json = project_json(&project);
             state.projects.push(project);
-            let session = state.new_session(id, state.last_provider);
             state.selected_project = Some(id);
-            state.selected_session = Some(session.id);
-            state.push_session(session);
             Ok(json)
         }
         ControlRequest::ListSessions { project } => {
@@ -231,10 +236,16 @@ pub fn apply_to_state(
                 Some(value) => resolve_project_id(state, &value)?,
                 None => ensure_projectless_project(state)?,
             };
+            // Reuse an unstarted draft only when it matches the requested
+            // provider. An explicit `--provider` that differs always creates.
             if let Some(existing) = state
                 .sessions
                 .iter()
-                .find(|session| session.project_id == project_id && !session.has_started())
+                .find(|session| {
+                    session.project_id == project_id
+                        && !session.has_started()
+                        && session.provider == provider
+                })
                 .map(|session| session.id)
             {
                 state.selected_project = Some(project_id);
@@ -247,6 +258,7 @@ pub fn apply_to_state(
                 return Ok(session_json(state, session));
             }
             let mut session = state.new_session(project_id, provider);
+            session.persist_draft = true;
             if let Some(model) = model.filter(|value| !value.trim().is_empty()) {
                 session.model = Some(model);
             }
@@ -386,6 +398,7 @@ fn session_json_with_prompt(
 mod tests {
     use super::*;
     use crate::control::ControlRequest;
+    use crate::model::ProviderKind;
 
     #[test]
     fn new_project_and_list_round_trip() {
@@ -401,9 +414,120 @@ mod tests {
         )
         .unwrap();
         assert_eq!(created["name"], "Demo");
+        assert!(state.sessions.is_empty(), "new-project must not create a session");
         let listed = apply_to_state(&mut state, ControlRequest::ListProjects).unwrap();
         assert_eq!(listed.as_array().unwrap().len(), 1);
         let _ = std::fs::remove_dir_all(path);
+    }
+
+    #[test]
+    fn new_session_respects_provider_and_persists_draft() {
+        let mut state = PersistedState::empty();
+        let path = std::env::temp_dir().join(format!("waku-cli-sess-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&path).unwrap();
+        apply_to_state(
+            &mut state,
+            ControlRequest::NewProject {
+                name: Some("Demo".into()),
+                path: path.clone(),
+            },
+        )
+        .unwrap();
+        let created = apply_to_state(
+            &mut state,
+            ControlRequest::NewSession {
+                project: Some("Demo".into()),
+                provider: Some("pi".into()),
+                model: None,
+                prompt: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(created["provider"], "pi");
+        assert_eq!(state.sessions.len(), 1);
+        assert!(state.sessions[0].persist_draft);
+        assert_eq!(state.sessions[0].provider, ProviderKind::Pi);
+        let session_id = state.sessions[0].id;
+
+        // Same provider draft is reused.
+        let again = apply_to_state(
+            &mut state,
+            ControlRequest::NewSession {
+                project: Some("Demo".into()),
+                provider: Some("pi".into()),
+                model: None,
+                prompt: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(again["id"], session_id.to_string());
+        assert_eq!(state.sessions.len(), 1);
+
+        // Different provider creates a second draft.
+        let other = apply_to_state(
+            &mut state,
+            ControlRequest::NewSession {
+                project: Some("Demo".into()),
+                provider: Some("codex".into()),
+                model: None,
+                prompt: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(other["provider"], "codex");
+        assert_eq!(state.sessions.len(), 2);
+
+        let listed = apply_to_state(&mut state, ControlRequest::ListSessions { project: None })
+            .unwrap();
+        assert_eq!(listed.as_array().unwrap().len(), 2);
+        let _ = std::fs::remove_dir_all(path);
+    }
+
+    #[test]
+    fn cli_session_survives_save_and_reload() {
+        let directory = std::env::temp_dir().join(format!("waku-cli-db-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let db = directory.join("app.db");
+        let store = StateStore::new(db);
+        let project_path = directory.join("repo");
+        std::fs::create_dir_all(&project_path).unwrap();
+
+        let mut state = PersistedState::empty();
+        apply_to_state(
+            &mut state,
+            ControlRequest::NewProject {
+                name: Some("Demo".into()),
+                path: project_path,
+            },
+        )
+        .unwrap();
+        let created = apply_to_state(
+            &mut state,
+            ControlRequest::NewSession {
+                project: Some("Demo".into()),
+                provider: Some("pi".into()),
+                model: None,
+                prompt: None,
+            },
+        )
+        .unwrap();
+        let session_id = created["id"].as_str().unwrap().to_owned();
+        store.save(&mut state).unwrap();
+
+        let mut reloaded = store.load().unwrap();
+        for session in &mut reloaded.sessions {
+            store.hydrate(session).unwrap();
+        }
+        assert_eq!(reloaded.sessions.len(), 1);
+        assert_eq!(reloaded.sessions[0].id.to_string(), session_id);
+        assert_eq!(reloaded.sessions[0].provider, ProviderKind::Pi);
+        assert!(reloaded.sessions[0].persist_draft);
+        assert!(!reloaded.sessions[0].has_started());
+
+        let listed = apply_to_state(&mut reloaded, ControlRequest::ListSessions { project: None })
+            .unwrap();
+        assert_eq!(listed.as_array().unwrap()[0]["id"], session_id);
+        let _ = std::fs::remove_dir_all(directory);
     }
 
     #[test]
@@ -426,6 +550,16 @@ mod tests {
             ControlRequest::NewProject {
                 name: Some("B".into()),
                 path: b.clone(),
+            },
+        )
+        .unwrap();
+        apply_to_state(
+            &mut state,
+            ControlRequest::NewSession {
+                project: Some("A".into()),
+                provider: Some("pi".into()),
+                model: None,
+                prompt: None,
             },
         )
         .unwrap();

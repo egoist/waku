@@ -706,6 +706,12 @@ pub struct AgentSession {
     /// that a session has no history.
     #[serde(skip, default = "detail_loaded_default")]
     pub detail_loaded: bool,
+    /// When true, persist this session even before it has started.
+    ///
+    /// The GUI keeps blank drafts in memory only. The CLI sets this so an
+    /// explicitly created session survives `save` / relaunch.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub persist_draft: bool,
 }
 
 /// Anything deserialized from a `data` blob carries its full detail.
@@ -735,6 +741,7 @@ impl AgentSession {
             updated_at: now,
             last_reply_at: None,
             detail_loaded: true,
+            persist_draft: false,
             provider_cursor: None,
             available_commands: Vec::new(),
             context_usage: None,
@@ -767,10 +774,23 @@ impl AgentSession {
     pub fn has_started(&self) -> bool {
         // A skeleton came from a stored row, and only started sessions are
         // stored, so it has started even though its transcript is not loaded.
+        // CLI draft rows are an exception: they may be stored before the first
+        // turn, so a skeleton is only treated as started when it is not still
+        // marked as a persisted draft (restored via hydrate).
+        if self.persist_draft {
+            return !self.turns.is_empty()
+                || !self.messages.is_empty()
+                || self.provider_cursor.is_some();
+        }
         !self.detail_loaded
             || !self.turns.is_empty()
             || !self.messages.is_empty()
             || self.provider_cursor.is_some()
+    }
+
+    /// Whether this session should be written to SQLite on the next save.
+    pub fn should_persist(&self) -> bool {
+        self.has_started() || self.persist_draft
     }
 
     pub fn display_title(&self) -> &str {
