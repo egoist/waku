@@ -16,6 +16,15 @@ the original feature bullet instead of adding separate entries for them.
 
 ## [unreleased]
 
+## [0.0.11]
+
+- Fix provider detection for CLIs installed through shell PATH managers such as
+  nvm and fnm
+- Show models registered by Pi extensions
+- Fix the model picker closing when entering a space in search
+- Fix duplicate transcript history and lost interaction mode when resuming ACP
+  sessions
+
 ## [0.0.10]
 
 - Fix crash in due to IME composition

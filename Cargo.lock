@@ -7614,7 +7614,7 @@ checksum = "317211a0dc0ceedd78fb2ca9a44aed3d7b9b26f81870d485c07122b4350673b7"
 
 [[package]]
 name = "waku"
-version = "0.0.10"
+version = "0.0.11"
 dependencies = [
  "alacritty_terminal",
  "anyhow",

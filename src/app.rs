@@ -799,6 +799,9 @@ pub struct Waku {
     analytics: crate::analytics::Analytics,
     state: PersistedState,
     store: StateStore,
+    /// Cached before rendering so path labels can abbreviate the home prefix
+    /// without consulting the environment or account database in a frame.
+    home_directory: Option<PathBuf>,
     composer: Entity<ComposerInput>,
     /// Drafts are independent of transcript persistence: started tasks key by
     /// session id, while blank New Task pages key by project id.
@@ -932,6 +935,7 @@ pub struct Waku {
     /// keyboard has not moved yet, so `enter` takes the first row.
     model_picker_highlight: Option<usize>,
     model_picker_scroll: ScrollHandle,
+    model_picker_scrollbar: Rc<ScrollbarState>,
     branch_search: Entity<ComposerInput>,
     branch_create_input: Entity<ComposerInput>,
     branch_picker_mode: BranchPickerMode,
@@ -1521,6 +1525,7 @@ impl Waku {
 
     pub fn new(window: &mut Window, cx: &mut App) -> Entity<Self> {
         let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        let home_directory = dirs::home_dir();
         let state_path = StateStore::default_path();
         let store = StateStore::new(state_path.clone());
         let composer_draft_store = ComposerDraftStore::for_state_path(&state_path);
@@ -2140,6 +2145,7 @@ impl Waku {
                 analytics,
                 state,
                 store,
+                home_directory,
                 composer,
                 composer_drafts,
                 composer_draft_store,
@@ -2177,8 +2183,7 @@ impl Waku {
                 provider_detection_tx,
                 provider_detection_events,
                 provider_detection_remaining: 0,
-                // Startup ran the same PATH detection synchronously just above.
-                provider_detection_checked_at: Some(Instant::now()),
+                provider_detection_checked_at: None,
                 expanded_provider_settings: None,
                 provider_path_input,
                 computer_permissions: ComputerPermissions::default(),
@@ -2221,6 +2226,7 @@ impl Waku {
                 model_picker_tab,
                 model_picker_highlight: None,
                 model_picker_scroll: ScrollHandle::new(),
+                model_picker_scrollbar: ScrollbarState::new(),
                 branch_picker_mode: BranchPickerMode::Browse,
                 branch_picker_highlight: None,
                 branch_picker_list_state,
@@ -2387,14 +2393,10 @@ impl Waku {
             // The autocomplete indexes prefetch alongside, so typing `/` or
             // `@` into the very first prompt already has data to draw.
             this.refresh_composer_sources(cx);
-            // Model discovery for every installed provider also starts here,
-            // ahead of the model picker's first render, so opening it never
-            // waits on a per-provider lazy load.
-            this.request_all_model_discoveries();
-            // CLI versions prefetch alongside for the same reason: the
-            // Providers settings page reads only this store and must never
-            // open onto a lazy load.
-            this.request_provider_version_probes();
+            // Re-detect providers after resolving the user's login-shell PATH
+            // off-thread. Detection then starts model and version discovery
+            // for every CLI it finds, including nvm/fnm-managed installs.
+            this.refresh_provider_detection(None);
             // The skill library too: the Skills settings page must open onto
             // data, not a scan.
             this.ensure_skills_catalog(false, cx);

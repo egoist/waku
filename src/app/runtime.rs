@@ -721,16 +721,6 @@ impl Waku {
         self.probes.iter().find(|probe| probe.provider == provider)
     }
 
-    /// Kick off discovery for every installed provider, so the model picker
-    /// never opens onto a lazy load. Runs once at launch; the catalog cached
-    /// by the last discovery (or the hardcoded fallback before any run has
-    /// cached one) stands in until this launch's discovery lands.
-    pub(super) fn request_all_model_discoveries(&mut self) {
-        for provider in ProviderKind::ALL {
-            self.request_provider_model_discovery(provider);
-        }
-    }
-
     pub(super) fn request_provider_model_discovery(&mut self, provider: ProviderKind) {
         if !provider.supports_model_discovery()
             || self.provider_model_discoveries.contains(&provider)
@@ -833,6 +823,10 @@ impl Waku {
         if std::thread::Builder::new()
             .name("waku-provider-detection".into())
             .spawn(move || {
+                // Finder/Dock launches do not inherit the PATH assembled by
+                // the user's interactive shell. Resolve it here, away from
+                // the UI thread, before looking for nvm/fnm-managed CLIs.
+                crate::command_env::refresh_from_default_shell();
                 for provider in detect_providers {
                     let path = match overrides.get(&provider) {
                         Some(binary) => crate::command_env::resolve_binary_override(binary),
