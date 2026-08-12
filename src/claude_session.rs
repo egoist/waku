@@ -508,11 +508,9 @@ mod tests {
 /* Import                                                                    */
 /* ------------------------------------------------------------------------- */
 
-/// One piece of an imported conversation, in transcript order.
-///
-/// Deliberately not [`crate::model::Message`]. Assembling a Waku transcript
-/// needs the app's own accumulators, and those live above this module, so this
-/// carries only what a record actually said.
+/// One piece of an imported conversation, in transcript order. Not
+/// [`crate::model::Message`]: assembling a transcript needs the app's own
+/// accumulators, so this carries only what a record said.
 pub enum ImportedRecord {
     /// A prompt the person typed, which opens a turn.
     Prompt(String),
@@ -521,10 +519,8 @@ pub enum ImportedRecord {
 }
 
 /// Reads `session_id`'s transcript as records a Waku session can be built
-/// from. Blocking, so background executor only.
-///
-/// Only the active branch is read ([`active_chain`]), so a session that was
-/// rewound imports what it looks like now rather than every path it took.
+/// from. Blocking, so background executor only. Only the active branch is read
+/// ([`active_chain`]), so a rewound session imports as it looks now.
 /// Tool calls and their results are separate records, so results are indexed
 /// first and folded into the call they answer, which is how the live stream
 /// presents them.

@@ -1487,11 +1487,9 @@ impl Waku {
     /// `true` when the prompt is a `/resume` invocation, which names a session
     /// for Waku to bind rather than work for a provider to do.
     ///
-    /// Refusing it here is what keeps the draft and its attachments intact:
-    /// every send path builds its submission before clearing the composer, so
-    /// no submission means nothing was consumed. Reaching this point means the
-    /// popup offered nothing to confirm, which is either a scan still running
-    /// or a project the CLI has no session for.
+    /// Refusing before the submission is built keeps the draft and its
+    /// attachments intact. Reaching here means the popup had nothing to
+    /// confirm, so the scan is still running or the project has no session.
     fn refuse_resume_invocation(&mut self, prompt: &str) -> bool {
         let Some(provider) = self
             .selected_session()

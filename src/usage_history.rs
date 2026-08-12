@@ -953,7 +953,7 @@ pub fn scan(
         }
         let mut files = Vec::new();
         skipped_files +=
-            crate::provider_sessions::list_transcripts(&root, mtime_cutoff_ms, &mut files);
+            crate::provider_sessions::list_transcripts(&root, mtime_cutoff_ms, true, &mut files);
         if files.is_empty() && std::fs::read_dir(&root).is_err() {
             errors.push(format!(
                 "{} transcripts at {} could not be read.",

@@ -169,10 +169,8 @@ impl Waku {
             }
         }
 
-        // Only a CLI with a resumable transcript pays for this scan, and
-        // sessions a Waku task already holds are dropped here rather than in
-        // the scan: the sidebar opens those, so offering them again would fork
-        // one provider thread across two tasks.
+        // Sessions a Waku task already holds are dropped here: the sidebar
+        // opens those, so offering them again would fork one CLI thread.
         if provider.records_resumable_sessions() {
             // Anything drawn before this key's scan lands must not be another
             // project's list.
@@ -402,9 +400,8 @@ impl Waku {
         let insert = match row {
             AutocompleteRow::Command(scored) => format!("/{} ", scored.item.name),
             AutocompleteRow::File(scored) => format!("@{} ", scored.item.path),
-            // Choosing a session is the whole action, so the invocation that
-            // opened this list leaves the composer with it rather than
-            // completing into text the user would then have to send.
+            // Choosing a session is the whole action, so the invocation
+            // leaves the composer rather than completing into text to send.
             AutocompleteRow::Session(scored) => {
                 let session = scored.item.clone();
                 self.composer.update(cx, |input, cx| {

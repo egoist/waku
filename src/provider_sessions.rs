@@ -1,11 +1,9 @@
 //! Sessions Claude Code recorded outside Waku, for `/resume`.
 //!
-//! Claude Code leaves a JSONL transcript per session on disk and resumes from
-//! its identifier. Resuming hands that identifier back to the CLI, which still
-//! holds the conversation, so all this module needs is the identifier, the
-//! working directory proving the session belongs to the open project, and a
-//! title to recognise it by in a picker. Reading a transcript for its content
-//! is [`crate::claude_session`]'s job.
+//! The CLI still holds each conversation, so all this needs from a transcript
+//! is the identifier to resume by, the `cwd` proving it belongs to the open
+//! project, and a title for the picker. Reading one for its content is
+//! [`crate::claude_session`]'s job.
 //!
 //! Every function here reads the filesystem: background executor only.
 
@@ -16,20 +14,16 @@ use serde_json::Value;
 use crate::model::{ProviderKind, ProviderResumeCursor};
 
 /// Sessions offered for one project. Past this the picker is a list to read
-/// rather than scan, and the scan itself stops costing more than it returns.
+/// rather than scan.
 const LIST_CAP: usize = 20;
-/// Transcripts whose head is read per scan. A long-running project accumulates
-/// far more sessions than a picker can show, and past this the tail of the
-/// list is older than anyone is looking for.
+/// Transcripts whose head is read per scan. Past this the rest are older than
+/// anyone is looking for.
 const SCAN_CAP: usize = 250;
-/// Bytes read from the start of a transcript, looking for the working
-/// directory and identifier. Both sit in the opening records, while the rest
+/// Bytes read from the start of a transcript, where its `cwd` sits. The rest
 /// of the file can be megabytes of tool output none of this wants.
 const HEAD_BYTES: u64 = 32 * 1024;
-/// Bytes read back from the end of a transcript, looking for a title or, for
-/// an untitled session, its newest prompt. A single turn can write hundreds of
-/// kilobytes of tool output, so the window grows until one is found instead of
-/// sizing every read for the worst transcript.
+/// Bytes read back from the end of a transcript, looking for its title. One
+/// turn can write hundreds of kilobytes, so the window grows until it hits one.
 const TAIL_WINDOWS: [u64; 3] = [64 * 1024, 512 * 1024, 2 * 1024 * 1024];
 
 /// Where a provider keeps its transcripts, honouring the CLI's own override.
@@ -60,14 +54,9 @@ pub struct ResumableSession {
 
 /// The sessions Claude Code recorded for `project_root`, newest first.
 ///
-/// Claude Code names each project directory after the working directory it ran
-/// in, but the encoding is lossy, so the directory only narrows the candidates.
-/// The recorded `cwd` inside each transcript is the check that decides.
-///
-/// The match is exact rather than by containment: the CLI resumes into the
-/// directory Waku launches it in, so offering a session recorded in a
-/// subdirectory would silently move the agent's working directory out from
-/// under the conversation it is continuing.
+/// The match is on the recorded `cwd` and is exact rather than by containment:
+/// the CLI resumes into the directory Waku launches it in, so a session
+/// recorded in a subdirectory would move the agent's working directory.
 ///
 /// Blocking, so background executor only.
 pub fn list_claude_sessions(project_root: &Path) -> Vec<ResumableSession> {
@@ -113,10 +102,8 @@ pub fn list_claude_sessions(project_root: &Path) -> Vec<ResumableSession> {
 }
 
 /// Claude Code names each project directory after its working directory, one
-/// dash per non-alphanumeric character. Matching on the prefix rather than the
-/// whole name keeps a CLI that encodes a trailing character differently from
-/// yielding nothing at all, and the recorded `cwd` is the exact check that
-/// follows it either way.
+/// dash per non-alphanumeric character. The prefix only narrows the candidates,
+/// since the recorded `cwd` is the exact check that follows.
 fn claude_candidates(root: &Path, project_root: &Path) -> Vec<(PathBuf, u64, i64)> {
     let prefix = project_root
         .to_string_lossy()
@@ -137,17 +124,24 @@ fn claude_candidates(root: &Path, project_root: &Path) -> Vec<(PathBuf, u64, i64
         .filter(|entry| entry.file_name().to_string_lossy().starts_with(&prefix))
         .flat_map(|entry| {
             let mut found = Vec::new();
-            list_transcripts(&entry.path(), i64::MIN, &mut found);
+            // Shallow: a subagent's transcript nests under
+            // `<session>/subagents/` and is work, not a session to resume.
+            list_transcripts(&entry.path(), i64::MIN, false, &mut found);
             found
         })
         .collect()
 }
 
-/// Lists `.jsonl` transcripts under `root` modified at or after `since_ms`.
-/// Errors on individual entries are swallowed: session files rotate and get
-/// removed while the walk is in flight, and a partial listing beats failing
-/// the caller. Returns the number of files skipped by the mtime prefilter.
-pub fn list_transcripts(root: &Path, since_ms: i64, found: &mut Vec<(PathBuf, u64, i64)>) -> usize {
+/// Lists `.jsonl` transcripts in `root` (and below it when `recurse`) modified
+/// at or after `since_ms`, as
+/// `(path, length, modified)`. Entries that error are skipped, since files
+/// rotate mid-walk. Returns how many the mtime prefilter dropped.
+pub fn list_transcripts(
+    root: &Path,
+    since_ms: i64,
+    recurse: bool,
+    found: &mut Vec<(PathBuf, u64, i64)>,
+) -> usize {
     let mut skipped = 0;
     let Ok(entries) = std::fs::read_dir(root) else {
         return 0;
@@ -158,7 +152,9 @@ pub fn list_transcripts(root: &Path, since_ms: i64, found: &mut Vec<(PathBuf, u6
             continue;
         };
         if file_type.is_dir() {
-            skipped += list_transcripts(&path, since_ms, found);
+            if recurse {
+                skipped += list_transcripts(&path, since_ms, recurse, found);
+            }
             continue;
         }
         if path.extension().and_then(|extension| extension.to_str()) != Some("jsonl") {
@@ -182,8 +178,8 @@ pub fn list_transcripts(root: &Path, since_ms: i64, found: &mut Vec<(PathBuf, u6
     skipped
 }
 
-/// The transcript's opening records, split into lines. A truncated read can
-/// cut the last line mid-JSON, which then fails to parse and is skipped.
+/// The transcript's opening records. A truncated read cuts the last line
+/// mid-JSON, which then fails to parse and is skipped.
 fn read_head(path: &Path) -> Option<Vec<String>> {
     use std::io::Read as _;
     let mut buffer = Vec::new();
@@ -195,9 +191,8 @@ fn read_head(path: &Path) -> Option<Vec<String>> {
     Some(split_records(&buffer, false))
 }
 
-/// The transcript's last `window` bytes as records. The opening line of a
-/// seeked read is almost always a partial record, so it is dropped rather
-/// than parsed.
+/// The transcript's last `window` bytes as records. A seeked read opens on a
+/// partial record, so that line is dropped.
 fn read_tail(path: &Path, window: u64, length: u64) -> Vec<String> {
     use std::io::{Read as _, Seek as _, SeekFrom};
     let read = || -> Option<Vec<String>> {
@@ -235,14 +230,12 @@ fn recorded_cwd(records: &[String]) -> Option<String> {
 
 /// How the picker names one session.
 ///
-/// Claude Code records the session's own title, which is what its CLI shows
-/// and a better name than any one message. Titles are appended when a title is
-/// generated and again on every rename, so the newest one reachable wins. A
-/// session too short to have been titled falls back to its newest typed
-/// prompt, widening the read until it reaches one.
+/// The session's own title is what the CLI shows, and it is appended again on
+/// every rename, so the newest one reachable wins. A session too short to have
+/// been titled falls back to its newest typed prompt.
 fn session_label(head: &[String], path: &Path, length: u64) -> Option<String> {
-    // A title is written as the session is titled or renamed, so it is either
-    // among the last records or among the first, and no wider read finds one.
+    // A title lands as the session is titled or renamed, so it is among the
+    // last records or the first, and no wider read finds one.
     let mut tail = read_tail(path, TAIL_WINDOWS[0], length);
     if let title @ Some(_) = newest_title(&tail).or_else(|| newest_title(head)) {
         return title;
@@ -260,8 +253,8 @@ fn session_label(head: &[String], path: &Path, length: u64) -> Option<String> {
 }
 
 fn newest_title(records: &[String]) -> Option<String> {
-    // A title record is rare and the read around it is tens of kilobytes, so
-    // the field name is looked for before a line is parsed at all.
+    // Titles are rare in tens of kilobytes, so look for the field name before
+    // parsing a line at all.
     records
         .iter()
         .rev()
@@ -271,12 +264,9 @@ fn newest_title(records: &[String]) -> Option<String> {
         })
 }
 
-/// The newest typed prompt in `records`, as the picker's label.
-///
-/// Deliberately the newest rather than the first: the CLI opens a session by
-/// replaying instruction files through the user role, so the first records are
-/// the same boilerplate in every session. The end of the transcript is both
-/// cheaper to reach and the better reminder of what the session was doing.
+/// The newest typed prompt in `records`, as the picker's label. Newest rather
+/// than first: a session opens by replaying instruction files through the user
+/// role, which reads the same in every session.
 fn latest_prompt(records: &[String]) -> Option<String> {
     records
         .iter()
@@ -294,12 +284,9 @@ fn latest_prompt(records: &[String]) -> Option<String> {
         })
 }
 
-/// The first line of a typed prompt, as a picker label.
-///
-/// The CLI opens a session by replaying instruction files through the same
-/// user role the person types into. A replayed file opens with a heading and
-/// would label every session in the list identically, so it is passed over in
-/// favour of the first prompt that reads as one.
+/// The first line of a typed prompt, as a picker label. A replayed instruction
+/// file opens with a heading and is passed over, since it would label every
+/// session identically.
 fn first_prompt_line(prompt: &str) -> Option<String> {
     if prompt.starts_with('#') {
         return None;

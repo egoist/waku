@@ -135,13 +135,11 @@ impl Waku {
         self.select_session(id, cx);
     }
 
-    /// Bind the selected task to a session the CLI already recorded,
-    /// so its next prompt continues that conversation instead of starting a
-    /// new one. The cursor is read once at driver startup, which is why this
-    /// only sets it and leaves sending to the user.
+    /// Bind the selected task to a session the CLI already recorded, so its
+    /// next prompt continues that conversation. The cursor is read at driver
+    /// startup, so this only sets it and leaves sending to the user.
     ///
-    /// The recorded transcript is then imported in the background so the
-    /// conversation reads the way it did in the CLI, and the note stands in
+    /// The transcript is imported in the background, and the note stands in
     /// until it lands.
     pub(super) fn resume_provider_session(
         &mut self,
@@ -154,8 +152,8 @@ impl Waku {
             return;
         };
         let (project_id, started) = (session.project_id, session.has_started());
-        // A started task owns a provider thread of its own, and a second
-        // cursor on it would contradict the transcript already drawn.
+        // A started task owns a thread of its own, and a second cursor on it
+        // would contradict the transcript already drawn.
         if started {
             self.create_session_for(project_id, provider, cx);
         }
@@ -163,16 +161,14 @@ impl Waku {
             return;
         };
         if session.provider != provider {
-            // The draft's model belongs to the provider it was drafted for,
-            // the same reason a model change across providers clears it.
+            // The draft's model belongs to the provider it was drafted for.
             session.model = None;
             session.reasoning_effort = None;
             session.service_tier = None;
         }
         session.provider = provider;
         session.provider_cursor = Some(cursor.clone());
-        // The CLI's own name for the session, so the task reads in the sidebar
-        // the way it read in the CLI.
+        // The CLI's own name for the session, so the sidebar reads the same.
         session.auto_title = Some(resumable.label);
         session.push_message(
             MessageRole::System,
@@ -188,8 +184,8 @@ impl Waku {
         {
             self.import_claude_transcript(session_id, native_id.clone(), cx);
         }
-        // A cursor this task now holds must leave the picker, or the next
-        // `/resume` would offer one provider thread to a second task.
+        // A cursor this task holds must leave the picker, or `/resume` would
+        // offer one CLI thread to a second task.
         self.refresh_composer_sources(cx);
         self.save();
         cx.notify();
@@ -198,12 +194,9 @@ impl Waku {
     /// Replace a just-resumed task's transcript with the conversation Claude
     /// Code recorded for it.
     ///
-    /// Reading and converting a transcript walks a file that reaches tens of
-    /// megabytes, so all of it happens on the background executor and the
-    /// frame only sees the finished result. The install is skipped when the
-    /// task has moved on in the meantime: a prompt sent while the read was in
-    /// flight owns the transcript, and overwriting it would delete what the
-    /// user just said.
+    /// A transcript reaches tens of megabytes, so the read and the conversion
+    /// both run on the background executor. The install is skipped when the
+    /// task moved on meanwhile, since that transcript is the user's.
     fn import_claude_transcript(
         &mut self,
         session_id: Uuid,
@@ -236,15 +229,14 @@ impl Waku {
             return;
         };
         // The resume note is the only thing a freshly bound task holds. More
-        // than that means the user started their own turn while the read was
-        // in flight, and that transcript is theirs.
+        // means the user started their own turn while the read was in flight.
         if !session.turns.is_empty() || session.messages.len() > 1 || imported.is_empty() {
             return;
         }
         session.messages.clear();
         session.transcript_blocks.clear();
-        // Every imported block is already whole, so each one is its own
-        // message rather than a delta accumulated into the previous.
+        // Every imported block is whole, so each is its own message rather
+        // than a delta accumulated into the previous.
         let mut continuing_work = false;
         for record in imported {
             match record {
