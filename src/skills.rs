@@ -150,16 +150,12 @@ impl SkillEntry {
     /// "Codex · Cursor · OpenCode" — every ecosystem this skill is
     /// installed in, scan order.
     pub fn sources_label(&self) -> String {
-        let sources = self
-            .installs
+        self.installs
             .iter()
             .map(|install| install.source.label())
+            .chain(self.plugin.clone())
             .collect::<Vec<_>>()
-            .join(" · ");
-        match &self.plugin {
-            Some(plugin) => format!("{sources} · {plugin}"),
-            None => sources,
-        }
+            .join(" · ")
     }
 }
 
@@ -190,7 +186,6 @@ pub fn claude_config_dir() -> Option<PathBuf> {
 /// filesystem access — so this is safe to call while building a frame.
 pub fn user_skill_locations() -> Vec<SkillLocation> {
     let home = dirs::home_dir();
-    let claude_config_dir = claude_config_dir();
     let mut locations = Vec::new();
     let mut push = |source: SkillSource, root: Option<PathBuf>| {
         if let Some(root) = root {
@@ -207,7 +202,7 @@ pub fn user_skill_locations() -> Vec<SkillLocation> {
     push(SkillSource::Shared, home_join(".agents/skills"));
     push(
         SkillSource::Provider(ProviderKind::Claude),
-        claude_config_dir.map(|dir| dir.join("skills")),
+        claude_config_dir().map(|dir| dir.join("skills")),
     );
     push(
         SkillSource::Provider(ProviderKind::Codex),
@@ -268,10 +263,6 @@ pub fn project_skill_locations(project_root: &Path, project_name: &str) -> Vec<S
 /// than a cache walk. Plugins switched off in `settings.json` are skipped:
 /// Claude does not load their skills either. Reads config files, so this
 /// runs on the background executor only, alongside the scan itself.
-pub fn claude_plugin_skill_locations() -> Vec<SkillLocation> {
-    claude_config_dir().map_or_else(Vec::new, |dir| claude_plugin_locations_in(&dir))
-}
-
 fn claude_plugin_locations_in(config_dir: &Path) -> Vec<SkillLocation> {
     let read_json = |path: PathBuf| {
         std::fs::read_to_string(path)
@@ -297,7 +288,7 @@ fn claude_plugin_locations_in(config_dir: &Path) -> Vec<SkillLocation> {
         // user and project installs of the same version share an
         // `installPath`, hence the dedup.
         let plugin = name.split('@').next().unwrap_or(name);
-        for install in installs.as_array().map_or(&[][..], Vec::as_slice) {
+        for install in installs.as_array().into_iter().flatten() {
             let Some(path) = install.get("installPath").and_then(|value| value.as_str()) else {
                 continue;
             };
@@ -318,7 +309,7 @@ fn claude_plugin_locations_in(config_dir: &Path) -> Vec<SkillLocation> {
 
 /// All roots the scan walks for the given projects: user scope plus each
 /// project's trees, in scan order.
-pub fn skill_locations(projects: &[(String, PathBuf)]) -> Vec<SkillLocation> {
+fn skill_locations(projects: &[(String, PathBuf)]) -> Vec<SkillLocation> {
     let mut locations = user_skill_locations();
     for (name, path) in projects {
         locations.extend(project_skill_locations(path, name));
@@ -347,13 +338,15 @@ struct RawSkill {
 /// plugin side. Filesystem work throughout, background executor only.
 pub fn scan_skill_catalog(projects: &[(String, PathBuf)]) -> SkillsCatalog {
     let mut locations = skill_locations(projects);
-    locations.extend(claude_plugin_skill_locations());
+    if let Some(config_dir) = claude_config_dir() {
+        locations.extend(claude_plugin_locations_in(&config_dir));
+    }
     scan_skills(&locations)
 }
 
 /// Walk every location and build the catalog. Filesystem work throughout —
 /// background executor only.
-pub fn scan_skills(locations: &[SkillLocation]) -> SkillsCatalog {
+fn scan_skills(locations: &[SkillLocation]) -> SkillsCatalog {
     let mut raw = Vec::new();
     for location in locations {
         scan_location(location, &mut raw);
@@ -588,6 +581,9 @@ fn parse_skill_frontmatter(contents: &str) -> SkillFrontmatter<'_> {
 /// copy that already has a live `SKILL.md` is a no-op rather than an error —
 /// which also makes toggling a symlink-shared directory reached through
 /// several installs idempotent.
+///
+/// For a dir inside Claude's plugin cache the rename edits a vendored copy:
+/// it holds until the plugin's next update reinstates the file.
 pub fn set_skill_enabled(dir: &Path, enabled: bool) -> Result<(), String> {
     let live = dir.join(SKILL_FILE);
     let disabled = dir.join(DISABLED_SKILL_FILE);

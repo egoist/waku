@@ -8,7 +8,7 @@
 
 use std::collections::BTreeSet;
 use std::ops::Range;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use nucleo_matcher::pattern::{CaseMatching, Normalization, Pattern};
 use nucleo_matcher::{Matcher, Utf32Str};
