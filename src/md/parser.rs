@@ -117,10 +117,6 @@ pub struct BlockTree {
 
 #[cfg(test)]
 impl BlockTree {
-    pub fn is_empty(&self) -> bool {
-        self.blocks.is_empty()
-    }
-
     pub fn len(&self) -> usize {
         self.blocks.len()
     }
