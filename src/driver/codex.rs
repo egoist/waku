@@ -1159,26 +1159,23 @@ const CODEX_CITATION_START: char = '\u{e200}';
 const CODEX_CITATION_END: char = '\u{e201}';
 const CODEX_CITATION_SEPARATOR: char = '\u{e202}';
 
+/// Also serves `codex_session`'s offline import, where a whole recorded
+/// message is one delta and a prompt opens the turn.
 #[derive(Default)]
-struct CodexStreamState {
+pub(crate) struct CodexStreamState {
     citations: HashMap<String, String>,
     citation_numbers: HashMap<String, usize>,
     citation_buffer: String,
-    next_citation_number: usize,
 }
 
 impl CodexStreamState {
-    fn begin_turn(&mut self) {
+    pub(crate) fn begin_turn(&mut self) {
         self.citations.clear();
         self.citation_numbers.clear();
         self.citation_buffer.clear();
-        self.next_citation_number = 1;
     }
 
-    fn capture_citations(&mut self, item: &Value) {
-        if item.get("type").and_then(Value::as_str) != Some("webSearch") {
-            return;
-        }
+    pub(crate) fn capture_citations(&mut self, item: &Value) {
         let Some(results) = item.get("results").and_then(Value::as_array) else {
             return;
         };
@@ -1198,7 +1195,7 @@ impl CodexStreamState {
         }
     }
 
-    fn rewrite_citation_delta(&mut self, delta: &str) -> String {
+    pub(crate) fn rewrite_citation_delta(&mut self, delta: &str) -> String {
         self.citation_buffer.push_str(delta);
         let mut input = std::mem::take(&mut self.citation_buffer);
         let mut output = String::with_capacity(input.len());
@@ -1244,21 +1241,18 @@ impl CodexStreamState {
             let Some(url) = self.citations.get(reference).cloned() else {
                 continue;
             };
+            let next = self.citation_numbers.len() + 1;
             let number = *self
                 .citation_numbers
                 .entry(reference.into())
-                .or_insert_with(|| {
-                    let number = self.next_citation_number;
-                    self.next_citation_number += 1;
-                    number
-                });
+                .or_insert(next);
             links.push(format!("[{number}]({})", markdown_link_destination(&url)));
         }
         links.join(" ")
     }
 }
 
-pub(crate) fn markdown_link_destination(url: &str) -> String {
+fn markdown_link_destination(url: &str) -> String {
     url.replace('\\', "\\\\")
         .replace('(', "\\(")
         .replace(')', "\\)")
@@ -1643,7 +1637,9 @@ fn handle_codex_message(
         }
         "item/started" | "item/completed" => {
             if let Some(item) = params.get("item") {
-                stream_state.capture_citations(item);
+                if item.get("type").and_then(Value::as_str) == Some("webSearch") {
+                    stream_state.capture_citations(item);
+                }
                 let complete = method == "item/completed";
                 if let Some(work) = codex_command_work(item, complete) {
                     let _ = events.send(DriverEvent::BackgroundWork(BackgroundWorkEvent::Upsert(

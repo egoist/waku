@@ -12,11 +12,8 @@ use anyhow::{Context as _, anyhow};
 use serde_json::Value;
 use uuid::Uuid;
 
+use crate::driver::codex::CodexStreamState;
 use crate::model::{ActivityItem, ActivityKind, ReasoningBlock};
-
-const CITATION_START: char = '\u{e200}';
-const CITATION_END: char = '\u{e201}';
-const CITATION_SEPARATOR: char = '\u{e202}';
 
 /// One piece of an imported conversation, in transcript order. Not
 /// [`crate::model::Message`]: assembling a transcript needs the app's own
@@ -59,16 +56,23 @@ pub fn imported_transcript_in(
         })
         .collect::<HashMap<_, _>>();
 
-    let mut citations = Citations::default();
+    // The stream's own citation rewriter, fed whole recorded messages: a
+    // prompt opens the turn, a search's results define the references, and a
+    // reply renders them as links.
+    let mut citations = CodexStreamState::default();
     let mut imported = Vec::new();
     for item in items {
         match item.get("type").and_then(Value::as_str) {
             Some("message") => match item.get("role").and_then(Value::as_str) {
-                Some("user") => imported.extend(prompt_text(item).map(ImportedRecord::Prompt)),
-                Some("assistant") => imported.extend(
-                    message_text(item, "output_text")
-                        .map(|text| ImportedRecord::Assistant(citations.rewrite(&text))),
-                ),
+                Some("user") => {
+                    if let Some(prompt) = prompt_text(item) {
+                        citations.begin_turn();
+                        imported.push(ImportedRecord::Prompt(prompt));
+                    }
+                }
+                Some("assistant") => imported.extend(reply_text(item).map(|text| {
+                    ImportedRecord::Assistant(citations.rewrite_citation_delta(&text))
+                })),
                 _ => {}
             },
             Some("reasoning") => imported.extend(reasoning_record(item)),
@@ -76,7 +80,7 @@ pub fn imported_transcript_in(
                 imported.extend(tool_record(item, &outputs));
             }
             Some("web_search_call") => {
-                citations.collect(item);
+                citations.capture_citations(item);
                 imported.push(search_record(item));
             }
             _ => {}
@@ -98,24 +102,29 @@ fn sessions_directory() -> anyhow::Result<PathBuf> {
 /// so a session is found by walking the date tree for its filename suffix.
 fn find_session_file(sessions_directory: &Path, session_id: &str) -> anyhow::Result<PathBuf> {
     Uuid::parse_str(session_id).context("Codex returned an invalid session ID")?;
-    find_rollout(sessions_directory, &format!("-{session_id}.jsonl"))
+    find_rollout(sessions_directory, &format!("-{session_id}.jsonl"), 3)
         .ok_or_else(|| anyhow!("Codex session {session_id} was not found on disk"))
 }
 
-fn find_rollout(directory: &Path, suffix: &str) -> Option<PathBuf> {
-    for entry in fs::read_dir(directory).ok()?.flatten() {
-        let path = entry.path();
-        if path.is_dir() {
-            if let Some(found) = find_rollout(&path, suffix) {
-                return Some(found);
-            }
-        } else if path.to_str().is_some_and(|path| path.ends_with(suffix))
-            && path.metadata().is_ok_and(|metadata| metadata.len() > 0)
-        {
-            return Some(path);
+/// Newest date directories first, since a resumed session is almost always
+/// recent, and exactly three levels down, so a miss never scans past the
+/// date tree.
+fn find_rollout(directory: &Path, suffix: &str, depth: u8) -> Option<PathBuf> {
+    let mut paths = fs::read_dir(directory)
+        .ok()?
+        .flatten()
+        .map(|entry| entry.path())
+        .collect::<Vec<_>>();
+    paths.sort_unstable();
+    paths.into_iter().rev().find_map(|path| {
+        if depth > 0 {
+            find_rollout(&path, suffix, depth - 1)
+        } else {
+            (path.to_str().is_some_and(|path| path.ends_with(suffix))
+                && path.metadata().is_ok_and(|metadata| metadata.len() > 0))
+            .then_some(path)
         }
-    }
-    None
+    })
 }
 
 fn read_entries(path: &Path) -> anyhow::Result<Vec<Value>> {
@@ -137,14 +146,12 @@ fn effective_items(entries: &[Value]) -> Vec<&Value> {
         match entry.get("type").and_then(Value::as_str) {
             Some("response_item") => items.extend(entry.get("payload")),
             Some("compacted") => {
-                items.clear();
-                items.extend(
-                    entry
-                        .pointer("/payload/replacement_history")
-                        .and_then(Value::as_array)
-                        .map(Vec::as_slice)
-                        .unwrap_or_default(),
-                );
+                items = entry
+                    .pointer("/payload/replacement_history")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .collect();
             }
             _ => {}
         }
@@ -156,7 +163,7 @@ fn effective_items(entries: &[Value]) -> Vec<&Value> {
 /// context, IDE state, and resumed history through the same user role, each
 /// in its own block, so blocks are filtered one by one and only the person's
 /// words survive.
-pub(crate) fn prompt_text(item: &Value) -> Option<String> {
+fn prompt_text(item: &Value) -> Option<String> {
     let text = text_blocks(item, "input_text")
         .filter_map(typed_text)
         .collect::<Vec<_>>()
@@ -181,8 +188,10 @@ fn typed_text(block: &str) -> Option<String> {
     .then(|| text.to_owned())
 }
 
-fn message_text(item: &Value, block_type: &str) -> Option<String> {
-    let text = text_blocks(item, block_type).collect::<Vec<_>>().join("\n");
+fn reply_text(item: &Value) -> Option<String> {
+    let text = text_blocks(item, "output_text")
+        .collect::<Vec<_>>()
+        .join("\n");
     let text = text.trim();
     (!text.is_empty()).then(|| text.to_owned())
 }
@@ -190,8 +199,8 @@ fn message_text(item: &Value, block_type: &str) -> Option<String> {
 fn text_blocks<'a>(item: &'a Value, block_type: &'a str) -> impl Iterator<Item = &'a str> {
     item.get("content")
         .and_then(Value::as_array)
-        .map_or([].as_slice(), Vec::as_slice)
-        .iter()
+        .into_iter()
+        .flatten()
         .filter(move |block| block.get("type").and_then(Value::as_str) == Some(block_type))
         .filter_map(|block| block.get("text").and_then(Value::as_str))
 }
@@ -204,8 +213,8 @@ fn reasoning_record(item: &Value) -> Option<ImportedRecord> {
         .map(|key| {
             item.get(key)
                 .and_then(Value::as_array)
-                .map_or([].as_slice(), Vec::as_slice)
-                .iter()
+                .into_iter()
+                .flatten()
                 .filter_map(|block| block.get("text").and_then(Value::as_str))
                 .map(str::trim)
                 .filter(|text| !text.is_empty())
@@ -241,7 +250,7 @@ fn tool_record(item: &Value, outputs: &HashMap<&str, &Value>) -> Option<Imported
     let kind = if command.is_some() {
         ActivityKind::Command
     } else {
-        crate::driver::support::classify_tool(name)
+        ActivityKind::from_tool_name(name)
     };
     let title = command
         .or_else(|| {
@@ -261,7 +270,7 @@ fn tool_record(item: &Value, outputs: &HashMap<&str, &Value>) -> Option<Imported
             title,
             arguments.as_ref(),
             output.as_ref(),
-            output.as_ref(),
+            None,
             output.as_ref().is_some_and(output_failed),
             true,
         ),
@@ -316,87 +325,10 @@ fn search_record(item: &Value) -> ImportedRecord {
         crate::driver::codex::codex_web_search_title(item),
         item.get("action"),
         item.get("results"),
-        item.get("results"),
+        None,
         false,
         true,
     ))
-}
-
-/// Codex marks citations in assistant text with private-use control
-/// characters that map to search results by reference ID. A transcript must
-/// render them as links and never leak the markers. Reference IDs repeat
-/// across turns, so the latest result set wins: it is the one the message
-/// after it was written against.
-#[derive(Default)]
-struct Citations {
-    urls: HashMap<String, String>,
-}
-
-impl Citations {
-    fn collect(&mut self, item: &Value) {
-        for result in item
-            .get("results")
-            .and_then(Value::as_array)
-            .map_or([].as_slice(), Vec::as_slice)
-        {
-            let reference = result
-                .get("ref_id")
-                .or_else(|| result.get("refId"))
-                .and_then(Value::as_str)
-                .filter(|reference| !reference.is_empty());
-            let url = result
-                .get("url")
-                .and_then(Value::as_str)
-                .filter(|url| !url.is_empty());
-            if let (Some(reference), Some(url)) = (reference, url) {
-                self.urls.insert(reference.into(), url.into());
-            }
-        }
-    }
-
-    fn rewrite(&self, text: &str) -> String {
-        let mut numbers = HashMap::new();
-        let mut output = String::with_capacity(text.len());
-        let mut rest = text;
-        while let Some(start) = rest.find(CITATION_START) {
-            output.push_str(&rest[..start]);
-            let marker_start = start + CITATION_START.len_utf8();
-            let Some(end) = rest[marker_start..].find(CITATION_END) else {
-                // An unterminated marker never reaches the transcript.
-                return output;
-            };
-            let marker = &rest[marker_start..marker_start + end];
-            rest = &rest[marker_start + end + CITATION_END.len_utf8()..];
-            let mut parts = marker.split(CITATION_SEPARATOR);
-            if parts.next() != Some("cite") {
-                continue;
-            }
-            let links = parts
-                .filter_map(|reference| {
-                    let url = self.urls.get(reference)?;
-                    let next = numbers.len() + 1;
-                    let number = *numbers.entry(reference).or_insert(next);
-                    Some(format!(
-                        "[{number}]({})",
-                        crate::driver::codex::markdown_link_destination(url)
-                    ))
-                })
-                .collect::<Vec<_>>()
-                .join(" ");
-            if !links.is_empty() {
-                if output
-                    .chars()
-                    .last()
-                    .is_some_and(|character| !character.is_whitespace())
-                {
-                    output.push(' ');
-                }
-                output.push_str(&links);
-            }
-        }
-        output.push_str(rest);
-        output
-    }
 }
 
 #[cfg(test)]
@@ -565,7 +497,7 @@ mod tests {
             ),
             response(json!({"type": "message", "role": "assistant", "content": [
                 {"type": "output_text",
-                 "text": format!("Use list().{CITATION_START}cite{CITATION_SEPARATOR}turn0search0{CITATION_END} Done.")},
+                 "text": "Use list().\u{e200}cite\u{e202}turn0search0\u{e201} Done."},
             ]})),
         ]);
         let imported = imported_transcript_in(&root, SESSION).unwrap();
@@ -577,7 +509,7 @@ mod tests {
             panic!("the assistant message imports as a reply");
         };
         assert_eq!(reply, "Use list(). [1](https://zed.dev/\\(docs\\)) Done.");
-        assert!(!reply.contains(CITATION_START));
+        assert!(!reply.contains('\u{e200}'));
         fs::remove_dir_all(root).ok();
     }
 }

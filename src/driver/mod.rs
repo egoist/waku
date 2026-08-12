@@ -6,7 +6,7 @@ pub(crate) mod codex;
 mod computer_use;
 mod opencode;
 mod pi;
-pub(crate) mod support;
+mod support;
 mod title_refresh;
 
 use std::path::PathBuf;
