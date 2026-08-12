@@ -14,7 +14,7 @@ use std::path::Path;
 use gpui::{KeyBinding, actions};
 
 use super::composer::next_picker_highlight;
-use crate::skills::{SkillEntry, SkillSource, SkillsCatalog, skill_locations};
+use crate::skills::{SkillEntry, SkillSource, SkillsCatalog};
 
 use super::*;
 
@@ -79,11 +79,11 @@ impl Waku {
         self.skills_scan_pending = true;
         self.skills_scan_generation += 1;
         let generation = self.skills_scan_generation;
-        let locations = skill_locations(&self.skill_scan_projects());
+        let projects = self.skill_scan_projects();
         cx.spawn(async move |this, cx| {
             let catalog = cx
                 .background_executor()
-                .spawn(async move { crate::skills::scan_skills(&locations) })
+                .spawn(async move { crate::skills::scan_skill_catalog(&projects) })
                 .await;
             let _ = this.update(cx, |this, cx| {
                 if this.skills_scan_generation != generation {

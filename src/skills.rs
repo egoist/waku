@@ -77,6 +77,8 @@ pub struct SkillLocation {
     pub root: PathBuf,
     /// Project display name when `scope` is [`SkillScope::Project`].
     pub project: Option<String>,
+    /// Plugin display name when the root is vendored by a Claude plugin.
+    pub plugin: Option<String>,
 }
 
 /// One concrete copy of a skill on disk.
@@ -100,6 +102,10 @@ pub struct SkillEntry {
     pub scope: SkillScope,
     /// Project display name when `scope` is [`SkillScope::Project`].
     pub project: Option<String>,
+    /// Plugin display name when every copy is vendored by a Claude plugin.
+    /// Part of the grouping identity, so two plugins shipping a same-named
+    /// skill stay separate rows.
+    pub plugin: Option<String>,
     /// Every copy of this skill in this scope group, scan order (Shared
     /// first, then per provider). Never empty.
     pub installs: Vec<SkillInstall>,
@@ -144,11 +150,16 @@ impl SkillEntry {
     /// "Codex · Cursor · OpenCode" — every ecosystem this skill is
     /// installed in, scan order.
     pub fn sources_label(&self) -> String {
-        self.installs
+        let sources = self
+            .installs
             .iter()
             .map(|install| install.source.label())
             .collect::<Vec<_>>()
-            .join(" · ")
+            .join(" · ");
+        match &self.plugin {
+            Some(plugin) => format!("{sources} · {plugin}"),
+            None => sources,
+        }
     }
 }
 
@@ -165,15 +176,21 @@ impl SkillsCatalog {
     }
 }
 
+/// Claude's config root: `$CLAUDE_CONFIG_DIR` when absolute, else
+/// `~/.claude`.
+pub fn claude_config_dir() -> Option<PathBuf> {
+    std::env::var("CLAUDE_CONFIG_DIR")
+        .ok()
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute())
+        .or_else(|| dirs::home_dir().map(|home| home.join(".claude")))
+}
+
 /// Every user-scope skill root, present on disk or not. Path joins only — no
 /// filesystem access — so this is safe to call while building a frame.
 pub fn user_skill_locations() -> Vec<SkillLocation> {
     let home = dirs::home_dir();
-    let claude_config_dir = std::env::var("CLAUDE_CONFIG_DIR")
-        .ok()
-        .map(PathBuf::from)
-        .filter(|path| path.is_absolute())
-        .or_else(|| home.as_deref().map(|home| home.join(".claude")));
+    let claude_config_dir = claude_config_dir();
     let mut locations = Vec::new();
     let mut push = |source: SkillSource, root: Option<PathBuf>| {
         if let Some(root) = root {
@@ -182,6 +199,7 @@ pub fn user_skill_locations() -> Vec<SkillLocation> {
                 scope: SkillScope::User,
                 root,
                 project: None,
+                plugin: None,
             });
         }
     };
@@ -239,8 +257,63 @@ pub fn project_skill_locations(project_root: &Path, project_name: &str) -> Vec<S
         scope: SkillScope::Project,
         root: project_root.join(suffix),
         project: Some(project_name.to_owned()),
+        plugin: None,
     })
     .collect()
+}
+
+/// Skill roots contributed by installed Claude plugins. Plugins vendor their
+/// skills under `<installPath>/skills`, and the plugin cache keeps stale
+/// versions around, so the roots come from `installed_plugins.json` rather
+/// than a cache walk. Plugins switched off in `settings.json` are skipped:
+/// Claude does not load their skills either. Reads config files, so this
+/// runs on the background executor only, alongside the scan itself.
+pub fn claude_plugin_skill_locations() -> Vec<SkillLocation> {
+    claude_config_dir().map_or_else(Vec::new, |dir| claude_plugin_locations_in(&dir))
+}
+
+fn claude_plugin_locations_in(config_dir: &Path) -> Vec<SkillLocation> {
+    let read_json = |path: PathBuf| {
+        std::fs::read_to_string(path)
+            .ok()
+            .and_then(|contents| serde_json::from_str::<serde_json::Value>(&contents).ok())
+    };
+    let Some(installed) = read_json(config_dir.join("plugins/installed_plugins.json")) else {
+        return Vec::new();
+    };
+    let enabled = read_json(config_dir.join("settings.json"))
+        .and_then(|settings| settings.get("enabledPlugins").cloned())
+        .unwrap_or(serde_json::Value::Null);
+    let Some(plugins) = installed.get("plugins").and_then(|value| value.as_object()) else {
+        return Vec::new();
+    };
+    let mut locations: Vec<SkillLocation> = Vec::new();
+    for (name, installs) in plugins {
+        // Absent from `enabledPlugins` means enabled. Only `false` disables.
+        if enabled.get(name).and_then(serde_json::Value::as_bool) == Some(false) {
+            continue;
+        }
+        // Records are keyed `plugin@marketplace`, one per install scope, and
+        // user and project installs of the same version share an
+        // `installPath`, hence the dedup.
+        let plugin = name.split('@').next().unwrap_or(name);
+        for install in installs.as_array().map_or(&[][..], Vec::as_slice) {
+            let Some(path) = install.get("installPath").and_then(|value| value.as_str()) else {
+                continue;
+            };
+            let root = Path::new(path).join("skills");
+            if !locations.iter().any(|location| location.root == root) {
+                locations.push(SkillLocation {
+                    source: SkillSource::Provider(ProviderKind::Claude),
+                    scope: SkillScope::User,
+                    root,
+                    project: None,
+                    plugin: Some(plugin.to_owned()),
+                });
+            }
+        }
+    }
+    locations
 }
 
 /// All roots the scan walks for the given projects: user scope plus each
@@ -259,12 +332,23 @@ struct RawSkill {
     description: String,
     scope: SkillScope,
     project: Option<String>,
+    plugin: Option<String>,
     install: SkillInstall,
     allowed_tools: Option<String>,
     body: String,
     supporting_files: usize,
     total_bytes: u64,
     modified_at: Option<u64>,
+}
+
+/// The full library scan for the given projects: the static roots plus the
+/// roots installed Claude plugins contribute, resolved and walked in one
+/// pass. Owning the composition here keeps callers from forgetting the
+/// plugin side. Filesystem work throughout, background executor only.
+pub fn scan_skill_catalog(projects: &[(String, PathBuf)]) -> SkillsCatalog {
+    let mut locations = skill_locations(projects);
+    locations.extend(claude_plugin_skill_locations());
+    scan_skills(&locations)
 }
 
 /// Walk every location and build the catalog. Filesystem work throughout —
@@ -281,9 +365,9 @@ pub fn scan_skills(locations: &[SkillLocation]) -> SkillsCatalog {
     // One entry per (scope group, name): the same skill installed into
     // several ecosystems' roots — copied or symlinked — is one skill.
     let mut skills: Vec<SkillEntry> = Vec::new();
-    let mut by_identity: HashMap<(Option<String>, String), usize> = HashMap::new();
+    let mut by_identity: HashMap<(Option<String>, Option<String>, String), usize> = HashMap::new();
     for raw in raw {
-        let key = (raw.project.clone(), raw.name.clone());
+        let key = (raw.project.clone(), raw.plugin.clone(), raw.name.clone());
         match by_identity.get(&key) {
             Some(&index) => {
                 let entry = &mut skills[index];
@@ -307,6 +391,7 @@ pub fn scan_skills(locations: &[SkillLocation]) -> SkillsCatalog {
                     description: raw.description,
                     scope: raw.scope,
                     project: raw.project,
+                    plugin: raw.plugin,
                     enabled: raw.install.enabled,
                     installs: vec![raw.install],
                     allowed_tools: raw.allowed_tools,
@@ -397,6 +482,7 @@ fn scan_location(location: &SkillLocation, raw: &mut Vec<RawSkill>) {
             description: front.description.unwrap_or_default(),
             scope: location.scope,
             project: location.project.clone(),
+            plugin: location.plugin.clone(),
             install: SkillInstall {
                 source: location.source,
                 dir,
@@ -544,6 +630,7 @@ mod tests {
             scope: SkillScope::User,
             root: root.to_path_buf(),
             project: None,
+            plugin: None,
         }
     }
 
@@ -647,6 +734,7 @@ mod tests {
                 scope: SkillScope::Project,
                 root: project_root.clone(),
                 project: Some("waku".into()),
+                plugin: None,
             },
         ];
         let catalog = scan_skills(&locations);
@@ -698,6 +786,55 @@ mod tests {
         let contents = std::fs::read_to_string(dir.join(SKILL_FILE)).unwrap();
         assert!(contents.contains("name: deploy"));
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn plugin_locations_come_from_the_install_record_and_honor_enablement() {
+        let config = temp_root("plugins");
+        std::fs::create_dir_all(config.join("plugins")).unwrap();
+        std::fs::write(
+            config.join("plugins/installed_plugins.json"),
+            r#"{
+              "version": 2,
+              "plugins": {
+                "github-dev@market": [
+                  {"scope": "user", "installPath": "/cache/github-dev/2.7.1"},
+                  {"scope": "project", "installPath": "/cache/github-dev/2.7.1"}
+                ],
+                "dropped@market": [
+                  {"scope": "user", "installPath": "/cache/dropped/1.0.0"}
+                ],
+                "broken@market": [{"scope": "user"}]
+              }
+            }"#,
+        )
+        .unwrap();
+        std::fs::write(
+            config.join("settings.json"),
+            r#"{"enabledPlugins": {"dropped@market": false, "github-dev@market": true}}"#,
+        )
+        .unwrap();
+
+        let locations = claude_plugin_locations_in(&config);
+        // The two scopes share one install path, so one root survives, and
+        // the disabled plugin contributes nothing.
+        assert_eq!(locations.len(), 1);
+        let location = &locations[0];
+        assert_eq!(
+            location.root,
+            PathBuf::from("/cache/github-dev/2.7.1/skills")
+        );
+        assert_eq!(location.source, SkillSource::Provider(ProviderKind::Claude));
+        assert_eq!(location.scope, SkillScope::User);
+        assert_eq!(location.project, None);
+        assert_eq!(location.plugin.as_deref(), Some("github-dev"));
+
+        // No settings file at all leaves every plugin enabled.
+        std::fs::remove_file(config.join("settings.json")).unwrap();
+        assert_eq!(claude_plugin_locations_in(&config).len(), 2);
+        // No install record at all is quietly empty.
+        assert!(claude_plugin_locations_in(&config.join("missing")).is_empty());
+        let _ = std::fs::remove_dir_all(&config);
     }
 
     #[test]
