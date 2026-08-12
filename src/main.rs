@@ -55,6 +55,8 @@ mod updater;
 mod usage;
 mod usage_history;
 mod worktree;
+mod control;
+mod cli;
 
 use gpui::{
     App, Application, Bounds, KeyBinding, Menu, MenuItem, TitlebarOptions,
@@ -128,6 +130,21 @@ impl WakuApplicationExt for Application {
 }
 
 fn main() {
+    let args: Vec<String> = std::env::args().collect();
+    if cli::wants_cli(&args) {
+        match cli::main() {
+            Ok(()) => return,
+            Err(error) => {
+                eprintln!("error: {error}");
+                std::process::exit(1);
+            }
+        }
+    }
+    run_app();
+}
+
+fn run_app() {
+
     gpui_platform::application()
         .with_assets(crate::assets::Assets)
         .with_main_window_reopen()

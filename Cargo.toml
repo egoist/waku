@@ -8,6 +8,7 @@ license = "GPL-3.0-only"
 [dependencies]
 alacritty_terminal = { version = "0.26", default-features = false }
 anyhow = "1.0"
+clap = { version = "4", features = ["derive"] }
 base64 = "0.22"
 chrono = "0.4"
 crossbeam-channel = "0.5"

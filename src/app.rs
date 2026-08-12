@@ -980,6 +980,8 @@ pub struct Waku {
     /// Coalesced edge trigger for provider and background result queues. The
     /// payloads stay in their typed channels; this channel only wakes the UI.
     event_wake_tx: smol::channel::Sender<()>,
+    /// CLI/app-control requests arriving on `control.sock`.
+    control_events: Receiver<crate::control::PendingControl>,
     runtimes: HashMap<Uuid, SessionRuntime>,
     /// Provider-neutral session work which may remain live after a turn ends.
     /// Runtime-only by design: providers reconcile their authoritative state
@@ -1709,6 +1711,8 @@ impl Waku {
         let (computer_permission_tx, computer_permission_events) = unbounded();
         let (plan_usage_tx, plan_usage_events) = unbounded();
         let (event_wake_tx, event_wake_events) = smol::channel::bounded(1);
+        let (control_tx, control_events) = unbounded::<crate::control::PendingControl>();
+        crate::control::spawn_server(state_path.clone(), control_tx, event_wake_tx.clone());
         {
             let computer_permission_tx = computer_permission_tx.clone();
             let event_wake = event_wake_tx.clone();
@@ -2244,6 +2248,7 @@ impl Waku {
                 image_preview: None,
                 image_preview_generation: 0,
                 event_wake_tx,
+                control_events,
                 runtimes: HashMap::new(),
                 background_work: HashMap::new(),
                 last_background_work_tick: Instant::now(),

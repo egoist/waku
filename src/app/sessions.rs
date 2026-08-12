@@ -1090,6 +1090,54 @@ impl Waku {
     }
 }
 
+
+impl Waku {
+    pub(super) fn drain_control_events(&mut self, cx: &mut Context<Self>) -> bool {
+        let mut changed = false;
+        while let Ok(pending) = self.control_events.try_recv() {
+            let response = self.handle_control_request(pending.request, cx);
+            let _ = pending.reply.send(response);
+            changed = true;
+        }
+        changed
+    }
+
+    fn handle_control_request(
+        &mut self,
+        request: crate::control::ControlRequest,
+        cx: &mut Context<Self>,
+    ) -> crate::control::ControlResponse {
+        let focus = matches!(request, crate::control::ControlRequest::Open { .. });
+        match crate::cli::apply_to_state(&mut self.state, request) {
+            Ok(data) => {
+                if let Some(session_id) = self.state.selected_session.filter(|session_id| {
+                    self.state
+                        .sessions
+                        .iter()
+                        .any(|session| session.id == *session_id)
+                }) {
+                    self.select_session(session_id, cx);
+                } else if let Some(project_id) = self.state.selected_project.filter(|project_id| {
+                    self.state
+                        .projects
+                        .iter()
+                        .any(|project| project.id == *project_id)
+                }) {
+                    self.select_project(project_id, cx);
+                } else {
+                    self.save();
+                    cx.notify();
+                }
+                if focus {
+                    cx.activate(true);
+                }
+                crate::control::ControlResponse::ok_data(data)
+            }
+            Err(error) => crate::control::ControlResponse::err(error),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

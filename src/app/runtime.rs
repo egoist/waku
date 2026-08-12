@@ -2501,6 +2501,7 @@ impl Waku {
             | self.drain_provider_detection_events()
             | self.drain_computer_permission_events()
             | self.drain_plan_usage_events()
+            | self.drain_control_events(cx)
         {
             cx.notify();
         }

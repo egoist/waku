@@ -30,6 +30,24 @@ structured protocol and session continuity.
 - Rewind Git-backed tasks with conversation-aware checkpoints.
 - Store app state locally, with no Waku account or remote service required.
 
+## CLI
+
+The `waku` binary also exposes a local control surface for projects and sessions
+(useful for agents and scripts). When the desktop app is running, commands talk
+to it over a Unix socket beside the app database; otherwise they read and write
+SQLite directly.
+
+```sh
+waku list-projects
+waku new-project --path ~/code/my-app --name my-app
+waku list-sessions --project my-app
+waku new-session --project my-app --provider pi --model ...
+waku open <project-or-session>
+waku link-session --session <session-id> --project my-app
+```
+
+See `waku --help` and each subcommand's `--help` for flags.
+
 ## Development
 
 Development currently requires macOS, [Rust 1.96 or newer](https://www.rust-lang.org/tools/install),
