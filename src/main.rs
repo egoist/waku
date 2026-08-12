@@ -41,6 +41,7 @@ mod input;
 mod md;
 mod model;
 mod model_catalog;
+mod opencode_pool;
 mod opencode_session;
 mod persistence;
 mod platform;

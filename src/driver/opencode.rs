@@ -1,12 +1,12 @@
-//! OpenCode's own HTTP server.
-//!
-//! `opencode serve` is OpenCode's real API: one resident process serves the
-//! whole conversation, streams server-sent events, and answers permission
-//! requests the user can actually be asked. Waku already started this server
-//! for a side-quest — forking a session — while running conversations through
-//! one-shot `opencode run` invocations; this drives everything through it.
-//! A prompt posted into a busy session is folded into the running turn rather
-//! than queued behind it, which is what makes steering a plain post.
+//! `opencode serve` is OpenCode's real API: one resident process serves
+//! every session in a workspace, streams server-sent events, and answers
+//! permission requests the user can actually be asked. Waku already started
+//! this server for a side-quest — forking a session — while running
+//! conversations through one-shot `opencode run` invocations; this drives
+//! everything through it, pooled per workspace via `opencode_pool` so
+//! sessions share the process instead of starting one each. A prompt posted
+//! into a busy session is folded into the running turn rather than queued
+//! behind it, which is what makes steering a plain post.
 //!
 //! Routes and payload shapes here were read off a live server's OpenAPI
 //! document and event stream, not guessed.
@@ -30,6 +30,7 @@ use crate::driver::{
 use crate::model::{
     ActivityKind, DriverEvent, InteractionMode, PermissionOption, ProviderResumeCursor, RuntimeMode,
 };
+use crate::opencode_pool::PooledServer;
 use crate::opencode_session::{
     OpenCodeServer, encode_path_segment, fork_session_removing_turns_on_server,
 };
@@ -58,7 +59,7 @@ fn prompt_body(text: &str, model: Option<&str>) -> Value {
 }
 
 pub struct OpenCodeDriver {
-    server: Arc<OpenCodeServer>,
+    server: PooledServer,
     session_id: String,
     commands: Sender<CommandMessage>,
     mode: RuntimeMode,
@@ -106,7 +107,16 @@ impl OpenCodeDriver {
             .as_ref()
             .map(|runtime| super::support::opencode_computer_use_environment(&runtime.config))
             .unwrap_or_default();
-        let server = Arc::new(OpenCodeServer::start_with_env(&binary, &cwd, &environment)?);
+        // Computer Use bakes per-session configuration into the server's
+        // environment, so it keeps a dedicated server. Every other session
+        // shares the workspace's one resident server — OpenCode hosts many
+        // sessions per process, and a second `opencode serve` in the same
+        // workspace contends with the live one.
+        let server = if computer_use.is_some() {
+            PooledServer::dedicated(OpenCodeServer::start_with_env(&binary, &cwd, &environment)?)
+        } else {
+            crate::opencode_pool::acquire(&binary, &cwd)?
+        };
 
         // Reuse the native session when resuming so the conversation, and the
         // cursor already persisted for it, stay the same.
@@ -129,8 +139,9 @@ impl OpenCodeDriver {
             }),
         });
 
-        // The agent decides Plan versus Build, and it is fixed for the life of
-        // the server because it is chosen when the session opens.
+        // The agent decides Plan versus Build, and it is per session: a
+        // resumed session gets the agent re-posted and OpenCode persists it
+        // with the session.
         let agent = if interaction_mode == InteractionMode::Plan || mode == RuntimeMode::Plan {
             "plan"
         } else {
@@ -170,18 +181,40 @@ impl OpenCodeDriver {
         // transcript or turns an otherwise healthy provider into a 0% meter.
         // The stream records the actual provider/model key in parallel; when
         // the catalog lands, publish the matching window as a separate merge.
-        let metadata_server = server.clone();
+        // The thread holds only the port: a handle would delay the pooled
+        // server's teardown behind this request's timeout.
+        let metadata_port = server.port;
         let metadata_events = events.clone();
         let background_usage_metadata = usage_metadata.clone();
         thread::Builder::new()
             .name("waku-opencode-usage-metadata".into())
             .spawn(move || {
-                let Ok(response) = metadata_server.request_with_timeout(
-                    "GET",
-                    "/api/model",
-                    None,
-                    Duration::from_secs(30),
-                ) else {
+                // `/api/model` answers with an empty catalog until the server
+                // warms it up. The first session of a workspace starts a cold
+                // server, so poll until models land or the budget runs out;
+                // later sessions share an already-warm server.
+                let started = std::time::Instant::now();
+                let budget = Duration::from_secs(30);
+                let response = loop {
+                    let request = crate::opencode_session::request_json_on_port(
+                        metadata_port,
+                        "GET",
+                        "/api/model",
+                        None,
+                        Duration::from_secs(30),
+                    );
+                    let landed = request.as_ref().is_ok_and(|response| {
+                        response
+                            .pointer("/data")
+                            .and_then(Value::as_array)
+                            .is_some_and(|data| !data.is_empty())
+                    });
+                    if landed || started.elapsed() >= budget {
+                        break request;
+                    }
+                    thread::sleep(Duration::from_secs(2));
+                };
+                let Ok(response) = response else {
                     return;
                 };
                 let windows = opencode_model_context_windows(&response);
@@ -199,7 +232,10 @@ impl OpenCodeDriver {
         let (commands, command_rx) = unbounded();
         let turn_active = Arc::new(Mutex::new(false));
 
-        let stream_server = server.clone();
+        // The reader holds only the port, never a server handle: the stream
+        // closes exactly when the process exits, so a handle held here would
+        // keep the pooled server from ever being killed.
+        let stream_port = server.port;
         let stream_session = session_id.clone();
         let stream_events = events.clone();
         let stream_commands = commands.clone();
@@ -213,9 +249,9 @@ impl OpenCodeDriver {
                     ..OpenCodeStreamState::default()
                 };
                 // The server-wide stream, not a per-session one: the scoped
-                // route exists only under `/api`, and this server is Waku's
-                // alone, so filtering by session id here is enough.
-                match open_event_stream(stream_server.port, "/event") {
+                // route exists only under `/api`, and the workspace server
+                // may carry other sessions' traffic, so filter by session id.
+                match open_event_stream(stream_port, "/event") {
                     Ok(stream) => {
                         for line in BufReader::new(stream).lines().map_while(Result::ok) {
                             let Some(payload) = line.strip_prefix("data:") else {
@@ -417,8 +453,8 @@ impl DriverControl for OpenCodeDriver {
     }
 
     fn apply_options(&self, options: SessionOptions) -> bool {
-        // The model rides on each prompt, but the agent is chosen when the
-        // session opens, so a mode change needs a fresh server.
+        // The model rides on each prompt, but the agent is chosen per
+        // session, so a mode change needs a fresh driver (and session).
         options.mode == self.mode && options.interaction_mode == self.interaction_mode
     }
 
@@ -438,10 +474,10 @@ impl Drop for OpenCodeDriver {
     fn drop(&mut self) {
         self.cancel_computer_use();
         let _ = self.commands.send(CommandMessage::Shutdown);
-        // Kill the server explicitly: the event-stream reader holds a handle and
-        // only unblocks once the stream closes, so refcounting alone would
-        // deadlock and leak the process.
-        self.server.shutdown();
+        // The server dies with the last pool handle. The worker thread drops
+        // its handle once it consumes the shutdown command; the stream and
+        // metadata readers hold only the port, so they cannot keep a dying
+        // server alive.
     }
 }
 

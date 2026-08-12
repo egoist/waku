@@ -28,7 +28,9 @@ pub fn fork_session_at_turn(
     session_id: &str,
     retained_turns: usize,
 ) -> anyhow::Result<ProviderResumeCursor> {
-    let server = OpenCodeServer::start(binary, cwd)?;
+    // Shares the workspace's resident server when one is live; a transient
+    // one is started and killed with the handle otherwise.
+    let server = crate::opencode_pool::acquire(binary, cwd)?;
     fork_session_at_turn_on_server(&server, session_id, retained_turns)
 }
 
@@ -194,15 +196,27 @@ impl OpenCodeServer {
         body: Option<&Value>,
         timeout: Duration,
     ) -> anyhow::Result<Value> {
-        let body = body.map(serde_json::to_vec).transpose()?;
-        let response = http_request(self.port, method, path, body.as_deref(), timeout)?;
-        // Some routes answer 204 No Content — `prompt_async` among them — and
-        // the status was already checked, so an empty success body is Null.
-        if response.iter().all(u8::is_ascii_whitespace) {
-            return Ok(Value::Null);
+        request_json_on_port(self.port, method, path, body, timeout)
+    }
+
+    /// Whether the server process is still running. Cheap — no subprocess
+    /// spawn — so the pool can probe without per-frame cost.
+    pub(crate) fn is_alive(&self) -> bool {
+        if self.pid == 0 {
+            return false;
         }
-        serde_json::from_slice(&response)
-            .with_context(|| format!("OpenCode returned invalid JSON for {method} {path}"))
+        #[cfg(unix)]
+        {
+            // `kill(pid, 0)` performs no signal, only the existence and
+            // permission check; EPERM still means the process exists.
+            let result = unsafe { libc::kill(self.pid as libc::pid_t, 0) };
+            result == 0
+                || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+        }
+        #[cfg(not(unix))]
+        {
+            true
+        }
     }
 }
 
@@ -244,6 +258,27 @@ impl Drop for OpenCodeServer {
         let _ = self.child.kill();
         let _ = self.child.wait();
     }
+}
+
+/// Sends one request to a server identified by port alone. Readers that must
+/// not keep the server alive (they only unblock when it exits) hold the port
+/// instead of a handle and request through this.
+pub(crate) fn request_json_on_port(
+    port: u16,
+    method: &str,
+    path: &str,
+    body: Option<&Value>,
+    timeout: Duration,
+) -> anyhow::Result<Value> {
+    let body = body.map(serde_json::to_vec).transpose()?;
+    let response = http_request(port, method, path, body.as_deref(), timeout)?;
+    // Some routes answer 204 No Content — `prompt_async` among them — and
+    // the status was already checked, so an empty success body is Null.
+    if response.iter().all(u8::is_ascii_whitespace) {
+        return Ok(Value::Null);
+    }
+    serde_json::from_slice(&response)
+        .with_context(|| format!("OpenCode returned invalid JSON for {method} {path}"))
 }
 
 fn http_request(
