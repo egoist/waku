@@ -276,14 +276,15 @@ fn parse_opencode_go_plan_usage(body: &Value) -> Option<PlanUsage> {
 /// with the account's monthly quota. Blocking, bounded by timeouts, and the
 /// probe process is always torn down.
 pub fn fetch_grok_plan_usage(binary: &std::path::Path) -> anyhow::Result<PlanUsage> {
-    let mut child = crate::command_env::command(binary)
+    let mut command = crate::command_env::command(binary);
+    let command = command
         .args(["agent", "stdio"])
         .env("GROK_OAUTH2_REFERRER", "waku")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .context(tr!("usage_error.start_grok_probe"))?;
+        .stderr(Stdio::null());
+    let mut child =
+        crate::command_env::spawn(command).context(tr!("usage_error.start_grok_probe"))?;
     let result = grok_billing_over_stdio(&mut child);
     // The probe has no shutdown request; ending it is the protocol.
     let _ = child.kill();

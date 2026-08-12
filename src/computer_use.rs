@@ -210,11 +210,11 @@ fn invoke_helper_direct(
     if let Some(mode) = mode {
         command.arg(mode);
     }
-    let mut child = command
+    let command = command
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
+        .stderr(Stdio::piped());
+    let mut child = crate::command_env::spawn(command)
         .with_context(|| format!("failed to start {}", helper.display()))?;
     let pid = child.id();
     active_helper_pid.store(pid, Ordering::SeqCst);

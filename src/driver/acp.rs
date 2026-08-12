@@ -141,6 +141,13 @@ impl AcpDriver {
         thread::Builder::new()
             .name(format!("waku-{}-acp", provider.id()))
             .spawn(move || {
+                if let Err(error) = crate::command_env::unblock_sigchld_for_current_thread() {
+                    let _ = thread_events.send(DriverEvent::Error(format!(
+                        "{provider_name}: failed to normalize the provider signal mask: {error}"
+                    )));
+                    let _ = thread_events.send(DriverEvent::ProcessExited);
+                    return;
+                }
                 let result = smol::block_on(run_sdk_connection(
                     agent,
                     provider,

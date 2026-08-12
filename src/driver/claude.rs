@@ -171,11 +171,11 @@ impl ClaudeDriver {
             command.args(["--session-id", &session_id]);
         }
 
-        let mut child = command
+        let command = command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
+            .stderr(Stdio::piped());
+        let mut child = crate::command_env::spawn(command)
             .context("failed to start `claude` in streaming-input mode")?;
         let stdin = child
             .stdin

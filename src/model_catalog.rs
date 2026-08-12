@@ -150,7 +150,9 @@ fn write_models_file(path: &Path, models: &[ProviderModel]) -> std::io::Result<(
 }
 
 fn discover_cursor_models(binary: &Path) -> Vec<ProviderModel> {
-    let Ok(output) = crate::command_env::command(binary).arg("models").output() else {
+    let mut command = crate::command_env::command(binary);
+    let command = command.arg("models");
+    let Ok(output) = crate::command_env::output(command) else {
         return Vec::new();
     };
     let combined = format!(
@@ -213,7 +215,9 @@ fn parse_cursor_models(output: &str) -> Vec<ProviderModel> {
 }
 
 fn discover_opencode_models(binary: &Path) -> Vec<ProviderModel> {
-    let Ok(output) = crate::command_env::command(binary).arg("models").output() else {
+    let mut command = crate::command_env::command(binary);
+    let command = command.arg("models");
+    let Ok(output) = crate::command_env::output(command) else {
         return Vec::new();
     };
     parse_opencode_models(&String::from_utf8_lossy(&output.stdout))
@@ -240,7 +244,9 @@ fn parse_opencode_models(output: &str) -> Vec<ProviderModel> {
 }
 
 fn discover_grok_models(binary: &Path) -> Vec<ProviderModel> {
-    let Ok(output) = crate::command_env::command(binary).arg("models").output() else {
+    let mut command = crate::command_env::command(binary);
+    let command = command.arg("models");
+    let Ok(output) = crate::command_env::output(command) else {
         return Vec::new();
     };
     let combined = format!(
@@ -291,7 +297,8 @@ fn parse_grok_models(output: &str) -> Vec<ProviderModel> {
 }
 
 fn discover_pi_models(binary: &Path) -> Vec<ProviderModel> {
-    let Ok(mut child) = crate::command_env::command(binary)
+    let mut command = crate::command_env::command(binary);
+    let command = command
         .args([
             "--mode",
             "rpc",
@@ -303,9 +310,8 @@ fn discover_pi_models(binary: &Path) -> Vec<ProviderModel> {
         .env("PI_SKIP_VERSION_CHECK", "1")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-    else {
+        .stderr(Stdio::null());
+    let Ok(mut child) = crate::command_env::spawn(command) else {
         return Vec::new();
     };
     let Some(mut stdin) = child.stdin.take() else {
@@ -430,13 +436,13 @@ fn pi_reasoning_options(model: &Value) -> Vec<ProviderModelOption> {
 }
 
 fn discover_codex_models(binary: &Path) -> Vec<ProviderModel> {
-    let Ok(mut child) = crate::command_env::command(binary)
+    let mut command = crate::command_env::command(binary);
+    let command = command
         .args(["app-server", "--stdio"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-    else {
+        .stderr(Stdio::null());
+    let Ok(mut child) = crate::command_env::spawn(command) else {
         return Vec::new();
     };
     let Some(mut stdin) = child.stdin.take() else {

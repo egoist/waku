@@ -1,8 +1,9 @@
 use std::collections::HashSet;
 use std::ffi::{OsStr, OsString};
 use std::fs::{self, OpenOptions};
+use std::io;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Command, Output, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{OnceLock, RwLock};
 use std::time::{Duration, Instant};
@@ -37,6 +38,97 @@ pub fn command(program: impl AsRef<OsStr>) -> Command {
         command.env("PATH", path);
     }
     command
+}
+
+/// Spawn `command` with `SIGCHLD` unblocked in the child. On macOS, libdispatch
+/// worker threads (which back GPUI's background executor) block `SIGCHLD`, and
+/// a process spawned from such a thread inherits the blocked mask. That breaks
+/// provider-side async process reapers. The caller's mask is restored as soon
+/// as the child has been created.
+pub(crate) fn spawn(command: &mut Command) -> io::Result<Child> {
+    with_sigchld_unblocked(|| command.spawn())
+}
+
+/// Spawn `command` through [`spawn`] and collect its output.
+///
+/// `Command::spawn` inherits standard streams by default, unlike
+/// `Command::output`. Own all three streams here so callers keep the latter's
+/// behavior while the signal mask is changed only for the spawn itself.
+pub(crate) fn output(command: &mut Command) -> io::Result<Output> {
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    spawn(command)?.wait_with_output()
+}
+
+/// Normalize a Waku-owned provider thread before a dependency spawns the child
+/// internally. The ACP SDK owns its `async_process::Command`, so its dedicated
+/// connection thread uses this once at startup instead of [`spawn`].
+pub(crate) fn unblock_sigchld_for_current_thread() -> io::Result<()> {
+    #[cfg(target_os = "macos")]
+    {
+        let sigchld = sigchld_set()?;
+        pthread_result(unsafe {
+            libc::pthread_sigmask(libc::SIG_UNBLOCK, &sigchld, std::ptr::null_mut())
+        })
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        Ok(())
+    }
+}
+
+fn with_sigchld_unblocked<T>(operation: impl FnOnce() -> io::Result<T>) -> io::Result<T> {
+    #[cfg(target_os = "macos")]
+    let _restore = SignalMaskRestore::unblock_sigchld()?;
+    operation()
+}
+
+#[cfg(target_os = "macos")]
+fn sigchld_set() -> io::Result<libc::sigset_t> {
+    let mut set = MaybeUninit::<libc::sigset_t>::uninit();
+    if unsafe { libc::sigemptyset(set.as_mut_ptr()) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let mut set = unsafe { set.assume_init() };
+    if unsafe { libc::sigaddset(&mut set, libc::SIGCHLD) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(set)
+}
+
+#[cfg(target_os = "macos")]
+fn pthread_result(status: libc::c_int) -> io::Result<()> {
+    if status == 0 {
+        Ok(())
+    } else {
+        // pthread APIs return the error number directly instead of setting
+        // errno, so `last_os_error` would report unrelated thread state.
+        Err(io::Error::from_raw_os_error(status))
+    }
+}
+
+#[cfg(target_os = "macos")]
+struct SignalMaskRestore(libc::sigset_t);
+
+#[cfg(target_os = "macos")]
+impl SignalMaskRestore {
+    fn unblock_sigchld() -> io::Result<Self> {
+        let sigchld = sigchld_set()?;
+        let mut previous = MaybeUninit::<libc::sigset_t>::uninit();
+        pthread_result(unsafe {
+            libc::pthread_sigmask(libc::SIG_UNBLOCK, &sigchld, previous.as_mut_ptr())
+        })?;
+        Ok(Self(unsafe { previous.assume_init() }))
+    }
+}
+
+#[cfg(target_os = "macos")]
+impl Drop for SignalMaskRestore {
+    fn drop(&mut self) {
+        let _ = unsafe { libc::pthread_sigmask(libc::SIG_SETMASK, &self.0, std::ptr::null_mut()) };
+    }
 }
 
 pub fn find_executable(name: &str) -> Option<PathBuf> {
@@ -227,7 +319,7 @@ fn capture_shell_path(shell: &Path, shell_args: &[&str], timeout: Duration) -> O
     #[cfg(target_os = "macos")]
     command.process_group(0);
 
-    let mut child = command.spawn().ok()?;
+    let mut child = spawn(&mut command).ok()?;
     if !wait_for_child(&mut child, timeout) {
         return None;
     }
@@ -307,6 +399,76 @@ mod tests {
 
     #[cfg(target_os = "macos")]
     use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn output_captures_stdout_and_stderr() {
+        let mut command = Command::new("/bin/sh");
+        command.args(["-c", "printf stdout; printf stderr >&2"]);
+
+        let output = output(&mut command).expect("command should run");
+
+        assert_eq!(output.stdout, b"stdout");
+        assert_eq!(output.stderr, b"stderr");
+    }
+
+    #[cfg(target_os = "macos")]
+    fn sigchld_is_blocked() -> io::Result<bool> {
+        let mut current = MaybeUninit::<libc::sigset_t>::uninit();
+        pthread_result(unsafe {
+            libc::pthread_sigmask(libc::SIG_SETMASK, std::ptr::null(), current.as_mut_ptr())
+        })?;
+        Ok(unsafe { libc::sigismember(current.as_ptr(), libc::SIGCHLD) } == 1)
+    }
+
+    #[cfg(target_os = "macos")]
+    fn block_sigchld() -> io::Result<SignalMaskRestore> {
+        let sigchld = sigchld_set()?;
+        let mut previous = MaybeUninit::<libc::sigset_t>::uninit();
+        pthread_result(unsafe {
+            libc::pthread_sigmask(libc::SIG_BLOCK, &sigchld, previous.as_mut_ptr())
+        })?;
+        Ok(SignalMaskRestore(unsafe { previous.assume_init() }))
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn spawn_unblocks_sigchld_in_the_child_and_restores_the_caller() {
+        if std::env::var_os("WAKU_SIGCHLD_CHILD_PROBE").is_some() {
+            assert!(!sigchld_is_blocked().expect("read child signal mask"));
+            return;
+        }
+
+        let _restore_original = block_sigchld().expect("block SIGCHLD for the fixture");
+        assert!(sigchld_is_blocked().expect("read blocked parent mask"));
+
+        let mut command = Command::new(std::env::current_exe().expect("resolve test executable"));
+        command
+            .args([
+                "--exact",
+                "command_env::tests::spawn_unblocks_sigchld_in_the_child_and_restores_the_caller",
+                "--nocapture",
+            ])
+            .env("WAKU_SIGCHLD_CHILD_PROBE", "1");
+        let output = output(&mut command).expect("spawn child signal probe");
+
+        assert!(
+            output.status.success(),
+            "child signal probe failed:\n{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(sigchld_is_blocked().expect("read restored parent mask"));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn dedicated_provider_thread_can_normalize_sigchld() {
+        let _restore_original = block_sigchld().expect("block SIGCHLD for the fixture");
+
+        unblock_sigchld_for_current_thread().expect("unblock provider thread");
+
+        assert!(!sigchld_is_blocked().expect("read normalized signal mask"));
+    }
 
     #[test]
     fn launch_services_path_is_extended_for_script_based_clis() {

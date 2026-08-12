@@ -2688,11 +2688,9 @@ mod response_fork_title_tests {
 /// Run `<cli> --version` and pull a version number out of whatever it prints.
 /// Blocking; runs on a version-probe thread, never on the UI thread.
 fn probe_provider_version(binary: &std::path::Path) -> Option<String> {
-    let output = crate::command_env::command(binary)
-        .arg("--version")
-        .stdin(std::process::Stdio::null())
-        .output()
-        .ok()?;
+    let mut command = crate::command_env::command(binary);
+    let command = command.arg("--version").stdin(std::process::Stdio::null());
+    let output = crate::command_env::output(command).ok()?;
     let combined = format!(
         "{}\n{}",
         String::from_utf8_lossy(&output.stdout),
