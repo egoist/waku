@@ -6,6 +6,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, anyhow, bail};
+use parking_lot::Mutex;
 use serde_json::{Value, json};
 
 use crate::model::ProviderResumeCursor;
@@ -118,9 +119,8 @@ fn fork_message_id(message_ids: &[String], retained_turns: usize) -> anyhow::Res
 }
 
 pub(crate) struct OpenCodeServer {
-    child: Child,
+    child: Mutex<Child>,
     pub(crate) port: u16,
-    pid: u32,
 }
 
 impl OpenCodeServer {
@@ -160,8 +160,10 @@ impl OpenCodeServer {
             .stderr(Stdio::null());
         let child =
             crate::command_env::spawn(command).context("failed to start `opencode serve`")?;
-        let pid = child.id();
-        let mut server = Self { child, port, pid };
+        let server = Self {
+            child: Mutex::new(child),
+            port,
+        };
         let started_at = Instant::now();
         loop {
             if server
@@ -170,7 +172,7 @@ impl OpenCodeServer {
             {
                 return Ok(server);
             }
-            if let Some(status) = server.child.try_wait()? {
+            if let Some(status) = server.child.lock().try_wait()? {
                 bail!("OpenCode session server exited during startup ({status})");
             }
             if started_at.elapsed() >= SERVER_START_TIMEOUT {
@@ -199,24 +201,14 @@ impl OpenCodeServer {
         request_json_on_port(self.port, method, path, body, timeout)
     }
 
-    /// Whether the server process is still running. Cheap — no subprocess
-    /// spawn — so the pool can probe without per-frame cost.
+    /// Whether the server process is still running. `Child::try_wait` both
+    /// observes and reaps an exited child; `kill(pid, 0)` cannot distinguish a
+    /// running process from the unreaped zombie owned by this process.
     pub(crate) fn is_alive(&self) -> bool {
-        if self.pid == 0 {
-            return false;
-        }
-        #[cfg(unix)]
-        {
-            // `kill(pid, 0)` performs no signal, only the existence and
-            // permission check; EPERM still means the process exists.
-            let result = unsafe { libc::kill(self.pid as libc::pid_t, 0) };
-            result == 0
-                || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
-        }
-        #[cfg(not(unix))]
-        {
-            true
-        }
+        self.child
+            .lock()
+            .try_wait()
+            .is_ok_and(|status| status.is_none())
     }
 }
 
@@ -234,29 +226,45 @@ fn is_native_user_turn(message: &Value) -> bool {
 }
 
 impl OpenCodeServer {
-    /// Ends the server without owning it mutably.
-    ///
-    /// A long-lived reader blocked on the event stream keeps a handle alive, and
-    /// that stream only closes when the server exits — so waiting for the last
-    /// handle to drop deadlocks and leaks the process. The owner kills it
-    /// directly instead, which closes the stream and releases the readers.
-    pub(crate) fn shutdown(&self) {
-        if self.pid == 0 {
+    /// Terminates and reaps the owned child. The timeout is a graceful-exit
+    /// budget; a server that ignores TERM is killed afterward.
+    pub(crate) fn shutdown(&self, timeout: Duration) {
+        let mut child = self.child.lock();
+        if child.try_wait().is_ok_and(|status| status.is_some()) {
             return;
         }
+
         #[cfg(unix)]
         {
-            let _ = std::process::Command::new("/bin/kill")
-                .args(["-TERM", &self.pid.to_string()])
-                .status();
+            let _ = unsafe { libc::kill(child.id() as libc::pid_t, libc::SIGTERM) };
         }
+        #[cfg(not(unix))]
+        {
+            let _ = child.kill();
+        }
+
+        let deadline = Instant::now() + timeout;
+        while Instant::now() < deadline {
+            match child.try_wait() {
+                Ok(Some(_)) => return,
+                Ok(None) => thread::sleep(Duration::from_millis(20)),
+                Err(_) => break,
+            }
+        }
+
+        let _ = child.kill();
+        let _ = child.wait();
     }
 }
 
 impl Drop for OpenCodeServer {
     fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        let child = self.child.get_mut();
+        if child.try_wait().is_ok_and(|status| status.is_some()) {
+            return;
+        }
+        let _ = child.kill();
+        let _ = child.wait();
     }
 }
 
@@ -524,6 +532,43 @@ mod tests {
             http_response_is_complete(b"HTTP/1.1 204 No Content\r\nConnection: keep-alive\r\n\r\n")
                 .unwrap()
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn liveness_probe_reaps_an_exited_child() {
+        let child = std::process::Command::new("/usr/bin/true")
+            .spawn()
+            .expect("the probe child should start");
+        let server = OpenCodeServer {
+            child: Mutex::new(child),
+            port: 0,
+        };
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while Instant::now() < deadline && server.is_alive() {
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert!(!server.is_alive(), "the exited child should be reaped");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn shutdown_waits_for_and_reaps_the_owned_child() {
+        let child = std::process::Command::new("/bin/sleep")
+            .arg("30")
+            .spawn()
+            .expect("the probe child should start");
+        let server = OpenCodeServer {
+            child: Mutex::new(child),
+            port: 0,
+        };
+        let started = Instant::now();
+        server.shutdown(Duration::from_secs(3));
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "a TERM-responsive child should not consume the shutdown budget"
+        );
+        assert!(!server.is_alive());
     }
 
     /// Exercises the same cold-session path used when an edited message is
