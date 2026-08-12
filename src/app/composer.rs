@@ -624,6 +624,7 @@ impl Waku {
             .model_picker_highlight
             .filter(|index| *index < available_models.len());
         let scroll = self.model_picker_scroll.clone();
+        let scrollbar_state = self.model_picker_scrollbar.clone();
 
         popover(
             MenuChip::new("composer-provider-model")
@@ -756,8 +757,7 @@ impl Waku {
 
                 let mut rows = div()
                     .id("model-picker-list")
-                    .flex_1()
-                    .min_h_0()
+                    .size_full()
                     .overflow_y_scroll()
                     .track_scroll(&scroll)
                     .p(px(9.0));
@@ -972,7 +972,14 @@ impl Waku {
                             .rounded_br(px(12.0))
                             .bg(theme.surface)
                             .child(search_input)
-                            .child(rows),
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_h_0()
+                                    .relative()
+                                    .child(rows)
+                                    .child(scrollbar::vertical(&scroll, &scrollbar_state)),
+                            ),
                     )
                     .into_any_element()
             },

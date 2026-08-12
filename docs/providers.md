@@ -294,10 +294,12 @@ file and verifies it landed on the right session; if that restore fails the
 runtime is dropped, because the RPC process may still be sitting on the fork
 ([src/app/runtime.rs:419](../src/app/runtime.rs#L419)).
 
-**Models** — a separate `pi --mode rpc --no-session --no-extensions --no-skills
---no-prompt-templates --no-context-files` process answering `get_state` and
-`get_available_models`. Ids are `provider/model` slugs and are validated as such
-before launch; per-model `thinkingLevelMap` becomes the reasoning-effort options.
+**Models** — a separate `pi --mode rpc --no-session --no-skills
+--no-prompt-templates --no-context-files` process answering
+`get_available_models` and `get_state`. Extensions stay enabled because they can
+register model providers. Ids are `provider/model` slugs and are validated as
+such before launch; per-model `thinkingLevelMap` becomes the reasoning-effort
+options.
 
 **Computer Use** — `--extension <waku pi extension>` and `--skill <SKILL.md>`,
 with the REPL and helper paths passed through the environment.
