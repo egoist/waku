@@ -515,9 +515,11 @@ process per turn.
 **Handshake** — `initialize` (advertising **no** `fs` or `terminal` client
 capability, since Waku does not proxy the agent's file or terminal access — an
 advertised capability the client cannot honor strands the agent mid-tool-call) →
-`session/load` when resuming and the agent reports `loadSession`, else
-`session/new` → optional `session/set_mode`. A `session/load` the agent no longer
-recognizes falls back to a fresh session rather than stranding the task.
+`session/resume` when resuming and the agent advertises it (so history is not
+replayed), otherwise a replay-suppressed `session/load` when it reports
+`loadSession`, else `session/new` → optional `session/set_mode`. A restore the
+agent no longer recognizes falls back to a fresh session rather than stranding
+the task. Mode selection is applied after both new and restored sessions.
 
 **Per turn** — `session/prompt`, whose response stays open until the turn ends.
 It is tracked apart from the blocking request table precisely so the writer stays
