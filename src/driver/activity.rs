@@ -6,7 +6,7 @@ use crate::model::{ActivityItem, ActivityKind};
 
 const MAX_ACTIVITY_CHARS: usize = 16_000;
 
-pub(super) fn tool_activity(
+pub(crate) fn tool_activity(
     source_id: Option<String>,
     kind: ActivityKind,
     title: String,

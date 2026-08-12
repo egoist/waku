@@ -1258,7 +1258,7 @@ impl CodexStreamState {
     }
 }
 
-fn markdown_link_destination(url: &str) -> String {
+pub(crate) fn markdown_link_destination(url: &str) -> String {
     url.replace('\\', "\\\\")
         .replace('(', "\\(")
         .replace(')', "\\)")
@@ -1856,7 +1856,7 @@ fn codex_item_title(item: &Value) -> String {
         .unwrap_or_else(|| tr!("activity.activity"))
 }
 
-fn codex_web_search_title(item: &Value) -> String {
+pub(crate) fn codex_web_search_title(item: &Value) -> String {
     let Some(action) = item.get("action") else {
         return tr!("activity.searched_web");
     };
@@ -1880,10 +1880,12 @@ fn codex_web_search_title(item: &Value) -> String {
             }
             tr!("activity.searched_web")
         }
-        Some("openPage") => non_empty_string(action.get("url"))
+        // A live app-server item spells the action in camelCase, a rollout
+        // record keeps the API's snake_case. Both name the same action.
+        Some("openPage" | "open_page") => non_empty_string(action.get("url"))
             .map(|url| tr!("activity.open_url", url = url))
             .unwrap_or_else(|| tr!("activity.opened_web_page")),
-        Some("findInPage") => match (
+        Some("findInPage" | "find_in_page") => match (
             non_empty_string(action.get("pattern")),
             non_empty_string(action.get("url")),
         ) {

@@ -27,6 +27,7 @@ mod blob_store;
 mod browser;
 mod checkpoint;
 mod claude_session;
+mod codex_session;
 mod command_env;
 mod composer_complete;
 mod computer_use;

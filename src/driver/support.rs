@@ -351,7 +351,7 @@ fn truncate_error(message: &str, max_chars: usize) -> String {
     truncated
 }
 
-pub(super) fn classify_tool(name: &str) -> ActivityKind {
+pub(crate) fn classify_tool(name: &str) -> ActivityKind {
     ActivityKind::from_tool_name(name)
 }
 
