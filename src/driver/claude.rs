@@ -1303,7 +1303,7 @@ mod tests {
             }
         ));
 
-        let mut collect = |driver: &ClaudeDriver, prompt: &str| -> String {
+        let collect = |driver: &ClaudeDriver, prompt: &str| -> String {
             driver.prompt(prompt.to_owned());
             let mut text = String::new();
             while let Ok(event) = event_rx.recv_timeout(std::time::Duration::from_secs(180)) {

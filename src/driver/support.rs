@@ -6,7 +6,6 @@ use std::fs;
 
 use std::os::unix::fs::{PermissionsExt as _, symlink};
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use anyhow::{Context as _, anyhow};
 use serde_json::Value;
@@ -283,10 +282,15 @@ fn build_grok_computer_use_toml(
     toml::to_string(&root).context("could not encode Grok Computer Use configuration")
 }
 
-pub(super) fn configure_grok_computer_use_command(
-    command: &mut Command,
+/// Process arguments and environment shared by every Grok transport.
+///
+/// ACP now launches through the official SDK rather than a `Command`, so its
+/// process configuration must be representable independently of either
+/// process API. Keeping one source of truth also prevents Computer Use from
+/// behaving differently between the headless and ACP drivers.
+pub(super) fn grok_computer_use_launch_configuration(
     config: Option<&HeadlessComputerUseConfig>,
-) {
+) -> (Vec<String>, Vec<(String, String)>) {
     if let Some(HeadlessComputerUseConfig::Grok {
         base,
         grok_home,
@@ -294,17 +298,24 @@ pub(super) fn configure_grok_computer_use_command(
         rules,
     }) = config
     {
-        command
-            .env("GROK_HOME", grok_home)
-            .env("WAKU_COMPUTER_USE_SERVER", &base.server_path)
-            .env(
-                "WAKU_COMPUTER_USE_PROCESS_DIRECTORY",
-                &base.process_directory,
-            )
-            .arg(format!("--rules={rules}"));
+        let args = vec![format!("--rules={rules}")];
+        let mut environment = vec![
+            ("GROK_HOME".to_owned(), grok_home.display().to_string()),
+            (
+                "WAKU_COMPUTER_USE_SERVER".to_owned(),
+                base.server_path.display().to_string(),
+            ),
+            (
+                "WAKU_COMPUTER_USE_PROCESS_DIRECTORY".to_owned(),
+                base.process_directory.display().to_string(),
+            ),
+        ];
         if let Some(auth_path) = auth_path {
-            command.env("GROK_AUTH_PATH", auth_path);
+            environment.push(("GROK_AUTH_PATH".to_owned(), auth_path.display().to_string()));
         }
+        (args, environment)
+    } else {
+        (Vec::new(), Vec::new())
     }
 }
 
@@ -505,31 +516,16 @@ mod tests {
             auth_path: Some(PathBuf::from("/Users/test/.grok/auth.json")),
             rules: "Waku Computer Use rules".into(),
         };
-        let mut command = Command::new("grok");
-
-        configure_grok_computer_use_command(&mut command, Some(&config));
-
-        let arguments = command
-            .get_args()
-            .map(|argument| argument.to_string_lossy().into_owned())
-            .collect::<Vec<_>>();
+        let (arguments, environment) = grok_computer_use_launch_configuration(Some(&config));
         assert_eq!(arguments, ["--rules=Waku Computer Use rules"]);
-        let environment = command
-            .get_envs()
-            .map(|(name, value)| {
-                (
-                    name.to_string_lossy().into_owned(),
-                    value.map(|value| value.to_string_lossy().into_owned()),
-                )
-            })
-            .collect::<HashMap<_, _>>();
+        let environment = environment.into_iter().collect::<HashMap<_, _>>();
         assert_eq!(
             environment.get("GROK_HOME"),
-            Some(&Some("/tmp/waku-computer-use/session/grok-home".into()))
+            Some(&"/tmp/waku-computer-use/session/grok-home".into())
         );
         assert_eq!(
             environment.get("GROK_AUTH_PATH"),
-            Some(&Some("/Users/test/.grok/auth.json".into()))
+            Some(&"/Users/test/.grok/auth.json".into())
         );
     }
 

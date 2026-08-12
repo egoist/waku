@@ -6,6 +6,7 @@ description = "A fast, native control plane for local coding agents"
 license = "GPL-3.0-only"
 
 [dependencies]
+agent-client-protocol = "2.0.0"
 alacritty_terminal = { version = "0.26", default-features = false }
 anyhow = "1.0"
 base64 = "0.22"
@@ -119,3 +120,8 @@ opt-level = 1
 
 [profile.dev.package."*"]
 opt-level = 2
+
+# `block` 0.1.6 declares an extern static with an uninhabited type. This fork
+# is the crates.io release plus the future-incompatibility fix only.
+[patch.crates-io]
+block = { git = "https://github.com/Dicklesworthstone/rust-block", rev = "b39ae859d1ee8e8cb5eef6a516471f1578d26b96" }
