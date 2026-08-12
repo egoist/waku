@@ -785,6 +785,7 @@ usage_error.no_home_directory: ホームディレクトリが見つかりませ�
 usage_error.read_file: "%{path} を読み込めませんでした"
 usage_error.codex_auth_invalid: Codex の auth.json は有効な JSON ではありません
 usage_error.codex_access_token_missing: Codex の auth.json にアクセストークンがありません。`codex login` を実行してください
+usage_error.opencode_go_key_rejected: OpenCode Go API キーでは使用量を取得できません（HTTP %{status}）。OpenCode Go に再接続してください
 usage_error.no_rate_limit_windows: 使用量 API からレート制限期間が返されませんでした
 usage_error.start_grok_probe: "`grok agent stdio` を起動できませんでした"
 usage_error.grok_stdin_unavailable: Grok の標準入力を利用できません

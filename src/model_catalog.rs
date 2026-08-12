@@ -182,7 +182,11 @@ fn parse_cursor_models(output: &str) -> Vec<ProviderModel> {
                 .map(str::trim)
                 .unwrap_or(line);
             let is_default = line.to_ascii_lowercase().contains("(default)");
-            let line = line.replace("(default)", "").replace("(Default)", "");
+            let line = line
+                .replace("(default)", "")
+                .replace("(Default)", "")
+                .replace("(current)", "")
+                .replace("(Current)", "");
             let line = line.trim();
             if line.is_empty() || line.contains("Usage:") || line.contains("error:") {
                 return None;
@@ -190,6 +194,7 @@ fn parse_cursor_models(output: &str) -> Vec<ProviderModel> {
             let (id, label) = line
                 .split_once('\t')
                 .or_else(|| line.split_once("  "))
+                .or_else(|| line.split_once(" - "))
                 .map(|(id, label)| (id.trim(), label.trim()))
                 .filter(|(id, _)| !id.is_empty())
                 .unwrap_or((line, line));
@@ -789,6 +794,32 @@ mod tests {
         assert!(models[0].is_default);
         assert_eq!(models[1].id, "composer-2.5");
         assert_eq!(models[1].name, "Composer 2.5");
+    }
+
+    #[test]
+    fn parses_cursor_cli_hyphen_separated_models() {
+        // The format printed by cursor-agent since at least 2026.08.04:
+        // `id - Label`, with `(default)` and `(current)` suffixes.
+        let models = parse_cursor_models(
+            "Available models\n\nauto - Auto (default)\ngpt-5.3-codex-low - Codex 5.3 Low\ncomposer-2.5 - Composer 2.5 (current)\nclaude-opus-5-thinking-high - Opus 5 1M Thinking\n",
+        );
+        assert_eq!(
+            models
+                .iter()
+                .map(|model| model.id.as_str())
+                .collect::<Vec<_>>(),
+            [
+                "auto",
+                "gpt-5.3-codex-low",
+                "composer-2.5",
+                "claude-opus-5-thinking-high"
+            ]
+        );
+        assert!(models[0].is_default);
+        assert_eq!(models[0].name, "Auto");
+        assert_eq!(models[1].name, "Codex 5.3 Low");
+        assert_eq!(models[2].name, "Composer 2.5");
+        assert!(!models[2].is_default);
     }
 
     #[test]

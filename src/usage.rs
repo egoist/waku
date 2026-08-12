@@ -2,9 +2,10 @@
 //! Claude's OAuth credential (keychain first, `~/.claude/.credentials.json`
 //! as fallback) calls `api.anthropic.com/api/oauth/usage`; Codex's
 //! `~/.codex/auth.json` token calls the ChatGPT backend's usage endpoint;
-//! Grok answers the `x.ai/billing` extension request on a short-lived
-//! `grok agent stdio` probe. Payload shapes were verified against live
-//! responses or the providers' own schemas, not guessed.
+//! OpenCode Go's API key calls `opencode.ai/zen/go/v1/usage`; Grok answers
+//! the `x.ai/billing` extension request on a short-lived `grok agent stdio`
+//! probe. Payload shapes were verified against live responses or the
+//! providers' own schemas, not guessed.
 //!
 //! Everything in this module blocks on subprocesses and the network and must
 //! run on the background executor. Render reads only the parsed snapshot the
@@ -27,6 +28,7 @@ const OAUTH_BETA_HEADER: &str = "oauth-2025-04-20";
 const FALLBACK_CLI_VERSION: &str = "2.1.0";
 
 const CODEX_USAGE_URL: &str = "https://chatgpt.com/backend-api/wham/usage";
+const OPENCODE_GO_USAGE_URL: &str = "https://opencode.ai/zen/go/v1/usage";
 
 /// A parsed snapshot of the account's rate-limit windows.
 #[derive(Clone, Debug, PartialEq)]
@@ -164,6 +166,109 @@ pub fn fetch_codex_plan_usage() -> anyhow::Result<PlanUsage> {
     }
     let body: Value = serde_json::from_str(&body).context(tr!("usage_error.invalid_json"))?;
     parse_codex_plan_usage(&body).ok_or_else(|| anyhow!(tr!("usage_error.no_rate_limit_windows")))
+}
+
+/// Fetch OpenCode Go's rolling, weekly, and monthly subscription limits.
+/// `None` means OpenCode has no Go credential, which is normal for people
+/// using Zen or any of OpenCode's many other providers. Blocking.
+pub fn fetch_opencode_go_plan_usage() -> anyhow::Result<Option<PlanUsage>> {
+    let Some(api_key) = opencode_go_api_key() else {
+        return Ok(None);
+    };
+    let (status, body) = http_get(
+        OPENCODE_GO_USAGE_URL,
+        &[
+            format!("Authorization: Bearer {api_key}"),
+            "Accept: application/json".to_owned(),
+            "User-Agent: waku".to_owned(),
+        ],
+    )?;
+    match status {
+        200 => {}
+        401 | 403 => {
+            return Err(anyhow!(tr!(
+                "usage_error.opencode_go_key_rejected",
+                status = status
+            )));
+        }
+        429 => return Err(anyhow!(tr!("usage_error.rate_limited"))),
+        other => return Err(anyhow!(tr!("usage_error.http_status", status = other))),
+    }
+    let body: Value = serde_json::from_str(&body).context(tr!("usage_error.invalid_json"))?;
+    parse_opencode_go_plan_usage(&body)
+        .map(Some)
+        .ok_or_else(|| anyhow!(tr!("usage_error.no_rate_limit_windows")))
+}
+
+/// Match OpenCode's credential precedence closely enough for its Go provider:
+/// `OPENCODE_AUTH_CONTENT` replaces auth.json, a provider entry overrides the
+/// catalog environment key, and `OPENCODE_API_KEY` remains the fallback.
+fn opencode_go_api_key() -> Option<String> {
+    let auth = std::env::var("OPENCODE_AUTH_CONTENT")
+        .ok()
+        .and_then(|payload| serde_json::from_str::<Value>(&payload).ok())
+        .or_else(|| {
+            let data_home = std::env::var_os("XDG_DATA_HOME")
+                .filter(|path| !path.is_empty())
+                .map(std::path::PathBuf::from)
+                .or_else(|| dirs::home_dir().map(|home| home.join(".local/share")))?;
+            let payload = std::fs::read_to_string(data_home.join("opencode/auth.json")).ok()?;
+            serde_json::from_str(&payload).ok()
+        });
+    opencode_go_api_key_from_auth(auth.as_ref()).or_else(|| {
+        std::env::var("OPENCODE_API_KEY")
+            .ok()
+            .map(|key| key.trim().to_owned())
+            .filter(|key| !key.is_empty())
+    })
+}
+
+fn opencode_go_api_key_from_auth(auth: Option<&Value>) -> Option<String> {
+    let entry = auth?.get("opencode-go")?;
+    if entry.get("type").and_then(Value::as_str) != Some("api") {
+        return None;
+    }
+    entry
+        .get("key")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|key| !key.is_empty())
+        .map(str::to_owned)
+}
+
+/// Live shape verified on 2026-08-12. Standard Zen has no corresponding
+/// `/zen/v1/usage` route, so these rows deliberately represent Go only.
+fn parse_opencode_go_plan_usage(body: &Value) -> Option<PlanUsage> {
+    let usage = body.get("usage")?;
+    let windows = [
+        ("rolling", tr!("usage.hour_limit", count = 5)),
+        ("weekly", tr!("usage.weekly_limit")),
+        ("monthly", tr!("usage.monthly_limit")),
+    ]
+    .into_iter()
+    .filter_map(|(key, label)| {
+        let window = usage.get(key)?;
+        Some(PlanWindow {
+            label,
+            percent: window
+                .get("percent")
+                .and_then(Value::as_f64)?
+                .clamp(0.0, 100.0),
+            resets_at: window
+                .get("resetsAt")
+                .and_then(Value::as_str)
+                .and_then(|reset| chrono::DateTime::parse_from_rfc3339(reset).ok())
+                .map(|date| date.timestamp()),
+        })
+    })
+    .collect::<Vec<_>>();
+    if windows.is_empty() {
+        return None;
+    }
+    Some(PlanUsage {
+        plan_label: Some("Go".to_owned()),
+        windows,
+    })
 }
 
 /// Fetch Grok's plan usage by asking the agent itself: a short-lived
@@ -923,6 +1028,80 @@ mod tests {
                 .map(|window| (window.label.as_str(), window.percent))
                 .collect::<Vec<_>>(),
             [("Weekly limit", 99.0), ("Weekly · GPT-5.3-Codex", 12.0),]
+        );
+    }
+
+    #[test]
+    fn opencode_go_usage_maps_live_subscription_windows() {
+        // Exact response shape captured from the live Go endpoint on
+        // 2026-08-12. Percentages vary by account; the envelope and reset
+        // timestamps are the contract this parser relies on.
+        let body: Value = serde_json::from_str(
+            r#"{
+                "usage": {
+                    "rolling": {
+                        "status": "ok",
+                        "percent": 0,
+                        "resetsAt": "2026-08-12T05:52:15.153Z"
+                    },
+                    "weekly": {
+                        "status": "ok",
+                        "percent": 8,
+                        "resetsAt": "2026-08-17T00:00:00.153Z"
+                    },
+                    "monthly": {
+                        "status": "ok",
+                        "percent": 36,
+                        "resetsAt": "2026-09-01T13:40:30.153Z"
+                    }
+                }
+            }"#,
+        )
+        .unwrap();
+        let usage = parse_opencode_go_plan_usage(&body).expect("all Go windows should map");
+        assert_eq!(usage.plan_label.as_deref(), Some("Go"));
+        assert_eq!(
+            usage
+                .windows
+                .iter()
+                .map(|window| (window.label.as_str(), window.percent))
+                .collect::<Vec<_>>(),
+            [
+                ("5-hour limit", 0.0),
+                ("Weekly limit", 8.0),
+                ("Monthly limit", 36.0),
+            ]
+        );
+        assert!(
+            usage
+                .windows
+                .iter()
+                .all(|window| window.resets_at.is_some())
+        );
+        assert!(parse_opencode_go_plan_usage(&serde_json::json!({"usage": {}})).is_none());
+    }
+
+    #[test]
+    fn opencode_auth_uses_only_the_go_provider_entry() {
+        let auth = serde_json::json!({
+            "opencode": {"type": "api", "key": "zen-key"},
+            "opencode-go": {"type": "api", "key": " go-key "}
+        });
+        assert_eq!(
+            opencode_go_api_key_from_auth(Some(&auth)).as_deref(),
+            Some("go-key")
+        );
+        assert_eq!(
+            opencode_go_api_key_from_auth(Some(&serde_json::json!({
+                "opencode": {"type": "api", "key": "zen-key"}
+            }))),
+            None
+        );
+        assert_eq!(
+            opencode_go_api_key_from_auth(Some(&serde_json::json!({
+                "opencode-go": {"type": "oauth", "key": "wrong-kind"}
+            }))),
+            None
         );
     }
 

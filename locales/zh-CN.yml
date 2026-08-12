@@ -734,6 +734,7 @@ usage_error.no_home_directory: 找不到用户主目录
 usage_error.read_file: 无法读取 %{path}
 usage_error.codex_auth_invalid: Codex auth.json 不是有效的 JSON
 usage_error.codex_access_token_missing: Codex auth.json 中没有访问令牌；请运行 `codex login`
+usage_error.opencode_go_key_rejected: OpenCode Go API 密钥无法读取用量（HTTP %{status}）；请重新连接 OpenCode Go
 usage_error.no_rate_limit_windows: 用量接口未返回任何速率限制周期
 usage_error.start_grok_probe: 无法启动 `grok agent stdio`
 usage_error.grok_stdin_unavailable: Grok 的标准输入不可用

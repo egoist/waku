@@ -1485,6 +1485,15 @@ impl ComposerInput {
         self.offset_from_utf16(range.start)..self.offset_from_utf16(range.end)
     }
 
+    /// Resolves a range whose endpoints count UTF-16 units from `base`, the
+    /// form macOS uses for everything relative to the marked text. The offsets
+    /// have to be added in UTF-16 before the conversion; converting first and
+    /// adding to `base` overshoots once anything multi-byte precedes it.
+    fn range_from_relative_utf16(&self, base: usize, range: &Range<usize>) -> Range<usize> {
+        let base_utf16 = self.offset_to_utf16(base);
+        self.range_from_utf16(&(base_utf16 + range.start..base_utf16 + range.end))
+    }
+
     fn previous_boundary(&self, offset: usize) -> usize {
         self.content
             .grapheme_indices(true)
@@ -1623,9 +1632,7 @@ impl EntityInputHandler for ComposerInput {
         // text is it absolute.
         let range = match (range_utf16.as_ref(), self.marked_range.as_ref()) {
             (Some(range_utf16), Some(marked)) => {
-                let base = self.offset_to_utf16(marked.start);
-                let absolute =
-                    self.range_from_utf16(&(base + range_utf16.start..base + range_utf16.end));
+                let absolute = self.range_from_relative_utf16(marked.start, range_utf16);
                 absolute.start.clamp(marked.start, marked.end)
                     ..absolute.end.clamp(marked.start, marked.end)
             }
@@ -1644,10 +1651,11 @@ impl EntityInputHandler for ComposerInput {
         if self.marked_range.is_none() {
             self.history.finalize_composition();
         }
+        // The composition's selection is also relative to the marked text,
+        // which now starts at `range.start`.
         self.selected_range = new_selected_range_utf16
             .as_ref()
-            .map(|range| self.range_from_utf16(range))
-            .map(|new_range| new_range.start + range.start..new_range.end + range.start)
+            .map(|new_range| self.range_from_relative_utf16(range.start, new_range))
             .unwrap_or_else(|| {
                 let offset = range.start + new_text.len();
                 offset..offset
@@ -2316,8 +2324,9 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use gpui::{
-        ClipboardEntry, ClipboardItem, Context, Entity, ExternalPaths, Image, ImageFormat, Pixels,
-        Render, TestAppContext, TextRun, Window, div, font, hsla, prelude::*, px,
+        ClipboardEntry, ClipboardItem, Context, Entity, EntityInputHandler, ExternalPaths, Image,
+        ImageFormat, Pixels, Render, TestAppContext, TextRun, Window, div, font, hsla, prelude::*,
+        px,
     };
 
     use super::TokenClass;
@@ -2756,6 +2765,47 @@ mod tests {
         assert_eq!(word_range_at(text, 9), 8..13);
         assert_eq!(word_range_at(text, 14), 14..text.len());
         assert_eq!(word_range_at(text, text.len()), text.len()..text.len());
+    }
+
+    /// ASCII keeps UTF-16 and UTF-8 offsets in step, so composing after it has
+    /// to land exactly where it always did.
+    #[gpui::test]
+    fn ime_composition_after_ascii_keeps_its_caret(cx: &mut TestAppContext) {
+        let (input, cx) = setup_input(cx, "hi", px(300.));
+        cx.update(|_, cx| input.update(cx, |input, cx| input.select_range(2..2, cx)));
+
+        cx.update(|window, cx| {
+            input.update(cx, |input, cx| {
+                input.replace_and_mark_text_in_range(None, "k", Some(1..1), window, cx);
+            })
+        });
+
+        cx.read_entity(&input, |input, _| {
+            assert_eq!(input.content(), "hik");
+            assert_eq!(input.marked_range, Some(2..3));
+            assert_eq!(input.selected_range, 3..3);
+        });
+    }
+
+    /// Multi-byte content ahead of the composition makes UTF-16 and UTF-8
+    /// offsets diverge, which used to place the caret past the end of the
+    /// content and abort the next slice.
+    #[gpui::test]
+    fn ime_selection_stays_inside_content_after_multibyte_text(cx: &mut TestAppContext) {
+        let (input, cx) = setup_input(cx, "あ", px(300.));
+        cx.update(|_, cx| input.update(cx, |input, cx| input.select_range(3..3, cx)));
+
+        cx.update(|window, cx| {
+            input.update(cx, |input, cx| {
+                input.replace_and_mark_text_in_range(None, "k", Some(1..1), window, cx);
+            })
+        });
+
+        cx.read_entity(&input, |input, _| {
+            assert_eq!(input.content(), "あk");
+            assert_eq!(input.marked_range, Some(3..4));
+            assert_eq!(input.selected_range, 4..4);
+        });
     }
 
     #[test]

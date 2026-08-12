@@ -2,9 +2,9 @@
 //! opens a panel with the session's context occupancy and the account's
 //! rate-limit lanes, mirroring Claude Code's `/usage` rows. Context numbers
 //! stream in from every provider transport that reports them; plan lanes come
-//! from the Claude OAuth endpoint (fetched off-thread in [`crate::usage`])
-//! and from Codex's own rate-limit notifications. Frames read only snapshots
-//! stored on the entity.
+//! from the Claude OAuth endpoint (fetched off-thread in [`crate::usage`]),
+//! OpenCode Go's usage endpoint, and Codex's own rate-limit
+//! notifications. Frames read only snapshots stored on the entity.
 
 use gpui::{PathBuilder, relative};
 
@@ -15,9 +15,10 @@ const USAGE_METER_MENU_ID: &str = "usage-meter";
 
 /// Providers with an account-level plan fetcher. Codex additionally refreshes
 /// live from its own stream notifications.
-pub(super) const PLAN_USAGE_PROVIDERS: [ProviderKind; 3] = [
+pub(super) const PLAN_USAGE_PROVIDERS: [ProviderKind; 4] = [
     ProviderKind::Claude,
     ProviderKind::Codex,
+    ProviderKind::OpenCode,
     ProviderKind::Grok,
 ];
 
@@ -78,10 +79,12 @@ impl Waku {
                     let result = match provider {
                         ProviderKind::Claude => {
                             crate::usage::fetch_claude_plan_usage(claude_version.as_deref())
+                                .map(Some)
                         }
-                        ProviderKind::Codex => crate::usage::fetch_codex_plan_usage(),
+                        ProviderKind::Codex => crate::usage::fetch_codex_plan_usage().map(Some),
+                        ProviderKind::OpenCode => crate::usage::fetch_opencode_go_plan_usage(),
                         ProviderKind::Grok => match grok_binary {
-                            Some(binary) => crate::usage::fetch_grok_plan_usage(&binary),
+                            Some(binary) => crate::usage::fetch_grok_plan_usage(&binary).map(Some),
                             None => Err(anyhow::anyhow!("grok is not installed")),
                         },
                         // A result must always come back: an early return here
@@ -107,14 +110,24 @@ impl Waku {
             self.plan_usage_stale.remove(&provider);
             self.plan_usage_checked_at.insert(provider, Instant::now());
             match result {
-                Ok(usage) => {
+                Ok(Some(usage)) => {
                     changed |= self.plan_usage.get(&provider) != Some(&usage)
-                        || self.plan_usage_error.contains_key(&provider);
+                        || self.plan_usage_error.contains_key(&provider)
+                        || self.plan_usage_unconfigured.contains(&provider);
                     self.plan_usage.insert(provider, usage);
                     self.plan_usage_error.remove(&provider);
+                    self.plan_usage_unconfigured.remove(&provider);
+                }
+                Ok(None) => {
+                    let had_usage = self.plan_usage.remove(&provider).is_some();
+                    let had_error = self.plan_usage_error.remove(&provider).is_some();
+                    let newly_unconfigured = self.plan_usage_unconfigured.insert(provider);
+                    changed |= had_usage || had_error || newly_unconfigured;
                 }
                 Err(error) => {
-                    changed |= self.plan_usage_error.get(&provider) != Some(&error);
+                    let was_unconfigured = self.plan_usage_unconfigured.remove(&provider);
+                    changed |=
+                        self.plan_usage_error.get(&provider) != Some(&error) || was_unconfigured;
                     // Keep any previous snapshot; stale meters with reset
                     // times still self-correct visually.
                     self.plan_usage_error.insert(provider, error);
@@ -175,8 +188,10 @@ impl Waku {
         let error = self.plan_usage_error.get(&provider).cloned();
         // Fetchable but nothing cached yet: the panel shows a skeleton
         // whether the fetch is already in flight or lands on the next tick.
-        let plan_loading =
-            plan.is_none() && error.is_none() && PLAN_USAGE_PROVIDERS.contains(&provider);
+        let plan_loading = plan.is_none()
+            && error.is_none()
+            && !self.plan_usage_unconfigured.contains(&provider)
+            && PLAN_USAGE_PROVIDERS.contains(&provider);
 
         let weak = cx.entity().downgrade();
         let handle = self.menu_handle_with(USAGE_METER_MENU_ID, cx, move |open, window, cx| {

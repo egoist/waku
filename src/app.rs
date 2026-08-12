@@ -855,16 +855,26 @@ pub struct Waku {
     computer_permission_tx: Sender<Result<ComputerPermissions, String>>,
     computer_permission_events: Receiver<Result<ComputerPermissions, String>>,
     computer_permission_request_pending: bool,
-    /// Account rate-limit meters per provider, fetched off-thread (Claude and
-    /// Codex over HTTPS, Grok through a stdio probe) and refreshed live by
-    /// Codex's own stream. Frames read only this snapshot.
+    /// Account rate-limit meters per provider, fetched off-thread (Claude,
+    /// Codex, and OpenCode Go over HTTPS; Grok through a stdio probe) and
+    /// refreshed live by Codex's own stream. Frames read only this snapshot.
     plan_usage: HashMap<ProviderKind, crate::usage::PlanUsage>,
     /// Why a provider's last fetch failed, kept alongside stale data for the
     /// meter's tooltip. Cleared by that provider's next success.
     plan_usage_error: HashMap<ProviderKind, String>,
-    plan_usage_tx: Sender<(ProviderKind, Result<crate::usage::PlanUsage, String>)>,
-    plan_usage_events: Receiver<(ProviderKind, Result<crate::usage::PlanUsage, String>)>,
+    plan_usage_tx: Sender<(
+        ProviderKind,
+        Result<Option<crate::usage::PlanUsage>, String>,
+    )>,
+    plan_usage_events: Receiver<(
+        ProviderKind,
+        Result<Option<crate::usage::PlanUsage>, String>,
+    )>,
     plan_usage_pending: HashSet<ProviderKind>,
+    /// Fetchable providers with no matching account credential. Unlike a
+    /// request failure, this hides the plan section until a later refresh
+    /// discovers a newly configured account.
+    plan_usage_unconfigured: HashSet<ProviderKind>,
     /// When each provider's last fetch settled, successful or not — the
     /// refresh backoff measures from here.
     plan_usage_checked_at: HashMap<ProviderKind, Instant>,
@@ -2187,6 +2197,7 @@ impl Waku {
                 plan_usage_tx,
                 plan_usage_events,
                 plan_usage_pending: HashSet::new(),
+                plan_usage_unconfigured: HashSet::new(),
                 plan_usage_checked_at: HashMap::new(),
                 plan_usage_stale: HashSet::new(),
                 usage_history: None,

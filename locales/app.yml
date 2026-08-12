@@ -182,7 +182,7 @@ settings.automatic_updates_description:
 settings.share_anonymous_usage_data:
   en: Share anonymous usage data
 settings.share_anonymous_usage_data_description:
-  en: Help improve Waku by sharing feature usage and reliability data. Prompts, responses, project names, file paths, and other perosnal data are never included
+  en: Help improve Waku by sharing feature usage and reliability data. Prompts, responses, project names, file paths, and other personal data are never included
 
 providers.coding_agents:
   en: Coding agents
@@ -1520,6 +1520,8 @@ usage_error.codex_auth_invalid:
   en: Codex auth.json is not JSON
 usage_error.codex_access_token_missing:
   en: Codex auth.json has no access token; run `codex login`
+usage_error.opencode_go_key_rejected:
+  en: OpenCode Go API key can't read usage (HTTP %{status}); reconnect OpenCode Go
 usage_error.no_rate_limit_windows:
   en: The usage endpoint reported no rate-limit windows
 usage_error.start_grok_probe:
