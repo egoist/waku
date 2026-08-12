@@ -294,7 +294,6 @@ fn discover_pi_models(binary: &Path) -> Vec<ProviderModel> {
             "--mode",
             "rpc",
             "--no-session",
-            "--no-extensions",
             "--no-skills",
             "--no-prompt-templates",
             "--no-context-files",
@@ -324,13 +323,19 @@ fn discover_pi_models(binary: &Path) -> Vec<ProviderModel> {
         }
     });
 
-    let state_request = json!({"id": "waku-state", "type": "get_state"});
     let models_request = json!({"id": "waku-models", "type": "get_available_models"});
-    let result = if write_json_line(&mut stdin, &state_request).is_ok()
-        && let Some(state) = recv_pi_rpc_response(&rx, "waku-state", PI_RPC_TIMEOUT)
-        && write_json_line(&mut stdin, &models_request).is_ok()
+    let result = if write_json_line(&mut stdin, &models_request).is_ok()
         && let Some(models) = recv_pi_rpc_response(&rx, "waku-models", PI_RPC_TIMEOUT)
     {
+        // The catalog is useful even when an older Pi cannot report its
+        // current state. State only marks the default model and thinking
+        // level, so ask for it after the required model response.
+        let state_request = json!({"id": "waku-state", "type": "get_state"});
+        let state = if write_json_line(&mut stdin, &state_request).is_ok() {
+            recv_pi_rpc_response(&rx, "waku-state", PI_RPC_TIMEOUT).unwrap_or(Value::Null)
+        } else {
+            Value::Null
+        };
         parse_pi_model_response(&state, &models)
     } else {
         Vec::new()
@@ -727,6 +732,21 @@ fn deduplicate(models: Vec<ProviderModel>) -> Vec<ProviderModel> {
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
+    fn write_fake_pi(name: &str, contents: &str) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let path = std::env::temp_dir().join(format!(
+            "waku-{name}-{}-pi-model-discovery.sh",
+            std::process::id()
+        ));
+        std::fs::write(&path, contents).unwrap();
+        let mut permissions = std::fs::metadata(&path).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&path, permissions).unwrap();
+        path
+    }
+
     #[test]
     fn model_cache_round_trips_and_rejects_empty_or_invalid_files() {
         let directory =
@@ -915,5 +935,38 @@ mod tests {
         );
         assert_eq!(models[0].default_reasoning_effort.as_deref(), Some("xhigh"));
         assert!(models[1].reasoning_efforts.is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn pi_rpc_discovery_keeps_model_provider_extensions_enabled() {
+        let binary = write_fake_pi(
+            "extensions",
+            r#"#!/bin/sh
+for argument in "$@"; do
+  if [ "$argument" = "--no-extensions" ]; then
+    exit 1
+  fi
+done
+while IFS= read -r request; do
+  case "$request" in
+    *waku-models*)
+      printf '%s\n' '{"id":"waku-models","type":"response","success":true,"data":{"models":[{"provider":"extension-provider","id":"extension-model","name":"Extension Model","reasoning":false}]}}'
+      ;;
+    *waku-state*)
+      printf '%s\n' '{"id":"waku-state","type":"response","success":true,"data":{"model":{"provider":"extension-provider","id":"extension-model"},"thinkingLevel":"medium"}}'
+      ;;
+  esac
+done
+"#,
+        );
+
+        let models = discover_pi_models(&binary);
+
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0].id, "extension-provider/extension-model");
+        assert_eq!(models[0].name, "Extension Model");
+        assert!(models[0].is_default);
+        let _ = std::fs::remove_file(binary);
     }
 }
