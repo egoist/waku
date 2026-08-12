@@ -2109,7 +2109,7 @@ impl Waku {
                             .flex_1()
                             .line_clamp(1)
                             .text_ellipsis()
-                            .text_size(px(12.0))
+                            .text_size_px(12.0)
                             .text_color(if active {
                                 theme.text
                             } else {
@@ -2264,7 +2264,7 @@ impl Waku {
                     .items_center()
                     .child(
                         div()
-                            .text_size(px(13.0))
+                            .text_size_px(13.0)
                             .font_weight(FontWeight::MEDIUM)
                             .text_color(theme.text)
                             .child(tr!("right_panel.open_surface")),
@@ -2272,7 +2272,7 @@ impl Waku {
                     .child(
                         div()
                             .mt(px(5.0))
-                            .text_size(px(11.0))
+                            .text_size_px(11.0)
                             .text_color(theme.text_tertiary)
                             .child(tr!("right_panel.choose_surface")),
                     )
@@ -2345,7 +2345,7 @@ impl Waku {
             .child(
                 div()
                     .mt(px(12.0))
-                    .text_size(px(12.5))
+                    .text_size_px(12.5)
                     .font_weight(FontWeight::MEDIUM)
                     .text_color(theme.text)
                     .child(label),
@@ -2353,8 +2353,8 @@ impl Waku {
             .child(
                 div()
                     .mt(px(4.0))
-                    .text_size(px(10.5))
-                    .line_height(px(15.0))
+                    .text_size_px(10.5)
+                    .line_height(rems_from_px(15.0))
                     .text_color(theme.text_tertiary)
                     .whitespace_normal()
                     .line_clamp(2)
@@ -2440,7 +2440,7 @@ impl Waku {
                         .min_w_0()
                         .flex_1()
                         .truncate()
-                        .text_size(px(11.5))
+                        .text_size_px(11.5)
                         .text_color(theme.text_secondary)
                         .child(entry.name),
                 );
@@ -2481,7 +2481,7 @@ impl Waku {
                             .min_w_0()
                             .flex_1()
                             .truncate()
-                            .text_size(px(11.5))
+                            .text_size_px(11.5)
                             .font_weight(FontWeight::MEDIUM)
                             .text_color(theme.text_secondary)
                             .child(project_name),
@@ -2541,7 +2541,7 @@ impl Waku {
                             .min_w_0()
                             .flex_1()
                             .truncate()
-                            .text_size(px(11.0))
+                            .text_size_px(11.0)
                             .text_color(theme.text_secondary)
                             .child(relative_path.clone()),
                     ),
@@ -2781,12 +2781,14 @@ impl Waku {
         let find_bar = self.render_file_search_bar(pane_width, writable, window, cx);
 
         let theme = Theme::current(cx);
+        let resolved_line_height = rems_from_px(LINE_HEIGHT).to_pixels(window.rem_size());
+        let resolved_text_size = rems_from_px(TEXT_SIZE).to_pixels(window.rem_size());
         let field = editor_state.read(cx);
         let line_count = field.content().split('\n').count().max(1);
         let heights = field.wrapped_line_heights();
         let gutter_width = 20.0 + 6.0 * (line_count.to_string().len() as f32);
         let content_height = if heights.is_empty() {
-            px(LINE_HEIGHT) * line_count as f32
+            resolved_line_height * line_count as f32
         } else {
             heights.iter().fold(Pixels::ZERO, |total, h| total + *h)
         };
@@ -2802,7 +2804,7 @@ impl Waku {
                     let height = heights
                         .get(number - 1)
                         .copied()
-                        .unwrap_or_else(|| px(LINE_HEIGHT));
+                        .unwrap_or(resolved_line_height);
                     // Everything below the viewport is unreachable from here on.
                     if y > visible.bottom() {
                         break;
@@ -2818,11 +2820,11 @@ impl Waku {
                         let line =
                             window
                                 .text_system()
-                                .shape_line(text, px(TEXT_SIZE), &[run], None);
+                                .shape_line(text, resolved_text_size, &[run], None);
                         let origin = point(bounds.right() - line.width, y);
                         let _ = line.paint(
                             origin,
-                            px(LINE_HEIGHT),
+                            resolved_line_height,
                             gpui::TextAlign::Left,
                             None,
                             window,
@@ -2834,7 +2836,7 @@ impl Waku {
             },
         )
         .flex_none()
-        .w(px(gutter_width - GUTTER_PAD_RIGHT))
+        .w(rems_from_px(gutter_width - GUTTER_PAD_RIGHT))
         .h(content_height);
 
         // The find bar sits in normal flow above the scroll region — Zed's
@@ -2848,8 +2850,8 @@ impl Waku {
             .flex_col()
             .bg(theme.surface)
             .font_family(md::render::MONO_FAMILY)
-            .text_size(px(TEXT_SIZE))
-            .line_height(px(LINE_HEIGHT))
+            .text_size_px(TEXT_SIZE)
+            .line_height(rems_from_px(LINE_HEIGHT))
             .children(find_bar)
             .child(
                 div()
@@ -2870,7 +2872,7 @@ impl Waku {
                                     .flex()
                                     .items_start()
                                     .child(gutter)
-                                    .child(div().w(px(GUTTER_PAD_RIGHT)).flex_none())
+                                    .child(div().w(rems_from_px(GUTTER_PAD_RIGHT)).flex_none())
                                     .child(
                                         div()
                                             .flex_1()
@@ -3168,14 +3170,14 @@ impl Waku {
             .child(source)
             .child(
                 div()
-                    .text_size(px(11.5))
+                    .text_size_px(11.5)
                     .font_weight(FontWeight::MEDIUM)
                     .text_color(theme.success)
                     .child(format!("+{additions}")),
             )
             .child(
                 div()
-                    .text_size(px(11.5))
+                    .text_size_px(11.5)
                     .font_weight(FontWeight::MEDIUM)
                     .text_color(theme.danger)
                     .child(format!("-{deletions}")),
@@ -3183,7 +3185,7 @@ impl Waku {
             .when(truncated, |row| {
                 row.child(
                     div()
-                        .text_size(px(10.5))
+                        .text_size_px(10.5)
                         .text_color(theme.warning)
                         .child(tr!("diff.truncated")),
                 )
@@ -3268,7 +3270,7 @@ impl Waku {
                         .min_w_0()
                         .flex_1()
                         .truncate()
-                        .text_size(px(11.5))
+                        .text_size_px(11.5)
                         .font_weight(FontWeight::MEDIUM)
                         .text_color(theme.text_secondary)
                         .tooltip(Tooltip::text(file.path.clone()))
@@ -3276,13 +3278,13 @@ impl Waku {
                 )
                 .child(
                     div()
-                        .text_size(px(10.5))
+                        .text_size_px(10.5)
                         .text_color(theme.success)
                         .child(format!("+{}", file.additions)),
                 )
                 .child(
                     div()
-                        .text_size(px(10.5))
+                        .text_size_px(10.5)
                         .text_color(theme.danger)
                         .child(format!("-{}", file.deletions)),
                 )
@@ -3371,7 +3373,7 @@ impl Waku {
                     .min_w_0()
                     .flex()
                     .items_center()
-                    .text_size(px(10.5))
+                    .text_size_px(10.5)
                     .text_color(theme.text_tertiary)
                     .child(gutter)
                     .child(label)
@@ -3384,7 +3386,7 @@ impl Waku {
                 .flex()
                 .items_center()
                 .font_family(md::render::MONO_FAMILY)
-                .text_size(px(10.0))
+                .text_size_px(10.0)
                 .text_color(theme.text_tertiary)
                 .child(
                     div()
@@ -3416,7 +3418,7 @@ impl Waku {
                 .flex()
                 .items_center()
                 .font_family(md::render::MONO_FAMILY)
-                .text_size(px(10.5))
+                .text_size_px(10.5)
                 .text_color(theme.text_tertiary)
                 .child(div().w(px(52.0)).h_full().flex_none())
                 .child(
@@ -3515,12 +3517,12 @@ impl Waku {
                     .id(SharedString::from(format!("review-diff-row-{index}")))
                     .w_full()
                     .min_w_0()
-                    .h(px(20.0))
+                    .h(rems_from_px(20.0))
                     .flex()
                     .items_center()
                     .font_family(md::render::MONO_FAMILY)
-                    .text_size(px(10.5))
-                    .line_height(px(20.0))
+                    .text_size_px(10.5)
+                    .line_height(rems_from_px(20.0))
                     .when_some(edge, |row, edge| row.border_l_2().border_color(edge))
                     .child(gutter)
                     .child(body)
@@ -3750,7 +3752,7 @@ impl Waku {
                                 .min_w_0()
                                 .flex_1()
                                 .truncate()
-                                .text_size(px(11.0))
+                                .text_size_px(11.0)
                                 .font_weight(FontWeight::MEDIUM)
                                 .text_color(theme.text_secondary)
                                 .child(name),
@@ -3812,7 +3814,7 @@ impl Waku {
                                     .min_w_0()
                                     .flex_1()
                                     .truncate()
-                                    .text_size(px(11.0))
+                                    .text_size_px(11.0)
                                     .text_color(if selected {
                                         theme.text
                                     } else {
@@ -3832,7 +3834,7 @@ impl Waku {
                                     .flex()
                                     .items_center()
                                     .justify_center()
-                                    .text_size(px(9.0))
+                                    .text_size_px(9.0)
                                     .font_weight(FontWeight::SEMIBOLD)
                                     .text_color(status_color)
                                     .child(status),
@@ -3867,7 +3869,7 @@ impl Waku {
             .pb(px(32.0))
             .child(
                 div()
-                    .text_size(px(13.0))
+                    .text_size_px(13.0)
                     .font_weight(FontWeight::MEDIUM)
                     .text_color(theme.text)
                     .child(title),
@@ -3877,8 +3879,8 @@ impl Waku {
                     .mt(px(6.0))
                     .max_w(px(300.0))
                     .text_center()
-                    .text_size(px(11.0))
-                    .line_height(px(17.0))
+                    .text_size_px(11.0)
+                    .line_height(rems_from_px(17.0))
                     .text_color(theme.text_tertiary)
                     .child(description),
             )

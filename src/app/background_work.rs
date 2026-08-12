@@ -773,7 +773,7 @@ impl Waku {
                 .items_center()
                 .gap(px(6.0))
                 .cursor_default()
-                .text_size(px(12.5))
+                .text_size_px(12.5)
                 .font_weight(FontWeight::MEDIUM)
                 .focus_visible(|style| {
                     style
@@ -870,7 +870,7 @@ impl Waku {
                         .child(icon(work_kind_icon(key.kind), 22.0, theme.text_ghost))
                         .child(
                             div()
-                                .text_size(px(12.0))
+                                .text_size_px(12.0)
                                 .text_color(theme.text_secondary)
                                 .child(tr!("background.no_work")),
                         ),
@@ -917,7 +917,7 @@ impl Waku {
                     .items_center()
                     .gap(px(5.0))
                     .cursor_default()
-                    .text_size(px(10.5))
+                    .text_size_px(10.5)
                     .font_weight(FontWeight::MEDIUM)
                     .text_color(theme.text_secondary)
                     .hover(|style| style.bg(theme.danger.opacity(0.10)))
@@ -975,7 +975,7 @@ impl Waku {
                             .child(
                                 div()
                                     .truncate()
-                                    .text_size(px(12.0))
+                                    .text_size_px(12.0)
                                     .font_weight(FontWeight::MEDIUM)
                                     .text_color(theme.text)
                                     .child(item.title.clone()),
@@ -985,7 +985,7 @@ impl Waku {
                                     .flex()
                                     .items_center()
                                     .gap(px(5.0))
-                                    .text_size(px(10.0))
+                                    .text_size_px(10.0)
                                     .text_color(theme.text_tertiary)
                                     .child(rendered_work_status_icon(
                                         item.status,
@@ -1062,13 +1062,13 @@ impl Waku {
                     .gap(px(3.0))
                     .child(
                         div()
-                            .text_size(px(9.5))
+                            .text_size_px(9.5)
                             .text_color(theme.text_tertiary)
                             .child(label),
                     )
                     .child(
                         div()
-                            .text_size(px(10.5))
+                            .text_size_px(10.5)
                             .font_family(md::render::MONO_FAMILY)
                             .text_color(theme.text_secondary)
                             .child(value),
@@ -1110,7 +1110,7 @@ impl Waku {
                         .flex()
                         .items_center()
                         .justify_between()
-                        .text_size(px(9.5))
+                        .text_size_px(9.5)
                         .text_color(theme.text_tertiary)
                         .child(tr!("background.output"))
                         .when(item.output_truncated, |header| {
@@ -1135,8 +1135,8 @@ impl Waku {
                                 .overflow_y_scroll()
                                 .track_scroll(&output_viewport.scroll_handle)
                                 .p(px(8.0))
-                                .text_size(px(10.5))
-                                .line_height(px(15.0))
+                                .text_size_px(10.5)
+                                .line_height(rems_from_px(15.0))
                                 .font_family(md::render::MONO_FAMILY)
                                 .text_color(theme.text_secondary)
                                 .child(output_text),
@@ -1314,7 +1314,7 @@ fn render_environment_summary_section(
                 .px(px(8.0))
                 .flex()
                 .items_center()
-                .text_size(px(13.5))
+                .text_size_px(13.5)
                 .text_color(theme.text_tertiary)
                 .child(tr!("environment.title")),
         )
@@ -1384,7 +1384,7 @@ fn render_environment_action_row(
                 .min_w_0()
                 .flex_1()
                 .truncate()
-                .text_size(px(13.5))
+                .text_size_px(13.5)
                 .text_color(foreground)
                 .child(label),
         )
@@ -1426,7 +1426,7 @@ fn render_background_summary_section(
         .child(
             div()
                 .px(px(8.0))
-                .text_size(px(13.0))
+                .text_size_px(13.0)
                 .text_color(theme.text_tertiary)
                 .child(label),
         )
@@ -1556,7 +1556,7 @@ fn render_background_summary_row(
                 .flex_1()
                 .line_clamp(1)
                 .text_ellipsis()
-                .text_size(px(if is_process { 12.0 } else { 13.5 }))
+                .text_size_px(if is_process { 12.0 } else { 13.5 })
                 .text_color(if is_process {
                     theme.text_secondary
                 } else {

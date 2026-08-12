@@ -58,6 +58,7 @@ use crate::query::{Query, QueryCache};
 use crate::review_diff::{Snapshot as ReviewDiffSnapshot, Source as ReviewDiffSource};
 use crate::terminal::TerminalView;
 use crate::theme::{Theme, ThemePreference};
+use crate::typography::{FontSizePreference, TextSizeExt, rems_from_px};
 use crate::ui::text_field::TextField;
 use crate::ui::{
     MenuChip, ProjectNameSelector, activity_icon, activity_noun, file_icon, icon, icon_button,
@@ -677,7 +678,7 @@ fn traits_choice(theme: Theme, label: String, is_default: bool, selected: bool) 
                         .bg(theme.overlay)
                         .flex()
                         .items_center()
-                        .text_size(px(9.0))
+                        .text_size_px(9.0)
                         .font_weight(FontWeight::SEMIBOLD)
                         .text_color(theme.text_tertiary)
                         .child(tr!("common.default")),
@@ -1527,6 +1528,7 @@ impl Waku {
         let composer_drafts = composer_draft_store.load().unwrap_or_default();
         let mut state = store.load_or_fresh(cwd);
         crate::i18n::set_language(state.language);
+        crate::typography::apply_font_size_preference(state.font_size, window);
         let analytics = crate::analytics::Analytics::new(
             state.language.locale(),
             state.analytics_id,

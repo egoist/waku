@@ -5,6 +5,7 @@ use gpui::{
 
 use crate::input::ComposerInput;
 use crate::theme::Theme;
+use crate::typography::{TextSizeExt, rems_from_px};
 
 use super::icon;
 
@@ -76,8 +77,8 @@ impl RenderOnce for TextField {
             .flex()
             .items_center()
             .gap(px(6.0))
-            .text_size(px(11.5))
-            .line_height(px(16.0))
+            .text_size_px(11.5)
+            .line_height(rems_from_px(16.0))
             .when_some(self.icon, |element, (path, size)| {
                 element.child(icon(path, size, theme.text_tertiary))
             })

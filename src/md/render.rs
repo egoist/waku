@@ -36,6 +36,7 @@ use super::selection::{
     RegisteredText, SelectionRegistry, SelectionState, TextKey, line_range, word_range,
 };
 use crate::theme::Theme;
+use crate::typography::{TextSizeExt, rems_from_px};
 
 /// Selection geometry: the laid-out text handle for one painted element.
 pub type TextGeometry = TextLayout;
@@ -881,7 +882,7 @@ pub fn markdown<'a>(view: &'a MarkdownView, ctx: &Ctx<'a>) -> Option<AnyElement>
             .min_w_0()
             .flex()
             .flex_col()
-            .gap(px(ctx.metrics.block_gap))
+            .gap(rems_from_px(ctx.metrics.block_gap))
             .children(children)
             .into_any_element(),
     )
@@ -898,8 +899,8 @@ fn render_block(block: &Block, ctx: &Ctx) -> AnyElement {
             div()
                 .w_full()
                 .min_w_0()
-                .text_size(px(ctx.metrics.text_size))
-                .line_height(px(ctx.metrics.line_height))
+                .text_size_px(ctx.metrics.text_size)
+                .line_height(rems_from_px(ctx.metrics.line_height))
                 .child(text_element(&flat, key, ctx))
                 .into_any_element()
         }
@@ -913,8 +914,8 @@ fn render_block(block: &Block, ctx: &Ctx) -> AnyElement {
                 .w_full()
                 .min_w_0()
                 .when(*level <= 2, |element| element.pt(px(4.0)))
-                .text_size(px(size))
-                .line_height(px(line_height))
+                .text_size_px(size)
+                .line_height(rems_from_px(line_height))
                 .child(text_element(&flat, key, ctx))
                 .into_any_element()
         }
@@ -943,7 +944,7 @@ fn render_block(block: &Block, ctx: &Ctx) -> AnyElement {
                         .min_w_0()
                         .flex()
                         .flex_col()
-                        .gap(px(ctx.metrics.block_gap))
+                        .gap(rems_from_px(ctx.metrics.block_gap))
                         .children(rendered),
                 )
                 .into_any_element()
@@ -974,7 +975,7 @@ fn render_list(ordered_start: Option<u64>, items: &[ListItem], ctx: &Ctx) -> Any
         .map(|(index, item)| {
             let marker = match (ordered_start, item.task) {
                 (_, Some(checked)) => div()
-                    .w(px(marker_width))
+                    .w(rems_from_px(marker_width))
                     .flex_none()
                     .flex()
                     .justify_start()
@@ -1002,7 +1003,7 @@ fn render_list(ordered_start: Option<u64>, items: &[ListItem], ctx: &Ctx) -> Any
                         .min_w_0()
                         .flex()
                         .flex_col()
-                        .gap(px(ctx.metrics.block_gap * 0.6))
+                        .gap(rems_from_px(ctx.metrics.block_gap * 0.6))
                         .children(blocks),
                 )
                 .into_any_element()
@@ -1014,7 +1015,7 @@ fn render_list(ordered_start: Option<u64>, items: &[ListItem], ctx: &Ctx) -> Any
         .min_w_0()
         .flex()
         .flex_col()
-        .gap(px(ctx.metrics.block_gap * 0.5))
+        .gap(rems_from_px(ctx.metrics.block_gap * 0.5))
         .children(rendered)
         .into_any_element()
 }
@@ -1023,10 +1024,10 @@ fn render_list(ordered_start: Option<u64>, items: &[ListItem], ctx: &Ctx) -> Any
 /// content the user typed, so they stay out of the selection registry.
 fn marker_text(label: String, width: f32, ctx: &Ctx) -> AnyElement {
     div()
-        .w(px(width))
+        .w(rems_from_px(width))
         .flex_none()
-        .text_size(px(ctx.metrics.text_size))
-        .line_height(px(ctx.metrics.line_height))
+        .text_size_px(ctx.metrics.text_size)
+        .line_height(rems_from_px(ctx.metrics.line_height))
         .text_color(ctx.palette.tertiary)
         .child(SharedString::from(label))
         .into_any_element()
@@ -1035,8 +1036,10 @@ fn marker_text(label: String, width: f32, ctx: &Ctx) -> AnyElement {
 fn checkbox(checked: bool, ctx: &Ctx) -> AnyElement {
     let box_size = (ctx.metrics.text_size * 0.92).round();
     div()
-        .size(px(box_size))
-        .my(px(((ctx.metrics.line_height - box_size) / 2.0).max(0.0)))
+        .size(rems_from_px(box_size))
+        .my(rems_from_px(
+            ((ctx.metrics.line_height - box_size) / 2.0).max(0.0),
+        ))
         .flex_none()
         .rounded(px(3.0))
         .border_1()
@@ -1087,8 +1090,8 @@ fn render_image(url: &str, alt: &str, ctx: &Ctx) -> AnyElement {
         .when(!alt.trim().is_empty(), |element| {
             element.child(
                 div()
-                    .text_size(px(ctx.metrics.text_size - 2.0))
-                    .line_height(px(ctx.metrics.line_height - 4.0))
+                    .text_size_px(ctx.metrics.text_size - 2.0)
+                    .line_height(rems_from_px(ctx.metrics.line_height - 4.0))
                     .text_color(ctx.palette.ghost)
                     .child(SharedString::from(alt.to_owned())),
             )
@@ -1146,8 +1149,8 @@ fn render_code_block(language: Option<&str>, code: &str, ctx: &Ctx) -> AnyElemen
                     .items_center()
                     .border_b_1()
                     .border_color(ctx.palette.border)
-                    .text_size(px(10.0))
-                    .line_height(px(14.0))
+                    .text_size_px(10.0)
+                    .line_height(rems_from_px(14.0))
                     .font_weight(FontWeight::MEDIUM)
                     .text_color(ctx.palette.ghost)
                     .child(SharedString::from(label)),
@@ -1167,8 +1170,8 @@ fn render_code_block(language: Option<&str>, code: &str, ctx: &Ctx) -> AnyElemen
                     div()
                         .flex_none()
                         .whitespace_nowrap()
-                        .text_size(px(ctx.metrics.code_text_size))
-                        .line_height(px(ctx.metrics.code_line_height))
+                        .text_size_px(ctx.metrics.code_text_size)
+                        .line_height(rems_from_px(ctx.metrics.code_line_height))
                         .text_color(ctx.palette.secondary)
                         .child(text_element(&flat, key, ctx)),
                 ),
@@ -1293,8 +1296,8 @@ fn table_row(
                 .min_w_0()
                 .px(px(9.0))
                 .py(px(6.0))
-                .text_size(px(ctx.metrics.text_size - 0.5))
-                .line_height(px(ctx.metrics.line_height - 2.0))
+                .text_size_px(ctx.metrics.text_size - 0.5)
+                .line_height(rems_from_px(ctx.metrics.line_height - 2.0))
                 .map(|element| match alignment {
                     TableAlign::Left => element,
                     TableAlign::Center => element.items_center().text_center(),
@@ -1516,8 +1519,8 @@ mod tests {
         cx.draw(Point::default(), size(px(96.0), px(400.0)), move |_, _| {
             div()
                 .w(px(96.0))
-                .text_size(px(14.0))
-                .line_height(px(20.0))
+                .text_size_px(14.0)
+                .line_height(rems_from_px(20.0))
                 .child(styled)
         });
 

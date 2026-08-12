@@ -103,7 +103,7 @@ fn session_group_header(theme: &Theme) -> Div {
         .px(px(8.0))
         .flex()
         .items_center()
-        .text_size(px(12.5))
+        .text_size_px(12.5)
         .font_weight(FontWeight::MEDIUM)
         .text_color(theme.text_tertiary)
 }
@@ -272,8 +272,8 @@ impl Waku {
             .flex()
             .items_center()
             .gap(px(5.0))
-            .text_size(px(11.0))
-            .line_height(px(0.0))
+            .text_size_px(11.0)
+            .line_height(rems_from_px(0.0))
             .child(div().w(px(6.0)).h(px(6.0)).rounded_full().bg(dot))
             .child(
                 div()
@@ -435,7 +435,9 @@ impl Waku {
             .active(|element| element.bg(theme.overlay_strong))
             .child(
                 div()
-                    .size(px(20.0))
+                    .size(rems_from_px(20.0))
+                    .min_w(px(20.0))
+                    .min_h(px(20.0))
                     .flex_none()
                     .flex()
                     .items_center()
@@ -446,7 +448,7 @@ impl Waku {
                 div()
                     .min_w_0()
                     .truncate()
-                    .text_size(px(13.0))
+                    .text_size_px(13.0)
                     .text_color(theme.text_secondary)
                     .child(label),
             )
@@ -531,7 +533,7 @@ impl Waku {
             .cursor_default()
             .bg(theme.gauge)
             .text_color(foreground)
-            .text_size(px(11.0))
+            .text_size_px(11.0)
             .font_weight(FontWeight::MEDIUM)
             .when(available, |button| {
                 button
@@ -1004,7 +1006,8 @@ impl Waku {
                 .on_action(cx.listener(|this, _: &CancelSessionRename, window, cx| {
                     this.cancel_session_rename(window, cx);
                 }))
-                .h(px(18.0))
+                .h(rems_from_px(18.0))
+                .min_h(px(18.0))
                 .flex_1()
                 .min_w_0()
                 .px(px(4.0))
@@ -1014,7 +1017,7 @@ impl Waku {
                 .bg(theme.inset)
                 .flex()
                 .items_center()
-                .text_size(px(13.5))
+                .text_size_px(13.5)
                 .text_color(theme.text)
                 .child(rename_input)
                 .into_any_element()
@@ -1025,7 +1028,7 @@ impl Waku {
                 .whitespace_normal()
                 .line_clamp(1)
                 .text_overflow(gpui::TextOverflow::Truncate("...".into()))
-                .text_size(px(13.5))
+                .text_size_px(13.5)
                 .text_color(theme.text)
                 .child(SharedString::from(localized_session_title(session)))
                 .into_any_element()
@@ -1056,7 +1059,7 @@ impl Waku {
                     .items_center()
                     .gap(px(6.0))
                     .overflow_hidden()
-                    .line_height(px(18.0))
+                    .line_height(rems_from_px(18.0))
                     .child(title)
                     .when(working, |element| {
                         element.child(
@@ -1098,8 +1101,8 @@ impl Waku {
                     .flex()
                     .items_center()
                     .gap(px(5.0))
-                    .text_size(px(11.5))
-                    .line_height(px(15.0))
+                    .text_size_px(11.5)
+                    .line_height(rems_from_px(15.0))
                     .child(icon("icons/folder.svg", 11.0, theme.text_tertiary))
                     .child(
                         div()
@@ -1252,7 +1255,7 @@ impl Waku {
                         .flex()
                         .items_center()
                         .truncate()
-                        .text_size(px(13.0))
+                        .text_size_px(13.0)
                         .font_weight(FontWeight::MEDIUM)
                         .text_color(theme.text)
                         .child(SharedString::from(
@@ -1296,7 +1299,7 @@ impl Waku {
                 .child(
                     div()
                         .mt(px(16.0))
-                        .text_size(px(20.0))
+                        .text_size_px(20.0)
                         .font_weight(FontWeight::MEDIUM)
                         .text_color(theme.text)
                         .child(tr_cow!("onboarding.open_project_to_begin")),
@@ -1306,8 +1309,8 @@ impl Waku {
                         .mt(px(8.0))
                         .max_w(px(380.0))
                         .text_center()
-                        .text_size(px(12.5))
-                        .line_height(px(19.0))
+                        .text_size_px(12.5)
+                        .line_height(rems_from_px(19.0))
                         .text_color(theme.text_tertiary)
                         .child(tr_cow!("onboarding.description")),
                 )
@@ -1335,7 +1338,7 @@ impl Waku {
                                 .cursor_default()
                                 .bg(theme.inverse)
                                 .text_color(theme.on_inverse)
-                                .text_size(px(12.5))
+                                .text_size_px(12.5)
                                 .font_weight(FontWeight::SEMIBOLD)
                                 .hover(|element| element.opacity(0.9))
                                 .active(|element| element.opacity(0.8))
@@ -1362,7 +1365,7 @@ impl Waku {
                                 .gap(px(6.0))
                                 .cursor_default()
                                 .text_color(theme.text_secondary)
-                                .text_size(px(12.0))
+                                .text_size_px(12.0)
                                 .hover(|element| element.bg(theme.overlay))
                                 .active(|element| element.bg(theme.overlay_strong))
                                 .child(icon("icons/x.svg", 11.0, theme.text_tertiary))
@@ -1468,7 +1471,7 @@ impl Waku {
                     .mt(px(14.0))
                     .flex()
                     .items_baseline()
-                    .text_size(px(20.0))
+                    .text_size_px(20.0)
                     .font_weight(FontWeight::MEDIUM)
                     .text_color(theme.text)
                     .when(projectless_selected, |element| {

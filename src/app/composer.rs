@@ -47,7 +47,7 @@ impl Waku {
                     .flex()
                     .items_center()
                     .cursor_default()
-                    .text_size(px(11.5))
+                    .text_size_px(11.5)
                     .font_weight(FontWeight::SEMIBOLD)
                     .when(allow, |element| {
                         element
@@ -89,7 +89,7 @@ impl Waku {
                             .child(icon("icons/alert.svg", 13.0, theme.warning))
                             .child(
                                 div()
-                                    .text_size(px(12.5))
+                                    .text_size_px(12.5)
                                     .font_weight(FontWeight::MEDIUM)
                                     .text_color(theme.text)
                                     .child(SharedString::from(permission.title.clone())),
@@ -105,8 +105,8 @@ impl Waku {
                             .rounded(px(7.0))
                             .bg(theme.inset)
                             .font_family(crate::md::render::MONO_FAMILY)
-                            .text_size(px(10.5))
-                            .line_height(px(16.0))
+                            .text_size_px(10.5)
+                            .line_height(rems_from_px(16.0))
                             .text_color(theme.text_secondary)
                             .whitespace_normal()
                             .child(SharedString::from(permission.detail.clone())),
@@ -144,7 +144,7 @@ impl Waku {
                     .flex()
                     .items_center()
                     .cursor_default()
-                    .text_size(px(11.5))
+                    .text_size_px(11.5)
                     .font_weight(FontWeight::SEMIBOLD)
                     .when(primary, |element| {
                         element
@@ -186,7 +186,7 @@ impl Waku {
                         .child(icon("icons/globe.svg", 14.0, theme.warning))
                         .child(
                             div()
-                                .text_size(px(12.5))
+                                .text_size_px(12.5)
                                 .font_weight(FontWeight::MEDIUM)
                                 .text_color(theme.text)
                                 .child(tr!("computer_use.allow_control", app = &target.app_name)),
@@ -195,8 +195,8 @@ impl Waku {
                 .child(
                     div()
                         .mt(px(7.0))
-                        .text_size(px(10.0))
-                        .line_height(px(14.0))
+                        .text_size_px(10.0)
+                        .line_height(rems_from_px(14.0))
                         .text_color(theme.text_secondary)
                         .child(tr!("computer_use.screenshot_shared")),
                 )
@@ -208,7 +208,7 @@ impl Waku {
                         .bg(theme.inset)
                         .child(
                             div()
-                                .text_size(px(11.5))
+                                .text_size_px(11.5)
                                 .font_weight(FontWeight::MEDIUM)
                                 .text_color(theme.text)
                                 .truncate()
@@ -217,7 +217,7 @@ impl Waku {
                         .child(
                             div()
                                 .mt(px(4.0))
-                                .text_size(px(10.5))
+                                .text_size_px(10.5)
                                 .text_color(theme.text_secondary)
                                 .child(SharedString::from(permission.request.summary())),
                         )
@@ -225,7 +225,7 @@ impl Waku {
                             element.child(
                                 div()
                                     .mt(px(5.0))
-                                    .text_size(px(10.5))
+                                    .text_size_px(10.5)
                                     .text_color(theme.warning)
                                     .child(tr!("computer_use.sensitive_action")),
                             )
@@ -234,7 +234,7 @@ impl Waku {
                 .child(
                     div()
                         .mt(px(7.0))
-                        .text_size(px(10.0))
+                        .text_size_px(10.0)
                         .text_color(theme.text_tertiary)
                         .child(if target.persistable() {
                             tr!("computer_use.bundle_id", id = &target.bundle_id)
@@ -332,7 +332,7 @@ impl Waku {
                                         .items_center()
                                         .justify_center()
                                         .bg(theme.overlay_strong)
-                                        .text_size(px(11.0))
+                                        .text_size_px(11.0)
                                         .font_weight(FontWeight::SEMIBOLD)
                                         .text_color(theme.text_secondary)
                                         .child(SharedString::from(app_initial)),
@@ -343,7 +343,7 @@ impl Waku {
                                         .min_w_0()
                                         .child(
                                             div()
-                                                .text_size(px(11.5))
+                                                .text_size_px(11.5)
                                                 .font_weight(FontWeight::MEDIUM)
                                                 .text_color(theme.text)
                                                 .truncate()
@@ -352,7 +352,7 @@ impl Waku {
                                         .child(
                                             div()
                                                 .mt(px(1.0))
-                                                .text_size(px(9.5))
+                                                .text_size_px(9.5)
                                                 .text_color(theme.text_tertiary)
                                                 .truncate()
                                                 .child(SharedString::from(title)),
@@ -372,7 +372,7 @@ impl Waku {
                                             .flex()
                                             .items_center()
                                             .cursor_default()
-                                            .text_size(px(10.0))
+                                            .text_size_px(10.0)
                                             .font_weight(FontWeight::MEDIUM)
                                             .text_color(if active {
                                                 theme.danger
@@ -442,7 +442,7 @@ impl Waku {
                                             )
                                             .child(
                                                 div()
-                                                    .text_size(px(10.0))
+                                                    .text_size_px(10.0)
                                                     .text_color(theme.text_tertiary)
                                                     .child(tr!("computer_use.preparing_preview")),
                                             ),
@@ -471,7 +471,7 @@ impl Waku {
                                         )
                                         .child(
                                             div()
-                                                .text_size(px(9.5))
+                                                .text_size_px(9.5)
                                                 .font_weight(FontWeight::MEDIUM)
                                                 .text_color(theme.text)
                                                 .child(status),
@@ -781,7 +781,7 @@ impl Waku {
                             .flex()
                             .items_center()
                             .justify_center()
-                            .text_size(px(11.5))
+                            .text_size_px(11.5)
                             .text_color(theme.text_ghost)
                             .child(label),
                     );
@@ -838,7 +838,7 @@ impl Waku {
                                     .child(
                                         div()
                                             .truncate()
-                                            .text_size(px(13.0))
+                                            .text_size_px(13.0)
                                             .font_weight(FontWeight::SEMIBOLD)
                                             .text_color(theme.text)
                                             .child(SharedString::from(model.name.clone())),
@@ -857,7 +857,7 @@ impl Waku {
                                             .child(
                                                 div()
                                                     .truncate()
-                                                    .text_size(px(11.0))
+                                                    .text_size_px(11.0)
                                                     .text_color(theme.text_tertiary)
                                                     .child(SharedString::from(subtitle)),
                                             ),
@@ -1244,7 +1244,7 @@ impl Waku {
                                             div()
                                                 .w_full()
                                                 .truncate()
-                                                .text_size(px(12.0))
+                                                .text_size_px(12.0)
                                                 .font_weight(if selected {
                                                     FontWeight::SEMIBOLD
                                                 } else {
@@ -1257,8 +1257,8 @@ impl Waku {
                                             div()
                                                 .w_full()
                                                 .mt(px(2.0))
-                                                .text_size(px(10.5))
-                                                .line_height(px(14.0))
+                                                .text_size_px(10.5)
+                                                .line_height(rems_from_px(14.0))
                                                 .whitespace_normal()
                                                 .text_color(theme.text_tertiary)
                                                 .child(option.description()),
@@ -1303,8 +1303,8 @@ impl Waku {
             .items_center()
             .gap(px(6.0))
             .cursor_default()
-            .text_size(px(11.5))
-            .line_height(px(14.0))
+            .text_size_px(11.5)
+            .line_height(rems_from_px(14.0))
             .text_color(if mode == InteractionMode::Plan {
                 theme.accent
             } else {
@@ -1602,7 +1602,7 @@ impl Waku {
                                 div()
                                     .max_w_full()
                                     .truncate()
-                                    .text_size(px(8.5))
+                                    .text_size_px(8.5)
                                     .text_color(theme.text_tertiary)
                                     .child(attachment.name.clone()),
                             ),
@@ -1719,7 +1719,7 @@ impl Waku {
                             .flex_1()
                             .min_w_0()
                             .truncate()
-                            .text_size(px(11.5))
+                            .text_size_px(11.5)
                             .text_color(theme.text_secondary)
                             .child(SharedString::from(content)),
                     )
@@ -1763,7 +1763,7 @@ impl Waku {
                             .child(icon("icons/list.svg", 10.5, theme.text_tertiary))
                             .child(
                                 div()
-                                    .text_size(px(10.0))
+                                    .text_size_px(10.0)
                                     .font_weight(FontWeight::SEMIBOLD)
                                     .text_color(theme.text_tertiary)
                                     .child(if busy {
@@ -1860,8 +1860,8 @@ impl Waku {
                         .flex()
                         .items_center()
                         .gap(px(4.0))
-                        .text_size(px(11.5))
-                        .line_height(px(14.0))
+                        .text_size_px(11.5)
+                        .line_height(rems_from_px(14.0))
                         .child(self.render_provider_model_control(cx))
                         .children(self.render_model_traits_control(cx))
                         .child(self.render_access_control(cx))
@@ -1916,7 +1916,7 @@ impl Waku {
                                         .when(escape_stop_armed, |element| {
                                             element.child(
                                                 div()
-                                                    .text_size(px(10.0))
+                                                    .text_size_px(10.0)
                                                     .font_weight(FontWeight::SEMIBOLD)
                                                     .text_color(theme.text)
                                                     .child("Esc"),
@@ -2169,7 +2169,7 @@ impl Waku {
                                 .flex()
                                 .items_center()
                                 .gap(px(8.0))
-                                .text_size(px(13.0))
+                                .text_size_px(13.0)
                                 .font_weight(FontWeight::MEDIUM)
                                 .text_color(theme.text)
                                 .child(icon("icons/plus.svg", 14.0, theme.text_secondary))
@@ -2191,7 +2191,7 @@ impl Waku {
                         .child(
                             div()
                                 .mt(px(9.0))
-                                .text_size(px(10.5))
+                                .text_size_px(10.5)
                                 .text_color(theme.text_tertiary)
                                 .child(tr!("branches.create_hint")),
                         )
@@ -2205,7 +2205,7 @@ impl Waku {
                             .flex()
                             .items_center()
                             .justify_center()
-                            .text_size(px(11.5))
+                            .text_size_px(11.5)
                             .text_color(theme.text_ghost)
                             .child(tr!("branches.none_found"))
                             .into_any_element()
@@ -2272,8 +2272,8 @@ impl Waku {
                                                 .min_w_0()
                                                 .flex_1()
                                                 .truncate()
-                                                .text_size(px(11.5))
-                                                .line_height(px(15.0))
+                                                .text_size_px(11.5)
+                                                .line_height(rems_from_px(15.0))
                                                 .text_color(color)
                                                 .child(SharedString::from(branch.name.clone())),
                                         )
@@ -2334,8 +2334,8 @@ impl Waku {
                             .child(icon("icons/plus.svg", 12.0, theme.text_secondary))
                             .child(
                                 div()
-                                    .text_size(px(11.5))
-                                    .line_height(px(15.0))
+                                    .text_size_px(11.5)
+                                    .line_height(rems_from_px(15.0))
                                     .text_color(theme.text)
                                     .child(tr!("branches.create_and_checkout_ellipsis")),
                             )
@@ -2378,7 +2378,7 @@ impl Waku {
                                 .px(px(14.0))
                                 .pt(px(3.0))
                                 .pb(px(7.0))
-                                .text_size(px(12.0))
+                                .text_size_px(12.0)
                                 .font_weight(FontWeight::MEDIUM)
                                 .text_color(theme.text_tertiary)
                                 .child(tr!("branches.title")),
@@ -2611,8 +2611,8 @@ impl Waku {
                     .tab_index(0)
                     .tab_group()
                     .tab_stop(false)
-                    .text_size(px(11.0))
-                    .line_height(px(14.0))
+                    .text_size_px(11.0)
+                    .line_height(rems_from_px(14.0))
                     .child(project_selector)
                     .child(worktree_selector)
                     .children(branch_selector)

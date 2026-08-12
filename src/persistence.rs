@@ -31,6 +31,7 @@ use crate::model::{
     ProviderKind, RuntimeMode, SessionWorkspace,
 };
 use crate::theme::ThemePreference;
+use crate::typography::FontSizePreference;
 
 const STATE_VERSION: u32 = 5;
 const APP_STATE_VERSION: u32 = 1;
@@ -245,6 +246,7 @@ pub struct AppSettings {
     pub analytics_enabled: bool,
     pub favorite_models: Vec<FavoriteModel>,
     pub theme: ThemePreference,
+    pub font_size: FontSizePreference,
     pub language: AppLanguage,
     pub computer_use_enabled: bool,
     pub computer_use_allowed_apps: Vec<ComputerAppGrant>,
@@ -262,6 +264,7 @@ impl Default for AppSettings {
             analytics_enabled: default_analytics_enabled(),
             favorite_models: Vec::new(),
             theme: ThemePreference::System,
+            font_size: FontSizePreference::default(),
             language: AppLanguage::default(),
             computer_use_enabled: default_computer_use_enabled(),
             computer_use_allowed_apps: Vec::new(),
@@ -325,6 +328,8 @@ pub struct PersistedState {
     pub favorite_models: Vec<FavoriteModel>,
     #[serde(default)]
     pub theme: ThemePreference,
+    #[serde(default)]
+    pub font_size: FontSizePreference,
     #[serde(default)]
     pub language: AppLanguage,
     #[serde(default = "default_sidebar_visibility")]
@@ -391,6 +396,7 @@ impl PersistedState {
             last_service_tier: None,
             favorite_models: Vec::new(),
             theme: ThemePreference::System,
+            font_size: FontSizePreference::default(),
             language: AppLanguage::default(),
             sidebar_visible: true,
             right_panel_visible: false,
@@ -433,6 +439,7 @@ impl PersistedState {
             analytics_enabled: self.analytics_enabled,
             favorite_models: self.favorite_models.clone(),
             theme: self.theme,
+            font_size: self.font_size,
             language: self.language,
             computer_use_enabled: self.computer_use_enabled,
             computer_use_allowed_apps: self.computer_use_allowed_apps.clone(),
@@ -462,6 +469,7 @@ impl PersistedState {
         self.analytics_enabled = settings.analytics_enabled;
         self.favorite_models = settings.favorite_models;
         self.theme = settings.theme;
+        self.font_size = settings.font_size;
         self.language = settings.language;
         self.computer_use_enabled = settings.computer_use_enabled;
         self.computer_use_allowed_apps = settings.computer_use_allowed_apps;
@@ -1746,6 +1754,7 @@ mod tests {
             serde_json::from_slice(&fs::read(directory.join("state.json")).unwrap()).unwrap();
 
         assert_eq!(settings["analytics_enabled"], true);
+        assert_eq!(settings["font_size"], "default");
         assert!(settings.get("analytics_id").is_none());
         assert_eq!(app_state["analytics_id"], restored.analytics_id.to_string());
         assert!(app_state.get("analytics_enabled").is_none());
@@ -1773,6 +1782,7 @@ mod tests {
         let settings: AppSettings = serde_json::from_str(r#"{"theme":"dark"}"#).unwrap();
 
         assert_eq!(settings.theme, ThemePreference::Dark);
+        assert_eq!(settings.font_size, FontSizePreference::Default);
         assert_eq!(settings.language, AppLanguage::System);
         assert!(settings.analytics_enabled);
         assert!(!settings.computer_use_enabled);
@@ -2260,6 +2270,7 @@ mod tests {
             model: "gpt-5.6-luna".into(),
         });
         state.theme = ThemePreference::Light;
+        state.font_size = FontSizePreference::ExtraLarge;
         state.language = AppLanguage::SimplifiedChinese;
         state.sidebar_visible = false;
         state.right_panel_visible = false;
@@ -2313,6 +2324,7 @@ mod tests {
         );
         assert_eq!(restored.favorite_models, state.favorite_models);
         assert_eq!(restored.theme, ThemePreference::Light);
+        assert_eq!(restored.font_size, FontSizePreference::ExtraLarge);
         assert_eq!(restored.language, AppLanguage::SimplifiedChinese);
         assert!(!restored.sidebar_visible);
         assert!(!restored.right_panel_visible);
@@ -2471,6 +2483,7 @@ mod tests {
         let store = store_in(&directory);
         let mut state = PersistedState::fresh(PathBuf::from("/tmp/project"));
         state.theme = ThemePreference::Light;
+        state.font_size = FontSizePreference::Large;
         state.language = AppLanguage::SimplifiedChinese;
         state.sidebar_width = 301.0;
         store.save(&mut state).unwrap();
@@ -2483,6 +2496,7 @@ mod tests {
         );
         let value: serde_json::Value = serde_json::from_str(&text).unwrap();
         assert_eq!(value["theme"], "light");
+        assert_eq!(value["font_size"], "large");
         assert_eq!(value["language"], "simplified-chinese");
         for app_managed_key in [
             "version",
@@ -2513,6 +2527,7 @@ mod tests {
             "analytics_enabled",
             "favorite_models",
             "theme",
+            "font_size",
             "language",
             "computer_use_enabled",
             "computer_use_allowed_apps",
@@ -2530,7 +2545,40 @@ mod tests {
         fs::write(&settings, edited).unwrap();
         let restored = store_in(&directory).load().unwrap();
         assert_eq!(restored.language, AppLanguage::English);
+        assert_eq!(restored.font_size, FontSizePreference::Large);
         assert_eq!(restored.sidebar_width, 301.0);
+
+        fs::remove_dir_all(directory).ok();
+    }
+
+    #[test]
+    fn unknown_font_size_does_not_discard_persisted_projects_or_sessions() {
+        let directory = temporary_directory();
+        let store = store_in(&directory);
+        let project_path = PathBuf::from("/tmp/preserved-project");
+        let mut state = PersistedState::fresh(project_path.clone());
+        let project_id = state.projects[0].id;
+        let session_id = state.sessions[0].id;
+        state.sessions[0].begin_turn("Persist me");
+        state.sessions[0].finish_active_turn(crate::model::TurnStatus::Completed);
+        store.save(&mut state).unwrap();
+
+        let settings_path = directory.join("settings.json");
+        let mut settings: serde_json::Value =
+            serde_json::from_slice(&fs::read(&settings_path).unwrap()).unwrap();
+        settings["font_size"] = serde_json::json!("future_size");
+        fs::write(
+            &settings_path,
+            serde_json::to_vec_pretty(&settings).unwrap(),
+        )
+        .unwrap();
+
+        let restored = load_hydrated(&store_in(&directory));
+        assert_eq!(restored.font_size, FontSizePreference::Default);
+        assert_eq!(restored.projects[0].id, project_id);
+        assert_eq!(restored.projects[0].path, project_path);
+        assert_eq!(restored.sessions[0].id, session_id);
+        assert_eq!(restored.sessions[0].messages[0].content, "Persist me");
 
         fs::remove_dir_all(directory).ok();
     }

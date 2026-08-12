@@ -14,6 +14,7 @@ use gpui::{
 use unicode_segmentation::UnicodeSegmentation;
 
 use crate::theme::Theme;
+use crate::typography::{TextSizeExt, rems_from_px};
 
 actions!(
     composer,
@@ -527,6 +528,11 @@ pub struct ComposerInput {
     /// address bar's page echo shows the start of the URL.
     scroll_offset: Pixels,
     last_layout: Option<TextLayout>,
+    /// Request one follow-up frame after the next text layout lands. File
+    /// editor gutters consume the previous layout's wrapped-row heights, so a
+    /// global font-size change needs this second pass even if the editor was
+    /// hidden while the setting changed.
+    notify_after_layout: bool,
     /// Horizontal goal and soft-wrap affinity for consecutive Up/Down
     /// presses. A byte offset at a wrap boundary can mean either the end of
     /// one visual row or the start of the next, so the offset alone is not
@@ -591,6 +597,7 @@ impl ComposerInput {
             marked_range: None,
             scroll_offset: px(0.),
             last_layout: None,
+            notify_after_layout: false,
             vertical_navigation: None,
             is_selecting: false,
             selected_word_range: None,
@@ -618,6 +625,14 @@ impl ComposerInput {
 
     pub fn focus(&self) -> FocusHandle {
         self.focus_handle.clone()
+    }
+
+    /// Discard geometry derived from the previous root font size.
+    pub fn invalidate_layout(&mut self, cx: &mut Context<Self>) {
+        self.last_layout = None;
+        self.vertical_navigation = None;
+        self.notify_after_layout = true;
+        cx.notify();
     }
 
     pub fn is_visually_focused(&self, window: &Window) -> bool {
@@ -2173,8 +2188,11 @@ impl Element for InputElement {
             window.paint_quad(cursor);
         }
         let text_layout = layout_state.text.layout().clone();
-        self.input.update(cx, |input, _| {
+        self.input.update(cx, |input, cx| {
             input.last_layout = Some(text_layout);
+            if std::mem::take(&mut input.notify_after_layout) {
+                cx.notify();
+            }
         });
     }
 }
@@ -2229,8 +2247,8 @@ impl Render for ComposerInput {
             .when(self.mode == FieldMode::Composer, |field| {
                 field
                     .min_h(px(24.0))
-                    .line_height(px(22.0))
-                    .text_size(px(13.5))
+                    .line_height(rems_from_px(22.0))
+                    .text_size_px(13.5)
             })
             // A search-mode field is visually one line: the text never wraps,
             // and the overlong remainder slides horizontally under this

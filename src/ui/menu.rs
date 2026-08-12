@@ -78,6 +78,7 @@ pub fn init(cx: &mut App) {
 }
 
 use crate::theme::Theme;
+use crate::typography::{TextSizeExt, rems_from_px};
 use crate::ui::icon;
 
 /// One row of a menu.
@@ -948,8 +949,8 @@ impl RenderOnce for MenuCard {
                     .px(px(10.0))
                     .pt(px(6.0))
                     .pb(px(2.0))
-                    .text_size(px(10.0))
-                    .line_height(px(14.0))
+                    .text_size_px(10.0)
+                    .line_height(rems_from_px(14.0))
                     .font_weight(FontWeight::MEDIUM)
                     .text_color(theme.text_tertiary)
                     .child(label)
@@ -1028,8 +1029,8 @@ fn row(
         .flex()
         .items_center()
         .gap(px(8.0))
-        .text_size(px(11.5))
-        .line_height(px(15.0))
+        .text_size_px(11.5)
+        .line_height(rems_from_px(15.0))
         .when(highlighted, |element| element.bg(highlight))
         .when_some(on_click, |element, on_click| {
             element

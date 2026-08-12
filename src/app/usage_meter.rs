@@ -388,7 +388,7 @@ fn usage_panel(
         .flex()
         .flex_col()
         .gap(px(12.0))
-        .text_size(px(12.0));
+        .text_size_px(12.0);
 
     // The context row always renders; a session with nothing measured yet
     // reads "0" over an empty track, exactly like the CLI's own panel.
@@ -421,7 +421,7 @@ fn usage_panel(
                     .child(div().flex_1())
                     .child(
                         div()
-                            .text_size(px(11.0))
+                            .text_size_px(11.0)
                             .text_color(theme.text_tertiary)
                             .child(SharedString::from(value)),
                     ),
@@ -447,7 +447,7 @@ fn usage_panel(
                 .flex_1()
                 .min_w(px(0.0))
                 .truncate()
-                .text_size(px(11.0))
+                .text_size_px(11.0)
                 .text_color(theme.text_tertiary)
                 .child(SharedString::from(header)),
         );
@@ -487,14 +487,14 @@ fn usage_panel(
                             .children(window.resets_at.map(|resets_at| {
                                 div()
                                     .flex_none()
-                                    .text_size(px(11.0))
+                                    .text_size_px(11.0)
                                     .text_color(theme.text_tertiary)
                                     .child(SharedString::from(reset_label(resets_at, now)))
                             }))
                             .child(
                                 div()
                                     .flex_none()
-                                    .text_size(px(11.5))
+                                    .text_size_px(11.5)
                                     .text_color(theme.text_secondary)
                                     .child(SharedString::from(format!("{:.0}%", window.percent))),
                             ),
@@ -512,13 +512,13 @@ fn usage_panel(
                 .gap(px(4.0))
                 .child(
                     div()
-                        .text_size(px(11.0))
+                        .text_size_px(11.0)
                         .text_color(theme.text_tertiary)
                         .child(tr!("usage.plan_limits")),
                 )
                 .child(
                     div()
-                        .text_size(px(11.0))
+                        .text_size_px(11.0)
                         .text_color(theme.text_secondary)
                         .child(SharedString::from(tr!("usage.unavailable", error = error))),
                 ),

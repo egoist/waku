@@ -32,6 +32,7 @@ use parking_lot::Mutex;
 
 use crate::persistence::DEFAULT_RIGHT_PANEL_WIDTH;
 use crate::theme::Theme;
+use crate::typography::{BASE_REM_SIZE_IN_PX, TextSizeExt, rems_from_px};
 
 const TERMINAL_CELL_WIDTH: f32 = 7.2;
 const TERMINAL_CELL_HEIGHT: f32 = 16.0;
@@ -151,6 +152,7 @@ struct TerminalSession {
     ui_events: Receiver<TerminalUiEvent>,
     window_size: Arc<Mutex<WindowSize>>,
     grid_size: (usize, usize),
+    cell_size: (u16, u16),
     dark_theme: Arc<AtomicBool>,
     url_regex: RegexSearch,
 }
@@ -223,6 +225,7 @@ impl TerminalSession {
             ui_events,
             window_size: shared_window_size,
             grid_size: (columns, rows),
+            cell_size: (window_size.cell_width, window_size.cell_height),
             dark_theme,
             url_regex,
         })
@@ -235,21 +238,29 @@ impl TerminalSession {
         }
     }
 
-    fn resize(&mut self, columns: usize, rows: usize) {
+    fn resize(&mut self, columns: usize, rows: usize, cell_width: f32, cell_height: f32) {
         let columns = columns.max(TERMINAL_MIN_COLUMNS);
         let rows = rows.max(TERMINAL_MIN_ROWS);
-        if self.grid_size == (columns, rows) {
+        let cell_size = (
+            cell_width.round().clamp(1.0, u16::MAX as f32) as u16,
+            cell_height.round().clamp(1.0, u16::MAX as f32) as u16,
+        );
+        let grid_changed = self.grid_size != (columns, rows);
+        if !grid_changed && self.cell_size == cell_size {
             return;
         }
 
         self.grid_size = (columns, rows);
-        let dimensions = TerminalDimensions { columns, rows };
-        self.term.lock().resize(dimensions);
+        self.cell_size = cell_size;
+        if grid_changed {
+            let dimensions = TerminalDimensions { columns, rows };
+            self.term.lock().resize(dimensions);
+        }
         let size = WindowSize {
             num_lines: rows.min(u16::MAX as usize) as u16,
             num_cols: columns.min(u16::MAX as usize) as u16,
-            cell_width: TERMINAL_CELL_WIDTH.round() as u16,
-            cell_height: TERMINAL_CELL_HEIGHT.round() as u16,
+            cell_width: cell_size.0,
+            cell_height: cell_size.1,
         };
         *self.window_size.lock() = size;
         let _ = self.sender.send(Msg::Resize(size));
@@ -565,6 +576,8 @@ pub struct TerminalView {
     exited: bool,
     scroll_accumulator: f32,
     panel_width: f32,
+    cell_width: f32,
+    cell_height: f32,
     grid_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
     selecting: bool,
     hovered_link: Option<TerminalLink>,
@@ -625,6 +638,8 @@ impl TerminalView {
             exited: false,
             scroll_accumulator: 0.0,
             panel_width: DEFAULT_RIGHT_PANEL_WIDTH,
+            cell_width: TERMINAL_CELL_WIDTH,
+            cell_height: TERMINAL_CELL_HEIGHT,
             grid_bounds: Rc::new(Cell::new(None)),
             selecting: false,
             hovered_link: None,
@@ -731,6 +746,8 @@ impl TerminalView {
             session.grid_size.1,
             display_offset,
             clamp_to_grid,
+            self.cell_width,
+            self.cell_height,
         )
     }
 
@@ -909,7 +926,7 @@ impl TerminalView {
             return;
         };
         let delta = match event.delta {
-            ScrollDelta::Pixels(delta) => f32::from(delta.y) / TERMINAL_CELL_HEIGHT,
+            ScrollDelta::Pixels(delta) => f32::from(delta.y) / self.cell_height,
             ScrollDelta::Lines(delta) => delta.y,
         };
         self.scroll_accumulator += delta;
@@ -970,13 +987,18 @@ impl Render for TerminalView {
         self.ensure_cursor_focus_tracking(window, cx);
         let theme = Theme::current(cx);
         let selection_color = theme.selection;
+        let text_scale = f32::from(window.rem_size()) / BASE_REM_SIZE_IN_PX;
+        self.cell_width = TERMINAL_CELL_WIDTH * text_scale;
+        self.cell_height = TERMINAL_CELL_HEIGHT * text_scale;
+        let cell_width = self.cell_width;
+        let cell_height = self.cell_height;
         let viewport = window.viewport_size();
         let panel_width = self.panel_width;
         let body_height = (f32::from(viewport.height) - 48.0 - TERMINAL_TOOLBAR_HEIGHT).max(120.0);
-        let columns = ((panel_width - TERMINAL_PADDING_X * 2.0) / TERMINAL_CELL_WIDTH)
+        let columns = ((panel_width - TERMINAL_PADDING_X * 2.0) / cell_width)
             .floor()
             .max(TERMINAL_MIN_COLUMNS as f32) as usize;
-        let rows = ((body_height - TERMINAL_PADDING_Y * 2.0) / TERMINAL_CELL_HEIGHT)
+        let rows = ((body_height - TERMINAL_PADDING_Y * 2.0) / cell_height)
             .floor()
             .max(TERMINAL_MIN_ROWS as f32) as usize;
 
@@ -984,7 +1006,7 @@ impl Render for TerminalView {
         let cursor_style =
             terminal_cursor_style(terminal_focused, self.cursor_blink.read(cx).visible());
         if let Some(session) = self.session.as_mut() {
-            session.resize(columns, rows);
+            session.resize(columns, rows, cell_width, cell_height);
         }
         if self.selecting {
             self.set_hovered_link(None);
@@ -1065,12 +1087,12 @@ impl Render for TerminalView {
                     .collect::<Vec<_>>();
                 screen = screen.child(
                     div()
-                        .h(px(TERMINAL_CELL_HEIGHT))
+                        .h(px(cell_height))
                         .flex_none()
                         .overflow_hidden()
                         .whitespace_nowrap()
-                        .text_size(px(TERMINAL_FONT_SIZE))
-                        .line_height(px(TERMINAL_CELL_HEIGHT))
+                        .text_size_px(TERMINAL_FONT_SIZE)
+                        .line_height(px(cell_height))
                         .child(StyledText::new(row.text).with_runs(runs)),
                 );
             }
@@ -1078,10 +1100,10 @@ impl Render for TerminalView {
                 screen = screen.child(
                     div()
                         .absolute()
-                        .left(px(column as f32 * TERMINAL_CELL_WIDTH))
-                        .top(px(row as f32 * TERMINAL_CELL_HEIGHT))
-                        .w(px(TERMINAL_CELL_WIDTH))
-                        .h(px(TERMINAL_CELL_HEIGHT))
+                        .left(px(column as f32 * cell_width))
+                        .top(px(row as f32 * cell_height))
+                        .w(px(cell_width))
+                        .h(px(cell_height))
                         .border_1()
                         .border_color(theme.text),
                 );
@@ -1090,8 +1112,8 @@ impl Render for TerminalView {
             screen = screen.child(
                 div()
                     .p(px(12.0))
-                    .text_size(px(11.0))
-                    .line_height(px(17.0))
+                    .text_size_px(11.0)
+                    .line_height(rems_from_px(17.0))
                     .text_color(if self.error.is_some() {
                         theme.danger
                     } else {
@@ -1205,14 +1227,14 @@ impl Render for TerminalView {
                             .min_w_0()
                             .flex_1()
                             .truncate()
-                            .text_size(px(10.5))
+                            .text_size_px(10.5)
                             .text_color(theme.text_secondary)
                             .child(SharedString::from(title.to_owned())),
                     )
                     .child(
                         div()
                             .flex_none()
-                            .text_size(px(10.0))
+                            .text_size_px(10.0)
                             .text_color(theme.text_tertiary)
                             .child(directory),
                     ),
@@ -1240,6 +1262,8 @@ fn terminal_grid_point(
     rows: usize,
     display_offset: usize,
     clamp_to_grid: bool,
+    cell_width: f32,
+    cell_height: f32,
 ) -> Option<(TerminalPoint, Side)> {
     if columns == 0 || rows == 0 || (!clamp_to_grid && !bounds.contains(&position)) {
         return None;
@@ -1247,13 +1271,13 @@ fn terminal_grid_point(
 
     let x = f32::from(position.x - bounds.origin.x);
     let y = f32::from(position.y - bounds.origin.y);
-    let max_x = columns as f32 * TERMINAL_CELL_WIDTH;
-    let max_y = rows as f32 * TERMINAL_CELL_HEIGHT;
+    let max_x = columns as f32 * cell_width;
+    let max_y = rows as f32 * cell_height;
     let x = x.clamp(0.0, max_x);
     let y = y.clamp(0.0, max_y);
-    let column = ((x / TERMINAL_CELL_WIDTH).floor() as usize).min(columns - 1);
-    let viewport_row = ((y / TERMINAL_CELL_HEIGHT).floor() as usize).min(rows - 1) as i32;
-    let side = if x >= max_x || x % TERMINAL_CELL_WIDTH >= TERMINAL_CELL_WIDTH / 2.0 {
+    let column = ((x / cell_width).floor() as usize).min(columns - 1);
+    let viewport_row = ((y / cell_height).floor() as usize).min(rows - 1) as i32;
+    let side = if x >= max_x || x % cell_width >= cell_width / 2.0 {
         Side::Right
     } else {
         Side::Left
@@ -1807,11 +1831,29 @@ mod tests {
         );
 
         assert_eq!(
-            terminal_grid_point(bounds, position, 10, 4, 3, false),
+            terminal_grid_point(
+                bounds,
+                position,
+                10,
+                4,
+                3,
+                false,
+                TERMINAL_CELL_WIDTH,
+                TERMINAL_CELL_HEIGHT,
+            ),
             Some((TerminalPoint::new(Line(-2), Column(2)), Side::Right))
         );
         assert_eq!(
-            terminal_grid_point(bounds, point(px(0.0), px(0.0)), 10, 4, 3, false),
+            terminal_grid_point(
+                bounds,
+                point(px(0.0), px(0.0)),
+                10,
+                4,
+                3,
+                false,
+                TERMINAL_CELL_WIDTH,
+                TERMINAL_CELL_HEIGHT,
+            ),
             None
         );
     }
@@ -1821,11 +1863,29 @@ mod tests {
         let bounds = Bounds::new(point(px(10.0), px(20.0)), size(px(72.0), px(64.0)));
 
         assert_eq!(
-            terminal_grid_point(bounds, point(px(500.0), px(500.0)), 10, 4, 0, true),
+            terminal_grid_point(
+                bounds,
+                point(px(500.0), px(500.0)),
+                10,
+                4,
+                0,
+                true,
+                TERMINAL_CELL_WIDTH,
+                TERMINAL_CELL_HEIGHT,
+            ),
             Some((TerminalPoint::new(Line(3), Column(9)), Side::Right))
         );
         assert_eq!(
-            terminal_grid_point(bounds, point(px(-50.0), px(-50.0)), 10, 4, 3, true),
+            terminal_grid_point(
+                bounds,
+                point(px(-50.0), px(-50.0)),
+                10,
+                4,
+                3,
+                true,
+                TERMINAL_CELL_WIDTH,
+                TERMINAL_CELL_HEIGHT,
+            ),
             Some((TerminalPoint::new(Line(-3), Column(0)), Side::Left))
         );
     }
