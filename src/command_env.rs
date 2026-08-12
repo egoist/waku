@@ -61,6 +61,7 @@ fn search_paths_from(path: Option<&OsStr>, home: Option<&Path>) -> Vec<PathBuf> 
             home.join(".local/bin"),
             home.join(".bun/bin"),
             home.join(".cargo/bin"),
+            home.join(".grok/bin"),
             home.join(".local/share/mise/shims"),
             home.join(".volta/bin"),
         ]);
@@ -91,6 +92,7 @@ mod tests {
         assert_eq!(paths[0], PathBuf::from("/usr/bin"));
         assert_eq!(paths[1], PathBuf::from("/bin"));
         assert!(paths.contains(&home.join(".bun/bin")));
+        assert!(paths.contains(&home.join(".grok/bin")));
         assert!(paths.contains(&home.join(".local/share/mise/shims")));
         assert!(paths.contains(&PathBuf::from("/opt/homebrew/bin")));
         assert_eq!(
