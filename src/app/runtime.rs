@@ -823,9 +823,10 @@ impl Waku {
         if std::thread::Builder::new()
             .name("waku-provider-detection".into())
             .spawn(move || {
-                // Finder/Dock launches do not inherit the PATH assembled by
-                // the user's interactive shell. Resolve it here, away from
-                // the UI thread, before looking for nvm/fnm-managed CLIs.
+                // Finder/Dock launches do not inherit the environment
+                // assembled by the user's interactive shell. Resolve it here,
+                // away from the UI thread, before looking for nvm/fnm-managed
+                // CLIs and launching provider probes.
                 crate::command_env::refresh_from_default_shell();
                 for provider in detect_providers {
                     let path = match overrides.get(&provider) {
@@ -2688,11 +2689,9 @@ mod response_fork_title_tests {
 /// Run `<cli> --version` and pull a version number out of whatever it prints.
 /// Blocking; runs on a version-probe thread, never on the UI thread.
 fn probe_provider_version(binary: &std::path::Path) -> Option<String> {
-    let output = crate::command_env::command(binary)
-        .arg("--version")
-        .stdin(std::process::Stdio::null())
-        .output()
-        .ok()?;
+    let mut command = crate::command_env::command(binary);
+    let command = command.arg("--version").stdin(std::process::Stdio::null());
+    let output = crate::command_env::output(command).ok()?;
     let combined = format!(
         "{}\n{}",
         String::from_utf8_lossy(&output.stdout),

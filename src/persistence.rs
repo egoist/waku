@@ -67,6 +67,22 @@ fn default_right_panel_width() -> f32 {
     DEFAULT_RIGHT_PANEL_WIDTH
 }
 
+/// Explicit trait choices remembered for one provider model.
+///
+/// Reasoning effort and service tier are model capabilities, so their option
+/// ids must not leak into another provider merely because that provider uses
+/// the same strings. Keeping the key beside the values lets the model picker
+/// restore them when the user returns to the model that owns them.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub(crate) struct RememberedModelTraits {
+    provider: ProviderKind,
+    model: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    reasoning_effort: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    service_tier: Option<String>,
+}
+
 /// One file or directory staged in the composer.
 ///
 /// The presentation metadata is stored with the path so restoring a draft
@@ -291,6 +307,8 @@ struct AppState {
     last_reasoning_effort: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     last_service_tier: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    remembered_model_traits: Vec<RememberedModelTraits>,
     #[serde(default = "default_sidebar_visibility")]
     sidebar_visible: bool,
     #[serde(default = "default_right_panel_visibility")]
@@ -321,6 +339,8 @@ pub struct PersistedState {
     pub last_reasoning_effort: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_service_tier: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) remembered_model_traits: Vec<RememberedModelTraits>,
     #[serde(default)]
     pub favorite_models: Vec<FavoriteModel>,
     #[serde(default)]
@@ -389,6 +409,7 @@ impl PersistedState {
             last_model: None,
             last_reasoning_effort: None,
             last_service_tier: None,
+            remembered_model_traits: Vec::new(),
             favorite_models: Vec::new(),
             theme: ThemePreference::System,
             language: AppLanguage::default(),
@@ -428,6 +449,49 @@ impl PersistedState {
         session
     }
 
+    pub(crate) fn remember_model_traits(
+        &mut self,
+        provider: ProviderKind,
+        model: &str,
+        reasoning_effort: Option<String>,
+        service_tier: Option<String>,
+    ) {
+        let existing = self
+            .remembered_model_traits
+            .iter()
+            .position(|traits| traits.provider == provider && traits.model == model);
+        if reasoning_effort.is_none() && service_tier.is_none() {
+            if let Some(index) = existing {
+                self.remembered_model_traits.remove(index);
+            }
+            return;
+        }
+        if let Some(index) = existing {
+            let traits = &mut self.remembered_model_traits[index];
+            traits.reasoning_effort = reasoning_effort;
+            traits.service_tier = service_tier;
+        } else {
+            self.remembered_model_traits.push(RememberedModelTraits {
+                provider,
+                model: model.to_owned(),
+                reasoning_effort,
+                service_tier,
+            });
+        }
+    }
+
+    pub(crate) fn model_traits_for(
+        &self,
+        provider: ProviderKind,
+        model: &str,
+    ) -> (Option<String>, Option<String>) {
+        self.remembered_model_traits
+            .iter()
+            .find(|traits| traits.provider == provider && traits.model == model)
+            .map(|traits| (traits.reasoning_effort.clone(), traits.service_tier.clone()))
+            .unwrap_or_default()
+    }
+
     fn settings(&self) -> AppSettings {
         AppSettings {
             analytics_enabled: self.analytics_enabled,
@@ -451,6 +515,7 @@ impl PersistedState {
             last_model: self.last_model.clone(),
             last_reasoning_effort: self.last_reasoning_effort.clone(),
             last_service_tier: self.last_service_tier.clone(),
+            remembered_model_traits: self.remembered_model_traits.clone(),
             sidebar_visible: self.sidebar_visible,
             right_panel_visible: self.right_panel_visible,
             sidebar_width: self.sidebar_width,
@@ -477,6 +542,7 @@ impl PersistedState {
         self.last_model = app_state.last_model;
         self.last_reasoning_effort = app_state.last_reasoning_effort;
         self.last_service_tier = app_state.last_service_tier;
+        self.remembered_model_traits = app_state.remembered_model_traits;
         self.sidebar_visible = app_state.sidebar_visible;
         self.right_panel_visible = app_state.right_panel_visible;
         self.sidebar_width = app_state.sidebar_width;
@@ -2254,6 +2320,12 @@ mod tests {
         state.last_reasoning_effort = Some("xhigh".into());
         state.sessions[0].service_tier = Some("fast".into());
         state.last_service_tier = Some("fast".into());
+        state.remember_model_traits(
+            ProviderKind::Codex,
+            "gpt-5.6-luna",
+            Some("xhigh".into()),
+            Some("fast".into()),
+        );
         state.sessions[0].runtime_mode = crate::model::RuntimeMode::Auto;
         state.favorite_models.push(FavoriteModel {
             provider: ProviderKind::Codex,
@@ -2307,6 +2379,10 @@ mod tests {
             Some("xhigh")
         );
         assert_eq!(restored.sessions[0].service_tier.as_deref(), Some("fast"));
+        assert_eq!(
+            restored.model_traits_for(ProviderKind::Codex, "gpt-5.6-luna"),
+            (Some("xhigh".into()), Some("fast".into()))
+        );
         assert_eq!(
             restored.sessions[0].runtime_mode,
             crate::model::RuntimeMode::Auto
@@ -2494,6 +2570,7 @@ mod tests {
             "last_model",
             "last_reasoning_effort",
             "last_service_tier",
+            "remembered_model_traits",
             "sidebar_visible",
             "right_panel_visible",
             "sidebar_width",
@@ -3208,6 +3285,33 @@ mod tests {
         assert!(other_provider.model.is_none());
         assert!(other_provider.reasoning_effort.is_none());
         assert!(other_provider.service_tier.is_none());
+    }
+
+    #[test]
+    fn model_traits_are_remembered_by_provider_and_model() {
+        let mut state = PersistedState::fresh(PathBuf::from("/tmp/project"));
+        state.remember_model_traits(
+            ProviderKind::Codex,
+            "gpt-5.6-sol",
+            Some("max".into()),
+            Some("fast".into()),
+        );
+
+        assert_eq!(
+            state.model_traits_for(ProviderKind::Claude, "claude-opus-5"),
+            (None, None),
+            "a different provider starts from its own defaults"
+        );
+        assert_eq!(
+            state.model_traits_for(ProviderKind::Codex, "gpt-5.6-terra"),
+            (None, None),
+            "a different model starts from its own defaults"
+        );
+        assert_eq!(
+            state.model_traits_for(ProviderKind::Codex, "gpt-5.6-sol"),
+            (Some("max".into()), Some("fast".into())),
+            "switching back restores both explicit choices"
+        );
     }
 
     #[test]

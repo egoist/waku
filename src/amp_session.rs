@@ -45,7 +45,8 @@ pub fn prompt_with_fork_context(context: &str, prompt: &str) -> String {
 /// Amp does not put its generated thread title on the streaming channel. The
 /// native thread index is its authoritative metadata surface instead.
 pub fn thread_title(binary: &Path, cwd: &Path, thread_id: &str) -> anyhow::Result<Option<String>> {
-    let output = crate::command_env::command(binary)
+    let mut command = crate::command_env::command(binary);
+    let command = command
         .args([
             "threads",
             "list",
@@ -55,9 +56,9 @@ pub fn thread_title(binary: &Path, cwd: &Path, thread_id: &str) -> anyhow::Resul
             "100",
         ])
         .current_dir(cwd)
-        .stdin(Stdio::null())
-        .output()
-        .context("failed to read Amp thread metadata")?;
+        .stdin(Stdio::null());
+    let output =
+        crate::command_env::output(command).context("failed to read Amp thread metadata")?;
     if !output.status.success() {
         let detail = String::from_utf8_lossy(&output.stderr);
         bail!("Amp could not list its threads: {}", detail.trim());
@@ -83,12 +84,12 @@ fn title_from_thread_list(threads: &Value, thread_id: &str) -> Option<String> {
 }
 
 fn export_thread(binary: &Path, cwd: &Path, thread_id: &str) -> anyhow::Result<Value> {
-    let output = crate::command_env::command(binary)
+    let mut command = crate::command_env::command(binary);
+    let command = command
         .args(["threads", "export", thread_id])
         .current_dir(cwd)
-        .stdin(Stdio::null())
-        .output()
-        .context("failed to export the Amp thread")?;
+        .stdin(Stdio::null());
+    let output = crate::command_env::output(command).context("failed to export the Amp thread")?;
     if !output.status.success() {
         let detail = String::from_utf8_lossy(&output.stderr);
         bail!("Amp could not export thread {thread_id}: {}", detail.trim());
@@ -97,12 +98,13 @@ fn export_thread(binary: &Path, cwd: &Path, thread_id: &str) -> anyhow::Result<V
 }
 
 fn create_thread(binary: &Path, cwd: &Path) -> anyhow::Result<String> {
-    let output = crate::command_env::command(binary)
+    let mut command = crate::command_env::command(binary);
+    let command = command
         .args(["threads", "new"])
         .current_dir(cwd)
-        .stdin(Stdio::null())
-        .output()
-        .context("failed to create the Amp branch thread")?;
+        .stdin(Stdio::null());
+    let output =
+        crate::command_env::output(command).context("failed to create the Amp branch thread")?;
     if !output.status.success() {
         let detail = String::from_utf8_lossy(&output.stderr);
         bail!("Amp could not create the branch thread: {}", detail.trim());

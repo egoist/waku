@@ -118,13 +118,13 @@ impl PiDriver {
                 .zip(pi_extension.as_deref())
                 .map(|(runtime, extension)| (&runtime.config, extension)),
         );
-        let mut child = command
+        let command = command
             .current_dir(cwd)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .context("failed to start `pi --mode rpc`")?;
+            .stderr(Stdio::piped());
+        let mut child =
+            crate::command_env::spawn(command).context("failed to start `pi --mode rpc`")?;
         let stdin = child
             .stdin
             .take()

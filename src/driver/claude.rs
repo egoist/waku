@@ -171,11 +171,11 @@ impl ClaudeDriver {
             command.args(["--session-id", &session_id]);
         }
 
-        let mut child = command
+        let command = command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
+            .stderr(Stdio::piped());
+        let mut child = crate::command_env::spawn(command)
             .context("failed to start `claude` in streaming-input mode")?;
         let stdin = child
             .stdin
@@ -483,7 +483,10 @@ fn write_line(writer: &mut impl Write, value: &Value) -> std::io::Result<()> {
 struct ClaudeStreamState {
     saw_text_delta: bool,
     saw_reasoning_delta: bool,
-    tools: HashMap<String, (ActivityKind, String, String)>,
+    /// Tool-use id → transcript presentation plus the full shell command.
+    /// Claude's later `task_started` event links back by id but does not repeat
+    /// the command, so keep it here until the matching tool result arrives.
+    tools: HashMap<String, (ActivityKind, String, String, Option<String>)>,
     background_task_kinds: HashMap<String, BackgroundWorkKind>,
     /// Task tool-use id → task id, so a subagent's own messages — they arrive
     /// on the main channel with `parent_tool_use_id` set — can be routed into
@@ -581,7 +584,7 @@ fn claude_task_kind(value: &Value, state: &ClaudeStreamState) -> BackgroundWorkK
         .and_then(Value::as_str);
     if tool_use_id
         .and_then(|id| state.tools.get(id))
-        .is_some_and(|(_, _, wire_name)| wire_name.eq_ignore_ascii_case("monitor"))
+        .is_some_and(|(_, _, wire_name, _)| wire_name.eq_ignore_ascii_case("monitor"))
     {
         BackgroundWorkKind::Monitor
     } else {
@@ -662,13 +665,23 @@ fn claude_task_item(
         .get("model")
         .and_then(Value::as_str)
         .map(str::to_owned);
-    // The launch prompt rides task_started and lands in the detail surface.
+    // Subagent prompts ride `task_started`, but detached Bash tasks only link
+    // back to the originating tool call by id. Preserve either as the detail
+    // surface's Prompt/Command value.
     item.command = value
         .get("prompt")
+        .or_else(|| value.get("command"))
+        .or_else(|| value.pointer("/task/command"))
         .and_then(Value::as_str)
         .map(str::trim)
         .filter(|text| !text.is_empty())
-        .map(str::to_owned);
+        .map(str::to_owned)
+        .or_else(|| {
+            item.origin_activity_id
+                .as_deref()
+                .and_then(|id| state.tools.get(id))
+                .and_then(|(_, _, _, command)| command.clone())
+        });
     // The settle notification's summary is the subagent's final report and
     // belongs in the output pane — unless the live transcript already
     // streamed there.
@@ -1044,9 +1057,16 @@ fn handle_message(
                         let kind = super::support::classify_tool(&wire_title);
                         let title = activity::tool_title(block, &wire_title);
                         if let Some(id) = &id {
-                            state
-                                .tools
-                                .insert(id.clone(), (kind, title.clone(), wire_title.clone()));
+                            let command = block
+                                .pointer("/input/command")
+                                .and_then(Value::as_str)
+                                .map(str::trim)
+                                .filter(|command| !command.is_empty())
+                                .map(str::to_owned);
+                            state.tools.insert(
+                                id.clone(),
+                                (kind, title.clone(), wire_title.clone(), command),
+                            );
                         }
                         let _ = events.send(DriverEvent::RichActivity(activity::tool_activity(
                             id,
@@ -1089,10 +1109,15 @@ fn handle_message(
                     .get("tool_use_id")
                     .and_then(Value::as_str)
                     .map(str::to_owned);
-                let (kind, title, _) = id
+                let (kind, title, _, _) = id
                     .as_ref()
                     .and_then(|id| state.tools.remove(id))
-                    .unwrap_or((ActivityKind::Tool, "Tool".to_owned(), "Tool".to_owned()));
+                    .unwrap_or((
+                        ActivityKind::Tool,
+                        "Tool".to_owned(),
+                        "Tool".to_owned(),
+                        None,
+                    ));
                 let failed = block.get("is_error").and_then(Value::as_bool) == Some(true);
                 let _ = events.send(DriverEvent::RichActivity(activity::tool_activity(
                     id,
@@ -1466,6 +1491,63 @@ mod tests {
                 ..
             })) if failed_key == key
         ));
+    }
+
+    #[test]
+    fn background_bash_task_keeps_its_originating_command() {
+        let (events, event_rx, commands, _command_rx, turn, mut state) = harness();
+        handle_message(
+            &json!({
+                "type": "assistant",
+                "message": {"content": [{
+                    "type": "tool_use",
+                    "id": "toolu-bash",
+                    "name": "Bash",
+                    "input": {
+                        "command": "cargo check && cargo test --bin waku",
+                        "description": "Type-check and run full suite"
+                    }
+                }]}
+            }),
+            "s",
+            &events,
+            &commands,
+            &turn,
+            true,
+            &mut state,
+        );
+        assert!(matches!(
+            event_rx.try_recv(),
+            Ok(DriverEvent::RichActivity(_))
+        ));
+
+        handle_message(
+            &json!({
+                "type": "system",
+                "subtype": "task_started",
+                "task_id": "bash-42",
+                "tool_use_id": "toolu-bash",
+                "task_type": "local_bash",
+                "description": "Type-check and run full suite",
+                "is_backgrounded": true
+            }),
+            "s",
+            &events,
+            &commands,
+            &turn,
+            true,
+            &mut state,
+        );
+        let DriverEvent::BackgroundWork(BackgroundWorkEvent::Upsert(started)) =
+            event_rx.try_recv().unwrap()
+        else {
+            panic!("task_started should surface a background item");
+        };
+        assert_eq!(started.key.kind, BackgroundWorkKind::Process);
+        assert_eq!(
+            started.command.as_deref(),
+            Some("cargo check && cargo test --bin waku")
+        );
     }
 
     #[test]

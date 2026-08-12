@@ -532,12 +532,11 @@ fn run_capture(command: &mut Command, timeout: Duration) -> anyhow::Result<Captu
         // a timeout does not leave those descendants running in the workspace.
         command.process_group(0);
     }
-    let mut child = command
+    let command = command
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .context("could not start process")?;
+        .stderr(Stdio::piped());
+    let mut child = crate::command_env::spawn(command).context("could not start process")?;
     let stdout = child.stdout.take().context("process stdout unavailable")?;
     let stderr = child.stderr.take().context("process stderr unavailable")?;
     let stdout_reader = thread::spawn(move || read_bounded(stdout, MAX_STDOUT_BYTES));
