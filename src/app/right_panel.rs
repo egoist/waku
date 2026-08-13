@@ -4,6 +4,14 @@ use std::path::{Path, PathBuf};
 use super::*;
 
 const TAB_SCROLL_FADE_WIDTH: f32 = 24.0;
+/// Size the unified diff's code rows shape at. Shared with the advance
+/// measurement behind [`review_diff_content_width`] so the reserved scroll
+/// extent is computed at the size the rows actually use.
+const REVIEW_DIFF_TEXT_SIZE: Pixels = px(10.5);
+/// Distance every unified-diff row reserves for its line-number gutter. The
+/// gutter is pinned rather than laid out beside the body, so the body reserves
+/// this with padding.
+const REVIEW_DIFF_GUTTER_WIDTH: f32 = 52.0;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct WorkingTreeEntry {
@@ -211,6 +219,45 @@ fn review_diff_gap_tooltip(direction: crate::review_diff::ExpansionDirection) ->
         crate::review_diff::ExpansionDirection::Both => tr!("diff.expand_context"),
         crate::review_diff::ExpansionDirection::All => tr!("diff.expand_all_context"),
     }
+}
+
+/// Horizontal extent the unified diff needs for its widest line to be fully
+/// reachable: the fixed gutter and paddings, plus one `advance` per column.
+fn review_diff_content_width(columns: usize, advance: Pixels) -> Pixels {
+    /// Gutter, the body's inset past it, the trailing pad, and the 2px edge
+    /// marker an added or deleted row carries. The marker is a border, so it is
+    /// inside the row's width: a row that is both the widest and marked would
+    /// clip its last glyph without it.
+    const GUTTER_AND_PADDING: f32 = REVIEW_DIFF_GUTTER_WIDTH + 12.0 + 10.0 + 2.0;
+    px(GUTTER_AND_PADDING + columns as f32 * f32::from(advance))
+}
+
+/// Pins a diff row's gutter against the horizontal scroll.
+///
+/// Rows live inside the scrolled content, so the gutter cancels the offset and,
+/// painted after the body, occludes it: a long line slides under the line
+/// numbers instead of dragging them off screen. `surface` is the pane's own
+/// opaque background and is what makes that occlusion work — every wash a row
+/// puts in its gutter is translucent, and layering one over itself would both
+/// fail to hide the text and come out the wrong shade.
+fn review_diff_pinned_gutter(offset: Pixels, surface: Hsla) -> Div {
+    div()
+        .absolute()
+        .left(offset)
+        .top_0()
+        .bottom_0()
+        .w(px(REVIEW_DIFF_GUTTER_WIDTH))
+        .bg(surface)
+}
+
+/// Width the file editor reserves for its line-number gutter: wide enough for
+/// the highest number in the file.
+///
+/// The gutter is pinned over the scrolled text, so this is also how much of the
+/// viewport's left edge is covered — a caret reveal has to start there, not at
+/// the viewport's own left.
+pub fn file_editor_gutter_width(line_count: usize) -> f32 {
+    20.0 + 6.0 * (line_count.to_string().len() as f32)
 }
 
 fn review_diff_gap_directions(
@@ -896,6 +943,14 @@ fn tab_scroll_fade(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The gutter and paddings are reserved unconditionally, and every column
+    /// costs exactly one advance on top of them.
+    #[test]
+    fn review_diff_width_reserves_gutter_and_code_columns() {
+        assert_eq!(review_diff_content_width(0, px(6.5)), px(76.0));
+        assert_eq!(review_diff_content_width(100, px(6.5)), px(726.0));
+    }
 
     #[test]
     fn transcript_file_links_route_by_the_active_workspace() {
@@ -2750,7 +2805,7 @@ impl Waku {
         .detach();
     }
 
-    /// The editor body: a line-number gutter beside soft-wrapped text.
+    /// The editor body: a line-number gutter over horizontally scrolled text.
     ///
     /// The gutter is *painted*, not laid out — one canvas that shapes only the
     /// numbers currently on screen, the way Zed's editor element does. A div per
@@ -2758,8 +2813,13 @@ impl Waku {
     /// is what made large files crawl.
     ///
     /// Row heights come from the text's measured layout rather than a nominal
-    /// line height, so a soft-wrapped line still gets exactly one number and the
-    /// two columns cannot drift apart down a long file.
+    /// line height, so the two columns cannot drift apart down a long file even
+    /// if a row ever measures taller than the nominal height.
+    ///
+    /// The gutter follows the vertical scroll but not the horizontal one: it is
+    /// positioned absolutely inside the scrolled content and shifted back by the
+    /// horizontal offset, so long lines slide underneath it instead of pushing
+    /// the numbers off screen.
     fn render_file_editor_body(
         &mut self,
         relative_path: &str,
@@ -2779,12 +2839,13 @@ impl Waku {
         // visible file actually changes.
         self.sync_file_search_target(relative_path, cx);
         let find_bar = self.render_file_search_bar(pane_width, writable, window, cx);
+        self.follow_file_editor_caret(editor_state, cx);
 
         let theme = Theme::current(cx);
         let field = editor_state.read(cx);
         let line_count = field.content().split('\n').count().max(1);
         let heights = field.wrapped_line_heights();
-        let gutter_width = 20.0 + 6.0 * (line_count.to_string().len() as f32);
+        let gutter_width = file_editor_gutter_width(line_count);
         let content_height = if heights.is_empty() {
             px(LINE_HEIGHT) * line_count as f32
         } else {
@@ -2836,6 +2897,9 @@ impl Waku {
         .flex_none()
         .w(px(gutter_width - GUTTER_PAD_RIGHT))
         .h(content_height);
+        // Cancels the horizontal scroll the enclosing content div applies to
+        // every child, absolute ones included.
+        let gutter_offset = -self.right_panel_editor_scroll_handle.offset().x;
 
         // The find bar sits in normal flow above the scroll region — Zed's
         // buffer-search arrangement — so an open bar pushes the content and
@@ -2860,29 +2924,53 @@ impl Waku {
                         div()
                             .id(SharedString::from(format!("file-editor-{relative_path}")))
                             .size_full()
-                            .overflow_y_scroll()
+                            .flex()
+                            .overflow_scroll()
+                            .restrict_scroll_to_axis()
                             .track_scroll(&self.right_panel_editor_scroll_handle)
                             .child(
                                 div()
-                                    .w_full()
+                                    // The viewport floor comes from the measured
+                                    // parent, not from a predicted pane width:
+                                    // borders are inside the specified size, so a
+                                    // prediction runs a pixel or two narrow and
+                                    // leaves a sliver of dead scroll range.
+                                    .min_w_full()
+                                    .flex_none()
+                                    .relative()
                                     .pt(px(CONTENT_PAD_TOP))
                                     .pb(px(CONTENT_PAD_TOP))
                                     .flex()
                                     .items_start()
-                                    .child(gutter)
-                                    .child(div().w(px(GUTTER_PAD_RIGHT)).flex_none())
                                     .child(
                                         div()
-                                            .flex_1()
-                                            .min_w_0()
+                                            .flex_grow(1.0)
+                                            .flex_shrink_0()
+                                            .pl(px(gutter_width))
                                             .pr(px(10.0))
                                             .child(editor_state.clone()),
+                                    )
+                                    .child(
+                                        div()
+                                            .absolute()
+                                            .top(px(CONTENT_PAD_TOP))
+                                            .left(gutter_offset)
+                                            .w(px(gutter_width))
+                                            // Opaque, and painted after the text,
+                                            // so a long line disappears under the
+                                            // numbers instead of through them.
+                                            .bg(theme.surface)
+                                            .child(gutter),
                                     ),
                             ),
                     )
                     .child(scrollbar::vertical(
                         &self.right_panel_editor_scroll_handle,
-                        &self.right_panel_editor_scrollbar,
+                        &self.right_panel_editor_vertical_scrollbar,
+                    ))
+                    .child(scrollbar::horizontal(
+                        &self.right_panel_editor_scroll_handle,
+                        &self.right_panel_editor_horizontal_scrollbar,
                     )),
             )
     }
@@ -2985,7 +3073,7 @@ impl Waku {
                     .min_h_0()
                     .min_w_0()
                     .flex()
-                    .child(self.render_right_panel_unified_diff(snapshot.clone(), cx))
+                    .child(self.render_right_panel_unified_diff(snapshot.clone(), window, cx))
                     .child(
                         div()
                             .w(px(tree_width))
@@ -3196,6 +3284,7 @@ impl Waku {
     fn render_right_panel_unified_diff(
         &self,
         snapshot: Arc<ReviewDiffSnapshot>,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         if snapshot.files.is_empty() {
@@ -3208,30 +3297,59 @@ impl Waku {
                 .into_any_element();
         }
         let entity = cx.entity().downgrade();
+        // The advance is measured rather than assumed: a guessed constant that
+        // runs narrow leaves the last glyphs of the widest line unscrollable,
+        // and the bundled mono font is free to change metrics or fall back.
+        let text_system = window.text_system();
+        let font_id = text_system.resolve_font(&font(md::render::MONO_FAMILY));
+        let advance = text_system
+            .em_advance(font_id, REVIEW_DIFF_TEXT_SIZE)
+            .unwrap_or(px(6.5));
+        let content_width = review_diff_content_width(snapshot.max_content_columns, advance);
         div()
             .flex_1()
             .min_h_0()
             .min_w_0()
             .relative()
             .child(
-                list(
-                    self.right_panel_diff_list_state.clone(),
-                    move |index, _window, cx| {
-                        entity
-                            .upgrade()
-                            .map(|entity| {
-                                entity.update(cx, |this, cx| {
-                                    this.render_right_panel_diff_line(index, cx)
-                                })
-                            })
-                            .unwrap_or_else(|| div().into_any_element())
-                    },
-                )
-                .size_full(),
+                div()
+                    .id("right-panel-diff-horizontal-scroll")
+                    .size_full()
+                    .flex()
+                    .overflow_x_scroll()
+                    .restrict_scroll_to_axis()
+                    .track_scroll(&self.right_panel_diff_horizontal_scroll_handle)
+                    .child(
+                        div()
+                            .h_full()
+                            .min_w_full()
+                            .w(content_width)
+                            .flex_none()
+                            .child(
+                                list(
+                                    self.right_panel_diff_list_state.clone(),
+                                    move |index, _window, cx| {
+                                        entity
+                                            .upgrade()
+                                            .map(|entity| {
+                                                entity.update(cx, |this, cx| {
+                                                    this.render_right_panel_diff_line(index, cx)
+                                                })
+                                            })
+                                            .unwrap_or_else(|| div().into_any_element())
+                                    },
+                                )
+                                .size_full(),
+                            ),
+                    ),
             )
             .child(scrollbar::vertical(
                 &self.right_panel_diff_list_state,
                 &self.right_panel_diff_scrollbar,
+            ))
+            .child(scrollbar::horizontal(
+                &self.right_panel_diff_horizontal_scroll_handle,
+                &self.right_panel_diff_horizontal_scrollbar,
             ))
             .into_any_element()
     }
@@ -3247,6 +3365,12 @@ impl Waku {
             return div().into_any_element();
         };
         let theme = Theme::current(cx);
+        // Chrome that must not slide away with the content cancels the offset
+        // the enclosing scroll container applies to every child, absolute ones
+        // included.
+        let scroll = &self.right_panel_diff_horizontal_scroll_handle;
+        let pin = -scroll.offset().x;
+        let viewport_width = scroll.bounds().size.width;
 
         match &line.kind {
             crate::review_diff::LineKind::FileHeader => div()
@@ -3254,37 +3378,53 @@ impl Waku {
                 .w_full()
                 .min_w_0()
                 .h(px(36.0))
-                .px(px(12.0))
-                .flex()
-                .items_center()
-                .gap(px(8.0))
+                .relative()
                 .border_b_1()
                 .border_color(theme.border)
                 .bg(theme.surface)
-                .child(file_icon(file_icon_for_path(&file.path), 14.0))
                 .child(
+                    // The band spans the whole content width so the border and
+                    // fill stay continuous, but the path and the counts are
+                    // pinned to the viewport: which file a hunk belongs to has
+                    // to stay readable however far right the code is scrolled.
                     div()
-                        .id(SharedString::from(format!("review-diff-file-path-{index}")))
-                        .min_w_0()
-                        .flex_1()
-                        .truncate()
-                        .text_size(px(11.5))
-                        .font_weight(FontWeight::MEDIUM)
-                        .text_color(theme.text_secondary)
-                        .tooltip(Tooltip::text(file.path.clone()))
-                        .child(file.path.clone()),
-                )
-                .child(
-                    div()
-                        .text_size(px(10.5))
-                        .text_color(theme.success)
-                        .child(format!("+{}", file.additions)),
-                )
-                .child(
-                    div()
-                        .text_size(px(10.5))
-                        .text_color(theme.danger)
-                        .child(format!("-{}", file.deletions)),
+                        .absolute()
+                        .left(pin)
+                        .top_0()
+                        .bottom_0()
+                        // Full width until the pane has been measured; an
+                        // unmeasured pane is also an unscrolled one.
+                        .w_full()
+                        .when(viewport_width > px(0.0), |chrome| chrome.w(viewport_width))
+                        .px(px(12.0))
+                        .flex()
+                        .items_center()
+                        .gap(px(8.0))
+                        .child(file_icon(file_icon_for_path(&file.path), 14.0))
+                        .child(
+                            div()
+                                .id(SharedString::from(format!("review-diff-file-path-{index}")))
+                                .min_w_0()
+                                .flex_1()
+                                .truncate()
+                                .text_size(px(11.5))
+                                .font_weight(FontWeight::MEDIUM)
+                                .text_color(theme.text_secondary)
+                                .tooltip(Tooltip::text(file.path.clone()))
+                                .child(file.path.clone()),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(10.5))
+                                .text_color(theme.success)
+                                .child(format!("+{}", file.additions)),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(10.5))
+                                .text_color(theme.danger)
+                                .child(format!("-{}", file.deletions)),
+                        ),
                 )
                 .into_any_element(),
             crate::review_diff::LineKind::Gap(gap) => {
@@ -3293,9 +3433,7 @@ impl Waku {
                 let directions = review_diff_gap_directions(gap.position, chunked);
                 let two_directions = directions.len() > 1;
                 let gutter = div()
-                    .w(px(52.0))
-                    .h_full()
-                    .flex_none()
+                    .size_full()
                     .flex()
                     .when(two_directions, |gutter| gutter.flex_col())
                     .border_r_1()
@@ -3327,7 +3465,8 @@ impl Waku {
                     .h_full()
                     .min_w_0()
                     .flex_1()
-                    .px(px(12.0))
+                    .pl(px(REVIEW_DIFF_GUTTER_WIDTH + 12.0))
+                    .pr(px(12.0))
                     .flex()
                     .items_center()
                     .bg(theme.overlay)
@@ -3369,18 +3508,20 @@ impl Waku {
                     .h(px(32.0))
                     .w_full()
                     .min_w_0()
+                    .relative()
                     .flex()
                     .items_center()
                     .text_size(px(10.5))
                     .text_color(theme.text_tertiary)
-                    .child(gutter)
                     .child(label)
+                    .child(review_diff_pinned_gutter(pin, theme.surface).child(gutter))
                     .into_any_element()
             }
             crate::review_diff::LineKind::HunkHeader => div()
                 .h(px(24.0))
                 .w_full()
                 .min_w_0()
+                .relative()
                 .flex()
                 .items_center()
                 .font_family(md::render::MONO_FAMILY)
@@ -3388,19 +3529,11 @@ impl Waku {
                 .text_color(theme.text_tertiary)
                 .child(
                     div()
-                        .w(px(52.0))
-                        .h_full()
-                        .flex_none()
-                        .border_r_1()
-                        .border_color(theme.border)
-                        .bg(theme.overlay),
-                )
-                .child(
-                    div()
                         .h_full()
                         .min_w_0()
                         .flex_1()
-                        .px(px(12.0))
+                        .pl(px(REVIEW_DIFF_GUTTER_WIDTH + 12.0))
+                        .pr(px(12.0))
                         .flex()
                         .items_center()
                         .overflow_hidden()
@@ -3408,26 +3541,37 @@ impl Waku {
                         .bg(theme.overlay)
                         .child(line.content.clone()),
                 )
+                .child(
+                    review_diff_pinned_gutter(pin, theme.surface).child(
+                        div()
+                            .size_full()
+                            .border_r_1()
+                            .border_color(theme.border)
+                            .bg(theme.overlay),
+                    ),
+                )
                 .into_any_element(),
             crate::review_diff::LineKind::Meta => div()
                 .h(px(24.0))
                 .w_full()
                 .min_w_0()
+                .relative()
                 .flex()
                 .items_center()
                 .font_family(md::render::MONO_FAMILY)
                 .text_size(px(10.5))
                 .text_color(theme.text_tertiary)
-                .child(div().w(px(52.0)).h_full().flex_none())
                 .child(
                     div()
                         .min_w_0()
                         .flex_1()
                         .overflow_hidden()
                         .whitespace_nowrap()
+                        .pl(px(REVIEW_DIFF_GUTTER_WIDTH))
                         .pr(px(10.0))
                         .child(line.content.clone()),
                 )
+                .child(review_diff_pinned_gutter(pin, theme.surface))
                 .into_any_element(),
             crate::review_diff::LineKind::Context
             | crate::review_diff::LineKind::Addition
@@ -3474,9 +3618,7 @@ impl Waku {
                     false,
                 );
                 let gutter = div()
-                    .w(px(52.0))
-                    .h_full()
-                    .flex_none()
+                    .size_full()
                     .pr(px(9.0))
                     .flex()
                     .items_center()
@@ -3492,7 +3634,7 @@ impl Waku {
                     .h_full()
                     .min_w_0()
                     .flex_1()
-                    .pl(px(12.0))
+                    .pl(px(REVIEW_DIFF_GUTTER_WIDTH + 12.0))
                     .flex()
                     .items_center()
                     .when_some(body_background, |body, background| body.bg(background))
@@ -3516,14 +3658,15 @@ impl Waku {
                     .w_full()
                     .min_w_0()
                     .h(px(20.0))
+                    .relative()
                     .flex()
                     .items_center()
                     .font_family(md::render::MONO_FAMILY)
-                    .text_size(px(10.5))
+                    .text_size(REVIEW_DIFF_TEXT_SIZE)
                     .line_height(px(20.0))
                     .when_some(edge, |row, edge| row.border_l_2().border_color(edge))
-                    .child(gutter)
                     .child(body)
+                    .child(review_diff_pinned_gutter(pin, theme.surface).child(gutter))
                     .into_any_element()
             }
         }

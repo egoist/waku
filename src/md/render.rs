@@ -24,9 +24,9 @@ use std::rc::Rc;
 use gpui::{
     AnyElement, BorderStyle, Bounds, CursorStyle, DispatchPhase, Font, FontStyle, FontWeight, Hsla,
     InteractiveText, IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
-    ParentElement, Pixels, Point, SharedString, StrikethroughStyle, StyledText, TextLayout,
-    TextRun, UnderlineStyle, Window, canvas, div, font, img, point, prelude::*, px, quad, relative,
-    size,
+    ParentElement, Pixels, Point, ScrollHandle, SharedString, StrikethroughStyle, StyledText,
+    TextLayout, TextRun, UnderlineStyle, Window, canvas, div, font, img, point, prelude::*, px,
+    quad, relative, size,
 };
 
 use super::highlight::{self, Lang, TokenClass};
@@ -36,6 +36,7 @@ use super::selection::{
     RegisteredText, SelectionRegistry, SelectionState, TextKey, line_range, word_range,
 };
 use crate::theme::Theme;
+use crate::ui::scrollbar::{self, ScrollbarState};
 
 /// Selection geometry: the laid-out text handle for one painted element.
 pub type TextGeometry = TextLayout;
@@ -325,6 +326,7 @@ pub struct MarkdownView {
     /// Mended replacement for the final block while streaming.
     tail: Vec<TopBlock>,
     flats: RefCell<HashMap<usize, Rc<FlatText>>>,
+    code_scrolls: RefCell<HashMap<usize, CodeScrollState>>,
     /// First element ordinal belonging to the final block — the only block an
     /// append can change. Recorded during render, because only the renderer
     /// knows how many text elements each block expands into.
@@ -347,6 +349,7 @@ impl MarkdownView {
             parser: IncrementalParser::new(),
             tail: Vec::new(),
             flats: RefCell::new(HashMap::new()),
+            code_scrolls: RefCell::new(HashMap::new()),
             volatile_from: Cell::new(0),
             style: Cell::new(None),
         }
@@ -379,6 +382,9 @@ impl MarkdownView {
             self.flats
                 .borrow_mut()
                 .retain(|ordinal, _| *ordinal < boundary);
+            self.code_scrolls
+                .borrow_mut()
+                .retain(|ordinal, _| *ordinal < boundary);
         }
     }
 
@@ -400,6 +406,14 @@ impl MarkdownView {
             .clone()
     }
 
+    fn code_scroll(&self, ordinal: usize) -> CodeScrollState {
+        self.code_scrolls
+            .borrow_mut()
+            .entry(ordinal)
+            .or_default()
+            .clone()
+    }
+
     /// Display blocks in document order: the settled prefix, then the mended
     /// tail when one is active.
     fn blocks(&self) -> impl Iterator<Item = &Block> + '_ {
@@ -413,6 +427,21 @@ impl MarkdownView {
             .iter()
             .chain(self.tail.iter())
             .map(|top| &top.block)
+    }
+}
+
+#[derive(Clone)]
+struct CodeScrollState {
+    handle: ScrollHandle,
+    scrollbar: Rc<ScrollbarState>,
+}
+
+impl Default for CodeScrollState {
+    fn default() -> Self {
+        Self {
+            handle: ScrollHandle::new(),
+            scrollbar: ScrollbarState::new(),
+        }
     }
 }
 
@@ -493,6 +522,10 @@ impl<'a> Ctx<'a> {
             Some(view) => view.flat(ordinal, build),
             None => Rc::new(build()),
         }
+    }
+
+    fn code_scroll(&self, ordinal: usize) -> Option<CodeScrollState> {
+        self.cache.map(|view| view.code_scroll(ordinal))
     }
 }
 
@@ -1137,10 +1170,35 @@ fn render_code_block(language: Option<&str>, code: &str, ctx: &Ctx) -> AnyElemen
     let label = language
         .filter(|language| !language.is_empty())
         .map(|language| language.to_ascii_lowercase());
+    let code_scroll = ctx.code_scroll(key.index);
+    let viewport = div()
+        .id(SharedString::from(format!(
+            "code-{}-{}",
+            key.row, key.index
+        )))
+        .w_full()
+        .px(px(10.0))
+        .py(px(8.0))
+        .flex()
+        .overflow_x_scroll()
+        .restrict_scroll_to_axis()
+        .when_some(code_scroll.as_ref(), |element, state| {
+            element.track_scroll(&state.handle)
+        })
+        .child(
+            div()
+                .flex_none()
+                .whitespace_nowrap()
+                .text_size(px(ctx.metrics.code_text_size))
+                .line_height(px(ctx.metrics.code_line_height))
+                .text_color(ctx.palette.secondary)
+                .child(text_element(&flat, key, ctx)),
+        );
 
     div()
         .w_full()
         .min_w_0()
+        .relative()
         .rounded(px(8.0))
         .border_1()
         .border_color(ctx.palette.border)
@@ -1163,26 +1221,10 @@ fn render_code_block(language: Option<&str>, code: &str, ctx: &Ctx) -> AnyElemen
                     .child(SharedString::from(label)),
             )
         })
-        .child(
-            div()
-                .id(SharedString::from(format!(
-                    "code-{}-{}",
-                    key.row, key.index
-                )))
-                .w_full()
-                .px(px(10.0))
-                .py(px(8.0))
-                .overflow_x_scroll()
-                .child(
-                    div()
-                        .flex_none()
-                        .whitespace_nowrap()
-                        .text_size(px(ctx.metrics.code_text_size))
-                        .line_height(px(ctx.metrics.code_line_height))
-                        .text_color(ctx.palette.secondary)
-                        .child(text_element(&flat, key, ctx)),
-                ),
-        )
+        .child(viewport)
+        .when_some(code_scroll, |element, state| {
+            element.child(scrollbar::horizontal(&state.handle, &state.scrollbar))
+        })
         .into_any_element()
 }
 
@@ -1394,7 +1436,7 @@ fn column_widths(
 mod tests {
     use super::*;
     use crate::md::parser;
-    use gpui::TestAppContext;
+    use gpui::{ScrollDelta, ScrollWheelEvent, TestAppContext};
 
     fn palette() -> Palette {
         Palette::from_theme(&Theme::dark())
@@ -1537,6 +1579,67 @@ mod tests {
         assert!(
             rects.iter().all(|rect| rect.left() == left),
             "a full selection must include each wrapped row's first glyph: {rects:?}"
+        );
+    }
+
+    #[gpui::test]
+    fn long_code_lines_scroll_horizontally(cx: &mut TestAppContext) {
+        const LONG_CODE: &str = "let value = \"abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyz\";";
+
+        struct CodeBlockHarness {
+            selection: TranscriptSelection,
+            markdown: MarkdownView,
+        }
+
+        impl gpui::Render for CodeBlockHarness {
+            fn render(&mut self, _: &mut Window, _: &mut gpui::Context<Self>) -> impl IntoElement {
+                let palette = palette();
+                let ctx = Ctx::new(
+                    "code-scroll-test",
+                    &palette,
+                    Metrics::BODY,
+                    self.selection.clone(),
+                );
+                div().w(px(180.0)).children(markdown(&self.markdown, &ctx))
+            }
+        }
+
+        let selection = TranscriptSelection::default();
+        let harness_selection = selection.clone();
+        let (harness, cx) = cx.add_window_view(move |_, _| {
+            let mut markdown = MarkdownView::new();
+            markdown.set_text(&format!("```\n{LONG_CODE}\n```"), false);
+            CodeBlockHarness {
+                selection: harness_selection,
+                markdown,
+            }
+        });
+        let scroll = cx.read_entity(&harness, |harness, _| {
+            harness.markdown.code_scrolls.borrow()[&0].handle.clone()
+        });
+        assert!(
+            scroll.max_offset().x > px(0.0),
+            "the cached code block must expose horizontal overflow"
+        );
+        let initial_left = selection.registry.borrow().entries()[0]
+            .geometry
+            .bounds()
+            .left();
+        selection.registry.borrow_mut().clear();
+
+        cx.simulate_event(ScrollWheelEvent {
+            position: point(px(90.0), px(20.0)),
+            delta: ScrollDelta::Pixels(point(px(-80.0), px(0.0))),
+            ..Default::default()
+        });
+
+        let scrolled_left = selection.registry.borrow().entries()[0]
+            .geometry
+            .bounds()
+            .left();
+        assert!(
+            scrolled_left < initial_left,
+            "a horizontal gesture must move a long code line: {initial_left:?} -> {scrolled_left:?}"
         );
     }
 

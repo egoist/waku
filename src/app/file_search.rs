@@ -212,6 +212,40 @@ fn revealed_scroll_offset(
     (next != current_offset).then_some(next)
 }
 
+/// Horizontal counterpart of [`revealed_scroll_offset`].
+///
+/// A match far along a long line is as unreachable as one below the fold, so it
+/// gets the same treatment on the other axis. `viewport_left` is where readable
+/// text begins rather than where the viewport does: the line-number gutter is
+/// pinned over the scrolled content, so anything under it is hidden.
+///
+/// Unlike the vertical case there is no natural resting fraction to aim for —
+/// re-centering every line would make navigation feel like it wanders — so a
+/// match outside the comfortable band is brought just inside the edge it left.
+fn revealed_scroll_offset_x(
+    current_offset: Pixels,
+    max_offset: Pixels,
+    match_left: Pixels,
+    margin: Pixels,
+    viewport_left: Pixels,
+    viewport_right: Pixels,
+) -> Option<Pixels> {
+    if viewport_right <= viewport_left + margin * 2.0 {
+        return None;
+    }
+    let (left_limit, right_limit) = (viewport_left + margin, viewport_right - margin);
+    if match_left >= left_limit && match_left <= right_limit {
+        return None;
+    }
+    let target = if match_left < left_limit {
+        left_limit
+    } else {
+        right_limit
+    };
+    let next = (current_offset + (target - match_left)).clamp(-max_offset, Pixels::ZERO);
+    (next != current_offset).then_some(next)
+}
+
 impl Waku {
     pub(super) fn refresh_file_search_localized_text(&mut self, cx: &mut Context<Self>) {
         let Some(search) = &self.file_search else {
@@ -490,36 +524,79 @@ impl Waku {
             }
         });
         if reveal && let Some(range) = active_range {
-            self.reveal_file_search_match(&editor, range.start, cx);
+            self.reveal_editor_offset(&editor, range.start, cx);
         }
         cx.notify();
     }
 
-    /// Scrolls the shared editor viewport so the match at `offset` is
-    /// visible. Uses the last painted layout, so right after an edit it can
-    /// land a line off; the next navigation corrects it.
-    fn reveal_file_search_match(
+    /// Keeps the editor viewport on the caret.
+    ///
+    /// The editor's text is not clipped to the pane, it scrolls inside it, so a
+    /// caret past the right edge is simply gone. Only a caret that has moved is
+    /// chased, which is what leaves a deliberate scroll alone.
+    pub fn follow_file_editor_caret(
+        &mut self,
+        editor: &Entity<ComposerInput>,
+        cx: &mut Context<Self>,
+    ) {
+        let caret = editor.read(cx).cursor_offset();
+        if self.right_panel_editor_caret != Some(caret)
+            && self.reveal_editor_offset(editor, caret, cx)
+        {
+            self.right_panel_editor_caret = Some(caret);
+        }
+    }
+
+    /// Scrolls the shared editor viewport so `offset` is comfortably visible on
+    /// both axes, reporting whether the offset could be placed at all.
+    ///
+    /// The position comes from the last painted layout, which cannot place an
+    /// offset a just-typed character opened up. Reporting that lets
+    /// [`Self::follow_file_editor_caret`] ask again on the next frame instead of
+    /// recording a reveal that never happened.
+    fn reveal_editor_offset(
         &self,
         editor: &Entity<ComposerInput>,
         offset: usize,
-        cx: &Context<Self>,
-    ) {
-        let Some((position, line_height)) = editor.read(cx).position_for_offset(offset) else {
-            return;
+        cx: &App,
+    ) -> bool {
+        let editor = editor.read(cx);
+        let Some((position, line_height)) = editor.position_for_offset(offset) else {
+            return false;
         };
+        // Readable text starts past the pinned line-number gutter, not at the
+        // viewport's own left edge.
+        let gutter = px(super::right_panel::file_editor_gutter_width(
+            editor.content().split('\n').count().max(1),
+        ));
         let scroll = &self.right_panel_editor_scroll_handle;
         let viewport = scroll.bounds();
-        let current = scroll.offset();
-        if let Some(next) = revealed_scroll_offset(
-            current.y,
-            scroll.max_offset().y,
+        let max = scroll.max_offset();
+        let mut next = scroll.offset();
+        if let Some(y) = revealed_scroll_offset(
+            next.y,
+            max.y,
             position.y,
             line_height,
             viewport.top(),
             viewport.bottom(),
         ) {
-            scroll.set_offset(point(current.x, next));
+            next.y = y;
         }
+        if let Some(x) = revealed_scroll_offset_x(
+            next.x,
+            max.x,
+            position.x,
+            line_height,
+            viewport.left() + gutter,
+            viewport.right(),
+        ) {
+            next.x = x;
+        }
+        if next != scroll.offset() {
+            scroll.set_offset(next);
+        }
+        true
     }
 
     fn file_search_navigate(&mut self, backwards: bool, cx: &mut Context<Self>) {
@@ -1306,6 +1383,73 @@ mod tests {
                 px(400.0)
             ),
             Some(px(0.0))
+        );
+    }
+
+    #[test]
+    fn reveal_scrolls_horizontally_only_past_the_gutter_and_the_far_edge() {
+        // `viewport_left` is already past the pinned gutter, so a caret inside
+        // the band is left where it is.
+        assert_eq!(
+            revealed_scroll_offset_x(
+                px(-100.0),
+                px(500.0),
+                px(200.0),
+                px(16.0),
+                px(60.0),
+                px(400.0)
+            ),
+            None
+        );
+        // Past the right edge: brought back to a margin inside it.
+        assert_eq!(
+            revealed_scroll_offset_x(
+                px(-100.0),
+                px(500.0),
+                px(600.0),
+                px(16.0),
+                px(60.0),
+                px(400.0)
+            ),
+            Some(px(-100.0) + (px(384.0) - px(600.0)))
+        );
+        // Under the gutter counts as hidden, even though it is inside the
+        // viewport: the gutter is painted over the text.
+        assert_eq!(
+            revealed_scroll_offset_x(
+                px(-100.0),
+                px(500.0),
+                px(40.0),
+                px(16.0),
+                px(60.0),
+                px(400.0)
+            ),
+            Some(px(-64.0))
+        );
+        // Clamped to the scrollable range.
+        assert_eq!(
+            revealed_scroll_offset_x(
+                px(-100.0),
+                px(120.0),
+                px(600.0),
+                px(16.0),
+                px(60.0),
+                px(400.0)
+            ),
+            Some(px(-120.0))
+        );
+        // A viewport with no room left after the margins reveals nothing rather
+        // than thrashing between two impossible limits.
+        assert_eq!(
+            revealed_scroll_offset_x(
+                px(-100.0),
+                px(500.0),
+                px(600.0),
+                px(16.0),
+                px(60.0),
+                px(80.0)
+            ),
+            None
         );
     }
 }

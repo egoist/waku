@@ -9,6 +9,7 @@ use std::path::Path;
 use std::process::{Command, Output};
 
 use anyhow::{Context as _, anyhow, bail};
+use unicode_width::UnicodeWidthChar;
 use uuid::Uuid;
 
 use crate::checkpoint;
@@ -132,6 +133,11 @@ pub struct Snapshot {
     pub source: Source,
     pub files: Vec<File>,
     pub lines: Vec<Line>,
+    /// Widest source line in monospace columns, counting the context retained
+    /// inside collapsed gaps so expanding a gap never changes the horizontal
+    /// extent, and skipping rows the visible-line cap dropped so the extent
+    /// never exceeds what the list can show.
+    pub max_content_columns: usize,
     pub additions: u64,
     pub deletions: u64,
     pub truncated: bool,
@@ -584,6 +590,7 @@ fn parse(source: Source, numstat: &str, patch: &str, complete_context: bool) -> 
         lines
     };
     let (lines, truncated) = cap_visible_lines(lines);
+    let max_content_columns = max_content_columns(&lines);
     recompute_diff_lines(&mut files, &lines);
     let additions = files.iter().map(|file| file.additions).sum();
     let deletions = files.iter().map(|file| file.deletions).sum();
@@ -591,10 +598,48 @@ fn parse(source: Source, numstat: &str, patch: &str, complete_context: bool) -> 
         source,
         files,
         lines,
+        max_content_columns,
         additions,
         deletions,
         truncated,
     }
+}
+
+/// Widest line among everything the list can ever show: the rows themselves
+/// plus the context retained inside collapsed gaps, so expanding a gap never
+/// changes the horizontal extent. Rows dropped by [`cap_visible_lines`] are
+/// excluded — they would only buy dead scroll range.
+fn max_content_columns(lines: &[Line]) -> usize {
+    lines
+        .iter()
+        .map(|line| {
+            let hidden = match &line.kind {
+                LineKind::Gap(gap) => gap
+                    .hidden
+                    .iter()
+                    .map(|line| monospace_columns(&line.content))
+                    .max()
+                    .unwrap_or_default(),
+                _ => 0,
+            };
+            monospace_columns(&line.content).max(hidden)
+        })
+        .max()
+        .unwrap_or_default()
+}
+
+/// Columns a rendered line occupies, where one column is one advance of the
+/// mono font.
+///
+/// Nothing expands tabs before shaping, and the mono font advances a tab by a
+/// single column, so that is what a tab costs here — charging it a tab stop
+/// would reserve scroll range that no glyph ever reaches. Wide characters are
+/// the only ones worth two: they are never wider than two advances, so the
+/// result stays an upper bound on the painted width.
+fn monospace_columns(text: &str) -> usize {
+    text.chars()
+        .map(|ch| UnicodeWidthChar::width(ch).unwrap_or(1))
+        .sum()
 }
 
 fn collapse_context(lines: Vec<Line>) -> Vec<Line> {
@@ -893,6 +938,17 @@ mod tests {
     use std::fs;
 
     use super::*;
+
+    #[test]
+    fn source_columns_match_the_advances_the_mono_font_paints() {
+        // A tab advances one column in the mono font, and nothing expands tabs
+        // before shaping, so a tab-indented line must not be charged a tab stop.
+        assert_eq!(monospace_columns("ab\tc"), 4);
+        // Accented Latin and arrows are single-advance despite not being ASCII.
+        assert_eq!(monospace_columns("é→"), 2);
+        // Wide characters are the only ones worth two.
+        assert_eq!(monospace_columns("a界b"), 4);
+    }
 
     fn git_ok(cwd: &Path, args: &[&str]) {
         let output = Command::new("git")

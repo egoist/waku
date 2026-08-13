@@ -1411,7 +1411,7 @@ impl ComposerInput {
         cx.notify();
     }
 
-    fn cursor_offset(&self) -> usize {
+    pub fn cursor_offset(&self) -> usize {
         if self.selection_reversed {
             self.selected_range.start
         } else {
@@ -2232,6 +2232,9 @@ impl Render for ComposerInput {
                     .line_height(px(22.0))
                     .text_size(px(13.5))
             })
+            .when(self.mode == FieldMode::Code, |field| {
+                field.whitespace_nowrap()
+            })
             // A search-mode field is visually one line: the text never wraps,
             // and the overlong remainder slides horizontally under this
             // clipped viewport to follow the caret — no scrollbar.
@@ -2325,8 +2328,8 @@ mod tests {
 
     use gpui::{
         ClipboardEntry, ClipboardItem, Context, Entity, EntityInputHandler, ExternalPaths, Image,
-        ImageFormat, Pixels, Render, TestAppContext, TextRun, Window, div, font, hsla, prelude::*,
-        px,
+        ImageFormat, Pixels, Render, ScrollDelta, ScrollHandle, ScrollWheelEvent, TestAppContext,
+        TextRun, Window, div, font, hsla, point, prelude::*, px,
     };
 
     use super::TokenClass;
@@ -2346,6 +2349,65 @@ mod tests {
         fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
             div().w(self.width).child(self.input.clone())
         }
+    }
+
+    struct CodeInputHarness {
+        input: Entity<ComposerInput>,
+        scroll: ScrollHandle,
+    }
+
+    impl Render for CodeInputHarness {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div().w(px(180.0)).h(px(80.0)).child(
+                div()
+                    .id("code-input-scroll-test")
+                    .size_full()
+                    .flex()
+                    .overflow_scroll()
+                    .restrict_scroll_to_axis()
+                    .track_scroll(&self.scroll)
+                    .child(
+                        div()
+                            .min_w(px(180.0))
+                            .flex_none()
+                            .flex()
+                            .child(div().w(px(28.0)).flex_none())
+                            .child(div().min_w(px(152.0)).flex_none().child(self.input.clone())),
+                    ),
+            )
+        }
+    }
+
+    #[gpui::test]
+    fn code_editor_exposes_horizontal_overflow(cx: &mut TestAppContext) {
+        cx.update(super::init);
+        let scroll = ScrollHandle::new();
+        let harness_scroll = scroll.clone();
+        let (_, cx) = cx.add_window_view(move |window, cx| {
+            let input = cx.new(|cx| {
+                let mut input = ComposerInput::new(window, cx).code_editor(None);
+                input.set_content(
+                    "let value = \"abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyz\";",
+                    cx,
+                );
+                input
+            });
+            CodeInputHarness {
+                input,
+                scroll: harness_scroll,
+            }
+        });
+
+        assert!(
+            scroll.max_offset().x > px(0.0),
+            "an unwrapped code line must overflow horizontally"
+        );
+        cx.simulate_event(ScrollWheelEvent {
+            position: point(px(90.0), px(20.0)),
+            delta: ScrollDelta::Pixels(point(px(-60.0), px(0.0))),
+            ..Default::default()
+        });
+        assert!(scroll.offset().x < px(0.0));
     }
 
     fn setup_input<'a>(

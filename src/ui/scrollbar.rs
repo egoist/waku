@@ -1,4 +1,4 @@
-//! Overlay scrollbar for a virtualized [`ListState`].
+//! Overlay scrollbars for [`ListState`] and [`ScrollHandle`] surfaces.
 //!
 //! Drawn as a single quad from geometry the list already tracks, with the drag
 //! and click listeners registered during paint. That keeps it to one element
@@ -24,7 +24,7 @@ use crate::theme::Theme;
 const TRACK_WIDTH: f32 = 11.0;
 const THUMB_WIDTH: f32 = 5.0;
 const THUMB_WIDTH_ACTIVE: f32 = 8.0;
-const THUMB_MIN_HEIGHT: f32 = 28.0;
+const THUMB_MIN_LENGTH: f32 = 28.0;
 const TRACK_INSET: f32 = 2.0;
 
 /// How long the bar stays at full strength after the last scroll, and how long
@@ -68,7 +68,17 @@ impl ScrollbarState {
 
 /// Overlay opacity: solid while hovered or dragging, otherwise held briefly
 /// after a scroll and then faded out. Pure, so the timing is testable.
-fn opacity(since_scroll: Option<Duration>, hovered: bool, grabbed: bool) -> f32 {
+///
+/// Under reduce-motion the hold still applies but the ramp does not: the bar
+/// goes straight from solid to gone. Skipping the *frames* instead would leave
+/// the thumb painted at whatever opacity it last had, because nothing else
+/// repaints a resting surface.
+fn opacity(
+    since_scroll: Option<Duration>,
+    hovered: bool,
+    grabbed: bool,
+    reduce_motion: bool,
+) -> f32 {
     if hovered || grabbed {
         return 1.0;
     }
@@ -77,6 +87,9 @@ fn opacity(since_scroll: Option<Duration>, hovered: bool, grabbed: bool) -> f32 
     };
     if elapsed < HOLD {
         return 1.0;
+    }
+    if reduce_motion {
+        return 0.0;
     }
     let fading = (elapsed - HOLD).as_secs_f32() / FADE.as_secs_f32();
     (1.0 - fading).clamp(0.0, 1.0)
@@ -93,133 +106,179 @@ struct Geometry {
     max_offset: Pixels,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Axis {
+    Horizontal,
+    Vertical,
+}
+
+impl Axis {
+    fn extent(self, bounds: Bounds<Pixels>) -> Pixels {
+        match self {
+            Self::Horizontal => bounds.size.width,
+            Self::Vertical => bounds.size.height,
+        }
+    }
+
+    fn coordinate(self, point: Point<Pixels>) -> Pixels {
+        match self {
+            Self::Horizontal => point.x,
+            Self::Vertical => point.y,
+        }
+    }
+
+    fn start(self, bounds: Bounds<Pixels>) -> Pixels {
+        match self {
+            Self::Horizontal => bounds.left(),
+            Self::Vertical => bounds.top(),
+        }
+    }
+}
+
 /// Compute the thumb rect for a track. Pure, so the mapping between scroll
 /// offset and thumb position is unit-testable.
 fn geometry(
     track: Bounds<Pixels>,
-    viewport_height: Pixels,
+    axis: Axis,
+    viewport_extent: Pixels,
     max_offset: Pixels,
     offset: Pixels,
-    thumb_width: Pixels,
+    thumb_thickness: Pixels,
 ) -> Option<Geometry> {
-    if viewport_height <= Pixels::ZERO || max_offset <= px(0.5) || track.size.height <= Pixels::ZERO
-    {
+    let track_extent = axis.extent(track);
+    if viewport_extent <= Pixels::ZERO || max_offset <= px(0.5) || track_extent <= Pixels::ZERO {
         return None;
     }
-    let content_height = viewport_height + max_offset;
-    let track_height = track.size.height;
-    let thumb_height = (track_height * (viewport_height / content_height))
-        .max(px(THUMB_MIN_HEIGHT))
-        .min(track_height);
-    let travel = (track_height - thumb_height).max(Pixels::ZERO);
+    let content_extent = viewport_extent + max_offset;
+    let thumb_length = (track_extent * (viewport_extent / content_extent))
+        .max(px(THUMB_MIN_LENGTH))
+        .min(track_extent);
+    let travel = (track_extent - thumb_length).max(Pixels::ZERO);
     let progress = (offset / max_offset).clamp(0.0, 1.0);
-    Some(Geometry {
-        thumb: Bounds::new(
+    let thumb_start = axis.start(track) + travel * progress;
+    let thumb = match axis {
+        Axis::Horizontal => Bounds::new(
             point(
-                track.right() - thumb_width - px(TRACK_INSET),
-                track.top() + travel * progress,
+                thumb_start,
+                track.bottom() - thumb_thickness - px(TRACK_INSET),
             ),
-            size(thumb_width, thumb_height),
+            size(thumb_length, thumb_thickness),
         ),
+        Axis::Vertical => Bounds::new(
+            point(
+                track.right() - thumb_thickness - px(TRACK_INSET),
+                thumb_start,
+            ),
+            size(thumb_thickness, thumb_length),
+        ),
+    };
+    Some(Geometry {
+        thumb,
         travel,
         max_offset,
     })
 }
 
-/// How far down the content a thumb top of `thumb_top` corresponds to.
-fn offset_for_thumb_top(track_top: Pixels, thumb_top: Pixels, geometry: &Geometry) -> Pixels {
+/// How far through the content a thumb start corresponds to.
+fn offset_for_thumb_start(track_start: Pixels, thumb_start: Pixels, geometry: &Geometry) -> Pixels {
     if geometry.travel <= Pixels::ZERO {
         return Pixels::ZERO;
     }
-    let progress = ((thumb_top - track_top) / geometry.travel).clamp(0.0, 1.0);
+    let progress = ((thumb_start - track_start) / geometry.travel).clamp(0.0, 1.0);
     geometry.max_offset * progress
 }
 
-/// The two things a scrollable surface has to expose. GPUI stores both kinds of
-/// offset as a non-positive y; implementations report a downward distance so the
+/// The geometry a scrollable surface has to expose. GPUI stores offsets as a
+/// non-positive point; implementations report a positive distance so the
 /// geometry above reads the obvious way.
 pub trait Scrollable {
-    /// Height of the visible area.
-    fn viewport_height(&self) -> Pixels;
-    /// Content height beyond the viewport.
-    fn max_offset(&self) -> Pixels;
-    /// How far the content is currently scrolled down.
-    fn scrolled(&self) -> Pixels;
-    fn scroll_to(&self, offset: Pixels);
+    fn viewport_extent(&self, axis: Axis) -> Pixels;
+    fn max_offset(&self, axis: Axis) -> Pixels;
+    fn scrolled(&self, axis: Axis) -> Pixels;
+    fn scroll_to(&self, axis: Axis, offset: Pixels);
 }
 
 impl Scrollable for ListState {
-    fn viewport_height(&self) -> Pixels {
-        self.viewport_bounds().size.height
+    fn viewport_extent(&self, axis: Axis) -> Pixels {
+        axis.extent(self.viewport_bounds())
     }
 
-    fn max_offset(&self) -> Pixels {
-        self.max_offset_for_scrollbar().y
+    fn max_offset(&self, axis: Axis) -> Pixels {
+        axis.coordinate(self.max_offset_for_scrollbar())
     }
 
-    fn scrolled(&self) -> Pixels {
-        -self.scroll_px_offset_for_scrollbar().y
+    fn scrolled(&self, axis: Axis) -> Pixels {
+        -axis.coordinate(self.scroll_px_offset_for_scrollbar())
     }
 
-    fn scroll_to(&self, offset: Pixels) {
-        self.set_offset_from_scrollbar(point(Pixels::ZERO, -offset));
+    fn scroll_to(&self, axis: Axis, offset: Pixels) {
+        let current = self.scroll_px_offset_for_scrollbar();
+        self.set_offset_from_scrollbar(match axis {
+            Axis::Horizontal => point(-offset, current.y),
+            Axis::Vertical => point(current.x, -offset),
+        });
     }
 }
 
 impl Scrollable for ScrollHandle {
-    fn viewport_height(&self) -> Pixels {
-        self.bounds().size.height
+    fn viewport_extent(&self, axis: Axis) -> Pixels {
+        axis.extent(self.bounds())
     }
 
-    fn max_offset(&self) -> Pixels {
-        self.max_offset().y
+    fn max_offset(&self, axis: Axis) -> Pixels {
+        axis.coordinate(self.max_offset())
     }
 
-    fn scrolled(&self) -> Pixels {
-        -self.offset().y
+    fn scrolled(&self, axis: Axis) -> Pixels {
+        -axis.coordinate(self.offset())
     }
 
-    fn scroll_to(&self, offset: Pixels) {
-        let x = self.offset().x;
-        self.set_offset(Point::new(x, -offset));
+    fn scroll_to(&self, axis: Axis, offset: Pixels) {
+        let current = self.offset();
+        self.set_offset(match axis {
+            Axis::Horizontal => Point::new(-offset, current.y),
+            Axis::Vertical => Point::new(current.x, -offset),
+        });
     }
 }
 
-fn scroll_to(surface: &impl Scrollable, offset: Pixels, max_offset: Pixels) {
-    surface.scroll_to(offset.clamp(Pixels::ZERO, max_offset));
+fn scroll_to(surface: &impl Scrollable, axis: Axis, offset: Pixels, max_offset: Pixels) {
+    surface.scroll_to(axis, offset.clamp(Pixels::ZERO, max_offset));
 }
 
-/// An overlay vertical scrollbar pinned to the right edge of its parent.
-///
-/// The parent must be `relative()`; this element positions itself absolutely
-/// and never participates in layout, so adding it cannot change content size.
-pub fn vertical<S>(surface: &S, state: &Rc<ScrollbarState>) -> impl IntoElement
+fn overlay<S>(surface: &S, state: &Rc<ScrollbarState>, axis: Axis) -> impl IntoElement
 where
     S: Scrollable + Clone + 'static,
 {
-    let list = surface.clone();
+    let surface = surface.clone();
     let state = state.clone();
-    canvas(
+    let overlay = canvas(
         |_, _, _| (),
         move |track: Bounds<Pixels>, _, window: &mut Window, cx: &mut App| {
             let theme = Theme::current(cx);
-            let viewport_height = list.viewport_height();
-            let max_offset = Scrollable::max_offset(&list);
-            let offset = list.scrolled();
+            let viewport_extent = surface.viewport_extent(axis);
+            let max_offset = Scrollable::max_offset(&surface, axis);
+            let offset = surface.scrolled(axis);
             let now = Instant::now();
             state.observe(offset, now);
 
             let hovered = state.hovered.get();
             let grabbed = state.is_grabbed();
             let active = hovered || grabbed;
-            let thumb_width = px(if active {
+            let thumb_thickness = px(if active {
                 THUMB_WIDTH_ACTIVE
             } else {
                 THUMB_WIDTH
             });
 
-            let Some(geometry) = geometry(track, viewport_height, max_offset, offset, thumb_width)
-            else {
+            let Some(geometry) = geometry(
+                track,
+                axis,
+                viewport_extent,
+                max_offset,
+                offset,
+                thumb_thickness,
+            ) else {
                 // Not scrollable: drop any stale drag so a later resize cannot
                 // resume one, and paint nothing.
                 state.grab_offset.set(None);
@@ -231,11 +290,11 @@ where
                 .last_scroll
                 .get()
                 .map(|last| now.saturating_duration_since(last));
-            let opacity = opacity(since_scroll, hovered, grabbed);
+            let opacity = opacity(since_scroll, hovered, grabbed, cx.reduce_motion());
             if opacity > 0.0 {
                 window.paint_quad(quad(
                     geometry.thumb,
-                    thumb_width / 2.0,
+                    thumb_thickness / 2.0,
                     if active {
                         theme.text_tertiary
                     } else {
@@ -248,7 +307,9 @@ where
                 ));
                 if !active {
                     // Keep driving frames through the hold and the fade;
-                    // nothing else would repaint a resting transcript.
+                    // nothing else would repaint a resting transcript. The
+                    // requests stop on their own once `opacity` reaches zero,
+                    // which reduce-motion reaches a whole fade earlier.
                     window.request_animation_frame();
                 }
             }
@@ -270,7 +331,7 @@ where
             });
 
             window.on_mouse_event({
-                let list = list.clone();
+                let surface = surface.clone();
                 let state = state.clone();
                 move |event: &MouseDownEvent, phase, window, _| {
                     if phase != gpui::DispatchPhase::Bubble
@@ -279,18 +340,20 @@ where
                     {
                         return;
                     }
+                    let pointer = axis.coordinate(event.position);
                     if geometry.thumb.contains(&event.position) {
                         state
                             .grab_offset
-                            .set(Some(f32::from(event.position.y - geometry.thumb.top())));
+                            .set(Some(f32::from(pointer - axis.start(geometry.thumb))));
                     } else {
                         // A click on bare track centres the thumb there and
                         // begins dragging from its middle.
-                        let half = geometry.thumb.size.height / 2.0;
+                        let half = axis.extent(geometry.thumb) / 2.0;
                         state.grab_offset.set(Some(f32::from(half)));
                         scroll_to(
-                            &list,
-                            offset_for_thumb_top(track.top(), event.position.y - half, &geometry),
+                            &surface,
+                            axis,
+                            offset_for_thumb_start(axis.start(track), pointer - half, &geometry),
                             geometry.max_offset,
                         );
                     }
@@ -299,7 +362,7 @@ where
             });
 
             window.on_mouse_event({
-                let list = list.clone();
+                let surface = surface.clone();
                 let state = state.clone();
                 move |event: &MouseMoveEvent, phase, window, _| {
                     if phase != gpui::DispatchPhase::Bubble {
@@ -309,8 +372,13 @@ where
                         return;
                     };
                     scroll_to(
-                        &list,
-                        offset_for_thumb_top(track.top(), event.position.y - px(grab), &geometry),
+                        &surface,
+                        axis,
+                        offset_for_thumb_start(
+                            axis.start(track),
+                            axis.coordinate(event.position) - px(grab),
+                            &geometry,
+                        ),
                         geometry.max_offset,
                     );
                     window.refresh();
@@ -329,19 +397,82 @@ where
             });
         },
     )
-    .absolute()
-    .top_0()
-    .right_0()
-    .h_full()
-    .w(px(TRACK_WIDTH))
+    .absolute();
+
+    match axis {
+        // The horizontal track stops a track-width short of the right edge so
+        // it cannot overlap the vertical one. Both register window-level mouse
+        // listeners keyed only on `track.contains`, so a shared corner would
+        // let one click grab and jump both axes at once. AppKit reserves that
+        // corner for neither scroller; so do we.
+        Axis::Horizontal => overlay
+            .left_0()
+            .bottom_0()
+            .right(px(TRACK_WIDTH))
+            .h(px(TRACK_WIDTH)),
+        Axis::Vertical => overlay.top_0().right_0().h_full().w(px(TRACK_WIDTH)),
+    }
+}
+
+/// An overlay vertical scrollbar pinned to the right edge of its parent.
+///
+/// The parent must be `relative()`; this element positions itself absolutely
+/// and never participates in layout, so adding it cannot change content size.
+pub fn vertical<S>(surface: &S, state: &Rc<ScrollbarState>) -> impl IntoElement
+where
+    S: Scrollable + Clone + 'static,
+{
+    overlay(surface, state, Axis::Vertical)
+}
+
+/// An overlay horizontal scrollbar pinned to the bottom edge of its parent,
+/// stopping short of the bottom-right corner so a vertical bar on the same
+/// parent keeps sole ownership of it.
+///
+/// The parent must be `relative()`; this element positions itself absolutely
+/// and never participates in layout, so adding it cannot change content size.
+pub fn horizontal<S>(surface: &S, state: &Rc<ScrollbarState>) -> impl IntoElement
+where
+    S: Scrollable + Clone + 'static,
+{
+    overlay(surface, state, Axis::Horizontal)
 }
 
 #[cfg(test)]
 mod tests {
+    use gpui::{ParentElement, div, prelude::*};
+
     use super::*;
 
     fn track() -> Bounds<Pixels> {
         Bounds::new(point(px(500.0), px(100.0)), size(px(11.0), px(400.0)))
+    }
+
+    fn horizontal_track() -> Bounds<Pixels> {
+        Bounds::new(point(px(100.0), px(500.0)), size(px(400.0), px(11.0)))
+    }
+
+    fn vertical_geometry(
+        track: Bounds<Pixels>,
+        viewport_extent: Pixels,
+        max_offset: Pixels,
+        offset: Pixels,
+        thumb_thickness: Pixels,
+    ) -> Option<Geometry> {
+        geometry(
+            track,
+            Axis::Vertical,
+            viewport_extent,
+            max_offset,
+            offset,
+            thumb_thickness,
+        )
+    }
+
+    /// `opacity` with motion allowed, which is every case but the one test
+    /// below that is about reduce-motion.
+    fn opacity(since_scroll: Option<Duration>, hovered: bool, grabbed: bool) -> f32 {
+        super::opacity(since_scroll, hovered, grabbed, false)
     }
 
     #[test]
@@ -376,6 +507,26 @@ mod tests {
         assert_eq!(opacity(None, false, true), 1.0);
     }
 
+    /// Reduce-motion drops the ramp, not the disappearance: the thumb must not
+    /// be left painted at a resting opacity forever.
+    #[test]
+    fn reduce_motion_hides_the_bar_without_a_fade() {
+        let reduced = |since| super::opacity(Some(since), false, false, true);
+
+        // The hold is not motion, so it stays.
+        assert_eq!(reduced(Duration::ZERO), 1.0);
+        assert_eq!(reduced(HOLD - Duration::from_millis(1)), 1.0);
+
+        // Where the fade would have been, there is nothing at all.
+        assert_eq!(reduced(HOLD), 0.0);
+        assert_eq!(reduced(HOLD + FADE / 2), 0.0);
+        assert_eq!(reduced(HOLD + FADE * 10), 0.0);
+
+        // Hover and drag still pin it, reduce-motion or not.
+        assert_eq!(super::opacity(None, true, false, true), 1.0);
+        assert_eq!(super::opacity(Some(HOLD + FADE), false, true, true), 1.0);
+    }
+
     #[test]
     fn the_first_observed_offset_only_seeds_the_baseline() {
         let state = ScrollbarState::default();
@@ -397,15 +548,20 @@ mod tests {
 
     #[test]
     fn a_surface_that_does_not_scroll_has_no_thumb() {
-        assert!(geometry(track(), px(400.0), Pixels::ZERO, Pixels::ZERO, px(5.0)).is_none());
-        assert!(geometry(track(), Pixels::ZERO, px(900.0), Pixels::ZERO, px(5.0)).is_none());
+        assert!(
+            vertical_geometry(track(), px(400.0), Pixels::ZERO, Pixels::ZERO, px(5.0)).is_none()
+        );
+        assert!(
+            vertical_geometry(track(), Pixels::ZERO, px(900.0), Pixels::ZERO, px(5.0)).is_none()
+        );
     }
 
     #[test]
     fn thumb_height_tracks_the_visible_fraction() {
         // Viewport is a quarter of the content, so the thumb is a quarter of
         // the track.
-        let geometry = geometry(track(), px(400.0), px(1200.0), Pixels::ZERO, px(5.0)).unwrap();
+        let geometry =
+            vertical_geometry(track(), px(400.0), px(1200.0), Pixels::ZERO, px(5.0)).unwrap();
         assert_eq!(geometry.thumb.size.height, px(100.0));
         assert_eq!(geometry.thumb.top(), px(100.0));
         assert_eq!(geometry.travel, px(300.0));
@@ -413,18 +569,39 @@ mod tests {
 
     #[test]
     fn a_tiny_visible_fraction_still_leaves_a_grabbable_thumb() {
-        let geometry = geometry(track(), px(400.0), px(100_000.0), Pixels::ZERO, px(5.0)).unwrap();
-        assert_eq!(geometry.thumb.size.height, px(THUMB_MIN_HEIGHT));
+        let geometry =
+            vertical_geometry(track(), px(400.0), px(100_000.0), Pixels::ZERO, px(5.0)).unwrap();
+        assert_eq!(geometry.thumb.size.height, px(THUMB_MIN_LENGTH));
     }
 
     #[test]
     fn thumb_position_and_offset_are_inverse() {
         let track = track();
-        let geometry = geometry(track, px(400.0), px(1200.0), px(600.0), px(5.0)).unwrap();
+        let geometry = vertical_geometry(track, px(400.0), px(1200.0), px(600.0), px(5.0)).unwrap();
         // Halfway down the content puts the thumb halfway along its travel.
         assert_eq!(geometry.thumb.top(), track.top() + px(150.0));
         assert_eq!(
-            offset_for_thumb_top(track.top(), geometry.thumb.top(), &geometry),
+            offset_for_thumb_start(track.top(), geometry.thumb.top(), &geometry),
+            px(600.0)
+        );
+    }
+
+    #[test]
+    fn horizontal_thumb_tracks_width_and_offset() {
+        let track = horizontal_track();
+        let geometry = geometry(
+            track,
+            Axis::Horizontal,
+            px(400.0),
+            px(1200.0),
+            px(600.0),
+            px(5.0),
+        )
+        .unwrap();
+        assert_eq!(geometry.thumb.size.width, px(100.0));
+        assert_eq!(geometry.thumb.left(), track.left() + px(150.0));
+        assert_eq!(
+            offset_for_thumb_start(track.left(), geometry.thumb.left(), &geometry),
             px(600.0)
         );
     }
@@ -432,18 +609,19 @@ mod tests {
     #[test]
     fn offsets_clamp_at_both_ends() {
         let track = track();
-        let geometry = geometry(track, px(400.0), px(1200.0), px(1200.0), px(5.0)).unwrap();
+        let geometry =
+            vertical_geometry(track, px(400.0), px(1200.0), px(1200.0), px(5.0)).unwrap();
         assert_eq!(
             geometry.thumb.top(),
             track.bottom() - geometry.thumb.size.height
         );
 
         assert_eq!(
-            offset_for_thumb_top(track.top(), track.top() - px(9_999.0), &geometry),
+            offset_for_thumb_start(track.top(), track.top() - px(9_999.0), &geometry),
             Pixels::ZERO
         );
         assert_eq!(
-            offset_for_thumb_top(track.top(), track.bottom() + px(9_999.0), &geometry),
+            offset_for_thumb_start(track.top(), track.bottom() + px(9_999.0), &geometry),
             px(1200.0)
         );
     }
@@ -452,7 +630,73 @@ mod tests {
     fn overscrolled_offsets_do_not_push_the_thumb_past_the_track() {
         let track = track();
         // A momentum overscroll can report more than max for a frame.
-        let geometry = geometry(track, px(400.0), px(1200.0), px(5000.0), px(5.0)).unwrap();
+        let geometry =
+            vertical_geometry(track, px(400.0), px(1200.0), px(5000.0), px(5.0)).unwrap();
         assert!(geometry.thumb.bottom() <= track.bottom() + px(0.001));
+    }
+
+    /// Both bars register window-level listeners gated only on their own track
+    /// bounds, so an overlapping corner would let one press grab both axes and
+    /// the following drag move the content diagonally.
+    #[gpui::test]
+    fn the_shared_corner_belongs_to_one_bar_only(cx: &mut gpui::TestAppContext) {
+        const PANE: f32 = 200.0;
+
+        struct BothBars {
+            scroll: ScrollHandle,
+            vertical: Rc<ScrollbarState>,
+            horizontal: Rc<ScrollbarState>,
+        }
+
+        impl gpui::Render for BothBars {
+            fn render(&mut self, _: &mut Window, _: &mut gpui::Context<Self>) -> impl IntoElement {
+                div()
+                    .w(px(PANE))
+                    .h(px(PANE))
+                    .relative()
+                    .child(
+                        div()
+                            .id("corner-test-scroll")
+                            .size_full()
+                            .flex()
+                            .overflow_scroll()
+                            .track_scroll(&self.scroll)
+                            .child(div().w(px(1_000.0)).h(px(1_000.0)).flex_none()),
+                    )
+                    .child(vertical(&self.scroll, &self.vertical))
+                    .child(horizontal(&self.scroll, &self.horizontal))
+            }
+        }
+
+        let scroll = ScrollHandle::new();
+        let view_scroll = scroll.clone();
+        let (_, cx) = cx.add_window_view(move |_, _| BothBars {
+            scroll: view_scroll,
+            vertical: ScrollbarState::new(),
+            horizontal: ScrollbarState::new(),
+        });
+        assert!(
+            scroll.max_offset().x > px(0.0) && scroll.max_offset().y > px(0.0),
+            "the harness must scroll on both axes"
+        );
+
+        // Press in the bottom-right corner, inside both tracks were they to
+        // overlap. Only the vertical bar may claim it.
+        cx.simulate_event(MouseDownEvent {
+            button: MouseButton::Left,
+            position: point(px(PANE - 3.0), px(PANE - 3.0)),
+            modifiers: Default::default(),
+            click_count: 1,
+            first_mouse: false,
+        });
+        assert_eq!(
+            scroll.offset().x,
+            px(0.0),
+            "a press in the corner must not jump the horizontal axis"
+        );
+        assert!(
+            scroll.offset().y < px(0.0),
+            "the vertical bar still owns the corner"
+        );
     }
 }
