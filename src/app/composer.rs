@@ -404,7 +404,7 @@ impl Waku {
                                 .w_full()
                                 .rounded(px(11.0))
                                 .overflow_hidden()
-                                .bg(rgb(0x101010))
+                                .bg(theme.inset)
                                 .when_some(screenshot, |element, screenshot| {
                                     element.child(
                                         img(screenshot)
@@ -1905,9 +1905,51 @@ impl Waku {
         )
     }
 
+    /// Stands in for the composer on a subagent conversation, saying plainly
+    /// why there is nothing to type into.
+    fn render_subagent_composer_note(&self, role: Option<String>, theme: &Theme) -> Div {
+        div().flex_none().px(px(20.0)).pb(px(4.0)).child(
+            div()
+                .w_full()
+                .max_w(px(CONTENT_MAX_WIDTH))
+                .mx_auto()
+                .min_h(px(34.0))
+                .px(px(11.0))
+                .py(px(8.0))
+                .rounded(px(10.0))
+                .border_1()
+                .border_color(theme.border)
+                .bg(theme.inset)
+                .flex()
+                .items_center()
+                .gap(px(7.0))
+                .child(icon("icons/bot.svg", 12.0, theme.text_ghost))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .text_size(px(11.5))
+                        .line_height(px(16.0))
+                        .text_color(theme.text_tertiary)
+                        .child(SharedString::from(match role {
+                            Some(role) => tr!("composer.subagent_read_only_role", role = role),
+                            None => tr!("composer.subagent_read_only"),
+                        })),
+                ),
+        )
+    }
+
     pub(super) fn render_composer(&self, window: &Window, cx: &mut Context<Self>) -> Div {
         let theme = Theme::current(cx);
         let session = self.selected_session();
+        // A subagent's conversation is watched, not driven. Its model, effort,
+        // mode and persona were all fixed by the parent at spawn, so none of
+        // the composer's controls apply — and on most providers there is no
+        // route to the agent at all. A composer here would look like it works
+        // and silently deliver somewhere else, which is worse than none.
+        if let Some(origin) = session.and_then(|session| session.subagent.as_ref()) {
+            return self.render_subagent_composer_note(origin.role.clone(), &theme);
+        }
         let preparing = session.is_some_and(|session| {
             self.submission_preparations.contains(&session.id)
                 || self.response_fork_preparations.contains_key(&session.id)
@@ -2054,7 +2096,7 @@ impl Waku {
                                             element.child(icon("icons/stop.svg", 18.0, theme.text))
                                         })
                                         .on_click(cx.listener(|this, _, _, cx| {
-                                            this.cancel_turn(cx);
+                                            this.stop_turn_and_resume_queue(cx);
                                         })),
                                 )
                                 .when(steerable && has_draft, |element| {

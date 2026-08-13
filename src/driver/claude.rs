@@ -111,6 +111,11 @@ fn configure_stream_command(
         // Echoes each user message back, which is how a queued prompt is
         // distinguished from one the agent has started on.
         "--replay-user-messages",
+        // Without this a subagent forwards only its tool calls: no narrative,
+        // no reasoning, and nothing at all from an agent it spawned in turn.
+        // Verified against 2.1.231 — a subagent transcript is empty prose
+        // without it.
+        "--forward-subagent-text",
         // Undocumented, and the whole reason Supervised can mean supervised:
         // without it the CLI decides permissions itself and only reports
         // denials after the fact.
@@ -493,13 +498,19 @@ struct ClaudeStreamState {
     /// on the main channel with `parent_tool_use_id` set — can be routed into
     /// that task's output pane instead of this session's transcript.
     subagent_tasks: HashMap<String, String>,
+    /// What an `Agent`/`Task` tool call said about the agent it launched, held
+    /// until something proves the agent is synchronous.
+    pending_subagent_launches: HashMap<String, super::support::SubagentLaunch>,
+    /// Subagents this driver published itself, from the tool call, because no
+    /// `task_started` announced them. Their tool result is what settles them.
+    tool_subagents: HashSet<String>,
+    /// Subagents whose conversation has already been opened, so the launch is
+    /// sent exactly once.
+    opened_subagents: HashSet<String>,
     /// The description each task started with. Progress events reuse the
     /// `description` field for the agent's current activity line, which
     /// belongs in the detail row, never the title.
     task_descriptions: HashMap<String, String>,
-    /// Tasks whose output pane already carries streamed transcript; the
-    /// settle notification's summary would only duplicate it.
-    streamed_task_output: HashSet<String>,
     pending_task_stops: Arc<Mutex<HashMap<String, BackgroundWorkKey>>>,
     /// Model of the latest main-thread assistant message, so the settled
     /// turn's `modelUsage` map can be read for that model's context window
@@ -686,7 +697,11 @@ fn claude_task_item(
     // The settle notification's summary is the subagent's final report and
     // belongs in the output pane — unless the live transcript already
     // streamed there.
-    if subtype == "task_notification" && !state.streamed_task_output.contains(&task_id) {
+    // The final report always lands on the agent's card. Its streamed
+    // narration goes to the agent's conversation, which is a different
+    // surface, so carrying both duplicates nothing — and suppressing the
+    // report here left a completed agent showing no output at all.
+    if subtype == "task_notification" {
         item.output = value
             .get("summary")
             .and_then(Value::as_str)
@@ -792,6 +807,11 @@ fn handle_claude_system(
         if subtype == "task_started"
             && let Some(tool_use_id) = item.origin_activity_id.clone()
         {
+            // The agent is backgrounded, so the task events own its
+            // background-work row from here. The launch stays: it is what
+            // opens the agent's conversation when its first message lands,
+            // and dropping it silently discarded every backgrounded agent's
+            // transcript.
             state.subagent_tasks.insert(tool_use_id, task_id.clone());
         }
         // Remember what the task is called: `task_started` names it, and a
@@ -817,74 +837,173 @@ fn handle_claude_system(
 
 /// Renders a subagent message into its task's output pane: narrative text
 /// as-is, tool calls as single `› tool · subject` lines.
+/// Reopen a turn for work the CLI started on its own.
+///
+/// A backgrounded subagent ends its parent's turn the moment it is launched:
+/// Claude sends `result`, and only wakes back up — with a synthetic task
+/// notification — once the subagent reports. Everything after that arrives on
+/// a settled turn, and the app drops output it cannot attribute, so the second
+/// stretch of work has to re-arm the turn it belongs to. Called only for
+/// main-thread messages; a subagent's own stream must never do this.
+fn rearm_provider_turn(turn_active: &Mutex<bool>, events: &impl DriverEventSink) {
+    let mut active = turn_active.lock();
+    if *active {
+        return;
+    }
+    *active = true;
+    drop(active);
+    let _ = events.send(DriverEvent::ProviderTurnStarted);
+}
+
+/// Replay a subagent's message as events against that agent's own
+/// conversation.
+///
+/// The child's blocks are the same shapes the main thread sends, so they are
+/// forwarded as ordinary `TextDelta`/`ReasoningDelta`/`RichActivity` events
+/// wrapped in [`DriverEvent::Subagent`]. That is what lets a subagent render
+/// through the same transcript as a task instead of as a flat log.
 fn forward_subagent_transcript(
     parent_tool_use_id: &str,
     value: &Value,
     events: &impl DriverEventSink,
     state: &mut ClaudeStreamState,
 ) {
-    let Some(task_id) = state.subagent_tasks.get(parent_tool_use_id).cloned() else {
-        return;
-    };
+    // The first message tagged with this call is what proves the agent exists;
+    // the launch it carries opens the conversation.
+    let launch = (!state.opened_subagents.contains(parent_tool_use_id))
+        .then(|| {
+            state
+                .pending_subagent_launches
+                .get(parent_tool_use_id)
+                .map(|launch| crate::model::SubagentLaunchInfo {
+                    title: launch.title.clone(),
+                    role: launch.role.clone(),
+                    model: launch.model.clone(),
+                    prompt: launch.prompt.clone(),
+                    // Verified against the CLI: no inbound control request or
+                    // user-message field addresses an agent, and sidechain
+                    // sessions are explicitly filtered from resume. A client
+                    // can watch a Claude subagent, never talk to it.
+                    can_prompt: false,
+                    prompt_target: None,
+                })
+        })
+        .flatten();
+    if launch.is_some() {
+        state.opened_subagents.insert(parent_tool_use_id.to_owned());
+    }
+
+    // A message tagged with this tool call and no task behind it means the
+    // agent is synchronous: `task_started` would have registered it already.
+    if !state.subagent_tasks.contains_key(parent_tool_use_id)
+        && let Some(pending) = state
+            .pending_subagent_launches
+            .get(parent_tool_use_id)
+            .cloned()
+    {
+        state.tool_subagents.insert(parent_tool_use_id.to_owned());
+        state
+            .subagent_tasks
+            .insert(parent_tool_use_id.to_owned(), parent_tool_use_id.to_owned());
+        let _ = events.send(DriverEvent::BackgroundWork(BackgroundWorkEvent::Upsert(
+            super::support::subagent_item(
+                parent_tool_use_id,
+                &pending,
+                BackgroundWorkStatus::Running,
+            ),
+        )));
+    }
     let Some(content) = value.pointer("/message/content").and_then(Value::as_array) else {
         return;
     };
-    let mut delta = String::new();
+
+    let mut launch = launch;
+    let mut emit = |event: DriverEvent| {
+        let _ = events.send(DriverEvent::Subagent {
+            provider_id: parent_tool_use_id.to_owned(),
+            launch: launch.take(),
+            event: Box::new(event),
+        });
+    };
     for block in content {
         match block.get("type").and_then(Value::as_str) {
             Some("text") => {
                 if let Some(text) = block
                     .get("text")
                     .and_then(Value::as_str)
-                    .map(str::trim)
-                    .filter(|text| !text.is_empty())
+                    .filter(|text| !text.trim().is_empty())
                 {
-                    delta.push_str(text);
-                    delta.push_str("\n\n");
+                    emit(DriverEvent::TextDelta(text.to_owned()));
+                }
+            }
+            Some("thinking") => {
+                if let Some(text) = block
+                    .get("thinking")
+                    .and_then(Value::as_str)
+                    .filter(|text| !text.trim().is_empty())
+                {
+                    emit(DriverEvent::ReasoningDelta(text.to_owned()));
                 }
             }
             Some("tool_use") => {
-                let name = block.get("name").and_then(Value::as_str).unwrap_or("tool");
-                let input = block.get("input");
-                let subject = activity::input_title(input).or_else(|| {
-                    input.and_then(|input| {
-                        [
-                            "command",
-                            "file_path",
-                            "path",
-                            "pattern",
-                            "query",
-                            "url",
-                            "description",
-                        ]
-                        .into_iter()
-                        .find_map(|key| input.get(key).and_then(Value::as_str))
-                        .and_then(one_line)
-                    })
-                });
-                match subject {
-                    Some(subject) => delta.push_str(&format!("› {name} · {subject}\n")),
-                    None => delta.push_str(&format!("› {name}\n")),
-                }
+                let id = block.get("id").and_then(Value::as_str).map(str::to_owned);
+                let wire_title = block
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .unwrap_or("tool")
+                    .to_owned();
+                let kind = super::support::classify_tool(&wire_title);
+                let title = activity::input_title(block.get("input")).unwrap_or(wire_title);
+                emit(DriverEvent::RichActivity(activity::tool_activity(
+                    id,
+                    kind,
+                    title,
+                    block.get("input"),
+                    None,
+                    None,
+                    false,
+                    false,
+                )));
             }
             _ => {}
         }
     }
-    if delta.is_empty() {
+}
+
+/// A subagent's tool results arrive on the main channel too. They complete
+/// activities inside that agent's conversation, not this session's.
+fn forward_subagent_tool_result(
+    parent_tool_use_id: &str,
+    value: &Value,
+    events: &impl DriverEventSink,
+) {
+    let Some(content) = value.pointer("/message/content").and_then(Value::as_array) else {
         return;
+    };
+    for block in content
+        .iter()
+        .filter(|block| block.get("type").and_then(Value::as_str) == Some("tool_result"))
+    {
+        let id = block
+            .get("tool_use_id")
+            .and_then(Value::as_str)
+            .map(str::to_owned);
+        let failed = block.get("is_error").and_then(Value::as_bool) == Some(true);
+        let _ = events.send(DriverEvent::Subagent {
+            provider_id: parent_tool_use_id.to_owned(),
+            launch: None,
+            event: Box::new(DriverEvent::RichActivity(activity::tool_activity(
+                id,
+                ActivityKind::Tool,
+                String::new(),
+                None,
+                block.get("content"),
+                block.get("content"),
+                failed,
+                true,
+            ))),
+        });
     }
-    let kind = state
-        .background_task_kinds
-        .get(&task_id)
-        .copied()
-        .unwrap_or(BackgroundWorkKind::Subagent);
-    state.streamed_task_output.insert(task_id.clone());
-    let _ = events.send(DriverEvent::BackgroundWork(
-        BackgroundWorkEvent::OutputDelta {
-            key: BackgroundWorkKey::new(kind, task_id),
-            delta,
-        },
-    ));
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -980,6 +1099,7 @@ fn handle_message(
             if event.get("type").and_then(Value::as_str) == Some("message_start") {
                 state.saw_text_delta = false;
                 state.saw_reasoning_delta = false;
+                rearm_provider_turn(turn_active, events);
             }
             let delta = event.get("delta").unwrap_or(&Value::Null);
             match delta.get("type").and_then(Value::as_str) {
@@ -1014,6 +1134,7 @@ fn handle_message(
                 forward_subagent_transcript(parent, value, events, state);
                 return;
             }
+            rearm_provider_turn(turn_active, events);
             if let Some(usage) = value.pointer("/message/usage") {
                 if let Some(model) = value.pointer("/message/model").and_then(Value::as_str) {
                     state.last_assistant_model = Some(model.to_owned());
@@ -1084,6 +1205,18 @@ fn handle_message(
                                 id.clone(),
                                 (kind, title.clone(), wire_title.clone(), command),
                             );
+                            // Only a backgrounded agent gets `task_started`; a
+                            // synchronous one is announced by this tool call
+                            // alone. Hold what the call said about it, but do
+                            // not publish yet — publishing here would race
+                            // `task_started` and put two rows in the sidebar
+                            // for one agent. The first message that arrives
+                            // tagged with this id decides.
+                            if let Some(launch) =
+                                super::support::subagent_launch(&wire_title, block.get("input"))
+                            {
+                                state.pending_subagent_launches.insert(id.clone(), launch);
+                            }
                         }
                         let _ = events.send(DriverEvent::RichActivity(activity::tool_activity(
                             id,
@@ -1101,13 +1234,10 @@ fn handle_message(
             }
         }
         Some("user") => {
-            // A subagent's tool results echo on the main channel too; its
-            // transcript lives in the task's output pane, not here.
-            if value
-                .get("parent_tool_use_id")
-                .and_then(Value::as_str)
-                .is_some()
-            {
+            // A subagent's tool results echo on the main channel too. They
+            // complete activities in that agent's conversation, not this one.
+            if let Some(parent) = value.get("parent_tool_use_id").and_then(Value::as_str) {
+                forward_subagent_tool_result(parent, value, events);
                 return;
             }
             // `--replay-user-messages` echoes Waku's own prompts back; they are
@@ -1136,6 +1266,29 @@ fn handle_message(
                         None,
                     ));
                 let failed = block.get("is_error").and_then(Value::as_bool) == Some(true);
+                if let Some(id) = id.as_ref() {
+                    state.pending_subagent_launches.remove(id);
+                }
+                // Settle a synchronous subagent this driver published from its
+                // own tool call. A backgrounded one keeps running past this
+                // result and is settled by `task_notification` instead.
+                if let Some(id) = id.as_ref().filter(|id| state.tool_subagents.remove(*id)) {
+                    let mut work = BackgroundWorkItem::new(
+                        BackgroundWorkKind::Subagent,
+                        id.clone(),
+                        String::new(),
+                        if failed {
+                            BackgroundWorkStatus::Failed
+                        } else {
+                            BackgroundWorkStatus::Completed
+                        },
+                    );
+                    work.output = block.get("content").and_then(activity::format_output);
+                    let _ = events.send(DriverEvent::BackgroundWork(BackgroundWorkEvent::Upsert(
+                        work,
+                    )));
+                    state.subagent_tasks.remove(id);
+                }
                 let _ = events.send(DriverEvent::RichActivity(activity::tool_activity(
                     id,
                     kind,
@@ -1634,6 +1787,261 @@ mod tests {
         assert_eq!(completed.status, BackgroundWorkStatus::Completed);
     }
 
+    /// A backgrounded agent is announced by `task_started`, which owns its
+    /// background-work row. The launch must survive that: it is what opens the
+    /// agent's conversation when its first message lands, and discarding it
+    /// silently threw away every backgrounded agent's whole transcript.
+    #[test]
+    fn a_backgrounded_agent_still_opens_a_conversation() {
+        let (events, event_rx, commands, _command_rx, turn, mut state) = harness();
+        handle_message(
+            &json!({
+                "type": "assistant",
+                "message": {"content": [{
+                    "type": "tool_use",
+                    "id": "toolu-agent",
+                    "name": "Agent",
+                    "input": {
+                        "description": "Test agent B",
+                        "subagent_type": "Explore",
+                        "prompt": "List the entries",
+                        "run_in_background": true
+                    }
+                }]}
+            }),
+            "s",
+            &events,
+            &commands,
+            &turn,
+            true,
+            &mut state,
+        );
+        handle_message(
+            &json!({
+                "type": "system",
+                "subtype": "task_started",
+                "task_id": "agent-42",
+                "tool_use_id": "toolu-agent",
+                "subagent_type": "Explore",
+                "is_backgrounded": true,
+                "description": "Test agent B"
+            }),
+            "s",
+            &events,
+            &commands,
+            &turn,
+            true,
+            &mut state,
+        );
+        let _ = event_rx.try_iter().count();
+
+        handle_message(
+            &json!({
+                "type": "assistant",
+                "parent_tool_use_id": "toolu-agent",
+                "message": {"content": [{"type": "text", "text": "AGENT-B OK"}]}
+            }),
+            "s",
+            &events,
+            &commands,
+            &turn,
+            true,
+            &mut state,
+        );
+        let DriverEvent::Subagent {
+            provider_id,
+            launch,
+            event,
+        } = event_rx.try_recv().unwrap()
+        else {
+            panic!("a backgrounded agent's message must reach its conversation");
+        };
+        assert_eq!(provider_id, "toolu-agent");
+        let launch = launch.expect("the launch opens the conversation");
+        assert_eq!(launch.title, "Test agent B");
+        assert_eq!(launch.role.as_deref(), Some("Explore"));
+        assert!(matches!(*event, DriverEvent::TextDelta(_)));
+    }
+
+    /// A backgrounded subagent ends its parent's turn the moment it launches,
+    /// then Claude wakes itself when the subagent reports back. That second
+    /// stretch of work has to reopen a turn, or the app — which drops output it
+    /// cannot attribute to a running turn — shows the agent as simply stopped.
+    #[test]
+    fn a_provider_wake_up_after_a_background_agent_reopens_the_turn() {
+        let (events, event_rx, commands, _command_rx, turn, mut state) = harness();
+        *turn.lock() = true;
+
+        handle_message(
+            &json!({"type": "result", "is_error": false}),
+            "s",
+            &events,
+            &commands,
+            &turn,
+            true,
+            &mut state,
+        );
+        assert!(
+            event_rx
+                .try_iter()
+                .any(|event| matches!(event, DriverEvent::TurnFinished { .. }))
+        );
+        assert!(!*turn.lock());
+
+        // The subagent reports; Claude resumes with no prompt behind it.
+        handle_message(
+            &json!({
+                "type": "assistant",
+                "message": {"content": [{"type": "text", "text": "The agent found it."}]}
+            }),
+            "s",
+            &events,
+            &commands,
+            &turn,
+            true,
+            &mut state,
+        );
+        assert!(matches!(
+            event_rx.try_recv().unwrap(),
+            DriverEvent::ProviderTurnStarted
+        ));
+        assert!(*turn.lock(), "the resumed turn must be armed");
+
+        // A subagent's own message must never reopen the main turn.
+        *turn.lock() = false;
+        handle_message(
+            &json!({
+                "type": "assistant",
+                "parent_tool_use_id": "toolu-agent",
+                "message": {"content": [{"type": "text", "text": "child chatter"}]}
+            }),
+            "s",
+            &events,
+            &commands,
+            &turn,
+            true,
+            &mut state,
+        );
+        assert!(!*turn.lock());
+
+        // And the reopened turn settles on its own result.
+        *turn.lock() = true;
+        let _ = event_rx.try_iter().count();
+        handle_message(
+            &json!({"type": "result", "is_error": false}),
+            "s",
+            &events,
+            &commands,
+            &turn,
+            true,
+            &mut state,
+        );
+        assert!(
+            event_rx
+                .try_iter()
+                .any(|event| matches!(event, DriverEvent::TurnFinished { .. }))
+        );
+    }
+
+    /// Claude only announces a *backgrounded* agent with `task_started`. A
+    /// synchronous one exists solely as a tool call plus messages tagged with
+    /// its id, so the driver has to publish that agent itself — and must not
+    /// publish a second row for the backgrounded case, which the test above
+    /// pins.
+    #[test]
+    fn a_synchronous_agent_reaches_the_sidebar_without_a_task_event() {
+        let (events, event_rx, commands, _command_rx, turn, mut state) = harness();
+        handle_message(
+            &json!({
+                "type": "assistant",
+                "message": {"content": [{
+                    "type": "tool_use",
+                    "id": "toolu-agent",
+                    "name": "Agent",
+                    "input": {
+                        "description": "Inspect the parser",
+                        "subagent_type": "Explore",
+                        "prompt": "Read every parser test"
+                    }
+                }]}
+            }),
+            "s",
+            &events,
+            &commands,
+            &turn,
+            true,
+            &mut state,
+        );
+        // The tool call alone publishes nothing: it cannot yet tell a
+        // synchronous agent from one about to be backgrounded.
+        assert!(matches!(
+            event_rx.try_recv().unwrap(),
+            DriverEvent::RichActivity(_)
+        ));
+        assert!(event_rx.try_recv().is_err());
+
+        handle_message(
+            &json!({
+                "type": "assistant",
+                "parent_tool_use_id": "toolu-agent",
+                "message": {"content": [{"type": "text", "text": "Reading the lexer."}]}
+            }),
+            "s",
+            &events,
+            &commands,
+            &turn,
+            true,
+            &mut state,
+        );
+        let DriverEvent::BackgroundWork(BackgroundWorkEvent::Upsert(started)) =
+            event_rx.try_recv().unwrap()
+        else {
+            panic!("a subagent message should publish the agent");
+        };
+        assert_eq!(started.key.kind, BackgroundWorkKind::Subagent);
+        assert_eq!(started.key.provider_id, "toolu-agent");
+        assert_eq!(started.title, "Inspect the parser");
+        assert_eq!(started.role.as_deref(), Some("Explore"));
+        assert_eq!(started.status, BackgroundWorkStatus::Running);
+        // Its narration is addressed to that agent's own conversation, and
+        // carries the launch that opens it.
+        assert!(matches!(
+            event_rx.try_recv().unwrap(),
+            DriverEvent::Subagent { provider_id, launch: Some(launch), event }
+                if provider_id == "toolu-agent"
+                    && launch.title == "Inspect the parser"
+                    && launch.role.as_deref() == Some("Explore")
+                    // Verified against the CLI: nothing on the wire addresses
+                    // a Claude subagent, so it is never given a composer.
+                    && !launch.can_prompt
+                    && matches!(*event, DriverEvent::TextDelta(_))
+        ));
+
+        handle_message(
+            &json!({
+                "type": "user",
+                "message": {"content": [{
+                    "type": "tool_result",
+                    "tool_use_id": "toolu-agent",
+                    "content": "Done."
+                }]}
+            }),
+            "s",
+            &events,
+            &commands,
+            &turn,
+            true,
+            &mut state,
+        );
+        let DriverEvent::BackgroundWork(BackgroundWorkEvent::Upsert(settled)) =
+            event_rx.try_recv().unwrap()
+        else {
+            panic!("the tool result should settle a synchronous agent");
+        };
+        assert_eq!(settled.key.provider_id, "toolu-agent");
+        assert_eq!(settled.status, BackgroundWorkStatus::Completed);
+    }
+
     /// Wire shapes read off CLI 2.1.226: progress events reuse `description`
     /// for the agent's current activity line, and the settle notification's
     /// `summary` is the whole final report. Neither may retitle the task —
@@ -1795,21 +2203,41 @@ mod tests {
         while let Ok(event) = event_rx.try_recv() {
             seen.push(event);
         }
-        assert_eq!(
-            seen.len(),
-            1,
+        // Everything the subagent said is addressed to the subagent's own
+        // conversation. Nothing reaches this session's transcript or meter.
+        assert!(
+            seen.iter()
+                .all(|event| matches!(event, DriverEvent::Subagent { .. })),
             "subagent content must not reach the transcript or usage meter"
         );
-        let DriverEvent::BackgroundWork(BackgroundWorkEvent::OutputDelta { key, delta }) = &seen[0]
-        else {
-            panic!("the subagent message should stream into its task output");
-        };
-        assert_eq!(key.provider_id, "agent-42");
-        assert_eq!(key.kind, BackgroundWorkKind::Subagent);
-        assert_eq!(delta, "Scanning the panel.\n\n› Bash · rg overlay src\n");
+        let addressed = seen
+            .iter()
+            .filter_map(|event| match event {
+                DriverEvent::Subagent {
+                    provider_id, event, ..
+                } => Some((provider_id.as_str(), event.as_ref())),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert!(addressed.iter().all(|(id, _)| *id == "toolu-agent"));
+        // Narrative, the tool call, and its result — the same event shapes a
+        // task's own transcript is built from.
+        assert!(matches!(
+            addressed[0].1,
+            DriverEvent::TextDelta(text) if text == "Scanning the panel."
+        ));
+        assert!(matches!(
+            addressed[1].1,
+            DriverEvent::RichActivity(item) if !item.complete
+        ));
+        assert!(matches!(
+            addressed[2].1,
+            DriverEvent::RichActivity(item) if item.complete
+        ));
 
-        // The settle notification's summary would duplicate the streamed
-        // transcript; the pane keeps what it already has.
+        // The final report lands on the agent's card even though its narration
+        // streamed to the agent's conversation: they are different surfaces,
+        // and suppressing it here left a completed agent showing no output.
         handle_message(
             &json!({
                 "type": "system",
@@ -1830,7 +2258,7 @@ mod tests {
         else {
             panic!("task_notification should settle the background item");
         };
-        assert!(settled.output.is_none());
+        assert_eq!(settled.output.as_deref(), Some("Scanning the panel."));
     }
 
     #[test]

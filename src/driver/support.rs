@@ -366,6 +366,154 @@ pub(super) fn classify_tool(name: &str) -> ActivityKind {
     ActivityKind::from_tool_name(name)
 }
 
+/// A nested agent a provider just launched, as read off the spawning tool call.
+///
+/// Every agent CLI Waku drives ends up expressing delegation the same way: one
+/// tool call that names a role and hands it a prompt. The transports disagree
+/// about everything after that — Codex opens a child thread, opencode opens a
+/// child session, Claude tags later messages with the spawning tool's id, and
+/// Amp declares `parent_tool_use_id` but always sends `null` — so the tool call
+/// itself is the one join point that exists everywhere.
+#[derive(Clone)]
+pub(super) struct SubagentLaunch {
+    /// The agent's kind, as the provider names it: `Explore`, `oracle`,
+    /// `general`. Shown as the role on the subagent's row.
+    pub(super) role: Option<String>,
+    /// The short human label for this run, preferring the provider's own
+    /// description over the first line of the prompt.
+    pub(super) title: String,
+    pub(super) prompt: Option<String>,
+    pub(super) model: Option<String>,
+}
+
+/// Whether `name` is a tool whose whole purpose is to run another agent.
+///
+/// Claude renamed `Task` to `Agent` in 2.x and still accepts both; Amp keeps
+/// `Task` plus a fixed set of named agent-backed tools; opencode and Qwen use
+/// lowercase `task`/`agent`; Cursor sends `taskToolCall`. Matching is done on
+/// the normalized leaf so MCP-namespaced variants (`mcp__x__task`) still hit.
+pub(super) fn is_subagent_tool(name: &str) -> bool {
+    let normalized = name.trim().to_ascii_lowercase().replace(['-', ' '], "_");
+    let leaf = normalized
+        .rsplit("__")
+        .next()
+        .unwrap_or(&normalized)
+        .rsplit([':', '.', '/'])
+        .next()
+        .unwrap_or(&normalized);
+    matches!(
+        leaf.replace('_', "").as_str(),
+        "agent"
+            | "task"
+            | "tasktoolcall"
+            | "subagent"
+            // DeepSeek ships the delegation tool twice, as `subagent` and
+            // `subagent_fork` for its one-shot mode.
+            | "subagentfork"
+            | "spawnagent"
+            // Grok names its delegation tool `spawn_subagent`; Cursor titles
+            // the ACP call `Task: Subagent task`.
+            | "spawnsubagent"
+            | "subagenttask"
+            // pi-minions, the delegation extension Pi actually loads.
+            | "spawn"
+            | "invokeagent"
+            | "runagent"
+            | "delegate"
+            | "oracle"
+            | "librarian"
+            | "codereview"
+    )
+}
+
+/// Read a subagent launch off a spawning tool call's arguments. Returns `None`
+/// for tools that are not delegation, so a caller can use it as the test.
+pub(super) fn subagent_launch(name: &str, input: Option<&Value>) -> Option<SubagentLaunch> {
+    if !is_subagent_tool(name) {
+        return None;
+    }
+    let field = |keys: &[&str]| -> Option<String> {
+        let input = input?;
+        keys.iter()
+            .find_map(|key| input.get(*key).and_then(Value::as_str))
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned)
+    };
+    let prompt = field(&["prompt", "message", "task", "instructions", "input"]);
+    // A named tool such as `oracle` is itself the role; a generic `Task` names
+    // its role in the arguments, and falls back to the tool's own name so a row
+    // never reads as an anonymous agent.
+    let role = field(&[
+        "subagent_type",
+        "subagentType",
+        "agent_type",
+        "agentType",
+        "agent_name",
+        "agentName",
+        "agent",
+        "role",
+        "task_name",
+        "taskName",
+    ])
+    .or_else(|| {
+        let leaf = name.trim();
+        (!leaf.is_empty()
+            && !leaf.eq_ignore_ascii_case("task")
+            && !leaf.eq_ignore_ascii_case("agent"))
+        .then(|| leaf.to_owned())
+    });
+    let title = field(&["description", "title", "subject", "task_name", "taskName"])
+        .or_else(|| prompt.as_deref().and_then(subagent_title_from_prompt))
+        .or_else(|| role.clone())
+        .unwrap_or_else(|| tr!("background.subagent"));
+    Some(SubagentLaunch {
+        role,
+        title,
+        prompt,
+        model: field(&["model", "modelID", "model_id"]),
+    })
+}
+
+/// The background-work entry for a subagent launched by tool call `tool_id`.
+///
+/// Keying on the spawning tool call — rather than a provider-specific thread or
+/// session id — is what lets the transcript badge and the sidebar row address
+/// the same piece of work through `origin_activity_id`.
+pub(super) fn subagent_item(
+    tool_id: &str,
+    launch: &SubagentLaunch,
+    status: crate::model::BackgroundWorkStatus,
+) -> crate::model::BackgroundWorkItem {
+    use crate::model::{BackgroundWorkItem, BackgroundWorkKind};
+
+    let mut item = BackgroundWorkItem::new(
+        BackgroundWorkKind::Subagent,
+        tool_id,
+        launch.title.clone(),
+        status,
+    );
+    item.role = launch.role.clone();
+    item.model = launch.model.clone();
+    item.command = launch.prompt.clone();
+    item.origin_activity_id = Some(tool_id.to_owned());
+    item
+}
+
+/// A prompt's first non-empty line, clipped to something a sidebar row can
+/// hold. Prompts run to paragraphs; a title is one glance.
+fn subagent_title_from_prompt(prompt: &str) -> Option<String> {
+    let line = prompt
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())?;
+    let mut title = line.chars().take(96).collect::<String>();
+    if line.chars().count() > 96 {
+        title.push('…');
+    }
+    Some(title)
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
@@ -381,6 +529,86 @@ mod tests {
             ),
             process_directory: PathBuf::from("/tmp/waku-computer-use/session"),
         }
+    }
+
+    #[test]
+    fn delegation_tools_are_recognized_across_providers() {
+        for name in [
+            "Agent",
+            "Task",
+            "task",
+            "taskToolCall",
+            "spawn_agent",
+            "subagent_fork",
+            "spawn",
+            "spawn_subagent",
+            "Task: Subagent task",
+            "invoke_agent",
+            "oracle",
+            "mcp__amp__code_review",
+        ] {
+            assert!(is_subagent_tool(name), "{name} should launch a subagent");
+        }
+        for name in [
+            "Bash",
+            "Read",
+            "todo_write",
+            "agent_skill",
+            "read_agents_md",
+        ] {
+            assert!(!is_subagent_tool(name), "{name} is not a subagent launch");
+        }
+    }
+
+    #[test]
+    fn a_launch_prefers_the_providers_description_over_the_prompt() {
+        let launch = subagent_launch(
+            "Agent",
+            Some(&serde_json::json!({
+                "description": "Audit the auth flow",
+                "subagent_type": "Explore",
+                "prompt": "Look at every call site of verifyToken.\nReport back.",
+                "model": "opus",
+            })),
+        )
+        .expect("Agent launches a subagent");
+        assert_eq!(launch.title, "Audit the auth flow");
+        assert_eq!(launch.role.as_deref(), Some("Explore"));
+        assert_eq!(launch.model.as_deref(), Some("opus"));
+        assert!(launch.prompt.unwrap().starts_with("Look at every"));
+    }
+
+    #[test]
+    fn a_launch_without_a_description_titles_itself_from_the_prompts_first_line() {
+        let launch = subagent_launch(
+            "task",
+            Some(&serde_json::json!({
+                "prompt": "\n\nFind the flaky test\nthen fix it",
+            })),
+        )
+        .expect("task launches a subagent");
+        assert_eq!(launch.title, "Find the flaky test");
+        // A generic tool name is not a role; only a named agent tool is.
+        assert_eq!(launch.role, None);
+        assert_eq!(
+            subagent_launch("oracle", None).unwrap().role.as_deref(),
+            Some("oracle")
+        );
+    }
+
+    #[test]
+    fn a_launch_keys_its_work_item_on_the_spawning_tool_call() {
+        let launch = subagent_launch("Agent", Some(&serde_json::json!({"description": "Probe"})))
+            .expect("Agent launches a subagent");
+        let item = subagent_item(
+            "toolu_01",
+            &launch,
+            crate::model::BackgroundWorkStatus::Running,
+        );
+        assert_eq!(item.key.kind, crate::model::BackgroundWorkKind::Subagent);
+        assert_eq!(item.key.provider_id, "toolu_01");
+        // The transcript badge finds its work through this field.
+        assert_eq!(item.origin_activity_id.as_deref(), Some("toolu_01"));
     }
 
     #[test]

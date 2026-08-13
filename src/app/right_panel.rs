@@ -717,6 +717,7 @@ impl RightPanelSurface {
                     title.clone()
                 }
             }
+            Self::Agents => tr!("right_panel.agents"),
             Self::Files => tr!("right_panel.files"),
             Self::Diff => tr!("right_panel.diff"),
             Self::File(path) => path.rsplit('/').next().unwrap_or(path).to_owned(),
@@ -728,6 +729,7 @@ impl RightPanelSurface {
             Self::Browser(_) => "icons/globe.svg",
             Self::Terminal(_) => "icons/terminal.svg",
             Self::BackgroundWork { key, .. } => work_kind_icon(key.kind),
+            Self::Agents => "icons/bot.svg",
             Self::Files => "icons/folder.svg",
             Self::Diff => "icons/file-diff.svg",
             Self::File(path) => file_icon_for_path(path),
@@ -768,9 +770,10 @@ fn reusable_surface_index(
         RightPanelSurface::BackgroundWork { key, .. } => surfaces.iter().position(|surface| {
             matches!(surface, RightPanelSurface::BackgroundWork { key: candidate, .. } if candidate == key)
         }),
-        RightPanelSurface::Files | RightPanelSurface::Diff | RightPanelSurface::File(_) => {
-            surfaces.iter().position(|surface| surface == requested)
-        }
+        RightPanelSurface::Agents
+        | RightPanelSurface::Files
+        | RightPanelSurface::Diff
+        | RightPanelSurface::File(_) => surfaces.iter().position(|surface| surface == requested),
     }
 }
 
@@ -1861,6 +1864,9 @@ impl Waku {
         }
         let body = match self.active_right_panel_surface().cloned() {
             None => self.render_right_panel_chooser(cx).into_any_element(),
+            Some(RightPanelSurface::Agents) => {
+                self.render_right_panel_agents(cx).into_any_element()
+            }
             Some(RightPanelSurface::BackgroundWork { key, .. }) => self
                 .render_background_work_surface(&key, cx)
                 .into_any_element(),
@@ -2309,7 +2315,14 @@ impl Waku {
                                 tr!("right_panel.diff_description"),
                                 cx,
                             )),
-                    ),
+                    )
+                    .child(div().mt(px(8.0)).w_full().flex().gap(px(8.0)).child(
+                        self.render_right_panel_card(
+                            RightPanelSurface::Agents,
+                            tr!("right_panel.agents_description"),
+                            cx,
+                        ),
+                    )),
             )
     }
 

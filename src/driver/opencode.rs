@@ -29,7 +29,8 @@ use crate::driver::{
     DriverControl, DriverEventSender, DriverEventSink, DriverStartOptions, SessionOptions,
 };
 use crate::model::{
-    ActivityKind, DriverEvent, InteractionMode, PermissionOption, ProviderResumeCursor, RuntimeMode,
+    ActivityKind, BackgroundWorkEvent, BackgroundWorkStatus, DriverEvent, InteractionMode,
+    PermissionOption, ProviderResumeCursor, RuntimeMode,
 };
 use crate::opencode_pool::PooledServer;
 use crate::opencode_session::{
@@ -1056,6 +1057,65 @@ fn tool_activity(part: &Value, events: &impl DriverEventSink, state: &mut OpenCo
             part.pointer("/state/output")
                 .filter(|value| !value.is_null())
         });
+    // opencode runs a subagent as a child session and reports the link on the
+    // `task` part itself, so the sidebar can name the agent and its model
+    // without reading the child's stream.
+    if let Some(call_id) = id.as_deref()
+        && let Some(launch) = super::support::subagent_launch(
+            part.get("tool").and_then(Value::as_str).unwrap_or_default(),
+            arguments,
+        )
+    {
+        let status = match part.pointer("/state/status").and_then(Value::as_str) {
+            Some("error") => BackgroundWorkStatus::Failed,
+            Some("completed") => BackgroundWorkStatus::Completed,
+            Some("pending") => BackgroundWorkStatus::Starting,
+            _ => BackgroundWorkStatus::Running,
+        };
+        let mut work = super::support::subagent_item(call_id, &launch, status);
+        work.parent_id = part
+            .pointer("/state/metadata/parentSessionId")
+            .and_then(Value::as_str)
+            .map(str::to_owned);
+        // The child session is both what a follow-up prompt is addressed to
+        // and what an abort targets. It only appears once the part reaches
+        // `running`, so a pending subagent has none for a frame.
+        work.control_id = part
+            .pointer("/state/metadata/sessionId")
+            .and_then(Value::as_str)
+            .map(str::to_owned);
+        if work.model.is_none() {
+            // Reported as `{providerID, modelID}`, not the slash-joined string
+            // the rest of Waku uses.
+            work.model = part
+                .pointer("/state/metadata/model")
+                .and_then(|model| {
+                    let provider = model.get("providerID").and_then(Value::as_str)?;
+                    let id = model.get("modelID").and_then(Value::as_str)?;
+                    Some(format!("{provider}/{id}"))
+                })
+                .or_else(|| {
+                    part.pointer("/state/metadata/model")
+                        .and_then(Value::as_str)
+                        .map(str::to_owned)
+                });
+        }
+        if let Some(state_title) = part
+            .pointer("/state/title")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|title| !title.is_empty())
+        {
+            work.title = state_title.to_owned();
+        }
+        if complete {
+            work.output = output.and_then(activity::format_output);
+        }
+        let _ = events.send(DriverEvent::BackgroundWork(BackgroundWorkEvent::Upsert(
+            work,
+        )));
+    }
+
     let item = activity::tool_activity(
         id,
         kind,

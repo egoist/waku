@@ -32,8 +32,8 @@ use crate::driver::{
     DriverControl, DriverEventSender, DriverEventSink, DriverStartOptions, SessionOptions,
 };
 use crate::model::{
-    ActivityKind, DriverEvent, InteractionMode, PermissionOption, ProviderKind,
-    ProviderResumeCursor, RuntimeMode,
+    ActivityKind, BackgroundWorkEvent, BackgroundWorkStatus, DriverEvent, InteractionMode,
+    PermissionOption, ProviderKind, ProviderResumeCursor, RuntimeMode,
 };
 
 enum CommandMessage {
@@ -1019,6 +1019,42 @@ fn tool_activity(update: &Value, events: &impl DriverEventSink, state: &mut AcpS
         .get("content")
         .filter(|value| !value.is_null())
         .or_else(|| update.get("rawOutput").filter(|value| !value.is_null()));
+    // ACP has no subagent tool kind, so delegation is recognized two ways: the
+    // `_meta.claudeCode.subagent` marker the official Claude adapter sets, or
+    // the spawning tool's own name for agents that only send the plain call.
+    if let Some(call_id) = id.as_deref() {
+        let marked = update
+            .pointer("/_meta/claudeCode/subagent")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let wire_name = update
+            .pointer("/_meta/claudeCode/toolName")
+            .and_then(Value::as_str)
+            .or(wire_title)
+            .unwrap_or_default();
+        if let Some(launch) = super::support::subagent_launch(wire_name, arguments)
+            .filter(|_| marked || super::support::is_subagent_tool(wire_name))
+        {
+            let work_status = match status {
+                "completed" => BackgroundWorkStatus::Completed,
+                "failed" => BackgroundWorkStatus::Failed,
+                "pending" => BackgroundWorkStatus::Starting,
+                _ => BackgroundWorkStatus::Running,
+            };
+            let mut work = super::support::subagent_item(call_id, &launch, work_status);
+            work.parent_id = update
+                .pointer("/_meta/claudeCode/parentToolUseId")
+                .and_then(Value::as_str)
+                .map(str::to_owned);
+            if complete {
+                work.output = output.and_then(activity::format_output);
+            }
+            let _ = events.send(DriverEvent::BackgroundWork(BackgroundWorkEvent::Upsert(
+                work,
+            )));
+        }
+    }
+
     let item =
         activity::tool_activity(id, kind, title, arguments, output, output, failed, complete);
     let _ = events.send(DriverEvent::RichActivity(item));

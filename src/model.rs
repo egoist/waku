@@ -739,9 +739,57 @@ pub struct ContextUsage {
     pub window: Option<u64>,
 }
 
+/// What a driver knows about a subagent the moment it first sees one, enough
+/// for the app to open a conversation for it.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct SubagentLaunchInfo {
+    pub title: String,
+    pub role: Option<String>,
+    pub model: Option<String>,
+    /// The prompt the parent handed the agent. Shown as the opening message,
+    /// because from the agent's side that is exactly what it was.
+    pub prompt: Option<String>,
+    /// Whether this provider lets a client send into the agent. Almost none
+    /// do; see [`SubagentOrigin::can_prompt`].
+    pub can_prompt: bool,
+    pub prompt_target: Option<String>,
+}
+
+/// What ties a subagent conversation back to the agent that launched it.
+///
+/// Providers disagree about what a subagent *is* — Claude keeps it on the
+/// parent's stream behind a tool-call id, OpenCode gives it a child session,
+/// Codex a child thread — so the one identifier that exists everywhere is the
+/// tool call that spawned it. `provider_id` is that call, and it is what the
+/// driver tags the child's events with.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct SubagentOrigin {
+    pub parent_session_id: Uuid,
+    pub provider_id: String,
+    /// The agent's kind as the provider names it: `Explore`, `oracle`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
+    /// Whether this provider lets a client send a message into the agent.
+    /// Most do not: delegation is usually a tool the orchestrating model
+    /// calls, with no client-facing route to the child. A composer is only
+    /// offered where this is true.
+    #[serde(default)]
+    pub can_prompt: bool,
+    /// Provider-side handle a prompt would be addressed to, when there is one
+    /// — OpenCode's child session id, Codex's child thread id.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_target: Option<String>,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct AgentSession {
     pub id: Uuid,
+    /// Set when this session is a subagent rather than something the user
+    /// started. Subagent sessions are real conversations — same transcript,
+    /// same rendering — but they are launched by another session's agent, so
+    /// they stay out of the task list and out of the sidebar.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subagent: Option<SubagentOrigin>,
     /// A title explicitly chosen by the user. [`Self::DEFAULT_TITLE`] means
     /// no explicit title has been set, so [`Self::auto_title`] may be shown.
     pub title: String,
@@ -824,6 +872,7 @@ impl AgentSession {
         let now = unix_time();
         Self {
             id: Uuid::new_v4(),
+            subagent: None,
             title: Self::DEFAULT_TITLE.to_owned(),
             auto_title: None,
             project_id,
@@ -849,6 +898,13 @@ impl AgentSession {
             turns: Vec::new(),
             queued_messages: Vec::new(),
         }
+    }
+
+    /// A conversation the user started, as opposed to one an agent launched.
+    /// The sidebar, the command palette and every other place that enumerates
+    /// "tasks" means this.
+    pub fn is_task(&self) -> bool {
+        self.subagent.is_none()
     }
 
     pub fn is_busy(&self) -> bool {
@@ -1084,6 +1140,25 @@ impl AgentSession {
             Message::new_for_turn(MessageRole::User, prompt, id)
                 .with_presentation(display_content, attachments),
         );
+        self.last_reply_at = Some(now);
+        id
+    }
+
+    /// Open a turn the provider started on its own, with no user message —
+    /// nobody typed one. See [`DriverEvent::ProviderTurnStarted`].
+    pub fn begin_provider_turn(&mut self) -> Uuid {
+        let id = Uuid::new_v4();
+        let now = unix_time();
+        self.turns.push(AgentTurn {
+            id,
+            turn_count: self.turns.len() + 1,
+            status: TurnStatus::Running,
+            provider_turn_started: true,
+            provider_resume_at: None,
+            started_at: now,
+            completed_at: None,
+            checkpoint: None,
+        });
         self.last_reply_at = Some(now);
         id
     }
@@ -1496,6 +1571,12 @@ pub enum DriverEvent {
     /// dynamically registered commands.
     AvailableCommands(Vec<ReportedCommand>),
     TurnStarted,
+    /// The provider began a turn nobody prompted for. Claude ends the turn
+    /// that launched a backgrounded subagent, then wakes itself when that
+    /// subagent reports back and keeps working. Without a turn to hold it that
+    /// second stretch of work is dropped on the floor, so the app opens one
+    /// that has no user message behind it.
+    ProviderTurnStarted,
     TextDelta(String),
     ReasoningDelta(String),
     Activity {
@@ -1510,6 +1591,18 @@ pub enum DriverEvent {
     /// deliberately separate from transcript activities: completing a turn
     /// must not make a detached process or subagent look complete.
     BackgroundWork(BackgroundWorkEvent),
+    /// An event belonging to a subagent rather than to this session.
+    ///
+    /// Providers interleave a subagent's stream with the parent's on one
+    /// channel, so the driver tags each child event with the agent it came
+    /// from and the app replays it against that agent's own conversation.
+    /// `launch` is present on the first event for an agent and carries what is
+    /// needed to open that conversation.
+    Subagent {
+        provider_id: String,
+        launch: Option<SubagentLaunchInfo>,
+        event: Box<DriverEvent>,
+    },
     Permission {
         request_id: String,
         title: String,

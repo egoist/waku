@@ -72,6 +72,15 @@ settings.theme_description: システム、ライト、ダークのいずれか�
 settings.theme_system: システム
 settings.theme_light: ライト
 settings.theme_dark: ダーク
+settings.theme_light_palette: ライトパレット
+settings.theme_light_palette_description: ライト外観のときに使用するパレット
+settings.theme_dark_palette: ダークパレット
+settings.theme_dark_palette_description: ダーク外観のときに使用するパレット
+settings.theme_preview: プレビュー
+settings.theme_preview_title: テーマトークンの名前を変更
+settings.theme_preview_body: セッションでの背景、文字階層、アクセント、差分の色。
+settings.theme_preview_action: 送信
+settings.theme_preview_caption: waku/src/theme.rs
 
 input.do_anything: 何でも依頼できます…
 input.search_models: モデルを検索…

@@ -421,7 +421,7 @@ impl Render for ConversationNavigationRail {
                     || emphasized_tick_index == Some(tick_index);
                 let tick_color = if prominent {
                     if theme.is_dark {
-                        rgb(0xFFFFFF).into()
+                        theme.inverse
                     } else {
                         theme.text
                     }
@@ -1549,6 +1549,12 @@ impl Waku {
                     self.background_work_for_activity(session_id, source_id)
                         .map(|item| (session_id, item.key.clone(), item.status))
                 });
+            // The call that summons an agent is a doorway to that agent, not a
+            // tool row to unfold: opening the panel is what the click is for.
+            let opens_agent = background_work
+                .as_ref()
+                .filter(|(_, key, _)| key.kind == BackgroundWorkKind::Subagent)
+                .map(|(session_id, key, _)| (*session_id, key.clone()));
             let background_badge = background_work.map(|(session_id, key, status)| {
                 let click_key = key.clone();
                 let focus = self.transcript_control_focus(format!("activity-background-{id}"), cx);
@@ -1684,7 +1690,9 @@ impl Waku {
                         })
                     })
                     .on_click(cx.listener(move |this, _, _, cx| {
-                        if has_detail {
+                        if let Some((session_id, key)) = opens_agent.clone() {
+                            this.open_subagent(session_id, key, cx);
+                        } else if has_detail {
                             this.toggle_activity_item(id, item_expanded, cx);
                         }
                     })),

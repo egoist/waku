@@ -57,7 +57,7 @@ use crate::persistence::{
 use crate::query::{Query, QueryCache};
 use crate::review_diff::{Snapshot as ReviewDiffSnapshot, Source as ReviewDiffSource};
 use crate::terminal::TerminalView;
-use crate::theme::{Theme, ThemePreference};
+use crate::theme::{Theme, ThemeId, ThemePreference};
 use crate::ui::text_field::TextField;
 use crate::ui::{
     MenuChip, ProjectNameSelector, activity_icon, activity_noun, file_icon, icon, icon_button,
@@ -472,6 +472,9 @@ enum RightPanelSurface {
         key: BackgroundWorkKey,
         title: String,
     },
+    /// The session's subagent roster. `BackgroundWork` is one agent's detail;
+    /// this is the list that says what is running at all.
+    Agents,
     Files,
     Diff,
     File(String),
@@ -1623,7 +1626,13 @@ impl Waku {
         );
         state.sidebar_width = sidebar_width;
         state.right_panel_width = right_panel_width;
-        crate::theme::apply_theme_preference(state.theme, window, cx);
+        crate::theme::apply_theme_preference(
+            state.theme,
+            state.light_theme,
+            state.dark_theme,
+            window,
+            cx,
+        );
         crate::platform::set_sidebar_material_width(window, sidebar_width);
         let project_paths = state
             .projects
@@ -1815,7 +1824,13 @@ impl Waku {
 
             cx.observe_window_appearance(window, |this: &mut Self, window, cx| {
                 if this.state.theme == ThemePreference::System {
-                    crate::theme::apply_theme_preference(this.state.theme, window, cx);
+                    crate::theme::apply_theme_preference(
+                        this.state.theme,
+                        this.state.light_theme,
+                        this.state.dark_theme,
+                        window,
+                        cx,
+                    );
                     cx.notify();
                 }
             })
