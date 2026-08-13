@@ -68,6 +68,15 @@ settings.theme_description: 选择跟随系统、浅色或深色主题
 settings.theme_system: 跟随系统
 settings.theme_light: 浅色
 settings.theme_dark: 深色
+settings.theme_light_palette: 浅色调色板
+settings.theme_light_palette_description: 应用处于浅色外观时使用的调色板
+settings.theme_dark_palette: 深色调色板
+settings.theme_dark_palette_description: 应用处于深色外观时使用的调色板
+settings.theme_preview: 预览
+settings.theme_preview_title: 重命名主题令牌
+settings.theme_preview_body: 会话中的背景、文字层级、强调色与差异颜色。
+settings.theme_preview_action: 发送
+settings.theme_preview_caption: waku/src/theme.rs
 input.do_anything: 做什么都可以…
 input.search_models: 搜索模型…
 input.search_branches: 搜索分支

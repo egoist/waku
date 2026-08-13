@@ -30,7 +30,7 @@ use crate::model::{
     AgentSession, FavoriteModel, InteractionMode, Message, MessageAttachment, MessageRole, Project,
     ProviderKind, RuntimeMode, SessionWorkspace,
 };
-use crate::theme::ThemePreference;
+use crate::theme::{ThemeId, ThemePreference};
 
 const STATE_VERSION: u32 = 5;
 const APP_STATE_VERSION: u32 = 1;
@@ -261,6 +261,8 @@ pub struct AppSettings {
     pub analytics_enabled: bool,
     pub favorite_models: Vec<FavoriteModel>,
     pub theme: ThemePreference,
+    pub light_theme: ThemeId,
+    pub dark_theme: ThemeId,
     pub language: AppLanguage,
     pub computer_use_enabled: bool,
     pub computer_use_allowed_apps: Vec<ComputerAppGrant>,
@@ -278,6 +280,8 @@ impl Default for AppSettings {
             analytics_enabled: default_analytics_enabled(),
             favorite_models: Vec::new(),
             theme: ThemePreference::System,
+            light_theme: ThemeId::default(),
+            dark_theme: ThemeId::default(),
             language: AppLanguage::default(),
             computer_use_enabled: default_computer_use_enabled(),
             computer_use_allowed_apps: Vec::new(),
@@ -346,6 +350,10 @@ pub struct PersistedState {
     #[serde(default)]
     pub theme: ThemePreference,
     #[serde(default)]
+    pub light_theme: ThemeId,
+    #[serde(default)]
+    pub dark_theme: ThemeId,
+    #[serde(default)]
     pub language: AppLanguage,
     #[serde(default = "default_sidebar_visibility")]
     pub sidebar_visible: bool,
@@ -412,6 +420,8 @@ impl PersistedState {
             remembered_model_traits: Vec::new(),
             favorite_models: Vec::new(),
             theme: ThemePreference::System,
+            light_theme: ThemeId::default(),
+            dark_theme: ThemeId::default(),
             language: AppLanguage::default(),
             sidebar_visible: true,
             right_panel_visible: false,
@@ -497,6 +507,8 @@ impl PersistedState {
             analytics_enabled: self.analytics_enabled,
             favorite_models: self.favorite_models.clone(),
             theme: self.theme,
+            light_theme: self.light_theme,
+            dark_theme: self.dark_theme,
             language: self.language,
             computer_use_enabled: self.computer_use_enabled,
             computer_use_allowed_apps: self.computer_use_allowed_apps.clone(),
@@ -527,6 +539,8 @@ impl PersistedState {
         self.analytics_enabled = settings.analytics_enabled;
         self.favorite_models = settings.favorite_models;
         self.theme = settings.theme;
+        self.light_theme = settings.light_theme;
+        self.dark_theme = settings.dark_theme;
         self.language = settings.language;
         self.computer_use_enabled = settings.computer_use_enabled;
         self.computer_use_allowed_apps = settings.computer_use_allowed_apps;
