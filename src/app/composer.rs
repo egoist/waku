@@ -789,12 +789,19 @@ impl Waku {
 
                 for (row_index, (kind, model)) in available_models.iter().enumerate() {
                     let kind = *kind;
-                    let is_selected =
-                        kind == provider && selected_model.as_deref() == Some(model.id.as_str());
+                    let is_selected = kind == provider
+                        && selected_model.as_ref().is_some_and(|selected| {
+                            crate::model_catalog::model_ids_match(kind, &selected, &model.id)
+                        });
                     let is_highlighted = highlight == Some(row_index);
-                    let is_favorite = favorites
-                        .iter()
-                        .any(|favorite| favorite.provider == kind && favorite.model == model.id);
+                    let is_favorite = favorites.iter().any(|favorite| {
+                        favorite.provider == kind
+                            && crate::model_catalog::model_ids_match(
+                                kind,
+                                &favorite.model,
+                                &model.id,
+                            )
+                    });
                     let model_id = model.id.clone();
                     let select_weak = weak.clone();
                     let select_popover = popover.clone();
@@ -1051,7 +1058,12 @@ impl Waku {
             "",
         )
         .iter()
-        .position(|(kind, model)| *kind == provider && selected_model == Some(model.id.as_str()))
+        .position(|(kind, model)| {
+            *kind == provider
+                && selected_model.is_some_and(|selected| {
+                    crate::model_catalog::model_ids_match(*kind, selected, &model.id)
+                })
+        })
         .unwrap_or(0);
         self.model_picker_scroll.scroll_to_item(index);
     }
@@ -2813,9 +2825,10 @@ pub(super) fn visible_picker_models(
                     .all(|token| searchable.contains(token));
             }
             match selected_tab {
-                ModelPickerTab::Favorites => favorites
-                    .iter()
-                    .any(|favorite| favorite.provider == *kind && favorite.model == model.id),
+                ModelPickerTab::Favorites => favorites.iter().any(|favorite| {
+                    favorite.provider == *kind
+                        && crate::model_catalog::model_ids_match(*kind, &favorite.model, &model.id)
+                }),
                 ModelPickerTab::Provider(provider) => provider == *kind,
             }
         })
@@ -2824,7 +2837,10 @@ pub(super) fn visible_picker_models(
         models.sort_by_key(|(kind, model)| {
             favorites
                 .iter()
-                .position(|favorite| favorite.provider == *kind && favorite.model == model.id)
+                .position(|favorite| {
+                    favorite.provider == *kind
+                        && crate::model_catalog::model_ids_match(*kind, &favorite.model, &model.id)
+                })
                 .unwrap_or(usize::MAX)
         });
     }

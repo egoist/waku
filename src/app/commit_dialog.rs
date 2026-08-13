@@ -112,7 +112,7 @@ impl Waku {
                 Some((
                     self.workspace_path_for_session(session)?.to_path_buf(),
                     session.provider,
-                    self.model_for_session(session).map(str::to_owned),
+                    self.model_id_for_request(session),
                     session.reasoning_effort.clone(),
                 ))
             })

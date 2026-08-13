@@ -743,12 +743,10 @@ impl Waku {
         model: String,
         cx: &mut Context<Self>,
     ) {
-        if let Some(index) = self
-            .state
-            .favorite_models
-            .iter()
-            .position(|favorite| favorite.provider == provider && favorite.model == model)
-        {
+        if let Some(index) = self.state.favorite_models.iter().position(|favorite| {
+            favorite.provider == provider
+                && crate::model_catalog::model_ids_match(provider, &favorite.model, &model)
+        }) {
             self.state.favorite_models.remove(index);
         } else {
             self.state

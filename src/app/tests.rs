@@ -1787,6 +1787,38 @@ fn model_picker_subtitle_deduplicates_the_provider_name() {
 }
 
 #[test]
+fn legacy_claude_fable_favorite_matches_the_single_1m_picker_entry() {
+    use super::ModelPickerTab;
+    use super::composer::visible_picker_models;
+    use crate::model::{FavoriteModel, ProviderModel, ProviderProbe};
+
+    let probes = [ProviderProbe {
+        provider: ProviderKind::Claude,
+        installed: true,
+        path: Some(std::path::PathBuf::from("/bin/claude")),
+        models: vec![ProviderModel::new(
+            "claude-fable-5[1m]",
+            "Claude Fable 5 · 1M",
+        )],
+    }];
+    let favorites = [FavoriteModel {
+        provider: ProviderKind::Claude,
+        model: "claude-fable-5".into(),
+    }];
+
+    let models = visible_picker_models(
+        &probes,
+        &favorites,
+        &[],
+        None,
+        ModelPickerTab::Favorites,
+        "",
+    );
+    assert_eq!(models.len(), 1);
+    assert_eq!(models[0].1.id, "claude-fable-5[1m]");
+}
+
+#[test]
 fn tab_cycle_walks_favorites_then_usable_providers_in_rail_order() {
     use super::ModelPickerTab;
     use super::composer::visible_picker_tabs;
