@@ -1003,20 +1003,23 @@ impl Waku {
                         })
                         .collect();
                     let menu = self.menu_handle(format!("message-{}", message.id), cx);
-                    let ctx = self.markdown_ctx(
-                        format!("message-{}", message.id),
-                        &palette,
-                        MarkdownMetrics::BODY,
-                    );
-                    // Only assistant responses are markdown. Reparsing happens
-                    // here rather than on every driver delta, so a response that
-                    // is off screen costs nothing.
+                    let metrics = if message.role == MessageRole::User {
+                        MarkdownMetrics::USER_MESSAGE
+                    } else {
+                        MarkdownMetrics::BODY
+                    };
+                    let ctx =
+                        self.markdown_ctx(format!("message-{}", message.id), &palette, metrics);
+                    // Human and assistant messages share the Markdown path.
+                    // Parse only visible rows rather than doing work for every
+                    // driver delta or every off-screen prompt.
                     let mut markdown = self.message_markdown.borrow_mut();
-                    let view = (message.role == MessageRole::Assistant).then(|| {
-                        let view = markdown.entry(message.id).or_default();
-                        view.set_text(&message.content, message.streaming);
-                        &*view
-                    });
+                    let view = matches!(message.role, MessageRole::User | MessageRole::Assistant)
+                        .then(|| {
+                            let view = markdown.entry(message.id).or_default();
+                            view.set_text(message.visible_content(), message.streaming);
+                            &*view
+                        });
                     render_message(
                         MessageRender {
                             theme: &theme,

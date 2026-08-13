@@ -43,9 +43,9 @@ case "$profile" in
 esac
 if [ "${WAKU_SKIP_CARGO_BUILD:-0}" != "1" ]; then
   if [ "$profile" = "release" ]; then
-    cargo build --release --bin waku --bin waku_js_repl
+    cargo build --release -vv --bin waku --bin waku_js_repl
   else
-    cargo build --bin waku --bin waku_js_repl
+    cargo build -vv --bin waku --bin waku_js_repl
   fi
 fi
 

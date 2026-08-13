@@ -1,20 +1,21 @@
-//! OpenCode's own HTTP server.
-//!
-//! `opencode serve` is OpenCode's real API: one resident process serves the
-//! whole conversation, streams server-sent events, and answers permission
-//! requests the user can actually be asked. Waku already started this server
-//! for a side-quest — forking a session — while running conversations through
-//! one-shot `opencode run` invocations; this drives everything through it.
-//! A prompt posted into a busy session is folded into the running turn rather
-//! than queued behind it, which is what makes steering a plain post.
+//! `opencode serve` is OpenCode's real API: one resident process serves
+//! every session in a workspace, streams server-sent events, and answers
+//! permission requests the user can actually be asked. Waku already started
+//! this server for a side-quest — forking a session — while running
+//! conversations through one-shot `opencode run` invocations; this drives
+//! everything through it, pooled per workspace via `opencode_pool` so
+//! sessions share the process instead of starting one each. A prompt posted
+//! into a busy session is folded into the running turn rather than queued
+//! behind it, which is what makes steering a plain post.
 //!
 //! Routes and payload shapes here were read off a live server's OpenAPI
 //! document and event stream, not guessed.
 
 use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, BufReader, Write};
-use std::net::TcpStream;
+use std::net::{Shutdown, TcpStream};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::Duration;
 
@@ -30,6 +31,7 @@ use crate::driver::{
 use crate::model::{
     ActivityKind, DriverEvent, InteractionMode, PermissionOption, ProviderResumeCursor, RuntimeMode,
 };
+use crate::opencode_pool::PooledServer;
 use crate::opencode_session::{
     OpenCodeServer, encode_path_segment, fork_session_removing_turns_on_server,
 };
@@ -58,9 +60,13 @@ fn prompt_body(text: &str, model: Option<&str>) -> Value {
 }
 
 pub struct OpenCodeDriver {
-    server: Arc<OpenCodeServer>,
+    // `Drop` releases this lease before waking the worker, guaranteeing that
+    // final process teardown runs on the worker rather than the UI thread.
+    server: Option<PooledServer>,
     session_id: String,
     commands: Sender<CommandMessage>,
+    permissions: Arc<Mutex<OpenCodePermissionState>>,
+    event_stream: Arc<OpenCodeEventStreamControl>,
     mode: RuntimeMode,
     interaction_mode: InteractionMode,
     computer_use: Option<super::support::HeadlessComputerUseRuntime>,
@@ -76,6 +82,7 @@ impl OpenCodeDriver {
             model,
             reasoning_effort: _,
             service_tier: _,
+            agent_preset: _,
             computer_use_enabled,
             provider_cursor,
         } = options;
@@ -106,7 +113,16 @@ impl OpenCodeDriver {
             .as_ref()
             .map(|runtime| super::support::opencode_computer_use_environment(&runtime.config))
             .unwrap_or_default();
-        let server = Arc::new(OpenCodeServer::start_with_env(&binary, &cwd, &environment)?);
+        // Computer Use bakes per-session configuration into the server's
+        // environment, so it keeps a dedicated server. Every other session
+        // shares the workspace's one resident server — OpenCode hosts many
+        // sessions per process, and a second `opencode serve` in the same
+        // workspace contends with the live one.
+        let server = if computer_use.is_some() {
+            PooledServer::dedicated(OpenCodeServer::start_with_env(&binary, &cwd, &environment)?)
+        } else {
+            crate::opencode_pool::acquire(&binary, &cwd)?
+        };
 
         // Reuse the native session when resuming so the conversation, and the
         // cursor already persisted for it, stay the same.
@@ -129,8 +145,9 @@ impl OpenCodeDriver {
             }),
         });
 
-        // The agent decides Plan versus Build, and it is fixed for the life of
-        // the server because it is chosen when the session opens.
+        // The agent decides Plan versus Build, and it is per session: a
+        // resumed session gets the agent re-posted and OpenCode persists it
+        // with the session.
         let agent = if interaction_mode == InteractionMode::Plan || mode == RuntimeMode::Plan {
             "plan"
         } else {
@@ -170,18 +187,40 @@ impl OpenCodeDriver {
         // transcript or turns an otherwise healthy provider into a 0% meter.
         // The stream records the actual provider/model key in parallel; when
         // the catalog lands, publish the matching window as a separate merge.
-        let metadata_server = server.clone();
+        // The thread holds only the port: a handle would delay the pooled
+        // server's teardown behind this request's timeout.
+        let metadata_port = server.port;
         let metadata_events = events.clone();
         let background_usage_metadata = usage_metadata.clone();
         thread::Builder::new()
             .name("waku-opencode-usage-metadata".into())
             .spawn(move || {
-                let Ok(response) = metadata_server.request_with_timeout(
-                    "GET",
-                    "/api/model",
-                    None,
-                    Duration::from_secs(30),
-                ) else {
+                // `/api/model` answers with an empty catalog until the server
+                // warms it up. The first session of a workspace starts a cold
+                // server, so poll until models land or the budget runs out;
+                // later sessions share an already-warm server.
+                let started = std::time::Instant::now();
+                let budget = Duration::from_secs(30);
+                let response = loop {
+                    let request = crate::opencode_session::request_json_on_port(
+                        metadata_port,
+                        "GET",
+                        "/api/model",
+                        None,
+                        Duration::from_secs(30),
+                    );
+                    let landed = request.as_ref().is_ok_and(|response| {
+                        response
+                            .pointer("/data")
+                            .and_then(Value::as_array)
+                            .is_some_and(|data| !data.is_empty())
+                    });
+                    if landed || started.elapsed() >= budget {
+                        break request;
+                    }
+                    thread::sleep(Duration::from_secs(2));
+                };
+                let Ok(response) = response else {
                     return;
                 };
                 let windows = opencode_model_context_windows(&response);
@@ -198,26 +237,37 @@ impl OpenCodeDriver {
         let auto_approve = mode != RuntimeMode::Ask;
         let (commands, command_rx) = unbounded();
         let turn_active = Arc::new(Mutex::new(false));
+        let permissions = Arc::new(Mutex::new(OpenCodePermissionState::default()));
+        let event_stream = Arc::new(OpenCodeEventStreamControl::default());
 
-        let stream_server = server.clone();
+        // The reader holds only the port, never a server handle: the stream
+        // closes exactly when the process exits, so a handle held here would
+        // keep the pooled server from ever being killed.
+        let stream_port = server.port;
         let stream_session = session_id.clone();
         let stream_events = events.clone();
         let stream_commands = commands.clone();
         let stream_turn = turn_active.clone();
         let stream_usage_metadata = usage_metadata;
+        let stream_permissions = Arc::clone(&permissions);
+        let stream_control = Arc::clone(&event_stream);
         thread::Builder::new()
             .name("waku-opencode-events".into())
             .spawn(move || {
                 let mut state = OpenCodeStreamState {
                     usage_metadata: stream_usage_metadata,
+                    permissions: stream_permissions,
                     ..OpenCodeStreamState::default()
                 };
                 // The server-wide stream, not a per-session one: the scoped
-                // route exists only under `/api`, and this server is Waku's
-                // alone, so filtering by session id here is enough.
-                match open_event_stream(stream_server.port, "/event") {
-                    Ok(stream) => {
+                // route exists only under `/api`, and the workspace server
+                // may carry other sessions' traffic, so filter by session id.
+                match open_event_stream(stream_port, "/event", &stream_control) {
+                    Ok(Some(stream)) => {
                         for line in BufReader::new(stream).lines().map_while(Result::ok) {
+                            if stream_control.is_cancelled() {
+                                break;
+                            }
                             let Some(payload) = line.strip_prefix("data:") else {
                                 continue;
                             };
@@ -242,15 +292,21 @@ impl OpenCodeDriver {
                             );
                         }
                     }
+                    Ok(None) => {}
                     Err(error) => {
-                        let _ = stream_events.send(DriverEvent::Error(tr!(
-                            "errors.read_provider_event_stream",
-                            provider = "OpenCode",
-                            error = error
-                        )));
+                        if !stream_control.is_cancelled() {
+                            let _ = stream_events.send(DriverEvent::Error(tr!(
+                                "errors.read_provider_event_stream",
+                                provider = "OpenCode",
+                                error = error
+                            )));
+                        }
                     }
                 }
-                let _ = stream_events.send(DriverEvent::ProcessExited);
+                stream_control.clear();
+                if !stream_control.is_cancelled() {
+                    let _ = stream_events.send(DriverEvent::ProcessExited);
+                }
             })?;
 
         let worker_server = server.clone();
@@ -373,12 +429,17 @@ impl OpenCodeDriver {
                         CommandMessage::Shutdown => break,
                     }
                 }
+            })
+            .inspect_err(|_| {
+                event_stream.cancel();
             })?;
 
         Ok(Self {
-            server,
+            server: Some(server),
             session_id,
             commands,
+            permissions,
+            event_stream,
             mode,
             interaction_mode,
             computer_use,
@@ -410,15 +471,19 @@ impl DriverControl for OpenCodeDriver {
     }
 
     fn respond(&self, request_id: String, option_id: String) {
-        let _ = self.commands.send(CommandMessage::Respond {
-            request_id,
-            option_id,
-        });
+        for (request_id, option_id) in
+            permission_responses(&self.permissions, &request_id, &option_id)
+        {
+            let _ = self.commands.send(CommandMessage::Respond {
+                request_id,
+                option_id,
+            });
+        }
     }
 
     fn apply_options(&self, options: SessionOptions) -> bool {
-        // The model rides on each prompt, but the agent is chosen when the
-        // session opens, so a mode change needs a fresh server.
+        // The model rides on each prompt, but the agent is chosen per
+        // session, so a mode change needs a fresh driver (and session).
         options.mode == self.mode && options.interaction_mode == self.interaction_mode
     }
 
@@ -430,18 +495,56 @@ impl DriverControl for OpenCodeDriver {
     }
 
     fn fork(&self, turns_to_remove: usize) -> anyhow::Result<ProviderResumeCursor> {
-        fork_session_removing_turns_on_server(&self.server, &self.session_id, turns_to_remove)
+        let server = self
+            .server
+            .as_deref()
+            .ok_or_else(|| anyhow!("OpenCode driver is shutting down"))?;
+        fork_session_removing_turns_on_server(server, &self.session_id, turns_to_remove)
     }
 }
 
 impl Drop for OpenCodeDriver {
     fn drop(&mut self) {
         self.cancel_computer_use();
+        self.event_stream.cancel();
+        // The worker owns the other server lease. Release the UI-owned lease
+        // first, then wake the worker so any final terminate/wait happens there.
+        drop(self.server.take());
         let _ = self.commands.send(CommandMessage::Shutdown);
-        // Kill the server explicitly: the event-stream reader holds a handle and
-        // only unblocks once the stream closes, so refcounting alone would
-        // deadlock and leak the process.
-        self.server.shutdown();
+    }
+}
+
+#[derive(Default)]
+struct OpenCodeEventStreamControl {
+    cancelled: AtomicBool,
+    socket: Mutex<Option<TcpStream>>,
+}
+
+impl OpenCodeEventStreamControl {
+    fn attach(&self, stream: &TcpStream) -> std::io::Result<bool> {
+        let socket = stream.try_clone()?;
+        let mut active = self.socket.lock();
+        if self.cancelled.load(Ordering::Acquire) {
+            let _ = socket.shutdown(Shutdown::Both);
+            return Ok(false);
+        }
+        *active = Some(socket);
+        Ok(true)
+    }
+
+    fn cancel(&self) {
+        self.cancelled.store(true, Ordering::Release);
+        if let Some(socket) = self.socket.lock().take() {
+            let _ = socket.shutdown(Shutdown::Both);
+        }
+    }
+
+    fn clear(&self) {
+        self.socket.lock().take();
+    }
+
+    fn is_cancelled(&self) -> bool {
+        self.cancelled.load(Ordering::Acquire)
     }
 }
 
@@ -449,9 +552,19 @@ impl Drop for OpenCodeDriver {
 ///
 /// The shared request helper reads a whole response before returning, which a
 /// stream never finishes doing.
-fn open_event_stream(port: u16, path: &str) -> anyhow::Result<TcpStream> {
+fn open_event_stream(
+    port: u16,
+    path: &str,
+    control: &OpenCodeEventStreamControl,
+) -> anyhow::Result<Option<TcpStream>> {
     let mut stream = TcpStream::connect(("127.0.0.1", port))
         .with_context(|| format!("could not connect to OpenCode on local port {port}"))?;
+    // Register before reading the response head too. If this driver is dropped
+    // while setup is blocked, cancellation can still close the socket and wake
+    // the reader even though another pooled session keeps the server alive.
+    if !control.attach(&stream)? {
+        return Ok(None);
+    }
     write!(
         stream,
         "GET {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nAccept: text/event-stream\r\nConnection: keep-alive\r\n\r\n"
@@ -470,7 +583,7 @@ fn open_event_stream(port: u16, path: &str) -> anyhow::Result<TcpStream> {
         }
     }
     stream.set_read_timeout(None)?;
-    Ok(stream)
+    Ok(Some(stream))
 }
 
 #[derive(Default)]
@@ -478,12 +591,85 @@ struct OpenCodeStreamState {
     tools: HashMap<String, (ActivityKind, String)>,
     reasoning_parts: HashSet<String>,
     usage_metadata: Arc<OpenCodeUsageMetadata>,
+    permissions: Arc<Mutex<OpenCodePermissionState>>,
 }
 
 #[derive(Default)]
 struct OpenCodeUsageMetadata {
     model_context_windows: Mutex<HashMap<String, u64>>,
     last_model: Mutex<Option<String>>,
+}
+
+#[derive(Clone, Debug)]
+struct OpenCodePermissionRequest {
+    permission: String,
+    patterns: Vec<String>,
+    always: Vec<String>,
+}
+
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+struct OpenCodePermissionRule {
+    permission: String,
+    pattern: String,
+}
+
+#[derive(Default)]
+struct OpenCodePermissionState {
+    pending: HashMap<String, OpenCodePermissionRequest>,
+    approved: HashSet<OpenCodePermissionRule>,
+}
+
+impl OpenCodePermissionState {
+    fn is_approved(&self, request: &OpenCodePermissionRequest) -> bool {
+        !request.patterns.is_empty()
+            && request.patterns.iter().all(|pattern| {
+                self.approved.iter().any(|rule| {
+                    opencode_wildcard_matches(&request.permission, &rule.permission)
+                        && opencode_wildcard_matches(pattern, &rule.pattern)
+                })
+            })
+    }
+
+    fn remember(&mut self, request: &OpenCodePermissionRequest) {
+        // Mirror OpenCode's own `always` handling exactly: only provider-
+        // supplied reusable patterns become rules. An empty list deliberately
+        // resolves the current request without broadening future access.
+        self.approved
+            .extend(request.always.iter().map(|pattern| OpenCodePermissionRule {
+                permission: request.permission.clone(),
+                pattern: pattern.clone(),
+            }));
+    }
+}
+
+fn opencode_wildcard_matches(input: &str, pattern: &str) -> bool {
+    let input = input.replace('\\', "/");
+    let pattern = pattern.replace('\\', "/");
+    if pattern
+        .strip_suffix(" *")
+        .is_some_and(|prefix| input == prefix)
+    {
+        return true;
+    }
+
+    let input = input.chars().collect::<Vec<_>>();
+    let mut previous = vec![false; input.len() + 1];
+    previous[0] = true;
+    for token in pattern.chars() {
+        let mut current = vec![false; input.len() + 1];
+        if token == '*' {
+            current[0] = previous[0];
+        }
+        for index in 1..=input.len() {
+            current[index] = match token {
+                '*' => previous[index] || current[index - 1],
+                '?' => previous[index - 1],
+                literal => previous[index - 1] && literal == input[index - 1],
+            };
+        }
+        previous = current;
+    }
+    previous[input.len()]
 }
 
 impl OpenCodeUsageMetadata {
@@ -647,6 +833,7 @@ fn handle_event(
         }
         "session.idle" => {
             state.reasoning_parts.clear();
+            state.permissions.lock().pending.clear();
             if std::mem::take(&mut *turn_active.lock()) {
                 let _ = events.send(DriverEvent::TurnFinished {
                     success: true,
@@ -673,7 +860,13 @@ fn handle_event(
             }
         }
         _ if kind.starts_with("permission.") => {
-            request_permission(properties, events, commands, auto_approve);
+            request_permission(
+                properties,
+                events,
+                commands,
+                auto_approve,
+                &state.permissions,
+            );
         }
         // `session.created`, `session.diff`, and the plugin/catalog/reference
         // chatter are not transcript content.
@@ -686,6 +879,7 @@ fn request_permission(
     events: &impl DriverEventSink,
     commands: &Sender<CommandMessage>,
     auto_approve: bool,
+    permissions: &Mutex<OpenCodePermissionState>,
 ) {
     // The request is either the properties themselves or nested under a key,
     // and it is identified by its `per`-prefixed ID.
@@ -697,31 +891,54 @@ fn request_permission(
     let Some(request_id) = request.get("id").and_then(Value::as_str) else {
         return;
     };
+    let permission_request = OpenCodePermissionRequest {
+        permission: request
+            .get("permission")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned(),
+        patterns: request
+            .get("patterns")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .map(str::to_owned)
+            .collect(),
+        always: request
+            .get("always")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .map(str::to_owned)
+            .collect(),
+    };
 
-    if auto_approve {
+    // OpenCode's `always` response updates a process-wide approval cache. A
+    // pooled Full Access task must never suppress prompts in a Supervised task,
+    // so Waku sends only one-shot provider replies and retains durable choices
+    // in this driver's session-local state.
+    if auto_approve || permissions.lock().is_approved(&permission_request) {
         let _ = commands.send(CommandMessage::Respond {
             request_id: request_id.to_owned(),
-            // Durable, so the agent stops asking about the same permission.
-            option_id: "always".into(),
+            option_id: "once".into(),
         });
         return;
     }
 
-    let permission = request
-        .get("permission")
-        .and_then(Value::as_str)
-        .map(str::to_owned)
-        .unwrap_or_else(|| tr!("permission.run_a_tool_lower"));
-    let patterns = request
-        .get("patterns")
-        .and_then(Value::as_array)
-        .map(|patterns| {
-            patterns
-                .iter()
-                .filter_map(Value::as_str)
-                .collect::<Vec<_>>()
-                .join(", ")
-        })
+    permissions
+        .lock()
+        .pending
+        .insert(request_id.to_owned(), permission_request.clone());
+
+    let permission = if permission_request.permission.is_empty() {
+        tr!("permission.run_a_tool_lower")
+    } else {
+        permission_request.permission.clone()
+    };
+    let patterns = (!permission_request.patterns.is_empty())
+        .then(|| permission_request.patterns.join(", "))
         .filter(|patterns| !patterns.is_empty());
     let _ = events.send(DriverEvent::Permission {
         request_id: request_id.to_owned(),
@@ -756,6 +973,43 @@ fn request_permission(
             },
         ],
     });
+}
+
+fn permission_responses(
+    permissions: &Mutex<OpenCodePermissionState>,
+    request_id: &str,
+    option_id: &str,
+) -> Vec<(String, String)> {
+    let mut permissions = permissions.lock();
+    let request = permissions.pending.remove(request_id);
+    if option_id != "always" {
+        return vec![(request_id.to_owned(), option_id.to_owned())];
+    }
+
+    if let Some(request) = request.as_ref() {
+        permissions.remember(request);
+    }
+    // OpenCode normally applies an `always` reply to other matching requests
+    // already pending in the same session. Preserve that behavior locally,
+    // but send every provider reply as one-shot so the shared server's cache
+    // remains untouched.
+    let additional = permissions
+        .pending
+        .iter()
+        .filter(|(_, request)| permissions.is_approved(request))
+        .map(|(request_id, _)| request_id.clone())
+        .collect::<Vec<_>>();
+    for request_id in &additional {
+        permissions.pending.remove(request_id);
+    }
+
+    std::iter::once((request_id.to_owned(), "once".into()))
+        .chain(
+            additional
+                .into_iter()
+                .map(|request_id| (request_id, "once".into())),
+        )
+        .collect()
 }
 
 fn tool_activity(part: &Value, events: &impl DriverEventSink, state: &mut OpenCodeStreamState) {
@@ -857,6 +1111,7 @@ mod tests {
                 model: None,
                 reasoning_effort: None,
                 service_tier: None,
+                agent_preset: None,
                 computer_use_enabled: false,
                 provider_cursor: None,
             },
@@ -944,6 +1199,7 @@ mod tests {
                 model: None,
                 reasoning_effort: None,
                 service_tier: None,
+                agent_preset: None,
                 computer_use_enabled: false,
                 provider_cursor: None,
             },
@@ -1201,7 +1457,7 @@ mod tests {
     }
 
     #[test]
-    fn supervised_mode_asks_the_user_and_auto_modes_answer_durably() {
+    fn permission_approvals_stay_driver_local() {
         let (events, event_rx, commands, command_rx, turn, mut state) = harness();
         // Shape from the server's OpenAPI PermissionRequest schema.
         let permission = json!({
@@ -1212,7 +1468,7 @@ mod tests {
                 "permission": "bash",
                 "patterns": ["rm -rf *"],
                 "metadata": {},
-                "always": []
+                "always": ["rm -rf *"]
             }
         });
 
@@ -1234,11 +1490,148 @@ mod tests {
         );
         assert!(command_rx.try_recv().is_err());
 
-        handle_event(&permission, &events, &commands, &turn, true, &mut state);
+        assert_eq!(
+            permission_responses(&state.permissions, "per_abc", "always"),
+            [("per_abc".into(), "once".into())],
+            "provider-wide durable approval must be translated to one-shot"
+        );
+        let repeated = json!({
+            "type": "permission.requested",
+            "properties": {
+                "id": "per_def",
+                "sessionID": "ses_1",
+                "permission": "bash",
+                "patterns": ["rm -rf /tmp/waku-cache"],
+                "metadata": {},
+                "always": ["rm -rf *"]
+            }
+        });
+        handle_event(&repeated, &events, &commands, &turn, false, &mut state);
+        let Ok(CommandMessage::Respond { option_id, .. }) = command_rx.try_recv() else {
+            panic!("the driver's remembered rule should answer without asking again");
+        };
+        assert_eq!(option_id, "once");
+        assert!(event_rx.try_recv().is_err());
+
+        let mut isolated = OpenCodeStreamState::default();
+        handle_event(&repeated, &events, &commands, &turn, false, &mut isolated);
+        assert!(matches!(
+            event_rx.try_recv().unwrap(),
+            DriverEvent::Permission { request_id, .. } if request_id == "per_def"
+        ));
+        assert!(
+            command_rx.try_recv().is_err(),
+            "another driver must not inherit the approval"
+        );
+    }
+
+    #[test]
+    fn auto_modes_use_one_shot_provider_approval() {
+        let (events, event_rx, commands, command_rx, turn, mut state) = harness();
+        handle_event(
+            &json!({
+                "type": "permission.requested",
+                "properties": {
+                    "id": "per_auto",
+                    "sessionID": "ses_1",
+                    "permission": "bash",
+                    "patterns": ["cargo test"],
+                    "always": ["cargo *"]
+                }
+            }),
+            &events,
+            &commands,
+            &turn,
+            true,
+            &mut state,
+        );
         let Ok(CommandMessage::Respond { option_id, .. }) = command_rx.try_recv() else {
             panic!("auto modes must answer without the user");
         };
-        assert_eq!(option_id, "always");
+        assert_eq!(option_id, "once");
         assert!(event_rx.try_recv().is_err());
+        assert!(state.permissions.lock().approved.is_empty());
+    }
+
+    #[test]
+    fn always_without_provider_rules_does_not_broaden_future_access() {
+        let permissions = Mutex::new(OpenCodePermissionState::default());
+        permissions.lock().pending.insert(
+            "per_once".into(),
+            OpenCodePermissionRequest {
+                permission: "bash".into(),
+                patterns: vec!["cargo test".into()],
+                always: Vec::new(),
+            },
+        );
+
+        assert_eq!(
+            permission_responses(&permissions, "per_once", "always"),
+            [("per_once".into(), "once".into())]
+        );
+        assert!(permissions.lock().approved.is_empty());
+    }
+
+    #[test]
+    fn always_resolves_matching_requests_that_are_already_pending() {
+        let permissions = Mutex::new(OpenCodePermissionState::default());
+        let request = |patterns: &[&str]| OpenCodePermissionRequest {
+            permission: "bash".into(),
+            patterns: patterns.iter().map(|pattern| (*pattern).into()).collect(),
+            always: vec!["cargo *".into()],
+        };
+        permissions
+            .lock()
+            .pending
+            .insert("per_first".into(), request(&["cargo test"]));
+        permissions
+            .lock()
+            .pending
+            .insert("per_matching".into(), request(&["cargo check"]));
+        permissions
+            .lock()
+            .pending
+            .insert("per_other".into(), request(&["git status"]));
+
+        assert_eq!(
+            permission_responses(&permissions, "per_first", "always"),
+            [
+                ("per_first".into(), "once".into()),
+                ("per_matching".into(), "once".into()),
+            ]
+        );
+        let permissions = permissions.lock();
+        assert!(!permissions.pending.contains_key("per_matching"));
+        assert!(permissions.pending.contains_key("per_other"));
+    }
+
+    #[test]
+    fn cancelling_event_stream_unblocks_response_setup() {
+        use std::net::TcpListener;
+        use std::sync::mpsc;
+
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let control = Arc::new(OpenCodeEventStreamControl::default());
+        let reader_control = Arc::clone(&control);
+        let (done, finished) = mpsc::channel();
+        let reader = thread::spawn(move || {
+            let _ = open_event_stream(port, "/event", &reader_control);
+            done.send(()).unwrap();
+        });
+        let (_peer, _) = listener.accept().unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(1);
+        while control.socket.lock().is_none() && std::time::Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(5));
+        }
+        assert!(control.socket.lock().is_some());
+
+        control.cancel();
+        finished
+            .recv_timeout(Duration::from_secs(1))
+            .expect("cancellation should unblock the response-head read");
+        reader.join().unwrap();
+        assert!(control.is_cancelled());
+        assert!(control.socket.lock().is_none());
     }
 }

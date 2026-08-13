@@ -339,8 +339,7 @@ pub(super) struct MessageRender<'a> {
     pub(super) user_message_action: Option<UserMessageAction>,
     pub(super) message_edit_input: Option<Entity<ComposerInput>>,
     pub(super) attachment_menus: Vec<ContextMenuHandle>,
-    /// The parsed response body. `None` for user and system messages, which are
-    /// shown verbatim rather than as markdown.
+    /// The parsed human or assistant body. System messages remain verbatim.
     pub(super) markdown: Option<&'a MarkdownView>,
     pub(super) ctx: &'a MarkdownCtx<'a>,
     pub(super) menu: ContextMenuHandle,
@@ -470,6 +469,26 @@ fn render_sent_message_attachments(
         ));
     }
     Some(row.into_any_element())
+}
+
+fn render_markdown_message_body<'a>(
+    content: &str,
+    markdown: Option<&'a MarkdownView>,
+    theme: &Theme,
+    ctx: &MarkdownCtx<'a>,
+) -> AnyElement {
+    markdown
+        .and_then(|markdown| md::render::markdown(markdown, ctx))
+        // Empty or not-yet-parsed content still needs a selectable fallback.
+        .unwrap_or_else(|| {
+            md::render::plain_text(
+                content.to_owned(),
+                md::render::SANS_FAMILY,
+                FontWeight::NORMAL,
+                theme.text,
+                ctx,
+            )
+        })
 }
 
 pub(super) fn render_message(params: MessageRender, cx: &mut App) -> AnyElement {
@@ -605,22 +624,18 @@ pub(super) fn render_message(params: MessageRender, cx: &mut App) -> AnyElement 
                 );
             } else {
                 if !content.trim().is_empty() {
+                    let body = render_markdown_message_body(&content, markdown, theme, ctx);
                     column = column.child(
                         div()
                             .max_w(px(540.0))
+                            .min_w_0()
                             .rounded(px(12.0))
                             .bg(theme.raised)
                             .px(px(12.0))
                             .py(px(8.0))
                             .text_size(px(14.0))
                             .line_height(px(20.0))
-                            .child(md::render::plain_text(
-                                content.clone(),
-                                md::render::SANS_FAMILY,
-                                FontWeight::NORMAL,
-                                theme.text,
-                                ctx,
-                            )),
+                            .child(body),
                     );
                 }
                 column = column.child(render_message_footer(
@@ -640,19 +655,7 @@ pub(super) fn render_message(params: MessageRender, cx: &mut App) -> AnyElement 
         }
         MessageRole::Assistant => {
             let group_name = SharedString::from(format!("assistant-message-{message_id}"));
-            let body = markdown
-                .and_then(|markdown| md::render::markdown(markdown, ctx))
-                // A response whose text has not reached the parser yet (or is
-                // pure whitespace) still needs a row, so fall back to verbatim.
-                .unwrap_or_else(|| {
-                    md::render::plain_text(
-                        content.clone(),
-                        md::render::SANS_FAMILY,
-                        FontWeight::NORMAL,
-                        theme.text,
-                        ctx,
-                    )
-                });
+            let body = render_markdown_message_body(&content, markdown, theme, ctx);
             let mut column = div()
                 .w_full()
                 .min_w_0()

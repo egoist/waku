@@ -92,6 +92,7 @@ impl AmpDriver {
             model,
             reasoning_effort,
             service_tier,
+            agent_preset: _,
             computer_use_enabled: _,
             provider_cursor,
         } = options;
@@ -570,6 +571,7 @@ mod tests {
                 model: None,
                 reasoning_effort: None,
                 service_tier: None,
+                agent_preset: None,
                 computer_use_enabled: false,
                 provider_cursor: None,
             },
@@ -627,6 +629,7 @@ mod tests {
                 model: None,
                 reasoning_effort: None,
                 service_tier: Some("fast".into()),
+                agent_preset: None,
                 computer_use_enabled: false,
                 provider_cursor: None,
             },
