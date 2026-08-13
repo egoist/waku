@@ -77,6 +77,51 @@ pub fn reduce_motion_enabled() -> bool {
     false
 }
 
+/// The tick a trackpad gives when a drag snaps to a new target.
+///
+/// AppKit offers no intensity control — only three patterns, of which
+/// `Alignment` is the lightest. It is the one macOS itself uses for guides and
+/// snapping, which is exactly what a drop target is, so both the snap and the
+/// landing use it rather than the noticeably heavier `Generic`.
+///
+/// Hardware without a Force Touch trackpad simply feels nothing, and the
+/// system's own "Force Click and haptic feedback" setting is honored for us —
+/// `LevelChange` would be the one pattern that overrides it, so it is never
+/// used here.
+#[cfg(target_os = "macos")]
+pub fn haptic_alignment_tick() {
+    perform_haptic(objc2_app_kit::NSHapticFeedbackPattern::Alignment);
+}
+
+#[cfg(target_os = "macos")]
+pub fn haptic_drop_tick() {
+    perform_haptic(objc2_app_kit::NSHapticFeedbackPattern::Alignment);
+}
+
+#[cfg(target_os = "macos")]
+fn perform_haptic(pattern: objc2_app_kit::NSHapticFeedbackPattern) {
+    use objc2_app_kit::{
+        NSHapticFeedbackManager, NSHapticFeedbackPerformanceTime, NSHapticFeedbackPerformer,
+    };
+
+    // The performer must be used on the main thread, which is where every
+    // caller of this already runs: these are pointer gestures.
+    let performer = NSHapticFeedbackManager::defaultPerformer();
+    // `DrawCompleted` lets AppKit line the tap up with the frame that shows
+    // the result, instead of firing ahead of it — the same tap reads as
+    // softer when it is not early.
+    performer.performFeedbackPattern_performanceTime(
+        pattern,
+        NSHapticFeedbackPerformanceTime::DrawCompleted,
+    );
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn haptic_alignment_tick() {}
+
+#[cfg(not(target_os = "macos"))]
+pub fn haptic_drop_tick() {}
+
 /// Deliver an audible macOS notification. GPUI owns the notification-center
 /// delegate (and therefore click responses); Waku only supplies content here
 /// because GPUI's generic payload does not currently expose a sound field.
@@ -248,6 +293,153 @@ pub fn hide_window(window: &mut Window) {
     window.remove_window();
 }
 
+/// One row of a native context menu, in the order it should appear.
+pub struct NativeMenuItem {
+    pub label: String,
+    pub enabled: bool,
+    pub checked: bool,
+    pub separator: bool,
+}
+
+#[cfg(target_os = "macos")]
+mod native_menu {
+    use std::cell::Cell;
+
+    use gpui::{Pixels, Point, Window};
+    use objc2::rc::Retained;
+    use objc2::runtime::{NSObject, NSObjectProtocol};
+    use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
+    use objc2_app_kit::{
+        NSControlStateValueOff, NSControlStateValueOn, NSMenu, NSMenuItem, NSView,
+    };
+    use objc2_foundation::{NSPoint, NSString};
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+
+    use super::NativeMenuItem;
+
+    define_class!(
+        // SAFETY: `NSObject` has no subclassing requirements and `MenuTarget`
+        // does not implement `Drop`.
+        #[unsafe(super(NSObject))]
+        #[thread_kind = MainThreadOnly]
+        #[name = "WakuContextMenuTarget"]
+        #[ivars = Cell<isize>]
+        struct MenuTarget;
+
+        unsafe impl NSObjectProtocol for MenuTarget {}
+
+        impl MenuTarget {
+            // AppKit sends this to the chosen item's target, and sends nothing
+            // at all when the menu is dismissed — which leaves the tag at -1.
+            #[unsafe(method(wakuContextMenuItemSelected:))]
+            fn item_selected(&self, item: &NSMenuItem) {
+                self.ivars().set(item.tag());
+            }
+        }
+    );
+
+    impl MenuTarget {
+        fn new(main_thread: MainThreadMarker) -> Retained<Self> {
+            let this = Self::alloc(main_thread).set_ivars(Cell::new(-1));
+            unsafe { msg_send![super(this), init] }
+        }
+    }
+
+    /// The window's native surface, captured while GPUI hands us a `Window` so
+    /// the menu itself can be popped later, from outside any GPUI borrow.
+    pub struct NativeContextMenu {
+        view: Retained<NSView>,
+    }
+
+    /// Capture that surface, or `None` when there is none — a headless test
+    /// window. The caller then falls back to the in-app menu card.
+    pub fn prepare_context_menu(window: &Window) -> Option<NativeContextMenu> {
+        let handle = HasWindowHandle::window_handle(window).ok()?;
+        let RawWindowHandle::AppKit(handle) = handle.as_raw() else {
+            return None;
+        };
+        MainThreadMarker::new()?;
+
+        // GPUI owns this view; we only read its geometry and anchor a menu to
+        // it.
+        let view = unsafe { Retained::retain(handle.ns_view.cast::<NSView>().as_ptr())? };
+        Some(NativeContextMenu { view })
+    }
+
+    impl NativeContextMenu {
+        /// Pop the menu at `position`, in GPUI's window coordinates, and block
+        /// on AppKit's tracking loop until it closes. Returns the index of the
+        /// chosen item within `items`.
+        ///
+        /// Must be called with no GPUI borrow held: the tracking loop keeps the
+        /// run loop turning, so GPUI redraws and its own timers still fire
+        /// while the menu is up.
+        pub fn show(&self, position: Point<Pixels>, items: &[NativeMenuItem]) -> Option<usize> {
+            let main_thread = MainThreadMarker::new()?;
+            let target = MenuTarget::new(main_thread);
+            let menu = NSMenu::new(main_thread);
+            // Enablement is ours to decide; AppKit's automatic validation
+            // would grey out every item, since a Rust target implements no
+            // validation protocol.
+            menu.setAutoenablesItems(false);
+
+            for (index, item) in items.iter().enumerate() {
+                if item.separator {
+                    menu.addItem(&NSMenuItem::separatorItem(main_thread));
+                    continue;
+                }
+                let entry = unsafe {
+                    NSMenuItem::initWithTitle_action_keyEquivalent(
+                        NSMenuItem::alloc(main_thread),
+                        &NSString::from_str(&item.label),
+                        Some(sel!(wakuContextMenuItemSelected:)),
+                        &NSString::from_str(""),
+                    )
+                };
+                unsafe { entry.setTarget(Some(&target)) };
+                entry.setTag(index as isize);
+                entry.setEnabled(item.enabled);
+                entry.setState(if item.checked {
+                    NSControlStateValueOn
+                } else {
+                    NSControlStateValueOff
+                });
+                menu.addItem(&entry);
+            }
+
+            // GPUI's coordinates start at the window's top-left; an unflipped
+            // AppKit view measures up from its bottom-left.
+            let height = self.view.bounds().size.height;
+            let y = f64::from(f32::from(position.y));
+            let y = if self.view.isFlipped() { y } else { height - y };
+            let location = NSPoint::new(f64::from(f32::from(position.x)), y);
+            menu.popUpMenuPositioningItem_atLocation_inView(None, location, Some(&self.view));
+
+            usize::try_from(target.ivars().get()).ok()
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+pub use native_menu::{NativeContextMenu, prepare_context_menu};
+
+#[cfg(not(target_os = "macos"))]
+pub struct NativeContextMenu {
+    _private: (),
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn prepare_context_menu(_: &Window) -> Option<NativeContextMenu> {
+    None
+}
+
+#[cfg(not(target_os = "macos"))]
+impl NativeContextMenu {
+    pub fn show(&self, _: gpui::Point<gpui::Pixels>, _: &[NativeMenuItem]) -> Option<usize> {
+        None
+    }
+}
+
 #[cfg(target_os = "macos")]
 thread_local! {
     static SIDEBAR_TINT_VIEW: std::cell::RefCell<Option<objc2::rc::Retained<objc2_app_kit::NSView>>> =
@@ -261,12 +453,20 @@ pub fn start_window_move(window: &Window) {
     window.start_window_move();
 }
 
+/// Whether the user has asked the system to reduce transparency. Read live so
+/// a change in System Settings is honored at the next theme application.
+#[cfg(target_os = "macos")]
+fn reduce_transparency() -> bool {
+    use objc2_app_kit::NSWorkspace;
+    NSWorkspace::sharedWorkspace().accessibilityDisplayShouldReduceTransparency()
+}
+
 /// Match Cursor's macOS glass window stack without asking GPUI's transparent
 /// Metal target to blend two translucent quads. The semantic tint is a native
 /// view above active Sidebar vibrancy; GPUI paints clear sidebar chrome and one
 /// translucent interaction layer above it.
 #[cfg(target_os = "macos")]
-pub fn configure_sidebar_material(window: &Window, dark: bool) {
+pub fn configure_sidebar_material(window: &Window, dark: bool, tint: gpui::Hsla) {
     use objc2::{MainThreadMarker, MainThreadOnly};
     use objc2_app_kit::{
         NSAutoresizingMaskOptions, NSColor, NSView, NSVisualEffectBlendingMode,
@@ -291,8 +491,14 @@ pub fn configure_sidebar_material(window: &Window, dark: bool) {
         let Some(native_window) = view.window() else {
             return;
         };
+        let backdrop = gpui::Rgba::from(tint);
         let background = if dark {
-            NSColor::colorWithSRGBRed_green_blue_alpha(0.0, 0.0, 0.0, 0.25)
+            NSColor::colorWithSRGBRed_green_blue_alpha(
+                f64::from(backdrop.r),
+                f64::from(backdrop.g),
+                f64::from(backdrop.b),
+                0.25,
+            )
         } else {
             NSColor::colorWithSRGBRed_green_blue_alpha(1.0, 1.0, 1.0, 0.0)
         };
@@ -316,8 +522,17 @@ pub fn configure_sidebar_material(window: &Window, dark: bool) {
             return;
         }
 
-        let channel = if dark { 0x18 } else { 0xF3 } as f64 / 255.0;
-        let tint = NSColor::colorWithSRGBRed_green_blue_alpha(channel, channel, channel, 0.92);
+        // The palette owns this color. Vibrancy still shows through, and the
+        // system's reduce-transparency setting closes that gap entirely rather
+        // than leaving the sidebar the one surface a theme cannot reach.
+        let tint = gpui::Rgba::from(tint);
+        let opacity = if reduce_transparency() { 1.0 } else { 0.92 };
+        let tint = NSColor::colorWithSRGBRed_green_blue_alpha(
+            f64::from(tint.r),
+            f64::from(tint.g),
+            f64::from(tint.b),
+            opacity,
+        );
 
         SIDEBAR_TINT_VIEW.with_borrow_mut(|slot| {
             let needs_new_view = slot.as_ref().is_none_or(|tint_view| {
@@ -348,7 +563,7 @@ pub fn configure_sidebar_material(window: &Window, dark: bool) {
 }
 
 #[cfg(not(target_os = "macos"))]
-pub fn configure_sidebar_material(_: &Window, _: bool) {}
+pub fn configure_sidebar_material(_: &Window, _: bool, _: gpui::Hsla) {}
 
 #[cfg(target_os = "macos")]
 pub fn set_sidebar_material_width(window: &Window, width: f32) {

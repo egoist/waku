@@ -33,6 +33,72 @@ impl Default for BackgroundOutputViewport {
     }
 }
 
+/// One subagent as the roster needs it: everything a row draws, and nothing
+/// that would keep a whole output buffer alive per frame.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) struct SubagentEntry {
+    pub(super) key: BackgroundWorkKey,
+    pub(super) title: SharedString,
+    pub(super) role: Option<SharedString>,
+    pub(super) model: Option<SharedString>,
+    pub(super) detail: Option<SharedString>,
+    pub(super) status: BackgroundWorkStatus,
+    pub(super) started_at_ms: u64,
+    pub(super) updated_at_ms: u64,
+    pub(super) duration_ms: Option<u64>,
+    pub(super) can_stop: bool,
+}
+
+impl SubagentEntry {
+    fn from_item(item: &BackgroundWorkItem) -> Self {
+        Self {
+            key: item.key.clone(),
+            title: SharedString::from(if item.title.trim().is_empty() {
+                tr!("background.subagent")
+            } else {
+                item.title.clone()
+            }),
+            role: item
+                .role
+                .as_deref()
+                .map(str::trim)
+                .filter(|role| !role.is_empty())
+                .map(SharedString::from),
+            model: item
+                .model
+                .as_deref()
+                .map(short_model_label)
+                .filter(|model| !model.is_empty())
+                .map(SharedString::from),
+            detail: item
+                .detail
+                .as_deref()
+                .map(str::trim)
+                .filter(|detail| !detail.is_empty())
+                .map(SharedString::from),
+            status: item.status,
+            started_at_ms: item.started_at_ms,
+            updated_at_ms: item.updated_at_ms,
+            duration_ms: item.duration_ms,
+            can_stop: item.can_stop && item.status.is_stoppable(),
+        }
+    }
+
+    /// The same clock the Background surface shows, so a subagent reads the
+    /// same in both places.
+    pub(super) fn elapsed(&self) -> String {
+        let duration_ms = self.duration_ms.unwrap_or_else(|| {
+            let end = if self.status.is_live() {
+                unix_time_millis()
+            } else {
+                self.updated_at_ms
+            };
+            end.saturating_sub(self.started_at_ms)
+        });
+        format_work_duration(duration_ms)
+    }
+}
+
 #[derive(Clone)]
 struct BackgroundSummaryEntry {
     item: BackgroundWorkItem,
@@ -292,6 +358,27 @@ impl BackgroundWorkRegistry {
             })
     }
 
+    /// Every subagent, live first, for the roster. Live work holds the order
+    /// it started in so a working fleet never reshuffles as siblings settle.
+    fn all_subagents(&self) -> Vec<SubagentEntry> {
+        let mut live = Vec::new();
+        let mut settled = Vec::new();
+        for item in self
+            .order
+            .iter()
+            .filter_map(|key| self.items.get(key))
+            .filter(|item| item.key.kind == BackgroundWorkKind::Subagent)
+        {
+            if item.status.is_live() {
+                live.push(SubagentEntry::from_item(item));
+            } else {
+                settled.push(SubagentEntry::from_item(item));
+            }
+        }
+        live.extend(settled);
+        live
+    }
+
     fn ordered_items(&self) -> Vec<&BackgroundWorkItem> {
         self.order
             .iter()
@@ -475,6 +562,28 @@ fn work_elapsed(item: &BackgroundWorkItem) -> String {
         };
         end.saturating_sub(item.started_at_ms)
     });
+    format_work_duration(duration_ms)
+}
+
+/// Providers report models at wildly different verbosity — `claude-opus-4-8`,
+/// `anthropic/claude-sonnet-5`, `gpt-5.6`. A roster row has space for the part
+/// that distinguishes them, not the vendor prefix or the datestamp.
+fn short_model_label(model: &str) -> String {
+    let leaf = model.rsplit('/').next().unwrap_or(model).trim();
+    let leaf = leaf.strip_prefix("claude-").unwrap_or(leaf);
+    let mut parts = leaf.rsplitn(2, '-');
+    match (parts.next(), parts.next()) {
+        // Drop a trailing release datestamp such as `-20250514`.
+        (Some(tail), Some(head))
+            if tail.len() == 8 && tail.chars().all(|character| character.is_ascii_digit()) =>
+        {
+            head.to_owned()
+        }
+        _ => leaf.to_owned(),
+    }
+}
+
+fn format_work_duration(duration_ms: u64) -> String {
     let seconds = duration_ms / 1_000;
     if seconds < 60 {
         format!("{seconds}s")
@@ -534,11 +643,59 @@ impl Waku {
         self.handle_background_work_event(session_id, BackgroundWorkEvent::Upsert(item));
     }
 
+    /// Close a subagent's conversation when the agent itself settles.
+    ///
+    /// A child session is opened Working and nothing in the child's own event
+    /// stream ever ends its turn — the provider reports completion against the
+    /// parent, not the child. Without this the agent spins forever in the
+    /// roster and the transcript keeps a live turn open on a finished agent.
+    fn settle_subagent_session(&mut self, parent_id: Uuid, provider_id: &str, failed: bool) {
+        let Some(child_id) = self
+            .state
+            .sessions
+            .iter()
+            .find(|session| {
+                session.subagent.as_ref().is_some_and(|origin| {
+                    origin.parent_session_id == parent_id && origin.provider_id == provider_id
+                })
+            })
+            .map(|session| session.id)
+        else {
+            return;
+        };
+        self.finish_streaming_assistant(child_id);
+        self.complete_turn_blocks(child_id);
+        if let Some(session) = self.state.session_mut(child_id) {
+            session.finish_active_turn(if failed {
+                TurnStatus::Failed
+            } else {
+                TurnStatus::Completed
+            });
+            session.status = if failed {
+                SessionStatus::Failed
+            } else {
+                SessionStatus::Idle
+            };
+        }
+    }
+
     pub(super) fn handle_background_work_event(
         &mut self,
         session_id: Uuid,
         event: BackgroundWorkEvent,
     ) {
+        // A settled subagent must also close its conversation.
+        if let BackgroundWorkEvent::Upsert(item) = &event
+            && item.key.kind == BackgroundWorkKind::Subagent
+            && !item.status.is_live()
+        {
+            let provider_id = item.key.provider_id.clone();
+            let failed = matches!(
+                item.status,
+                BackgroundWorkStatus::Failed | BackgroundWorkStatus::Lost
+            );
+            self.settle_subagent_session(session_id, &provider_id, failed);
+        }
         self.background_work
             .entry(session_id)
             .or_default()
@@ -615,8 +772,14 @@ impl Waku {
             }
         }
 
+        // The Agents roster and the header summary both show elapsed clocks
+        // for work in any session, not only the selected one, so any live
+        // work has to keep the tick going.
         if self.last_background_work_tick.elapsed() >= BACKGROUND_WORK_TICK_INTERVAL
-            && selected.is_some_and(|session_id| self.session_has_live_background_work(session_id))
+            && self
+                .background_work
+                .values()
+                .any(BackgroundWorkRegistry::has_live)
         {
             self.last_background_work_tick = Instant::now();
             cx.notify();
@@ -653,6 +816,35 @@ impl Waku {
         );
         driver.stop_background_work(key, control_id);
         cx.notify();
+    }
+
+    /// Open a subagent as a conversation.
+    ///
+    /// A subagent that has said anything has a real session behind it, so this
+    /// selects that session and the ordinary transcript renders it — the whole
+    /// point of modelling subagents as sessions rather than as log panes. An
+    /// agent that has produced nothing yet has no session, and falls back to
+    /// its background-work card.
+    pub(super) fn open_subagent(
+        &mut self,
+        parent_id: Uuid,
+        key: BackgroundWorkKey,
+        cx: &mut Context<Self>,
+    ) {
+        let child = self
+            .state
+            .sessions
+            .iter()
+            .find(|session| {
+                session.subagent.as_ref().is_some_and(|origin| {
+                    origin.parent_session_id == parent_id && origin.provider_id == key.provider_id
+                })
+            })
+            .map(|session| session.id);
+        match child {
+            Some(child) => self.select_session(child, cx),
+            None => self.open_background_work_surface(parent_id, key, cx),
+        }
     }
 
     pub(super) fn open_background_work_surface(
@@ -841,6 +1033,405 @@ impl Waku {
             .children(git_status)
             .child(info)
             .into_any_element()
+    }
+
+    /// The session's subagent roster.
+    ///
+    /// Deliberately a list and not a tree: nesting answers "who spawned this",
+    /// which the transcript already shows, while the question this surface
+    /// exists for is "what is running right now". Live agents sort first and
+    /// hold their start order so a working fleet never reshuffles; finished
+    /// ones fall below in the order they landed.
+    pub(super) fn render_right_panel_agents(&self, cx: &mut Context<Self>) -> Stateful<Div> {
+        let theme = Theme::current(cx);
+        let Some(session_id) = self.state.selected_session else {
+            return self.render_agents_empty(&theme);
+        };
+        let subagents = self
+            .background_work
+            .get(&session_id)
+            .map(BackgroundWorkRegistry::all_subagents)
+            .unwrap_or_default();
+        if subagents.is_empty() {
+            return self.render_agents_empty(&theme);
+        }
+
+        let (live, settled): (Vec<_>, Vec<_>) = subagents
+            .into_iter()
+            .partition(|subagent| subagent.status.is_live());
+        let live_count = live.len();
+        let mut list = div()
+            .id("right-panel-agents-scroll")
+            .flex_1()
+            .min_h_0()
+            .overflow_y_scroll()
+            .p(px(10.0))
+            .flex()
+            .flex_col()
+            .gap(px(10.0));
+        for (label, group, working) in [
+            (tr!("background.agents_working"), live, true),
+            (tr!("background.agents_finished"), settled, false),
+        ] {
+            if group.is_empty() {
+                continue;
+            }
+            let mut section = div().w_full().flex().flex_col().gap(px(4.0)).child(
+                div()
+                    .h(px(22.0))
+                    .px(px(4.0))
+                    .flex()
+                    .items_center()
+                    .gap(px(6.0))
+                    .text_size(px(11.0))
+                    .font_weight(FontWeight::MEDIUM)
+                    .child(
+                        div()
+                            .text_color(if working {
+                                theme.text_secondary
+                            } else {
+                                theme.text_tertiary
+                            })
+                            .child(SharedString::from(label)),
+                    )
+                    .child(
+                        // A count badge rather than a bare number: it reads as
+                        // a quantity at a glance and keeps its own width.
+                        div()
+                            .h(px(15.0))
+                            .min_w(px(15.0))
+                            .px(px(4.0))
+                            .rounded_full()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .bg(if working {
+                                theme.accent.opacity(0.14)
+                            } else {
+                                theme.overlay
+                            })
+                            .text_size(px(10.0))
+                            .font_family(crate::md::render::MONO_FAMILY)
+                            .text_color(if working {
+                                theme.accent
+                            } else {
+                                theme.text_ghost
+                            })
+                            .child(SharedString::from(group.len().to_string())),
+                    )
+                    .child(div().flex_1()),
+            );
+            for subagent in group {
+                section = section.child(self.render_agent_roster_row(session_id, &subagent, cx));
+            }
+            list = list.child(section);
+        }
+
+        div()
+            .id("right-panel-agents")
+            .tab_group()
+            .flex_1()
+            .min_h_0()
+            .flex()
+            .flex_col()
+            .child(
+                // A standing answer to "what is running", so the question does
+                // not require reading the list.
+                div()
+                    .flex_none()
+                    .h(px(30.0))
+                    .px(px(12.0))
+                    .flex()
+                    .items_center()
+                    .gap(px(6.0))
+                    .border_b_1()
+                    .border_color(theme.border)
+                    .text_size(px(11.0))
+                    .when(live_count > 0, |header| {
+                        header
+                            .child(
+                                icon("icons/loader-circle.svg", 10.0, theme.accent).with_animation(
+                                    SharedString::from("agents-header-spinner"),
+                                    Animation::new(Duration::from_millis(900))
+                                        .repeat()
+                                        .with_easing(gpui::linear),
+                                    |icon, delta| {
+                                        icon.with_transformation(gpui::Transformation::rotate(
+                                            gpui::percentage(delta),
+                                        ))
+                                    },
+                                ),
+                            )
+                            .child(
+                                div()
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .text_color(theme.accent)
+                                    .child(SharedString::from(if live_count == 1 {
+                                        tr!("background.agent_count_one")
+                                    } else {
+                                        tr!("background.agent_count", count = live_count)
+                                    })),
+                            )
+                    })
+                    .when(live_count == 0, |header| {
+                        header.child(
+                            div()
+                                .text_color(theme.text_tertiary)
+                                .child(tr!("background.agents_all_finished")),
+                        )
+                    })
+                    .child(div().flex_1()),
+            )
+            .child(list)
+    }
+
+    fn render_agents_empty(&self, theme: &Theme) -> Stateful<Div> {
+        div()
+            .id("right-panel-agents")
+            .tab_group()
+            .flex_1()
+            .min_h_0()
+            .flex()
+            .items_center()
+            .justify_center()
+            .px(px(24.0))
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .gap(px(7.0))
+                    .child(icon("icons/bot.svg", 22.0, theme.text_ghost))
+                    .child(
+                        div()
+                            .text_size(px(12.0))
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(theme.text_secondary)
+                            .child(tr!("background.no_agents")),
+                    )
+                    .child(
+                        div()
+                            .max_w(px(240.0))
+                            .text_center()
+                            .text_size(px(11.0))
+                            .line_height(px(16.0))
+                            .text_color(theme.text_ghost)
+                            .child(tr!("background.no_agents_description")),
+                    ),
+            )
+    }
+
+    /// One agent in the roster.
+    ///
+    /// Three reserved lines at a fixed height — identity, activity, metrics —
+    /// so a changing activity line or a ticking clock never reflows the list
+    /// under the pointer. Live work is marked by an accent rail and a filled
+    /// dot; every settled state has its own glyph shape, so nothing here is
+    /// carried by color alone.
+    fn render_agent_roster_row(
+        &self,
+        session_id: Uuid,
+        subagent: &SubagentEntry,
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
+        let theme = Theme::current(cx);
+        let live = subagent.status.is_live();
+        let color = work_status_color(subagent.status, theme);
+        let row_id = SharedString::from(format!("agent-row-{}", subagent.key.provider_id));
+        let open_key = subagent.key.clone();
+        let keyboard_key = subagent.key.clone();
+        let stop_key = subagent.key.clone();
+
+        // Live agents say what they are doing; settled ones say how they
+        // ended, in words as well as in color.
+        let activity = subagent
+            .detail
+            .clone()
+            .unwrap_or_else(|| SharedString::from(work_status_label(subagent.status)));
+        let metrics = [subagent.model.clone()]
+            .into_iter()
+            .flatten()
+            .map(|part| part.to_string())
+            .collect::<Vec<_>>()
+            .join(" · ");
+
+        let stop = (live && subagent.can_stop).then(|| {
+            div()
+                .id(SharedString::from(format!("{row_id}-stop")))
+                .track_focus(&self.transcript_control_focus(format!("{row_id}-stop"), cx))
+                .tab_index(0)
+                .size(px(20.0))
+                .rounded(px(5.0))
+                .flex()
+                .items_center()
+                .justify_center()
+                .cursor_default()
+                .invisible()
+                .group_hover(row_id.clone(), |style| style.visible())
+                .focus_visible(|style| style.visible().border_1().border_color(theme.accent))
+                .hover(|style| style.bg(theme.danger.opacity(0.14)))
+                .tooltip(Tooltip::text(tr_cow!("background.stop")))
+                .child(icon("icons/stop-filled.svg", 9.0, theme.danger))
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .on_click(cx.listener({
+                    let stop_key = stop_key.clone();
+                    move |this, _, _, cx| {
+                        cx.stop_propagation();
+                        this.stop_background_work(session_id, stop_key.clone(), cx);
+                    }
+                }))
+                .on_key_down(cx.listener(move |this, event: &KeyDownEvent, _, cx| {
+                    if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                        this.stop_background_work(session_id, stop_key.clone(), cx);
+                        cx.stop_propagation();
+                    }
+                }))
+        });
+
+        div()
+            .id(row_id.clone())
+            .group(row_id.clone())
+            .track_focus(&self.transcript_control_focus(row_id.to_string(), cx))
+            .tab_index(0)
+            .w_full()
+            .h(px(62.0))
+            .rounded(px(8.0))
+            .overflow_hidden()
+            .flex()
+            .cursor_default()
+            .bg(if live {
+                theme.accent.opacity(0.05)
+            } else {
+                theme.surface
+            })
+            .border_1()
+            .border_color(if live {
+                theme.accent.opacity(0.22)
+            } else {
+                theme.border
+            })
+            .focus_visible(|style| style.border_color(theme.accent))
+            .hover(|style| {
+                style.bg(if live {
+                    theme.accent.opacity(0.09)
+                } else {
+                    theme.overlay
+                })
+            })
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .px(px(10.0))
+                    .py(px(7.0))
+                    .flex()
+                    .flex_col()
+                    .gap(px(1.0))
+                    // Identity.
+                    .child(
+                        div()
+                            .h(px(17.0))
+                            .flex()
+                            .items_center()
+                            .gap(px(6.0))
+                            .child(rendered_work_status_icon(
+                                subagent.status,
+                                11.0,
+                                color,
+                                format!("{row_id}-status"),
+                            ))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .truncate()
+                                    .text_size(px(12.5))
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .text_color(if live {
+                                        theme.text
+                                    } else {
+                                        theme.text_secondary
+                                    })
+                                    .child(subagent.title.clone()),
+                            )
+                            .child(
+                                div()
+                                    .flex_none()
+                                    .text_size(px(10.5))
+                                    .font_family(crate::md::render::MONO_FAMILY)
+                                    .text_color(if live {
+                                        theme.text_tertiary
+                                    } else {
+                                        theme.text_ghost
+                                    })
+                                    .child(SharedString::from(subagent.elapsed())),
+                            )
+                            // Reserved whether or not the button is showing, so
+                            // hovering a row never shifts its clock.
+                            .child(
+                                div()
+                                    .size(px(20.0))
+                                    .flex_none()
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .children(stop),
+                            ),
+                    )
+                    // Activity.
+                    .child(
+                        div().h(px(15.0)).pl(px(17.0)).flex().items_center().child(
+                            div()
+                                .w_full()
+                                .truncate()
+                                .text_size(px(11.0))
+                                .text_color(if live { color } else { theme.text_tertiary })
+                                .child(activity),
+                        ),
+                    )
+                    // Metrics: the role as a chip, then whatever else is known.
+                    .child(
+                        div()
+                            .h(px(15.0))
+                            .pl(px(17.0))
+                            .flex()
+                            .items_center()
+                            .gap(px(5.0))
+                            .children(subagent.role.clone().map(|role| {
+                                div()
+                                    .flex_none()
+                                    .h(px(14.0))
+                                    .px(px(5.0))
+                                    .rounded(px(4.0))
+                                    .flex()
+                                    .items_center()
+                                    .bg(theme.overlay)
+                                    .text_size(px(9.5))
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .text_color(theme.text_tertiary)
+                                    .child(role)
+                            }))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .truncate()
+                                    .text_size(px(10.0))
+                                    .font_family(crate::md::render::MONO_FAMILY)
+                                    .text_color(theme.text_ghost)
+                                    .child(SharedString::from(metrics)),
+                            ),
+                    ),
+            )
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.open_subagent(session_id, open_key.clone(), cx);
+            }))
+            .on_key_down(cx.listener(move |this, event: &KeyDownEvent, _, cx| {
+                if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                    this.open_subagent(session_id, keyboard_key.clone(), cx);
+                    cx.stop_propagation();
+                }
+            }))
     }
 
     pub(super) fn render_background_work_surface(
@@ -1597,6 +2188,65 @@ mod tests {
         );
         item.background = background;
         item
+    }
+
+    fn subagent(id: &str, status: BackgroundWorkStatus) -> BackgroundWorkItem {
+        BackgroundWorkItem::new(
+            BackgroundWorkKind::Subagent,
+            id,
+            format!("agent {id}"),
+            status,
+        )
+    }
+
+    #[test]
+    fn the_roster_lists_live_agents_in_start_order_ahead_of_finished_ones() {
+        let mut registry = BackgroundWorkRegistry::default();
+        for id in ["settled-1", "settled-2"] {
+            registry.apply(BackgroundWorkEvent::Upsert(subagent(
+                id,
+                BackgroundWorkStatus::Completed,
+            )));
+        }
+        for id in ["live-1", "live-2"] {
+            registry.apply(BackgroundWorkEvent::Upsert(subagent(
+                id,
+                BackgroundWorkStatus::Running,
+            )));
+        }
+        // A background process shares the registry but is not a subagent.
+        registry.apply(BackgroundWorkEvent::Upsert(item(
+            "proc",
+            BackgroundWorkStatus::Running,
+            true,
+        )));
+
+        let ids = registry
+            .all_subagents()
+            .into_iter()
+            .map(|subagent| subagent.key.provider_id)
+            .collect::<Vec<_>>();
+        // Live work keeps the order it started in so a running fleet does not
+        // reshuffle under the pointer as siblings settle.
+        assert_eq!(ids, ["live-1", "live-2", "settled-1", "settled-2"]);
+    }
+
+    #[test]
+    fn roster_model_labels_drop_the_vendor_prefix_and_datestamp() {
+        assert_eq!(short_model_label("claude-sonnet-5-20250514"), "sonnet-5");
+        assert_eq!(short_model_label("anthropic/claude-opus-4-8"), "opus-4-8");
+        assert_eq!(short_model_label("gpt-5.6"), "gpt-5.6");
+    }
+
+    #[test]
+    fn a_subagents_elapsed_clock_freezes_when_it_settles() {
+        let mut item = subagent("a", BackgroundWorkStatus::Completed);
+        item.started_at_ms = 1_000;
+        item.updated_at_ms = 66_000;
+        assert_eq!(SubagentEntry::from_item(&item).elapsed(), "1m 05s");
+        // A reported duration wins over the wall clock either way.
+        item.duration_ms = Some(3_000);
+        assert_eq!(SubagentEntry::from_item(&item).elapsed(), "3s");
     }
 
     #[test]

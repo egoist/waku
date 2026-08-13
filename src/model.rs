@@ -525,6 +525,139 @@ pub struct Project {
     pub created_at: u64,
 }
 
+/// A user-created sidebar folder.
+///
+/// Folders are a filing device, not a container: a session names its folder,
+/// so removing a folder simply leaves its sessions unfiled.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct SessionFolder {
+    pub id: Uuid,
+    pub name: String,
+    /// Order shown in the sidebar.
+    #[serde(default)]
+    pub position: u32,
+    /// When the folder was created, unix seconds.
+    #[serde(default)]
+    pub created_at: u64,
+}
+
+impl SessionFolder {
+    pub fn new(name: String, position: u32) -> Self {
+        Self {
+            id: Uuid::new_v4(),
+            name,
+            position,
+            created_at: unix_time(),
+        }
+    }
+}
+
+/// What the sidebar's session groups mean.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum SidebarGrouping {
+    /// Calendar periods — today, yesterday, this week, and so on.
+    #[default]
+    Date,
+    /// One group per project the sessions belong to.
+    Project,
+    /// One group per user-created folder, plus everything still unfiled.
+    Folder,
+    /// No groups at all; one flat list in the current sort order.
+    Flat,
+}
+
+impl SidebarGrouping {
+    pub const ALL: [Self; 4] = [Self::Date, Self::Project, Self::Folder, Self::Flat];
+}
+
+/// How sessions are ordered inside each sidebar group.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum SidebarSort {
+    /// Most recent activity first, falling back to when the task was created.
+    #[default]
+    Recent,
+    /// Oldest activity first.
+    Oldest,
+    /// By displayed title, case-insensitively.
+    Title,
+    /// Sessions still working or waiting on the user first, each block in
+    /// recency order. For watching a fan-out of tasks rather than reading back.
+    Activity,
+    /// The order the user dragged sessions into. Sessions never moved by hand
+    /// keep their recency order below the ones that were.
+    Manual,
+}
+
+impl SidebarSort {
+    pub const ALL: [Self; 5] = [
+        Self::Recent,
+        Self::Oldest,
+        Self::Title,
+        Self::Activity,
+        Self::Manual,
+    ];
+}
+
+/// Which sessions the sidebar shows at all.
+///
+/// Filters compose: a session must satisfy every one that is set. Archived
+/// sessions are excluded unless [`Self::show_archived`] is on, whatever the
+/// other filters say.
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SidebarFilter {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<ProviderKind>,
+    /// Show only sessions that are mid-turn or waiting on the user.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub active_only: bool,
+    /// Hide sessions whose last activity is older than this many days. `None`
+    /// keeps the whole history.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_age_days: Option<u32>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub show_archived: bool,
+}
+
+impl SidebarFilter {
+    /// Cutoffs offered in the filter menu, in days.
+    pub const AGE_OPTIONS: [u32; 3] = [1, 7, 30];
+
+    /// Whether anything is narrowing the list, for the control's badge.
+    pub fn is_narrowed(&self) -> bool {
+        self.provider.is_some() || self.active_only || self.max_age_days.is_some()
+    }
+
+    /// `now` is passed in rather than read here so one pass over the sidebar
+    /// judges every session against the same instant.
+    pub fn matches(&self, session: &AgentSession, now: u64) -> bool {
+        if session.archived && !self.show_archived {
+            return false;
+        }
+        if self
+            .provider
+            .is_some_and(|provider| provider != session.provider)
+        {
+            return false;
+        }
+        if self.active_only && !session.is_busy() {
+            return false;
+        }
+        if let Some(days) = self.max_age_days {
+            let cutoff = u64::from(days) * 86_400;
+            // A session that is still working stays visible however old its
+            // conversation is; hiding live work would lose track of it.
+            let age = now.saturating_sub(session.last_reply_at.unwrap_or(session.created_at));
+            if age > cutoff && !session.is_busy() {
+                return false;
+            }
+        }
+        true
+    }
+}
+
 /// Filesystem context a task runs in.
 ///
 /// Drafts may carry [`Self::NewWorktree`] until their first prompt. Waku then
@@ -739,9 +872,57 @@ pub struct ContextUsage {
     pub window: Option<u64>,
 }
 
+/// What a driver knows about a subagent the moment it first sees one, enough
+/// for the app to open a conversation for it.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct SubagentLaunchInfo {
+    pub title: String,
+    pub role: Option<String>,
+    pub model: Option<String>,
+    /// The prompt the parent handed the agent. Shown as the opening message,
+    /// because from the agent's side that is exactly what it was.
+    pub prompt: Option<String>,
+    /// Whether this provider lets a client send into the agent. Almost none
+    /// do; see [`SubagentOrigin::can_prompt`].
+    pub can_prompt: bool,
+    pub prompt_target: Option<String>,
+}
+
+/// What ties a subagent conversation back to the agent that launched it.
+///
+/// Providers disagree about what a subagent *is* — Claude keeps it on the
+/// parent's stream behind a tool-call id, OpenCode gives it a child session,
+/// Codex a child thread — so the one identifier that exists everywhere is the
+/// tool call that spawned it. `provider_id` is that call, and it is what the
+/// driver tags the child's events with.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct SubagentOrigin {
+    pub parent_session_id: Uuid,
+    pub provider_id: String,
+    /// The agent's kind as the provider names it: `Explore`, `oracle`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
+    /// Whether this provider lets a client send a message into the agent.
+    /// Most do not: delegation is usually a tool the orchestrating model
+    /// calls, with no client-facing route to the child. A composer is only
+    /// offered where this is true.
+    #[serde(default)]
+    pub can_prompt: bool,
+    /// Provider-side handle a prompt would be addressed to, when there is one
+    /// — OpenCode's child session id, Codex's child thread id.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_target: Option<String>,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct AgentSession {
     pub id: Uuid,
+    /// Set when this session is a subagent rather than something the user
+    /// started. Subagent sessions are real conversations — same transcript,
+    /// same rendering — but they are launched by another session's agent, so
+    /// they stay out of the task list and out of the sidebar.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subagent: Option<SubagentOrigin>,
     /// A title explicitly chosen by the user. [`Self::DEFAULT_TITLE`] means
     /// no explicit title has been set, so [`Self::auto_title`] may be shown.
     pub title: String,
@@ -777,6 +958,21 @@ pub struct AgentSession {
     /// then refreshed when the turn settles, whatever its outcome.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_reply_at: Option<u64>,
+    /// Kept in the sidebar's sticky top section, above every other group.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub pinned: bool,
+    /// Filed out of the main sidebar list. An archived session is still
+    /// selectable and still streams; it is only hidden from the default view.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub archived: bool,
+    /// User-created folder this session belongs to. A folder that no longer
+    /// exists reads as unfiled, so deleting one never orphans a session.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub folder_id: Option<Uuid>,
+    /// Hand-picked position from a drag. `None` means the session has never
+    /// been moved by hand and falls back to whatever the sort says.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub position: Option<i64>,
     #[serde(default)]
     pub provider_cursor: Option<ProviderResumeCursor>,
     /// Slash commands the provider reported for this session's live process,
@@ -824,6 +1020,7 @@ impl AgentSession {
         let now = unix_time();
         Self {
             id: Uuid::new_v4(),
+            subagent: None,
             title: Self::DEFAULT_TITLE.to_owned(),
             auto_title: None,
             project_id,
@@ -839,6 +1036,10 @@ impl AgentSession {
             created_at: now,
             updated_at: now,
             last_reply_at: None,
+            pinned: false,
+            archived: false,
+            folder_id: None,
+            position: None,
             detail_loaded: true,
             provider_cursor: None,
             available_commands: Vec::new(),
@@ -849,6 +1050,13 @@ impl AgentSession {
             turns: Vec::new(),
             queued_messages: Vec::new(),
         }
+    }
+
+    /// A conversation the user started, as opposed to one an agent launched.
+    /// The sidebar, the command palette and every other place that enumerates
+    /// "tasks" means this.
+    pub fn is_task(&self) -> bool {
+        self.subagent.is_none()
     }
 
     pub fn is_busy(&self) -> bool {
@@ -1084,6 +1292,25 @@ impl AgentSession {
             Message::new_for_turn(MessageRole::User, prompt, id)
                 .with_presentation(display_content, attachments),
         );
+        self.last_reply_at = Some(now);
+        id
+    }
+
+    /// Open a turn the provider started on its own, with no user message —
+    /// nobody typed one. See [`DriverEvent::ProviderTurnStarted`].
+    pub fn begin_provider_turn(&mut self) -> Uuid {
+        let id = Uuid::new_v4();
+        let now = unix_time();
+        self.turns.push(AgentTurn {
+            id,
+            turn_count: self.turns.len() + 1,
+            status: TurnStatus::Running,
+            provider_turn_started: true,
+            provider_resume_at: None,
+            started_at: now,
+            completed_at: None,
+            checkpoint: None,
+        });
         self.last_reply_at = Some(now);
         id
     }
@@ -1496,6 +1723,12 @@ pub enum DriverEvent {
     /// dynamically registered commands.
     AvailableCommands(Vec<ReportedCommand>),
     TurnStarted,
+    /// The provider began a turn nobody prompted for. Claude ends the turn
+    /// that launched a backgrounded subagent, then wakes itself when that
+    /// subagent reports back and keeps working. Without a turn to hold it that
+    /// second stretch of work is dropped on the floor, so the app opens one
+    /// that has no user message behind it.
+    ProviderTurnStarted,
     TextDelta(String),
     ReasoningDelta(String),
     Activity {
@@ -1510,6 +1743,18 @@ pub enum DriverEvent {
     /// deliberately separate from transcript activities: completing a turn
     /// must not make a detached process or subagent look complete.
     BackgroundWork(BackgroundWorkEvent),
+    /// An event belonging to a subagent rather than to this session.
+    ///
+    /// Providers interleave a subagent's stream with the parent's on one
+    /// channel, so the driver tags each child event with the agent it came
+    /// from and the app replays it against that agent's own conversation.
+    /// `launch` is present on the first event for an agent and carries what is
+    /// needed to open that conversation.
+    Subagent {
+        provider_id: String,
+        launch: Option<SubagentLaunchInfo>,
+        event: Box<DriverEvent>,
+    },
     Permission {
         request_id: String,
         title: String,

@@ -68,6 +68,15 @@ settings.theme_description: 选择跟随系统、浅色或深色主题
 settings.theme_system: 跟随系统
 settings.theme_light: 浅色
 settings.theme_dark: 深色
+settings.theme_light_palette: 浅色调色板
+settings.theme_light_palette_description: 应用处于浅色外观时使用的调色板
+settings.theme_dark_palette: 深色调色板
+settings.theme_dark_palette_description: 应用处于深色外观时使用的调色板
+settings.theme_preview: 预览
+settings.theme_preview_title: 重命名主题令牌
+settings.theme_preview_body: 会话中的背景、文字层级、强调色与差异颜色。
+settings.theme_preview_action: 发送
+settings.theme_preview_caption: waku/src/theme.rs
 input.do_anything: 做什么都可以…
 input.search_models: 搜索模型…
 input.search_branches: 搜索分支
@@ -134,6 +143,42 @@ sidebar.minutes_ago: "%{count} 分钟前"
 sidebar.hours_ago: "%{count} 小时前"
 sidebar.days_ago: "%{count} 天前"
 sidebar.unknown_project: 未知项目
+sidebar.pinned: 已置顶
+sidebar.archived: 已归档
+sidebar.unfiled: 未归类
+sidebar.pin: 置顶
+sidebar.unpin: 取消置顶
+sidebar.archive: 归档
+sidebar.unarchive: 取消归档
+sidebar.move_to_folder: 移动到文件夹
+sidebar.no_folder: 不使用文件夹
+sidebar.new_folder: 新建文件夹
+sidebar.new_folder_name: 新建文件夹
+sidebar.delete_folder: 删除文件夹
+sidebar.add_project: 添加项目
+sidebar.group_by: 分组方式
+sidebar.group_by_date: 日期
+sidebar.group_by_project: 项目
+sidebar.group_by_folder: 文件夹
+sidebar.group_by_none: 不分组
+sidebar.sort_by: 排序方式
+sidebar.sort_recent: 最近优先
+sidebar.sort_oldest: 最早优先
+sidebar.sort_title: 标题
+sidebar.sort_activity: 进行中优先
+sidebar.last_active: 最近活动
+sidebar.any_age: 不限时间
+sidebar.age_day: 最近一天
+sidebar.age_week: 最近一周
+sidebar.age_month: 最近一个月
+sidebar.age_days: 最近%{count}天
+sidebar.filter: 筛选
+sidebar.filter_active: 筛选（已启用）
+sidebar.provider: 智能体
+sidebar.all_providers: 全部智能体
+sidebar.active_only: 仅进行中
+sidebar.show_archived: 显示已归档
+sidebar.no_matching_sessions: 没有符合当前筛选条件的任务。
 project.new_project: 新建项目…
 project.no_project: 不使用项目
 project.no_project_name: 无项目
@@ -762,3 +807,7 @@ usage_error.curl_did_not_finish: curl 未能完成请求
 usage_error.curl_failed: "curl 失败：%{error}"
 usage_error.unknown_error: 未知错误
 usage_error.curl_no_status: curl 未返回 HTTP 状态行
+sidebar.sort_manual: 自定义顺序
+sidebar.drop_to_pin: 拖放到此处置顶
+sidebar.drop_to_archive: 拖放到此处归档
+sidebar.drop_to_file: 拖放到此文件夹

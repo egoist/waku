@@ -559,7 +559,7 @@ impl Waku {
             return;
         };
         match self.escape_stop_confirmation.press(target, Instant::now()) {
-            EscapeStopPress::Stop => self.cancel_turn(cx),
+            EscapeStopPress::Stop => self.stop_turn_and_resume_queue(cx),
             EscapeStopPress::Arm(arm) => {
                 cx.notify();
                 cx.spawn(async move |this, cx| {
@@ -846,6 +846,31 @@ impl Waku {
             self.reset_session_runtime(session_id);
             self.save();
             cx.notify();
+        }
+    }
+
+    /// Stop the running turn, then start whatever the user queued while it ran.
+    pub(super) fn stop_turn_and_resume_queue(&mut self, cx: &mut Context<Self>) {
+        let session_id = self.state.selected_session;
+        let stoppable = session_id.is_some_and(|session_id| {
+            !self.submission_preparations.contains(&session_id)
+                && self
+                    .state
+                    .sessions
+                    .iter()
+                    .any(|session| session.id == session_id && session.status.is_busy())
+        });
+        self.cancel_turn(cx);
+        let Some(session_id) = session_id.filter(|_| stoppable) else {
+            return;
+        };
+        let has_queued = self
+            .state
+            .sessions
+            .iter()
+            .any(|session| session.id == session_id && !session.queued_messages.is_empty());
+        if has_queued {
+            self.resume_queue_after_stop(session_id, cx);
         }
     }
 

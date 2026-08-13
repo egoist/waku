@@ -184,6 +184,79 @@ impl Waku {
             })
     }
 
+    /// The conversation for one subagent of `parent_id`, opened on first sight.
+    ///
+    /// A subagent session is a real [`AgentSession`]: same transcript, same
+    /// renderer, same everything, minus a place in the task list. It inherits
+    /// the parent's project and provider because it is literally running
+    /// inside the parent's process.
+    fn resolve_subagent_session(
+        &mut self,
+        parent_id: Uuid,
+        provider_id: &str,
+        launch: Option<crate::model::SubagentLaunchInfo>,
+    ) -> Option<Uuid> {
+        let existing = self
+            .state
+            .sessions
+            .iter()
+            .find(|session| {
+                session.subagent.as_ref().is_some_and(|origin| {
+                    origin.parent_session_id == parent_id && origin.provider_id == provider_id
+                })
+            })
+            .map(|session| (session.id, session.active_turn_id().is_some()));
+        if let Some((child_id, has_active_turn)) = existing {
+            // The agent is talking again after it had settled — Claude's
+            // orchestrator resumes a finished agent with `SendMessage`, and the
+            // resumed run arrives under the same spawning call. Its conversation
+            // needs a turn reopened or the app, which drops output it cannot
+            // attribute to a running turn, would discard the whole second run.
+            if !has_active_turn && let Some(session) = self.state.session_mut(child_id) {
+                session.begin_provider_turn();
+                session.status = SessionStatus::Working;
+            }
+            return Some(child_id);
+        }
+        // Without a launch there is nothing to open a conversation with, and
+        // inventing one from a stray delta would produce an untitled ghost.
+        let launch = launch?;
+        let parent = self
+            .state
+            .sessions
+            .iter()
+            .find(|session| session.id == parent_id)?;
+        let mut child = AgentSession::new(parent.project_id, parent.provider);
+        child.workspace = parent.workspace.clone();
+        child.runtime_mode = parent.runtime_mode;
+        child.interaction_mode = parent.interaction_mode;
+        child.model = launch.model.clone().or_else(|| parent.model.clone());
+        child.subagent = Some(crate::model::SubagentOrigin {
+            parent_session_id: parent_id,
+            provider_id: provider_id.to_owned(),
+            role: launch.role.clone(),
+            can_prompt: launch.can_prompt,
+            prompt_target: launch.prompt_target.clone(),
+        });
+        if !launch.title.trim().is_empty() {
+            child.set_auto_title(Some(launch.title.clone()));
+        }
+        let child_id = child.id;
+        // The prompt the parent handed over opens the transcript, because from
+        // this agent's side that is exactly what its first message was.
+        match launch.prompt.filter(|prompt| !prompt.trim().is_empty()) {
+            Some(prompt) => {
+                child.begin_turn_with_presentation(prompt, None, Vec::new());
+            }
+            None => {
+                child.begin_provider_turn();
+            }
+        }
+        child.status = SessionStatus::Working;
+        self.state.sessions.push(child);
+        Some(child_id)
+    }
+
     pub(super) fn accepts_turn_output(&self, session_id: Uuid) -> bool {
         // The turn begins at submission accept, before its prompt has reached
         // any provider. While preparation is still running, a reused runtime
@@ -221,6 +294,22 @@ impl Waku {
         cx: &mut Context<Self>,
     ) -> bool {
         runtime.last_active_at = Instant::now();
+        if let DriverEvent::Subagent {
+            provider_id,
+            launch,
+            event,
+        } = event
+        {
+            let Some(child_id) = self.resolve_subagent_session(session_id, &provider_id, launch)
+            else {
+                return false;
+            };
+            // The child's events are ordinary session events; they just belong
+            // to a different conversation. Replaying them through this same
+            // function is what makes a subagent render exactly like a task —
+            // one transcript implementation, not two.
+            return self.handle_driver_event(child_id, runtime, *event, false, cx);
+        }
         match event {
             DriverEvent::Connected { provider_cursor } => {
                 runtime.last_driver_error = None;
@@ -268,6 +357,23 @@ impl Waku {
                     && session.active_turn_id().is_some()
                 {
                     session.mark_active_turn_provider_started();
+                    session.status = SessionStatus::Working;
+                }
+            }
+            // Unwrapped above, before this match, so the child's own events
+            // are dispatched against the child's session.
+            DriverEvent::Subagent { .. } => {}
+            DriverEvent::ProviderTurnStarted => {
+                runtime.last_driver_error = None;
+                // A prompt already opened a turn; this only has to cover the
+                // case where the provider resumed on its own after one settled.
+                // Preparation means a submission is mid-flight and owns the
+                // next turn, so never race it with an unprompted one.
+                if !self.submission_preparations.contains(&session_id)
+                    && let Some(session) = self.state.session_mut(session_id)
+                    && session.active_turn_id().is_none()
+                {
+                    session.begin_provider_turn();
                     session.status = SessionStatus::Working;
                 }
             }

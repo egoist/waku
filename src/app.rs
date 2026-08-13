@@ -15,7 +15,7 @@ use gpui::{
     MouseUpEvent, NavigationDirection, ObjectFit, PathPromptOptions, Pixels, Render, ScrollHandle,
     SharedString, Stateful, StyleRefinement, TextRun, WeakEntity, Window, canvas, div,
     ease_out_quint, fill, font, img, linear_color_stop, linear_gradient, list, point, prelude::*,
-    pulsating_between, px, rgb,
+    pulsating_between, px,
 };
 use uuid::Uuid;
 
@@ -33,8 +33,9 @@ use crate::model::{
     BackgroundWorkKind, BackgroundWorkStatus, Checkpoint, CheckpointStatus, ContextUsage,
     DriverEvent, FavoriteModel, InteractionMode, Message, MessageAttachment, MessageRole,
     PendingPermission, Project, ProviderKind, ProviderModel, ProviderProbe, ProviderResumeCursor,
-    QueuedMessage, ReasoningBlock, RuntimeMode, SessionStatus, SessionWorkspace, TranscriptBlock,
-    TurnStatus, compact_path, unix_time, unix_time_millis,
+    QueuedMessage, ReasoningBlock, RuntimeMode, SessionFolder, SessionStatus, SessionWorkspace,
+    SidebarFilter, SidebarGrouping, SidebarSort, TranscriptBlock, TurnStatus, compact_path,
+    unix_time, unix_time_millis,
 };
 use unicode_segmentation::UnicodeSegmentation;
 
@@ -57,7 +58,7 @@ use crate::persistence::{
 use crate::query::{Query, QueryCache};
 use crate::review_diff::{Snapshot as ReviewDiffSnapshot, Source as ReviewDiffSource};
 use crate::terminal::TerminalView;
-use crate::theme::{Theme, ThemePreference};
+use crate::theme::{Theme, ThemeId, ThemePreference};
 use crate::ui::text_field::TextField;
 use crate::ui::{
     MenuChip, ProjectNameSelector, activity_icon, activity_noun, file_icon, icon, icon_button,
@@ -472,6 +473,9 @@ enum RightPanelSurface {
         key: BackgroundWorkKey,
         title: String,
     },
+    /// The session's subagent roster. `BackgroundWork` is one agent's detail;
+    /// this is the list that says what is running at all.
+    Agents,
     Files,
     Diff,
     File(String),
@@ -1027,14 +1031,37 @@ pub struct Waku {
     /// focus whenever GPUI re-renders the list.
     transcript_control_focuses: RefCell<HashMap<String, FocusHandle>>,
     session_navigation: SessionNavigation,
-    /// Sidebar task currently showing its inline rename field.
+    /// Task currently showing its inline rename field.
     session_rename: Option<Uuid>,
+    /// Whether that field belongs to the header title rather than a sidebar
+    /// row. The two share one input, so only one of them may draw it.
+    session_rename_in_header: bool,
+    /// Stable focus identity for the header title, so the rename it starts is
+    /// reachable without a pointer.
+    header_title_focus: FocusHandle,
     /// One stable field reused across sidebar rows so virtualization never
     /// replaces the focused editor while a rename is in progress.
     session_rename_input: Entity<ComposerInput>,
-    /// Date groups the user has folded in the sidebar. This is intentionally
-    /// runtime-only, like transcript disclosure state.
-    sidebar_collapsed_groups: HashSet<SessionDateGroup>,
+    /// Folder currently showing its inline rename field in a group header.
+    folder_rename: Option<Uuid>,
+    /// The field that rename draws, kept separate from the session rename so a
+    /// folder header and a session row can never fight over one editor.
+    folder_rename_input: Entity<ComposerInput>,
+    /// The session currently being dragged in the sidebar.
+    ///
+    /// Held because the list has to change shape for the drag: the sections a
+    /// session can be dropped into — pinned, archived — are hidden while they
+    /// are empty, which would otherwise leave a fresh sidebar with nowhere to
+    /// drop anything.
+    sidebar_drag: Option<SidebarDrag>,
+    /// Where a session dragged over the sidebar would land, tracked while the
+    /// pointer moves so the list can open a gap and draw the insertion line
+    /// before the drop happens.
+    sidebar_drop_target: Option<SidebarDropTarget>,
+    /// Groups the user has folded in the sidebar, by their stable key. Kept
+    /// here rather than derived so folding survives a grouping-mode switch,
+    /// and mirrored into app state on change so it survives a relaunch.
+    sidebar_collapsed_groups: HashSet<String>,
     sidebar_visible: bool,
     sidebar_width: f32,
     right_panel_visible: bool,
@@ -1262,7 +1289,7 @@ use components::*;
 pub use image_preview::init as init_image_preview_keys;
 pub use settings::init as init_settings_keys;
 pub use sidebar::init as init_sidebar_keys;
-use sidebar::{SessionDateGroup, SidebarRow};
+use sidebar::{SidebarDrag, SidebarDropTarget, SidebarRow};
 pub use skills_page::init as init_skills_keys;
 use streaming::*;
 use transcript::*;
@@ -1582,6 +1609,12 @@ impl Waku {
                 .placeholder(tr!("skills.search"))
         });
         let session_rename_input = cx.new(|cx| ComposerInput::new(window, cx).search_field());
+        let folder_rename_input = cx.new(|cx| ComposerInput::new(window, cx).search_field());
+        let sidebar_collapsed_groups = state
+            .sidebar_collapsed_groups
+            .iter()
+            .cloned()
+            .collect::<HashSet<_>>();
         let provider_path_input = cx.new(|cx| {
             ComposerInput::new(window, cx)
                 .search_field()
@@ -1623,7 +1656,13 @@ impl Waku {
         );
         state.sidebar_width = sidebar_width;
         state.right_panel_width = right_panel_width;
-        crate::theme::apply_theme_preference(state.theme, window, cx);
+        crate::theme::apply_theme_preference(
+            state.theme,
+            state.light_theme,
+            state.dark_theme,
+            window,
+            cx,
+        );
         crate::platform::set_sidebar_material_width(window, sidebar_width);
         let project_paths = state
             .projects
@@ -1815,7 +1854,13 @@ impl Waku {
 
             cx.observe_window_appearance(window, |this: &mut Self, window, cx| {
                 if this.state.theme == ThemePreference::System {
-                    crate::theme::apply_theme_preference(this.state.theme, window, cx);
+                    crate::theme::apply_theme_preference(
+                        this.state.theme,
+                        this.state.light_theme,
+                        this.state.dark_theme,
+                        window,
+                        cx,
+                    );
                     cx.notify();
                 }
             })
@@ -2266,8 +2311,14 @@ impl Waku {
                 transcript_control_focuses: RefCell::new(HashMap::new()),
                 session_navigation,
                 session_rename: None,
+                session_rename_in_header: false,
+                header_title_focus: cx.focus_handle(),
                 session_rename_input,
-                sidebar_collapsed_groups: HashSet::new(),
+                folder_rename: None,
+                folder_rename_input,
+                sidebar_drag: None,
+                sidebar_drop_target: None,
+                sidebar_collapsed_groups,
                 sidebar_visible,
                 sidebar_width,
                 right_panel_visible,

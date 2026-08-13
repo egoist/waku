@@ -15,7 +15,10 @@ use super::{activity, computer_use as computer_use_runtime};
 use crate::driver::{
     DriverControl, DriverEventSender, DriverEventSink, DriverStartOptions, SessionOptions,
 };
-use crate::model::{ActivityKind, DriverEvent, InteractionMode, ProviderResumeCursor, RuntimeMode};
+use crate::model::{
+    ActivityKind, BackgroundWorkEvent, BackgroundWorkStatus, DriverEvent, InteractionMode,
+    ProviderResumeCursor, RuntimeMode,
+};
 
 const RPC_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -939,6 +942,31 @@ fn handle_pi_message(
             };
             let complete = event_type == "tool_execution_end";
             let failed = value.get("isError").and_then(Value::as_bool) == Some(true);
+            // Pi streams nothing from inside a delegated agent, so its
+            // execution events are the whole lifecycle: start it live here and
+            // settle it when the same call ends.
+            if let Some(call_id) = id.as_deref()
+                && let Some(launch) = super::support::subagent_launch(
+                    tool_name.unwrap_or_default(),
+                    value.get("args"),
+                )
+            {
+                let mut work = super::support::subagent_item(
+                    call_id,
+                    &launch,
+                    match (complete, failed) {
+                        (false, _) => BackgroundWorkStatus::Running,
+                        (true, false) => BackgroundWorkStatus::Completed,
+                        (true, true) => BackgroundWorkStatus::Failed,
+                    },
+                );
+                if complete {
+                    work.output = output.and_then(activity::format_output);
+                }
+                let _ = events.send(DriverEvent::BackgroundWork(BackgroundWorkEvent::Upsert(
+                    work,
+                )));
+            }
             let item = activity::tool_activity(
                 id.clone(),
                 kind,

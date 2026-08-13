@@ -42,13 +42,37 @@ export const sessions = sqliteTable(
     updatedAt: integer("updated_at").notNull(),
     /** Completion of the most recent assistant turn, unix seconds. */
     lastReplyAt: integer("last_reply_at"),
+    /** Kept in a sticky section at the top of the sidebar. */
+    pinned: integer("pinned", { mode: "boolean" }).notNull().default(false),
+    /** Hidden from the main sidebar list until archived sessions are shown. */
+    archived: integer("archived", { mode: "boolean" }).notNull().default(false),
+    /** User-created folder this session was filed under, if any. */
+    folderId: text("folder_id"),
+    /** Hand-picked order from a drag, null until the session is moved. */
+    position: integer("position"),
   },
   (table) => [
     index("sessions_by_project").on(table.projectId, table.updatedAt),
     index("sessions_by_updated_at").on(table.updatedAt),
     index("sessions_by_last_reply_at").on(table.lastReplyAt),
+    index("sessions_by_folder").on(table.folderId, table.updatedAt),
   ],
 );
+
+/**
+ * User-created sidebar folders.
+ *
+ * A session references one by id; deleting a folder leaves its sessions
+ * unfiled rather than removing them, so the row is safe to drop on its own.
+ */
+export const sessionFolders = sqliteTable("session_folders", {
+  id: text("id").primaryKey(),
+  name: text("name").notNull(),
+  /** Order shown in the sidebar. */
+  position: integer("position").notNull(),
+  /** When the folder was created, unix seconds. */
+  createdAt: integer("created_at").notNull(),
+});
 
 /**
  * Conversation messages, one row each.

@@ -648,73 +648,100 @@ impl Waku {
             .w_full()
             .flex()
             .flex_col()
-            .rounded(px(13.0))
-            .overflow_hidden()
-            .bg(theme.raised)
+            .gap(px(15.0))
             .child(
                 div()
                     .w_full()
-                    .min_h(px(60.0))
-                    .px(px(20.0))
-                    .py(px(12.0))
                     .flex()
-                    .items_center()
-                    .gap(px(24.0))
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .child(
-                                div()
-                                    .text_size(px(13.5))
-                                    .font_weight(FontWeight::MEDIUM)
-                                    .text_color(theme.text)
-                                    .child(tr!("settings.theme")),
-                            )
-                            .child(
-                                div()
-                                    .mt(px(5.0))
-                                    .text_size(px(12.5))
-                                    .line_height(px(18.0))
-                                    .text_color(theme.text_secondary)
-                                    .child(tr!("settings.theme_description")),
-                            ),
-                    )
-                    .child(theme_selector),
+                    .flex_col()
+                    .rounded(px(13.0))
+                    .overflow_hidden()
+                    .bg(theme.raised)
+                    .child(settings_row(
+                        &theme,
+                        tr!("settings.theme"),
+                        tr!("settings.theme_description"),
+                        theme_selector.into_any_element(),
+                    ))
+                    .child(settings_divider(&theme))
+                    .child(settings_row(
+                        &theme,
+                        tr!("settings.theme_light_palette"),
+                        tr!("settings.theme_light_palette_description"),
+                        self.render_palette_selector(false, cx),
+                    ))
+                    .child(settings_divider(&theme))
+                    .child(settings_row(
+                        &theme,
+                        tr!("settings.theme_dark_palette"),
+                        tr!("settings.theme_dark_palette_description"),
+                        self.render_palette_selector(true, cx),
+                    )),
             )
-            .child(div().mx(px(20.0)).h(px(1.0)).bg(theme.border))
+            .child(render_palette_preview(&theme))
             .child(
                 div()
                     .w_full()
-                    .min_h(px(60.0))
-                    .px(px(20.0))
-                    .py(px(12.0))
                     .flex()
-                    .items_center()
-                    .gap(px(24.0))
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .child(
-                                div()
-                                    .text_size(px(13.5))
-                                    .font_weight(FontWeight::MEDIUM)
-                                    .text_color(theme.text)
-                                    .child(tr!("language.title")),
-                            )
-                            .child(
-                                div()
-                                    .mt(px(5.0))
-                                    .text_size(px(12.5))
-                                    .line_height(px(18.0))
-                                    .text_color(theme.text_secondary)
-                                    .child(tr!("language.description")),
-                            ),
-                    )
-                    .child(language_selector),
+                    .flex_col()
+                    .rounded(px(13.0))
+                    .overflow_hidden()
+                    .bg(theme.raised)
+                    .child(settings_row(
+                        &theme,
+                        tr!("language.title"),
+                        tr!("language.description"),
+                        language_selector.into_any_element(),
+                    )),
             )
             .into_any_element()
+    }
+
+    /// One palette slot. Only ids that register the slot's variant are offered,
+    /// so a dark-only palette never becomes an unresolvable light choice.
+    fn render_palette_selector(&self, is_dark: bool, cx: &mut Context<Self>) -> AnyElement {
+        let selected = if is_dark {
+            self.state.dark_theme
+        } else {
+            self.state.light_theme
+        };
+        let id: SharedString = if is_dark {
+            "dark-palette-selector".into()
+        } else {
+            "light-palette-selector".into()
+        };
+        let menu_id: SharedString = format!("{id}-menu").into();
+        let handle = self.menu_handle(id.clone(), cx);
+        let weak = cx.entity().downgrade();
+
+        dropdown_menu(
+            MenuChip::new(id)
+                .label(selected.label())
+                .outlined()
+                .selected(handle.is_open())
+                .w(px(152.0))
+                .justify_between(),
+            menu_id,
+            &handle,
+            MenuAlign::BelowRight,
+            move |_| {
+                ThemeId::all_for(is_dark)
+                    .into_iter()
+                    .map(|id| {
+                        let weak = weak.clone();
+                        MenuItem::custom(move |_, cx| {
+                            palette_menu_row(id, is_dark, id == selected, cx)
+                        })
+                        .on_click(move |window, cx| {
+                            let _ = weak.update(cx, |this, cx| {
+                                this.set_palette(id, is_dark, window, cx);
+                            });
+                        })
+                    })
+                    .collect()
+            },
+        )
+        .into_any_element()
     }
 
     fn render_providers_settings(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -1569,9 +1596,43 @@ impl Waku {
             return;
         }
         self.state.theme = preference;
-        crate::theme::apply_theme_preference(preference, window, cx);
+        self.reapply_theme(window, cx);
         self.save();
         cx.notify();
+    }
+
+    /// Assign a palette to one slot. The other slot is untouched, so a light
+    /// and a dark palette are chosen independently and `System` only decides
+    /// which of the two is live.
+    fn set_palette(
+        &mut self,
+        id: ThemeId,
+        is_dark: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let slot = if is_dark {
+            &mut self.state.dark_theme
+        } else {
+            &mut self.state.light_theme
+        };
+        if *slot == id {
+            return;
+        }
+        *slot = id;
+        self.reapply_theme(window, cx);
+        self.save();
+        cx.notify();
+    }
+
+    fn reapply_theme(&self, window: &mut Window, cx: &mut App) {
+        crate::theme::apply_theme_preference(
+            self.state.theme,
+            self.state.light_theme,
+            self.state.dark_theme,
+            window,
+            cx,
+        );
     }
 
     fn set_language(
@@ -1748,4 +1809,194 @@ mod tests {
             "/opt/homebrew/bin/codex"
         );
     }
+}
+
+/// The shared shape of a settings row: a title, a supporting line, and a
+/// trailing control.
+fn settings_row(
+    theme: &Theme,
+    title: String,
+    description: String,
+    control: AnyElement,
+) -> AnyElement {
+    div()
+        .w_full()
+        .min_h(px(60.0))
+        .px(px(20.0))
+        .py(px(12.0))
+        .flex()
+        .items_center()
+        .gap(px(24.0))
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .child(
+                    div()
+                        .text_size(px(13.5))
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(theme.text)
+                        .child(title),
+                )
+                .child(
+                    div()
+                        .mt(px(5.0))
+                        .text_size(px(12.5))
+                        .line_height(px(18.0))
+                        .text_color(theme.text_secondary)
+                        .child(description),
+                ),
+        )
+        .child(control)
+        .into_any_element()
+}
+
+fn settings_divider(theme: &Theme) -> AnyElement {
+    div()
+        .mx(px(20.0))
+        .h(px(1.0))
+        .bg(theme.border)
+        .into_any_element()
+}
+
+/// A palette's identity at a glance: its own canvas, border and accent drawn
+/// in miniature, so the list reads as swatches rather than as a list of words.
+fn palette_swatch(palette: &Theme, size: f32) -> AnyElement {
+    div()
+        .w(px(size))
+        .h(px(size))
+        .rounded(px(size * 0.28))
+        .border_1()
+        .border_color(palette.border_strong)
+        .bg(palette.canvas)
+        .flex()
+        .items_center()
+        .justify_center()
+        .text_size(px(size * 0.44))
+        .line_height(px(size * 0.44))
+        .font_weight(FontWeight::MEDIUM)
+        .text_color(palette.accent)
+        .child("Aa")
+        .into_any_element()
+}
+
+fn palette_menu_row(id: ThemeId, is_dark: bool, selected: bool, cx: &App) -> AnyElement {
+    let theme = Theme::current(cx);
+    let palette = id.resolve(is_dark);
+    div()
+        .flex_1()
+        .min_w_0()
+        .flex()
+        .items_center()
+        .gap(px(8.0))
+        .child(palette_swatch(&palette, 20.0))
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .truncate()
+                .text_color(if selected {
+                    theme.text
+                } else {
+                    theme.text_secondary
+                })
+                .when(selected, |element| element.font_weight(FontWeight::MEDIUM))
+                .child(id.label()),
+        )
+        .when(selected, |element| {
+            element.child(icon("icons/check.svg", 11.0, theme.text_tertiary))
+        })
+        .into_any_element()
+}
+
+/// The active palette applied to the surfaces it actually governs — a raised
+/// panel, the three text tiers, the accent, and a diff pair — so a choice is
+/// judged before it is lived with.
+fn render_palette_preview(theme: &Theme) -> AnyElement {
+    let diff_line = |added: bool, text: &'static str| {
+        let color = if added { theme.success } else { theme.danger };
+        div()
+            .w_full()
+            .px(px(8.0))
+            .py(px(2.0))
+            .rounded(px(4.0))
+            .bg(gpui::Hsla { a: 0.12, ..color })
+            .text_size(px(11.5))
+            .line_height(px(17.0))
+            .text_color(color)
+            .child(text)
+    };
+
+    div()
+        .w_full()
+        .p(px(16.0))
+        .rounded(px(13.0))
+        .bg(theme.raised)
+        .flex()
+        .flex_col()
+        .gap(px(10.0))
+        .child(
+            div()
+                .text_size(px(11.0))
+                .font_weight(FontWeight::MEDIUM)
+                .text_color(theme.text_tertiary)
+                .child(tr!("settings.theme_preview")),
+        )
+        .child(
+            div()
+                .w_full()
+                .p(px(14.0))
+                .rounded(px(10.0))
+                .bg(theme.composer)
+                .border_1()
+                .border_color(theme.border)
+                .flex()
+                .flex_col()
+                .gap(px(8.0))
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(7.0))
+                        .child(div().size(px(7.0)).rounded_full().bg(theme.accent))
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .truncate()
+                                .text_size(px(12.5))
+                                .font_weight(FontWeight::MEDIUM)
+                                .text_color(theme.text)
+                                .child(tr!("settings.theme_preview_title")),
+                        )
+                        .child(
+                            div()
+                                .px(px(8.0))
+                                .py(px(2.0))
+                                .rounded(px(5.0))
+                                .bg(theme.inverse)
+                                .text_size(px(10.5))
+                                .line_height(px(15.0))
+                                .font_weight(FontWeight::MEDIUM)
+                                .text_color(theme.on_inverse)
+                                .child(tr!("settings.theme_preview_action")),
+                        ),
+                )
+                .child(
+                    div()
+                        .text_size(px(12.0))
+                        .line_height(px(18.0))
+                        .text_color(theme.text_secondary)
+                        .child(tr!("settings.theme_preview_body")),
+                )
+                .child(diff_line(true, "+  let theme = Theme::current(cx);"))
+                .child(diff_line(false, "-  let theme = Theme::dark();"))
+                .child(
+                    div()
+                        .text_size(px(11.0))
+                        .text_color(theme.text_ghost)
+                        .child(tr!("settings.theme_preview_caption")),
+                ),
+        )
+        .into_any_element()
 }

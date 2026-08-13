@@ -28,9 +28,10 @@ use crate::i18n::AppLanguage;
 use crate::identity::DATA_DIRECTORY_NAME;
 use crate::model::{
     AgentSession, FavoriteModel, InteractionMode, Message, MessageAttachment, MessageRole, Project,
-    ProviderKind, RuntimeMode, SessionWorkspace,
+    ProviderKind, RuntimeMode, SessionFolder, SessionWorkspace, SidebarFilter, SidebarGrouping,
+    SidebarSort,
 };
-use crate::theme::ThemePreference;
+use crate::theme::{ThemeId, ThemePreference};
 
 const STATE_VERSION: u32 = 5;
 const APP_STATE_VERSION: u32 = 1;
@@ -261,6 +262,8 @@ pub struct AppSettings {
     pub analytics_enabled: bool,
     pub favorite_models: Vec<FavoriteModel>,
     pub theme: ThemePreference,
+    pub light_theme: ThemeId,
+    pub dark_theme: ThemeId,
     pub language: AppLanguage,
     pub computer_use_enabled: bool,
     pub computer_use_allowed_apps: Vec<ComputerAppGrant>,
@@ -278,6 +281,8 @@ impl Default for AppSettings {
             analytics_enabled: default_analytics_enabled(),
             favorite_models: Vec::new(),
             theme: ThemePreference::System,
+            light_theme: ThemeId::default(),
+            dark_theme: ThemeId::default(),
             language: AppLanguage::default(),
             computer_use_enabled: default_computer_use_enabled(),
             computer_use_allowed_apps: Vec::new(),
@@ -317,6 +322,17 @@ struct AppState {
     sidebar_width: f32,
     #[serde(default = "default_right_panel_width")]
     right_panel_width: f32,
+    #[serde(default)]
+    sidebar_grouping: SidebarGrouping,
+    #[serde(default)]
+    sidebar_sort: SidebarSort,
+    #[serde(default)]
+    sidebar_filter: SidebarFilter,
+    /// Groups the user folded, by the stable key their grouping mode gives
+    /// them. Keys from a grouping that is not current are kept, so switching
+    /// back restores what was folded.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    sidebar_collapsed_groups: Vec<String>,
 }
 
 /// The complete in-memory model hydrated from settings, app state, and SQLite.
@@ -329,6 +345,8 @@ pub struct PersistedState {
     #[serde(default = "default_analytics_enabled")]
     pub analytics_enabled: bool,
     pub projects: Vec<Project>,
+    #[serde(default)]
+    pub folders: Vec<SessionFolder>,
     pub sessions: Vec<AgentSession>,
     pub selected_project: Option<Uuid>,
     pub selected_session: Option<Uuid>,
@@ -346,6 +364,10 @@ pub struct PersistedState {
     #[serde(default)]
     pub theme: ThemePreference,
     #[serde(default)]
+    pub light_theme: ThemeId,
+    #[serde(default)]
+    pub dark_theme: ThemeId,
+    #[serde(default)]
     pub language: AppLanguage,
     #[serde(default = "default_sidebar_visibility")]
     pub sidebar_visible: bool,
@@ -355,6 +377,14 @@ pub struct PersistedState {
     pub sidebar_width: f32,
     #[serde(default = "default_right_panel_width")]
     pub right_panel_width: f32,
+    #[serde(default)]
+    pub sidebar_grouping: SidebarGrouping,
+    #[serde(default)]
+    pub sidebar_sort: SidebarSort,
+    #[serde(default)]
+    pub sidebar_filter: SidebarFilter,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sidebar_collapsed_groups: Vec<String>,
     #[serde(default = "default_computer_use_enabled")]
     pub computer_use_enabled: bool,
     #[serde(default)]
@@ -402,6 +432,7 @@ impl PersistedState {
             analytics_id: Uuid::new_v4(),
             analytics_enabled: true,
             projects: Vec::new(),
+            folders: Vec::new(),
             sessions: Vec::new(),
             selected_project: None,
             selected_session: None,
@@ -412,11 +443,17 @@ impl PersistedState {
             remembered_model_traits: Vec::new(),
             favorite_models: Vec::new(),
             theme: ThemePreference::System,
+            light_theme: ThemeId::default(),
+            dark_theme: ThemeId::default(),
             language: AppLanguage::default(),
             sidebar_visible: true,
             right_panel_visible: false,
             sidebar_width: DEFAULT_SIDEBAR_WIDTH,
             right_panel_width: DEFAULT_RIGHT_PANEL_WIDTH,
+            sidebar_grouping: SidebarGrouping::default(),
+            sidebar_sort: SidebarSort::default(),
+            sidebar_filter: SidebarFilter::default(),
+            sidebar_collapsed_groups: Vec::new(),
             computer_use_enabled: false,
             computer_use_allowed_apps: Vec::new(),
             disabled_providers: Vec::new(),
@@ -497,6 +534,8 @@ impl PersistedState {
             analytics_enabled: self.analytics_enabled,
             favorite_models: self.favorite_models.clone(),
             theme: self.theme,
+            light_theme: self.light_theme,
+            dark_theme: self.dark_theme,
             language: self.language,
             computer_use_enabled: self.computer_use_enabled,
             computer_use_allowed_apps: self.computer_use_allowed_apps.clone(),
@@ -520,6 +559,10 @@ impl PersistedState {
             right_panel_visible: self.right_panel_visible,
             sidebar_width: self.sidebar_width,
             right_panel_width: self.right_panel_width,
+            sidebar_grouping: self.sidebar_grouping,
+            sidebar_sort: self.sidebar_sort,
+            sidebar_filter: self.sidebar_filter.clone(),
+            sidebar_collapsed_groups: self.sidebar_collapsed_groups.clone(),
         }
     }
 
@@ -527,6 +570,8 @@ impl PersistedState {
         self.analytics_enabled = settings.analytics_enabled;
         self.favorite_models = settings.favorite_models;
         self.theme = settings.theme;
+        self.light_theme = settings.light_theme;
+        self.dark_theme = settings.dark_theme;
         self.language = settings.language;
         self.computer_use_enabled = settings.computer_use_enabled;
         self.computer_use_allowed_apps = settings.computer_use_allowed_apps;
@@ -547,6 +592,10 @@ impl PersistedState {
         self.right_panel_visible = app_state.right_panel_visible;
         self.sidebar_width = app_state.sidebar_width;
         self.right_panel_width = app_state.right_panel_width;
+        self.sidebar_grouping = app_state.sidebar_grouping;
+        self.sidebar_sort = app_state.sidebar_sort;
+        self.sidebar_filter = app_state.sidebar_filter;
+        self.sidebar_collapsed_groups = app_state.sidebar_collapsed_groups;
     }
 
     /// A session only earns a row once it has started; drafts stay in memory.
@@ -880,6 +929,7 @@ struct Storage {
     /// See [`write_messages`].
     written_messages: HashMap<Uuid, HashMap<Uuid, u64>>,
     saved_projects: u64,
+    saved_folders: u64,
     saved_settings: u64,
     saved_app_state: u64,
 }
@@ -1082,13 +1132,39 @@ impl StateStore {
             .collect();
         drop(projects);
 
+        let mut folders = connection
+            .prepare("SELECT id, name, position, created_at FROM session_folders ORDER BY position")
+            .map_err(to_io_error)?;
+        state.folders = folders
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, i64>(3)?,
+                ))
+            })
+            .map_err(to_io_error)?
+            .filter_map(Result::ok)
+            .filter_map(|(id, name, position, created_at)| {
+                Some(SessionFolder {
+                    id: Uuid::parse_str(&id).ok()?,
+                    name,
+                    position: position.max(0) as u32,
+                    created_at: created_at as u64,
+                })
+            })
+            .collect();
+        drop(folders);
+
         // Only the columns the session list needs. Transcripts and messages are
         // fetched per session by `hydrate`, so startup cost does not grow with
         // how much history exists.
         let mut sessions = connection
             .prepare(
                 "SELECT id, project_id, title, auto_title, provider, model, status,
-                        created_at, updated_at, last_reply_at
+                        created_at, updated_at, last_reply_at, pinned, archived, folder_id,
+                        position
                  FROM sessions ORDER BY updated_at",
             )
             .map_err(to_io_error)?;
@@ -1106,6 +1182,10 @@ impl StateStore {
                     row.get::<_, i64>(7)?,
                     row.get::<_, i64>(8)?,
                     row.get::<_, Option<i64>>(9)?,
+                    row.get::<_, i64>(10)?,
+                    row.get::<_, i64>(11)?,
+                    row.get::<_, Option<String>>(12)?,
+                    row.get::<_, Option<i64>>(13)?,
                 ))
             })
             .map_err(to_io_error)?
@@ -1137,6 +1217,7 @@ impl StateStore {
             // are skeletons anyway, so the first save of one is a full write.
             written_messages: HashMap::new(),
             saved_projects: 0,
+            saved_folders: 0,
             saved_settings: if settings_are_saved {
                 fingerprint(&serde_json::to_string(&settings).map_err(to_io_error)?)
             } else {
@@ -1167,6 +1248,7 @@ impl StateStore {
                 persisted_sessions: HashSet::new(),
                 written_messages: HashMap::new(),
                 saved_projects: 0,
+                saved_folders: 0,
                 saved_settings: 0,
                 saved_app_state: 0,
             });
@@ -1249,6 +1331,7 @@ impl StateStore {
                 persisted_sessions: HashSet::new(),
                 written_messages: HashMap::new(),
                 saved_projects: 0,
+                saved_folders: 0,
                 saved_settings: 0,
                 saved_app_state: 0,
             });
@@ -1299,6 +1382,31 @@ impl StateStore {
             storage.saved_projects = projects_fingerprint;
         }
 
+        // Folders are few and only change on an explicit user action, so the
+        // whole set is rewritten rather than tracked row by row. The delete
+        // also clears rows for folders the user removed.
+        let folders = serde_json::to_string(&state.folders).map_err(to_io_error)?;
+        let folders_fingerprint = fingerprint(&folders);
+        if folders_fingerprint != storage.saved_folders {
+            transaction
+                .execute("DELETE FROM session_folders", [])
+                .map_err(to_io_error)?;
+            for (position, folder) in state.folders.iter().enumerate() {
+                transaction
+                    .execute(
+                        INSERT_SESSION_FOLDER,
+                        params![
+                            folder.id.to_string(),
+                            folder.name,
+                            position as i64,
+                            folder.created_at as i64
+                        ],
+                    )
+                    .map_err(to_io_error)?;
+            }
+            storage.saved_folders = folders_fingerprint;
+        }
+
         // Only sessions the app reported as changed are written. A draft that
         // has not started yet owns no row, so it counts as removed until it does.
         let mut live = HashSet::with_capacity(state.sessions.len());
@@ -1306,10 +1414,13 @@ impl StateStore {
         // does not leave this connection believing rows it never wrote are on
         // disk — which would make the next save skip them for good.
         let mut written_messages = Vec::new();
+        // Subagent conversations are runtime-only. They belong to a turn, the
+        // provider keeps its own transcript of them, and persisting a fan-out
+        // of them would bury the task list they are deliberately kept out of.
         for session in state
             .sessions
             .iter()
-            .filter(|session| session.has_started())
+            .filter(|session| session.has_started() && session.is_task())
         {
             live.insert(session.id);
             // A skeleton's empty transcript means "not fetched", not "empty".
@@ -1425,6 +1536,10 @@ type SessionColumns = (
     i64,
     i64,
     Option<i64>,
+    i64,
+    i64,
+    Option<String>,
+    Option<i64>,
 );
 
 /// Builds a list-only session from its columns. `messages`,
@@ -1444,9 +1559,15 @@ fn session_skeleton(row: SessionColumns) -> Option<AgentSession> {
         created_at,
         updated_at,
         last_reply_at,
+        pinned,
+        archived,
+        folder_id,
+        position,
     ) = row;
     Some(AgentSession {
         id: Uuid::parse_str(&id).ok()?,
+        // Only tasks are stored, so a row is never a subagent.
+        subagent: None,
         title,
         auto_title,
         project_id: Uuid::parse_str(&project_id).ok()?,
@@ -1463,6 +1584,11 @@ fn session_skeleton(row: SessionColumns) -> Option<AgentSession> {
         created_at: created_at as u64,
         updated_at: updated_at as u64,
         last_reply_at: last_reply_at.map(|at| at as u64),
+        pinned: pinned != 0,
+        archived: archived != 0,
+        // An unparseable id reads as unfiled rather than dropping the session.
+        folder_id: folder_id.and_then(|id| Uuid::parse_str(&id).ok()),
+        position,
         provider_cursor: None,
         available_commands: Vec::new(),
         context_usage: None,
@@ -1669,8 +1795,9 @@ fn message_fingerprint(message: &Message, position: usize) -> u64 {
 /// listing sessions never has to deserialize a transcript.
 const UPSERT_SESSION: &str = "INSERT INTO sessions(
          id, project_id, title, auto_title, provider, model, status,
-         created_at, updated_at, last_reply_at
-     ) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+         created_at, updated_at, last_reply_at, pinned, archived, folder_id,
+         position
+     ) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
      ON CONFLICT(id) DO UPDATE SET
          project_id    = excluded.project_id,
          title         = excluded.title,
@@ -1680,7 +1807,11 @@ const UPSERT_SESSION: &str = "INSERT INTO sessions(
          status        = excluded.status,
          created_at    = excluded.created_at,
          updated_at    = excluded.updated_at,
-         last_reply_at = excluded.last_reply_at";
+         last_reply_at = excluded.last_reply_at,
+         pinned        = excluded.pinned,
+         archived      = excluded.archived,
+         folder_id     = excluded.folder_id,
+         position      = excluded.position";
 
 const INSERT_PROJECT: &str = "INSERT INTO projects(id, name, path, position, created_at)
      VALUES(?1, ?2, ?3, ?4, ?5)
@@ -1719,8 +1850,21 @@ fn session_params(session: &AgentSession) -> Vec<rusqlite::types::Value> {
         session
             .last_reply_at
             .map_or(Value::Null, |at| Value::Integer(at as i64)),
+        Value::Integer(i64::from(session.pinned)),
+        Value::Integer(i64::from(session.archived)),
+        session
+            .folder_id
+            .map_or(Value::Null, |id| Value::Text(id.to_string())),
+        session.position.map_or(Value::Null, Value::Integer),
     ]
 }
+
+const INSERT_SESSION_FOLDER: &str = "INSERT INTO session_folders(id, name, position, created_at)
+     VALUES(?1, ?2, ?3, ?4)
+     ON CONFLICT(id) DO UPDATE SET
+         name       = excluded.name,
+         position   = excluded.position,
+         created_at = excluded.created_at";
 
 fn normalize_computer_app_grants(grants: &mut Vec<ComputerAppGrant>) {
     let mut seen_bundle_ids = HashSet::new();

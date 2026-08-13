@@ -97,7 +97,7 @@ pub(super) fn format_json(value: &Value) -> Option<String> {
         .and_then(non_empty_text)
 }
 
-fn format_output(value: &Value) -> Option<String> {
+pub(super) fn format_output(value: &Value) -> Option<String> {
     if let Some(text) = value.as_str() {
         return non_empty_text(text.to_owned());
     }
