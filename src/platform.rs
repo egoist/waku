@@ -248,6 +248,153 @@ pub fn hide_window(window: &mut Window) {
     window.remove_window();
 }
 
+/// One row of a native context menu, in the order it should appear.
+pub struct NativeMenuItem {
+    pub label: String,
+    pub enabled: bool,
+    pub checked: bool,
+    pub separator: bool,
+}
+
+#[cfg(target_os = "macos")]
+mod native_menu {
+    use std::cell::Cell;
+
+    use gpui::{Pixels, Point, Window};
+    use objc2::rc::Retained;
+    use objc2::runtime::{NSObject, NSObjectProtocol};
+    use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
+    use objc2_app_kit::{
+        NSControlStateValueOff, NSControlStateValueOn, NSMenu, NSMenuItem, NSView,
+    };
+    use objc2_foundation::{NSPoint, NSString};
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+
+    use super::NativeMenuItem;
+
+    define_class!(
+        // SAFETY: `NSObject` has no subclassing requirements and `MenuTarget`
+        // does not implement `Drop`.
+        #[unsafe(super(NSObject))]
+        #[thread_kind = MainThreadOnly]
+        #[name = "WakuContextMenuTarget"]
+        #[ivars = Cell<isize>]
+        struct MenuTarget;
+
+        unsafe impl NSObjectProtocol for MenuTarget {}
+
+        impl MenuTarget {
+            // AppKit sends this to the chosen item's target, and sends nothing
+            // at all when the menu is dismissed — which leaves the tag at -1.
+            #[unsafe(method(wakuContextMenuItemSelected:))]
+            fn item_selected(&self, item: &NSMenuItem) {
+                self.ivars().set(item.tag());
+            }
+        }
+    );
+
+    impl MenuTarget {
+        fn new(main_thread: MainThreadMarker) -> Retained<Self> {
+            let this = Self::alloc(main_thread).set_ivars(Cell::new(-1));
+            unsafe { msg_send![super(this), init] }
+        }
+    }
+
+    /// The window's native surface, captured while GPUI hands us a `Window` so
+    /// the menu itself can be popped later, from outside any GPUI borrow.
+    pub struct NativeContextMenu {
+        view: Retained<NSView>,
+    }
+
+    /// Capture that surface, or `None` when there is none — a headless test
+    /// window. The caller then falls back to the in-app menu card.
+    pub fn prepare_context_menu(window: &Window) -> Option<NativeContextMenu> {
+        let handle = HasWindowHandle::window_handle(window).ok()?;
+        let RawWindowHandle::AppKit(handle) = handle.as_raw() else {
+            return None;
+        };
+        MainThreadMarker::new()?;
+
+        // GPUI owns this view; we only read its geometry and anchor a menu to
+        // it.
+        let view = unsafe { Retained::retain(handle.ns_view.cast::<NSView>().as_ptr())? };
+        Some(NativeContextMenu { view })
+    }
+
+    impl NativeContextMenu {
+        /// Pop the menu at `position`, in GPUI's window coordinates, and block
+        /// on AppKit's tracking loop until it closes. Returns the index of the
+        /// chosen item within `items`.
+        ///
+        /// Must be called with no GPUI borrow held: the tracking loop keeps the
+        /// run loop turning, so GPUI redraws and its own timers still fire
+        /// while the menu is up.
+        pub fn show(&self, position: Point<Pixels>, items: &[NativeMenuItem]) -> Option<usize> {
+            let main_thread = MainThreadMarker::new()?;
+            let target = MenuTarget::new(main_thread);
+            let menu = NSMenu::new(main_thread);
+            // Enablement is ours to decide; AppKit's automatic validation
+            // would grey out every item, since a Rust target implements no
+            // validation protocol.
+            menu.setAutoenablesItems(false);
+
+            for (index, item) in items.iter().enumerate() {
+                if item.separator {
+                    menu.addItem(&NSMenuItem::separatorItem(main_thread));
+                    continue;
+                }
+                let entry = unsafe {
+                    NSMenuItem::initWithTitle_action_keyEquivalent(
+                        NSMenuItem::alloc(main_thread),
+                        &NSString::from_str(&item.label),
+                        Some(sel!(wakuContextMenuItemSelected:)),
+                        &NSString::from_str(""),
+                    )
+                };
+                unsafe { entry.setTarget(Some(&target)) };
+                entry.setTag(index as isize);
+                entry.setEnabled(item.enabled);
+                entry.setState(if item.checked {
+                    NSControlStateValueOn
+                } else {
+                    NSControlStateValueOff
+                });
+                menu.addItem(&entry);
+            }
+
+            // GPUI's coordinates start at the window's top-left; an unflipped
+            // AppKit view measures up from its bottom-left.
+            let height = self.view.bounds().size.height;
+            let y = f64::from(f32::from(position.y));
+            let y = if self.view.isFlipped() { y } else { height - y };
+            let location = NSPoint::new(f64::from(f32::from(position.x)), y);
+            menu.popUpMenuPositioningItem_atLocation_inView(None, location, Some(&self.view));
+
+            usize::try_from(target.ivars().get()).ok()
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+pub use native_menu::{NativeContextMenu, prepare_context_menu};
+
+#[cfg(not(target_os = "macos"))]
+pub struct NativeContextMenu {
+    _private: (),
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn prepare_context_menu(_: &Window) -> Option<NativeContextMenu> {
+    None
+}
+
+#[cfg(not(target_os = "macos"))]
+impl NativeContextMenu {
+    pub fn show(&self, _: gpui::Point<gpui::Pixels>, _: &[NativeMenuItem]) -> Option<usize> {
+        None
+    }
+}
+
 #[cfg(target_os = "macos")]
 thread_local! {
     static SIDEBAR_TINT_VIEW: std::cell::RefCell<Option<objc2::rc::Retained<objc2_app_kit::NSView>>> =
