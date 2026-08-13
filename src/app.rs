@@ -56,7 +56,7 @@ use crate::persistence::{
 };
 use crate::query::{Query, QueryCache};
 use crate::review_diff::{Snapshot as ReviewDiffSnapshot, Source as ReviewDiffSource};
-use crate::terminal::TerminalView;
+use crate::terminal::{TerminalEvent, TerminalFileLocation, TerminalView};
 use crate::theme::{Theme, ThemePreference};
 use crate::ui::text_field::TextField;
 use crate::ui::{
@@ -605,6 +605,14 @@ struct RightPanelFileEditor {
     read_epoch: u64,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct PendingFileLocation {
+    relative_path: String,
+    line: usize,
+    column: Option<usize>,
+    offset: Option<usize>,
+}
+
 struct RightPanelSessionState {
     visible: bool,
     surfaces: Vec<RightPanelSurface>,
@@ -1062,6 +1070,8 @@ pub struct Waku {
     right_panel_editor_scrollbar: Rc<ScrollbarState>,
     right_panel_pending_tab_reveal: Option<usize>,
     right_panel_pending_terminal_focus: Option<Uuid>,
+    right_panel_pending_file_focus: Option<String>,
+    right_panel_pending_file_location: Option<PendingFileLocation>,
     right_panel_expanded_paths: HashSet<PathBuf>,
     right_panel_files_selected_path: Option<String>,
     right_panel_file_tree_width: f32,
@@ -2291,6 +2301,8 @@ impl Waku {
                 right_panel_editor_scrollbar: ScrollbarState::new(),
                 right_panel_pending_tab_reveal: None,
                 right_panel_pending_terminal_focus: None,
+                right_panel_pending_file_focus: None,
+                right_panel_pending_file_location: None,
                 right_panel_expanded_paths: HashSet::new(),
                 right_panel_files_selected_path: None,
                 right_panel_file_tree_width: DEFAULT_FILE_TREE_WIDTH,

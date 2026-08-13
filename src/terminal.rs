@@ -21,9 +21,9 @@ use alacritty_terminal::vte::ansi::{Color, NamedColor, Rgb};
 use anyhow::{Context as _, Result};
 use crossbeam_channel::{Receiver, Sender, unbounded};
 use gpui::{
-    App, AppContext, Bounds, ClipboardItem, Context, FocusHandle, Focusable, FontFallbacks,
-    FontStyle, FontWeight, Hsla, InteractiveElement, IntoElement, KeyDownEvent, Keystroke,
-    ModifiersChangedEvent, MouseButton, MouseDownEvent, MouseExitEvent, MouseMoveEvent,
+    App, AppContext, Bounds, ClipboardItem, Context, EventEmitter, FocusHandle, Focusable,
+    FontFallbacks, FontStyle, FontWeight, Hsla, InteractiveElement, IntoElement, KeyDownEvent,
+    Keystroke, ModifiersChangedEvent, MouseButton, MouseDownEvent, MouseExitEvent, MouseMoveEvent,
     MouseUpEvent, ParentElement, Pixels, Point, Render, ScrollDelta, ScrollWheelEvent,
     SharedString, StrikethroughStyle, Styled, StyledText, Subscription, Task, TextRun,
     UnderlineStyle, Window, canvas, div, font, px, rgb,
@@ -465,7 +465,20 @@ struct TerminalLink {
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum TerminalLinkTarget {
     Url(String),
-    File(PathBuf),
+    File(TerminalFileLocation),
+    Finder(PathBuf),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct TerminalFileLocation {
+    pub(crate) path: PathBuf,
+    pub(crate) line: Option<usize>,
+    pub(crate) column: Option<usize>,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) enum TerminalEvent {
+    OpenFile(TerminalFileLocation),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -757,7 +770,8 @@ impl TerminalView {
             self.hovered_link = Some(link);
             match target {
                 TerminalLinkTarget::Url(url) => cx.open_url(&url),
-                TerminalLinkTarget::File(path) => crate::platform::reveal_in_finder(&path),
+                TerminalLinkTarget::File(location) => cx.emit(TerminalEvent::OpenFile(location)),
+                TerminalLinkTarget::Finder(path) => crate::platform::reveal_in_finder(&path),
             }
             window.prevent_default();
             cx.stop_propagation();
@@ -964,6 +978,8 @@ impl Focusable for TerminalView {
         self.focus_handle.clone()
     }
 }
+
+impl EventEmitter<TerminalEvent> for TerminalView {}
 
 impl Render for TerminalView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -1386,8 +1402,12 @@ fn hyperlink_at<T: EventListener>(term: &Term<T>, point: TerminalPoint) -> Optio
 }
 
 fn terminal_link_target(value: &str, working_directory: &Path) -> Option<TerminalLinkTarget> {
-    if let Some(path) = existing_terminal_file_path(value, working_directory) {
-        return Some(TerminalLinkTarget::File(path));
+    if let Some(location) = existing_terminal_file_location(value, working_directory) {
+        return Some(if location.path.is_file() {
+            TerminalLinkTarget::File(location)
+        } else {
+            TerminalLinkTarget::Finder(location.path)
+        });
     }
 
     let url = url::Url::parse(value).ok()?;
@@ -1397,7 +1417,10 @@ fn terminal_link_target(value: &str, working_directory: &Path) -> Option<Termina
     Some(TerminalLinkTarget::Url(url.to_string()))
 }
 
-fn existing_terminal_file_path(value: &str, working_directory: &Path) -> Option<PathBuf> {
+fn existing_terminal_file_location(
+    value: &str,
+    working_directory: &Path,
+) -> Option<TerminalFileLocation> {
     let mut path = match url::Url::parse(value) {
         Ok(url) if url.scheme() == "file" => url.to_file_path().ok()?,
         Ok(_) => return None,
@@ -1414,16 +1437,28 @@ fn existing_terminal_file_path(value: &str, working_directory: &Path) -> Option<
             }
         }
     };
+    let mut suffixes = Vec::with_capacity(2);
 
     loop {
         if path.exists() {
-            return Some(path);
+            let (line, column) = match suffixes.as_slice() {
+                [] => (None, None),
+                [line] => (Some(*line), None),
+                [column, line] => (Some(*line), Some(*column)),
+                _ => unreachable!("terminal file locations have at most two suffixes"),
+            };
+            return Some(TerminalFileLocation { path, line, column });
+        }
+        if suffixes.len() == 2 {
+            return None;
         }
         let value = path.to_string_lossy();
         let (prefix, suffix) = value.rsplit_once(':')?;
         if suffix.is_empty() || !suffix.bytes().all(|byte| byte.is_ascii_digit()) {
             return None;
         }
+        let suffix = suffix.parse::<usize>().unwrap_or(usize::MAX);
+        suffixes.push(suffix);
         path = PathBuf::from(prefix);
     }
 }
@@ -1723,13 +1758,47 @@ mod tests {
         );
         assert_eq!(
             terminal_link_target("src/terminal.rs:42:8", working_directory),
-            Some(TerminalLinkTarget::File(
-                working_directory.join("src/terminal.rs")
-            ))
+            Some(TerminalLinkTarget::File(TerminalFileLocation {
+                path: working_directory.join("src/terminal.rs"),
+                line: Some(42),
+                column: Some(8),
+            }))
         );
         assert_eq!(
             terminal_link_target("src/does-not-exist.rs", working_directory),
             None
+        );
+    }
+
+    #[test]
+    fn preserves_terminal_file_line_and_column() {
+        let working_directory = Path::new(env!("CARGO_MANIFEST_DIR"));
+
+        assert_eq!(
+            terminal_link_target("src/terminal.rs:42:8", working_directory),
+            Some(TerminalLinkTarget::File(TerminalFileLocation {
+                path: working_directory.join("src/terminal.rs"),
+                line: Some(42),
+                column: Some(8),
+            }))
+        );
+        assert_eq!(
+            terminal_link_target("src/terminal.rs:42", working_directory),
+            Some(TerminalLinkTarget::File(TerminalFileLocation {
+                path: working_directory.join("src/terminal.rs"),
+                line: Some(42),
+                column: None,
+            }))
+        );
+    }
+
+    #[test]
+    fn keeps_terminal_directories_on_the_finder_route() {
+        let working_directory = Path::new(env!("CARGO_MANIFEST_DIR"));
+
+        assert_eq!(
+            terminal_link_target("src", working_directory),
+            Some(TerminalLinkTarget::Finder(working_directory.join("src")))
         );
     }
 
