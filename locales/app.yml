@@ -871,8 +871,8 @@ errors.claude_fork_checkpoint_missing:
   en: Claude omitted the fork checkpoint
 errors.claude_turn_checkpoint_unavailable:
   en: "Claude's native checkpoint for that turn is unavailable: %{error}"
-errors.pi_session_file_unavailable:
-  en: Pi's native session file is unavailable
+errors.provider_session_file_unavailable:
+  en: The native session file for %{provider} is unavailable
 errors.fork_task:
   en: "Could not fork the task: %{error}"
 errors.create_rewind_snapshot:
@@ -957,8 +957,8 @@ errors.provider_rejected_prompt:
   en: "%{provider} rejected the prompt before it ran"
 errors.provider_complete_turn:
   en: "%{provider} could not complete this turn"
-errors.pi_reported_error:
-  en: Pi reported an error
+errors.provider_reported_error:
+  en: "%{provider} reported an error"
 
 session.response_unavailable:
   en: That response is no longer available

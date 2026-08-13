@@ -314,7 +314,7 @@ fn perform_provider_rewind(
             )?;
             Ok((Some(cursor), None, None))
         }
-        ProviderKind::Codex | ProviderKind::Pi => {
+        ProviderKind::Codex | ProviderKind::Pi | ProviderKind::OhMyPi => {
             let mut prepared_driver = None;
             let driver = if let Some(driver) = request.driver.as_ref() {
                 driver.clone()
@@ -564,15 +564,24 @@ fn perform_response_fork(mut request: ResponseForkRequest) -> Result<PreparedRes
                     None,
                 ))
             }
-            ProviderKind::Pi => {
-                if !matches!(
+            ProviderKind::Pi | ProviderKind::OhMyPi => {
+                let cursor_matches = matches!(
                     request.source.provider_cursor.as_ref(),
-                    Some(ProviderResumeCursor::Pi {
-                        session_file: Some(_),
-                        ..
-                    })
-                ) {
-                    anyhow::bail!(tr!("errors.pi_session_file_unavailable"));
+                    Some(
+                        ProviderResumeCursor::Pi {
+                            session_file: Some(_),
+                            ..
+                        } | ProviderResumeCursor::OhMyPi {
+                            session_file: Some(_),
+                            ..
+                        }
+                    )
+                );
+                if !cursor_matches {
+                    anyhow::bail!(tr!(
+                        "errors.provider_session_file_unavailable",
+                        provider = provider.display_name()
+                    ));
                 }
                 let (cursor, prepared_driver) = fork_response_with_driver(&mut request)?;
                 Ok((cursor, None, prepared_driver))
@@ -1202,8 +1211,10 @@ impl Waku {
             cx.notify();
             return;
         }
-        let driver_start = if matches!(provider, ProviderKind::Codex | ProviderKind::Pi)
-            && driver.is_none()
+        let driver_start = if matches!(
+            provider,
+            ProviderKind::Codex | ProviderKind::Pi | ProviderKind::OhMyPi
+        ) && driver.is_none()
         {
             match self.driver_start_request_for_session(&source, source_workspace_path.clone()) {
                 Ok(request) => Some(request),
@@ -1265,8 +1276,8 @@ impl Waku {
         } = match result {
             Ok(prepared) => prepared,
             Err(error) => {
-                if provider == ProviderKind::Pi {
-                    // A failed restore after Pi creates a fork can leave the
+                if matches!(provider, ProviderKind::Pi | ProviderKind::OhMyPi) {
+                    // A failed restore after a fork can leave the
                     // resident RPC process on that fork. Recreate it lazily
                     // from the source cursor on its next prompt.
                     self.runtimes.remove(&session_id);
@@ -1566,7 +1577,10 @@ impl Waku {
             return;
         }
         let driver_start = if rollback_turns > 0
-            && matches!(source.provider, ProviderKind::Codex | ProviderKind::Pi)
+            && matches!(
+                source.provider,
+                ProviderKind::Codex | ProviderKind::Pi | ProviderKind::OhMyPi
+            )
             && driver.is_none()
         {
             match self.driver_start_request_for_session(&source, project_path.clone()) {

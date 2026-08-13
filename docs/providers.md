@@ -141,22 +141,22 @@ OpenCode server itself, whose driver kills it explicitly on drop.
 
 ## At a glance
 
-| | Codex CLI | Pi | Claude Code | Amp | Cursor CLI | OpenCode | Grok Build |
-| --- | --- | --- | --- | --- | --- | --- | --- |
-| Binary | `codex` | `pi` | `claude` | `amp` | `cursor-agent` | `opencode` | `grok` |
-| Wire protocol | JSON-RPC over stdio | NDJSON RPC over stdio | stream-json over stdio | stream-json over stdio | ACP over stdio | HTTP + SSE | ACP over stdio |
-| Process spans the whole session | yes | yes | yes | yes | yes | yes | yes |
-| Process spawned per turn | no | no | no | no | no | no | no |
-| Bidirectional | yes | yes | yes | yes | yes | yes | yes |
-| Reasoning stream | yes | yes | yes | yes | yes | yes | yes |
-| Interactive approvals | yes | no | yes | no | yes | yes | yes |
-| Mid-turn steering | yes | yes | yes | yes | yes | yes | yes |
-| Model discovery | yes | yes | no (fixed) | no (modes) | yes | yes | yes |
-| Computer Use | yes | yes | no | no | no | yes | yes |
-| Restricted to Build + Full access | no | yes | no | yes | no | no | no |
+| | Codex CLI | Pi | Oh My Pi | Claude Code | Amp | Cursor CLI | OpenCode | Grok Build |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| Binary | `codex` | `pi` | `omp` | `claude` | `amp` | `cursor-agent` | `opencode` | `grok` |
+| Wire protocol | JSON-RPC over stdio | NDJSON RPC over stdio | NDJSON RPC over stdio | stream-json over stdio | stream-json over stdio | ACP over stdio | HTTP + SSE | ACP over stdio |
+| Process spans the whole session | yes | yes | yes | yes | yes | yes | yes | yes |
+| Process spawned per turn | no | no | no | no | no | no | no | no |
+| Bidirectional | yes | yes | yes | yes | yes | yes | yes | yes |
+| Reasoning stream | yes | yes | yes | yes | yes | yes | yes | yes |
+| Interactive approvals | yes | no | no | yes | no | yes | yes | yes |
+| Mid-turn steering | yes | yes | yes | yes | yes | yes | yes | yes |
+| Model discovery | yes | yes | yes | no (fixed) | no (modes) | yes | yes | yes |
+| Computer Use | yes | yes | yes* | no | no | no | yes | yes |
+| Restricted to Build + Full access | no | yes | no | no | yes | no | no | no |
 
 Every provider now holds a session across turns. That was not true when this
-document was first written: five of the seven spawned a process per prompt, and
+document was first written: five of the eight spawned a process per prompt, and
 everything stateful — resume, rewind, branch, approvals — had to be reconstructed
 from a session id, an on-disk transcript, or a side-channel. In each case the CLI
 turned out to already serve a session protocol; nobody had looked.
@@ -303,6 +303,45 @@ options.
 
 **Computer Use** — `--extension <waku pi extension>` and `--skill <SKILL.md>`,
 with the REPL and helper paths passed through the environment.
+
+---
+
+## Oh My Pi
+
+[Oh My Pi](https://github.com/can1357/oh-my-pi) (`omp`) is a fork of Pi. It
+keeps the NDJSON RPC wire protocol, so Waku runs it through the same driver
+([src/driver/pi.rs](../src/driver/pi.rs)) with provider-specific differences:
+
+**Launch** — `omp --mode rpc`, plus `--approval-mode always-ask|write|yolo` for
+non-Full access (OMP's default is `yolo`; Pi's `--approve` and the
+`PI_SKIP_VERSION_CHECK` env are not recognized and would exit with
+`unknown flag`).
+
+**Access modes** — unlike Pi (Build + Full only), the OMP access picker maps
+onto launch flags: Supervised → `always-ask`, Auto-accept edits and Auto →
+`write` (Auto folds conservatively into `write`), Full access → the default
+`yolo`. Permissions are still decided at launch, so changing mode mid-session
+asks for a fresh start, exactly like Pi.
+
+**Turn boundary** — Pi ends a run with `agent_settled`; OMP never emits it and
+instead repeats `turn_start`/`turn_end` per model round and ends the run with a
+single `agent_end`. Waku treats `agent_end` as the turn boundary.
+
+**Rewind and branch** — `get_branch_messages` → `branch {entryId}` replaces
+Pi's `get_fork_messages` → `fork`/`clone`; OMP has no `clone`. Rewind-to-zero
+turns is unsupported there.
+
+**Models** — a separate `omp --mode rpc --no-session --no-skills` process
+answering `get_available_models` and `get_state` (OMP drops Pi's
+`--no-prompt-templates`/`--no-context-files`, which are unknown flags there).
+
+**Skills and commands** — OMP reads only its own `.omp` vocabulary: project
+`.omp/commands` and `.omp/skills`, user `~/.omp/agent/skills` (and
+`~/.omp/agent/commands`). It does not read `.pi`.
+
+**Computer Use** — `--extension <waku pi extension>` and `--skill <SKILL.md>`
+are passed the same way as Pi; extension API compatibility with OMP is not yet
+verified.
 
 ---
 
@@ -636,6 +675,7 @@ with the session and is what makes a Waku task outlive its process:
 | --- | --- | --- |
 | Codex | `thread_id` | `thread/resume` |
 | Pi | `session_id`, `session_file` | `switch_session` needs the path |
+| Oh My Pi | `session_id`, `session_file` | `switch_session` needs the path; same shape as Pi |
 | Claude | `session_id`, `resume_at` | `resume_at` is the transcript message uuid used for forking |
 | Amp | `thread_id`, `fork_context` | `fork_context` is the seeded history for a branch |
 | Cursor | `session_id`, `fork_context` | id is empty until a seeded branch streams one |

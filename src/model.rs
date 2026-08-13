@@ -15,10 +15,11 @@ pub enum ProviderKind {
     OpenCode,
     Grok,
     Pi,
+    OhMyPi,
 }
 
 impl ProviderKind {
-    pub const ALL: [Self; 7] = [
+    pub const ALL: [Self; 8] = [
         Self::Amp,
         Self::Claude,
         Self::Codex,
@@ -26,6 +27,7 @@ impl ProviderKind {
         Self::OpenCode,
         Self::Grok,
         Self::Pi,
+        Self::OhMyPi,
     ];
 
     pub fn id(self) -> &'static str {
@@ -37,6 +39,7 @@ impl ProviderKind {
             Self::OpenCode => "opencode",
             Self::Grok => "grok",
             Self::Pi => "pi",
+            Self::OhMyPi => "ohMyPi",
         }
     }
 
@@ -49,6 +52,7 @@ impl ProviderKind {
             Self::OpenCode => "OpenCode",
             Self::Grok => "Grok Build",
             Self::Pi => "Pi",
+            Self::OhMyPi => "Oh My Pi",
         }
     }
 
@@ -61,6 +65,7 @@ impl ProviderKind {
             Self::OpenCode => "OpenCode",
             Self::Grok => "Grok",
             Self::Pi => "Pi",
+            Self::OhMyPi => "OMP",
         }
     }
 
@@ -75,6 +80,7 @@ impl ProviderKind {
             Self::OpenCode => "opencode",
             Self::Grok => "grok",
             Self::Pi => "pi",
+            Self::OhMyPi => "omp",
         }
     }
 
@@ -88,6 +94,7 @@ impl ProviderKind {
                 | Self::OpenCode
                 | Self::Grok
                 | Self::Pi
+                | Self::OhMyPi
         )
     }
 
@@ -101,13 +108,14 @@ impl ProviderKind {
                 | Self::OpenCode
                 | Self::Grok
                 | Self::Pi
+                | Self::OhMyPi
         )
     }
 
     pub fn supports_model_discovery(self) -> bool {
         matches!(
             self,
-            Self::Codex | Self::Cursor | Self::OpenCode | Self::Grok | Self::Pi
+            Self::Codex | Self::Cursor | Self::OpenCode | Self::Grok | Self::Pi | Self::OhMyPi
         )
     }
 }
@@ -148,6 +156,12 @@ pub enum ProviderResumeCursor {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         session_file: Option<PathBuf>,
     },
+    /// Oh My Pi (omp) — the Pi fork keeps the same session shape.
+    OhMyPi {
+        session_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        session_file: Option<PathBuf>,
+    },
 }
 
 impl ProviderResumeCursor {
@@ -172,6 +186,10 @@ impl ProviderResumeCursor {
                 session_id: id,
                 session_file: None,
             },
+            ProviderKind::OhMyPi => Self::OhMyPi {
+                session_id: id,
+                session_file: None,
+            },
         }
     }
 
@@ -184,6 +202,7 @@ impl ProviderResumeCursor {
             Self::OpenCode { .. } => ProviderKind::OpenCode,
             Self::Grok { .. } => ProviderKind::Grok,
             Self::Pi { .. } => ProviderKind::Pi,
+            Self::OhMyPi { .. } => ProviderKind::OhMyPi,
         }
     }
 
@@ -194,7 +213,8 @@ impl ProviderResumeCursor {
             | Self::Cursor { session_id, .. }
             | Self::OpenCode { session_id }
             | Self::Grok { session_id }
-            | Self::Pi { session_id, .. } => session_id,
+            | Self::Pi { session_id, .. }
+            | Self::OhMyPi { session_id, .. } => session_id,
             Self::Codex { thread_id } => thread_id,
         }
     }
@@ -2695,6 +2715,8 @@ mod tests {
         assert_eq!(ProviderKind::OpenCode.command(), "opencode");
         assert_eq!(ProviderKind::Grok.command(), "grok");
         assert_eq!(ProviderKind::Pi.command(), "pi");
+        assert_eq!(ProviderKind::OhMyPi.command(), "omp");
+        assert_eq!(ProviderKind::OhMyPi.id(), "ohMyPi");
     }
 
     #[test]
@@ -2707,6 +2729,7 @@ mod tests {
             ProviderKind::OpenCode,
             ProviderKind::Grok,
             ProviderKind::Pi,
+            ProviderKind::OhMyPi,
         ] {
             assert!(provider.supports_conversation_fork());
             assert!(provider.supports_conversation_rollback());
@@ -2722,6 +2745,7 @@ mod tests {
         assert!(ProviderKind::OpenCode.supports_model_discovery());
         assert!(ProviderKind::Grok.supports_model_discovery());
         assert!(ProviderKind::Pi.supports_model_discovery());
+        assert!(ProviderKind::OhMyPi.supports_model_discovery());
     }
 
     #[test]

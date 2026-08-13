@@ -15,6 +15,7 @@ Waku works with:
 - Codex CLI
 - Cursor CLI
 - Grok Build
+- [Oh My Pi](https://github.com/can1357/oh-my-pi)
 - OpenCode
 - Pi
 

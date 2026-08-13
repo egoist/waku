@@ -16,6 +16,11 @@ the original feature bullet instead of adding separate entries for them.
 
 ## [unreleased]
 
+- Add [Oh My Pi](https://github.com/can1357/oh-my-pi) as a new supported agent:
+  same NDJSON RPC protocol as Pi with OMP-specific launch flags
+  (`--approval-mode`), turn-boundary event (`agent_end`), branch commands
+  (`get_branch_messages`/`branch`), and `.omp` skills/commands directories
+
 ## [0.0.11]
 
 - Fix provider detection for CLIs installed through shell PATH managers such as

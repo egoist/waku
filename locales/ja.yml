@@ -454,7 +454,7 @@ errors.provider_not_installed: "%{provider} はインストールされていま
 errors.provider_not_found: "%{provider} はインストールされていないか、見つかりませんでした"
 errors.claude_fork_checkpoint_missing: Claude からフォーク用チェックポイントが返されませんでした
 errors.claude_turn_checkpoint_unavailable: "そのターンの Claude ネイティブチェックポイントは利用できません：%{error}"
-errors.pi_session_file_unavailable: Pi のネイティブセッションファイルは利用できません
+errors.provider_session_file_unavailable: "%{provider} のネイティブセッションファイルは利用できません"
 errors.fork_task: "タスクをフォークできませんでした：%{error}"
 errors.create_rewind_snapshot: "巻き戻し用の安全スナップショットを作成できませんでした：%{error}"
 errors.restore_checkpoint: "チェックポイントを復元できませんでした：%{error}"
@@ -497,7 +497,7 @@ errors.provider_stopped_receiving: "%{provider} はメッセージの受信を�
 errors.provider_initialize_session: "%{provider} はこのセッションを初期化できませんでした"
 errors.provider_rejected_prompt: "%{provider} は実行前にプロンプトを拒否しました"
 errors.provider_complete_turn: "%{provider} はこのターンを完了できませんでした"
-errors.pi_reported_error: Pi からエラーが報告されました
+errors.provider_reported_error: "%{provider} からエラーが報告されました"
 
 session.response_unavailable: その回答は利用できなくなりました
 session.response_cannot_fork: その回答からは現在タスクをフォークできません

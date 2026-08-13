@@ -72,7 +72,7 @@ pub fn fallback_models(provider: ProviderKind) -> Vec<ProviderModel> {
         }
         // Pi's catalog depends on the user's configured LLM providers. A
         // fabricated fallback would make unavailable models look selectable.
-        ProviderKind::Pi => Vec::new(),
+        ProviderKind::Pi | ProviderKind::OhMyPi => Vec::new(),
     }
 }
 
@@ -89,7 +89,7 @@ pub fn discover_models(provider: ProviderKind, binary: &Path) -> Vec<ProviderMod
         ProviderKind::Cursor => discover_cursor_models(binary),
         ProviderKind::OpenCode => discover_opencode_models(binary),
         ProviderKind::Grok => discover_grok_models(binary),
-        ProviderKind::Pi => discover_pi_models(binary),
+        ProviderKind::Pi | ProviderKind::OhMyPi => discover_pi_models(provider, binary),
     };
     if discovered.is_empty() {
         // A failed or empty probe keeps the last successful discovery over
@@ -288,17 +288,19 @@ fn parse_grok_models(output: &str) -> Vec<ProviderModel> {
         .collect()
 }
 
-fn discover_pi_models(binary: &Path) -> Vec<ProviderModel> {
-    let Ok(mut child) = crate::command_env::command(binary)
-        .args([
-            "--mode",
-            "rpc",
-            "--no-session",
-            "--no-skills",
-            "--no-prompt-templates",
-            "--no-context-files",
-        ])
-        .env("PI_SKIP_VERSION_CHECK", "1")
+fn discover_pi_models(provider: ProviderKind, binary: &Path) -> Vec<ProviderModel> {
+    let is_omp = provider == ProviderKind::OhMyPi;
+    let mut command = crate::command_env::command(binary);
+    command.args(["--mode", "rpc", "--no-session", "--no-skills"]);
+    if !is_omp {
+        // Pi skips version checks via env and disables template/context
+        // discovery. OMP recognizes neither the extra flags (unknown flags are
+        // a hard startup error there) nor the version-check env.
+        command
+            .args(["--no-prompt-templates", "--no-context-files"])
+            .env("PI_SKIP_VERSION_CHECK", "1");
+    }
+    let Ok(mut child) = command
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -961,7 +963,7 @@ done
 "#,
         );
 
-        let models = discover_pi_models(&binary);
+        let models = discover_pi_models(ProviderKind::Pi, &binary);
 
         assert_eq!(models.len(), 1);
         assert_eq!(models[0].id, "extension-provider/extension-model");

@@ -344,6 +344,23 @@ fn agent_arguments(
                 push(&mut args, effort);
             }
         }
+        // OMP keeps the same one-shot flags minus the ones it removed
+        // (--no-context-files, --no-prompt-templates, --no-approve).
+        ProviderKind::OhMyPi => {
+            push(&mut args, "--print");
+            push(&mut args, "--no-session");
+            push(&mut args, "--no-tools");
+            push(&mut args, "--no-extensions");
+            push(&mut args, "--no-skills");
+            if let Some(model) = model {
+                push(&mut args, "--model");
+                push(&mut args, model);
+            }
+            if let Some(effort) = reasoning_effort {
+                push(&mut args, "--thinking");
+                push(&mut args, effort);
+            }
+        }
     }
     push(&mut args, prompt);
     args
@@ -744,6 +761,17 @@ mod tests {
                     assert!(has(&args, "--no-session"));
                     assert!(has(&args, "--no-tools"));
                     assert!(has_pair(&args, "--thinking", "low"));
+                }
+                ProviderKind::OhMyPi => {
+                    assert!(has(&args, "--print"));
+                    assert!(has(&args, "--no-session"));
+                    assert!(has(&args, "--no-tools"));
+                    assert!(has(&args, "--no-extensions"));
+                    assert!(has_pair(&args, "--thinking", "low"));
+                    // OMP removed these Pi flags; they must not leak through.
+                    assert!(!has(&args, "--no-context-files"));
+                    assert!(!has(&args, "--no-prompt-templates"));
+                    assert!(!has(&args, "--no-approve"));
                 }
             }
         }

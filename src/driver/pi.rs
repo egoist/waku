@@ -15,7 +15,9 @@ use super::{activity, computer_use as computer_use_runtime};
 use crate::driver::{
     DriverControl, DriverEventSender, DriverEventSink, DriverStartOptions, SessionOptions,
 };
-use crate::model::{ActivityKind, DriverEvent, InteractionMode, ProviderResumeCursor, RuntimeMode};
+use crate::model::{
+    ActivityKind, DriverEvent, InteractionMode, ProviderKind, ProviderResumeCursor, RuntimeMode,
+};
 
 const RPC_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -41,6 +43,10 @@ type PendingResponses = Arc<Mutex<HashMap<String, Sender<Result<Value, String>>>
 pub struct PiDriver {
     commands: Sender<CommandMessage>,
     computer_use: Option<computer_use_runtime::ComputerUseRuntime>,
+    /// The access mode the process was launched with. Permissions are decided
+    /// at launch (Pi's `--approve`, OMP's `--approval-mode`), so any mode
+    /// change must restart the session.
+    access_mode: RuntimeMode,
 }
 
 fn configure_pi_computer_use_command(
@@ -63,7 +69,14 @@ fn configure_pi_computer_use_command(
 }
 
 impl PiDriver {
-    pub fn start(options: DriverStartOptions, events: DriverEventSender) -> anyhow::Result<Self> {
+    pub fn start(
+        provider: ProviderKind,
+        options: DriverStartOptions,
+        events: DriverEventSender,
+    ) -> anyhow::Result<Self> {
+        debug_assert!(matches!(provider, ProviderKind::Pi | ProviderKind::OhMyPi));
+        let is_omp = provider == ProviderKind::OhMyPi;
+        let provider_label = provider.display_name();
         let DriverStartOptions {
             binary,
             cwd,
@@ -75,22 +88,36 @@ impl PiDriver {
             computer_use_enabled,
             provider_cursor,
         } = options;
-        if mode != RuntimeMode::FullAccess || interaction_mode != InteractionMode::Build {
-            return Err(anyhow!("Pi currently supports Build with Full access only"));
+        if interaction_mode != InteractionMode::Build {
+            return Err(anyhow!(
+                "{provider_label} currently supports Build interaction mode only"
+            ));
+        }
+        // Pi has no permission vocabulary beyond its launch flag and only runs
+        // with Full access. OMP maps the access mode onto `--approval-mode` at
+        // launch; any mode change afterwards asks for a fresh start.
+        if !is_omp && mode != RuntimeMode::FullAccess {
+            return Err(anyhow!(
+                "{provider_label} currently supports Full access only"
+            ));
         }
         let resume_session_file = match provider_cursor {
             Some(ProviderResumeCursor::Pi {
                 session_file: Some(session_file),
                 ..
             }) => Some(session_file),
-            Some(ProviderResumeCursor::Pi { .. }) => {
+            Some(ProviderResumeCursor::OhMyPi {
+                session_file: Some(session_file),
+                ..
+            }) => Some(session_file),
+            Some(ProviderResumeCursor::Pi { .. }) | Some(ProviderResumeCursor::OhMyPi { .. }) => {
                 return Err(anyhow!(
-                    "cannot resume Pi because its native session file is missing"
+                    "cannot resume {provider_label} because its native session file is missing"
                 ));
             }
             Some(cursor) => {
                 return Err(anyhow!(
-                    "cannot resume Pi from a {} cursor",
+                    "cannot resume {provider_label} from a {} cursor",
                     cursor.provider().display_name()
                 ));
             }
@@ -108,9 +135,27 @@ impl PiDriver {
             .map(|_| crate::computer_use::pi_extension_path())
             .transpose()?;
         let mut command = crate::command_env::command(binary);
-        command
-            .args(["--mode", "rpc", "--approve"])
-            .env("PI_SKIP_VERSION_CHECK", "1");
+        if is_omp {
+            // OMP accepts `--approval-mode always-ask|write|yolo` (default yolo).
+            // `--approve` and Pi's version-check env are not recognized there.
+            match mode {
+                RuntimeMode::Ask => {
+                    command.args(["--mode", "rpc", "--approval-mode", "always-ask"]);
+                }
+                RuntimeMode::AutoAcceptEdits | RuntimeMode::Auto => {
+                    command.args(["--mode", "rpc", "--approval-mode", "write"]);
+                }
+                // FullAccess is OMP's default; do not pass a flag.
+                RuntimeMode::FullAccess => {
+                    command.args(["--mode", "rpc"]);
+                }
+                RuntimeMode::Plan => unreachable!("rejected above"),
+            }
+        } else {
+            command
+                .args(["--mode", "rpc", "--approve"])
+                .env("PI_SKIP_VERSION_CHECK", "1");
+        }
         configure_pi_computer_use_command(
             &mut command,
             computer_use
@@ -124,7 +169,7 @@ impl PiDriver {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
-            .context("failed to start `pi --mode rpc`")?;
+            .with_context(|| format!("failed to start `{} --mode rpc`", provider.command()))?;
         let stdin = child
             .stdin
             .take()
@@ -147,6 +192,7 @@ impl PiDriver {
             thread::Builder::new()
                 .name("waku-pi-reader".into())
                 .spawn(move || {
+                    let provider_label = provider.display_name();
                     let mut stream_state = PiStreamState::default();
                     for line in BufReader::new(stdout).lines() {
                         match line {
@@ -158,11 +204,12 @@ impl PiDriver {
                                         &reader_commands,
                                         &reader_events,
                                         &mut stream_state,
+                                        provider,
                                     ),
                                     Err(error) => {
                                         let _ = reader_events.send(DriverEvent::Error(tr!(
                                             "errors.provider_invalid_json",
-                                            provider = "Pi",
+                                            provider = provider_label,
                                             error = error
                                         )));
                                     }
@@ -172,7 +219,7 @@ impl PiDriver {
                             Err(error) => {
                                 let _ = reader_events.send(DriverEvent::Error(tr!(
                                     "errors.provider_transport_read",
-                                    provider = "Pi",
+                                    provider = provider_label,
                                     error = error
                                 )));
                                 break;
@@ -190,6 +237,7 @@ impl PiDriver {
         thread::Builder::new()
             .name("waku-pi-writer".into())
             .spawn(move || {
+                let provider_label = provider.display_name();
                 let mut stdin = stdin;
                 let mut next_request_id = 0_u64;
                 let initialize = (|| -> Result<Value, String> {
@@ -250,14 +298,14 @@ impl PiDriver {
                     Err(error) => {
                         let _ = writer_events.send(DriverEvent::Error(tr!(
                             "errors.initialize_provider",
-                            provider = "Pi",
+                            provider = provider_label,
                             error = error
                         )));
                         let _ = writer_events.send(DriverEvent::TurnFinished {
                             success: false,
                             summary: Some(tr!(
                                 "errors.provider_initialize_session",
-                                provider = "Pi"
+                                provider = provider_label
                             )),
                         });
                         return;
@@ -266,11 +314,14 @@ impl PiDriver {
                 let Some(mut cursor) = cursor_from_state(&state) else {
                     let _ = writer_events.send(DriverEvent::Error(tr!(
                         "errors.provider_no_session_id",
-                        provider = "Pi"
+                        provider = provider_label
                     )));
                     let _ = writer_events.send(DriverEvent::TurnFinished {
                         success: false,
-                        summary: Some(tr!("errors.provider_initialize_session", provider = "Pi")),
+                        summary: Some(tr!(
+                            "errors.provider_initialize_session",
+                            provider = provider_label
+                        )),
                     });
                     return;
                 };
@@ -317,14 +368,14 @@ impl PiDriver {
                             if let Err(error) = result {
                                 let _ = writer_events.send(DriverEvent::Error(tr!(
                                     "errors.provider_rejected_prompt_detail",
-                                    provider = "Pi",
+                                    provider = provider_label,
                                     error = error
                                 )));
                                 let _ = writer_events.send(DriverEvent::TurnFinished {
                                     success: false,
                                     summary: Some(tr!(
                                         "errors.provider_rejected_prompt",
-                                        provider = "Pi"
+                                        provider = provider_label
                                     )),
                                 });
                             }
@@ -358,7 +409,7 @@ impl PiDriver {
                             ) {
                                 let _ = writer_events.send(DriverEvent::Error(tr!(
                                     "errors.stop_provider",
-                                    provider = "Pi",
+                                    provider = provider_label,
                                     error = error
                                 )));
                             }
@@ -395,7 +446,7 @@ impl PiDriver {
                                                 let _ =
                                                     writer_events.send(DriverEvent::Error(tr!(
                                                         "errors.switch_provider_model",
-                                                        provider = "Pi",
+                                                        provider = provider_label,
                                                         error = error
                                                     )));
                                             }
@@ -420,7 +471,7 @@ impl PiDriver {
                                 {
                                     let _ = writer_events.send(DriverEvent::Error(tr!(
                                         "errors.change_provider_thinking",
-                                        provider = "Pi",
+                                        provider = provider_label,
                                         error = error
                                     )));
                                 }
@@ -449,6 +500,7 @@ impl PiDriver {
                                 &cursor,
                                 turns,
                                 false,
+                                provider,
                             );
                             if let Ok(next_cursor) = &result {
                                 cursor = next_cursor.clone();
@@ -466,6 +518,7 @@ impl PiDriver {
                                 &cursor,
                                 turns_to_remove,
                                 true,
+                                provider,
                             );
                             let _ = response.send(result);
                         }
@@ -481,9 +534,10 @@ impl PiDriver {
             thread::Builder::new()
                 .name("waku-pi-stderr".into())
                 .spawn(move || {
+                    let provider_label = provider.display_name();
                     for line in BufReader::new(stderr).lines().map_while(Result::ok) {
                         if line.to_ascii_lowercase().contains("error") {
-                            let error = format!("Pi: {}", line.trim());
+                            let error = format!("{provider_label}: {}", line.trim());
                             *stderr_last_error.lock() = Some(error.clone());
                             let _ = stderr_events.send(DriverEvent::Error(error));
                         }
@@ -496,6 +550,7 @@ impl PiDriver {
         thread::Builder::new()
             .name("waku-pi-process".into())
             .spawn(move || {
+                let provider_label = provider.display_name();
                 let status = child.wait();
                 let _ = reader_thread.join();
                 let _ = stderr_thread.join();
@@ -503,14 +558,14 @@ impl PiDriver {
                     Ok(status) if !status.success() && last_visible_stderr.lock().is_none() => {
                         let _ = events.send(DriverEvent::Error(tr!(
                             "errors.provider_rpc_exited",
-                            provider = "Pi",
+                            provider = provider_label,
                             status = status
                         )));
                     }
                     Err(error) => {
                         let _ = events.send(DriverEvent::Error(tr!(
                             "errors.read_provider_exit_status",
-                            provider = "Pi RPC",
+                            provider = provider_label,
                             error = error
                         )));
                     }
@@ -522,6 +577,7 @@ impl PiDriver {
         Ok(Self {
             commands,
             computer_use,
+            access_mode: mode,
         })
     }
 }
@@ -553,12 +609,11 @@ impl DriverControl for PiDriver {
 
     fn apply_options(&self, options: SessionOptions) -> bool {
         // Pi has setters for the model and thinking level, so those apply to the
-        // live session. It has none for permissions — and only runs Build with
-        // Full access anyway — so a mode change asks for a fresh start, which is
-        // where that constraint is reported.
-        if options.mode != RuntimeMode::FullAccess
-            || options.interaction_mode != InteractionMode::Build
-        {
+        // live session. Neither Pi nor OMP has a permission setter — the access
+        // mode is fixed at launch (`--approve` / `--approval-mode`) — so a mode
+        // change asks for a fresh start, which is where that constraint is
+        // reported.
+        if options.interaction_mode != InteractionMode::Build || options.mode != self.access_mode {
             return false;
         }
         self.commands.send(CommandMessage::Options(options)).is_ok()
@@ -716,21 +771,25 @@ fn fork_pi_session(
     original_cursor: &ProviderResumeCursor,
     turns_to_remove: usize,
     restore_original: bool,
+    provider: ProviderKind,
 ) -> Result<ProviderResumeCursor, String> {
-    let messages = send_request(
-        stdin,
-        pending,
-        next_request_id,
-        json!({"type": "get_fork_messages"}),
-    )?;
+    let provider_label = provider.display_name();
+    // Pi lists forkable user messages with `get_fork_messages`; OMP renamed
+    // the same call `get_branch_messages` (same `{entryId, text}` payload).
+    let messages_request = if provider == ProviderKind::OhMyPi {
+        json!({"type": "get_branch_messages"})
+    } else {
+        json!({"type": "get_fork_messages"})
+    };
+    let messages = send_request(stdin, pending, next_request_id, messages_request)?;
     let messages = messages
         .pointer("/data/messages")
         .and_then(Value::as_array)
-        .ok_or_else(|| "Pi returned an invalid fork-message list".to_owned())?;
-    let request = pi_fork_request(messages, turns_to_remove)?;
+        .ok_or_else(|| format!("{provider_label} returned an invalid fork-message list"))?;
+    let request = pi_fork_request(messages, turns_to_remove, provider)?;
     let fork = send_request(stdin, pending, next_request_id, request)?;
     if fork.pointer("/data/cancelled").and_then(Value::as_bool) == Some(true) {
-        return Err("Pi session fork was cancelled".into());
+        return Err(format!("{provider_label} session fork was cancelled"));
     }
     let fork_state = send_request(
         stdin,
@@ -739,15 +798,23 @@ fn fork_pi_session(
         json!({"type": "get_state"}),
     )?;
     let fork_cursor = cursor_from_state(&fork_state)
-        .ok_or_else(|| "Pi did not report the forked session cursor".to_owned())?;
+        .ok_or_else(|| format!("{provider_label} did not report the forked session cursor"))?;
 
     if restore_original {
-        let ProviderResumeCursor::Pi {
-            session_file: Some(session_file),
-            ..
-        } = original_cursor
-        else {
-            return Err("Pi's original session file is unavailable".into());
+        let session_file = match original_cursor {
+            ProviderResumeCursor::Pi {
+                session_file: Some(session_file),
+                ..
+            }
+            | ProviderResumeCursor::OhMyPi {
+                session_file: Some(session_file),
+                ..
+            } => session_file,
+            _ => {
+                return Err(format!(
+                    "{provider_label}'s original session file is unavailable"
+                ));
+            }
         };
         let switched = send_request(
             stdin,
@@ -759,7 +826,9 @@ fn fork_pi_session(
             }),
         )?;
         if switched.pointer("/data/cancelled").and_then(Value::as_bool) == Some(true) {
-            return Err("Pi could not return to the source session after forking".into());
+            return Err(format!(
+                "{provider_label} could not return to the source session after forking"
+            ));
         }
         let restored_state = send_request(
             stdin,
@@ -767,33 +836,53 @@ fn fork_pi_session(
             next_request_id,
             json!({"type": "get_state"}),
         )?;
-        let restored_cursor = cursor_from_state(&restored_state)
-            .ok_or_else(|| "Pi did not report the restored source session".to_owned())?;
+        let restored_cursor = cursor_from_state(&restored_state).ok_or_else(|| {
+            format!("{provider_label} did not report the restored source session")
+        })?;
         if restored_cursor.native_id() != original_cursor.native_id() {
-            return Err("Pi returned to the wrong source session after forking".into());
+            return Err(format!(
+                "{provider_label} returned to the wrong source session after forking"
+            ));
         }
     }
 
     Ok(fork_cursor)
 }
 
-fn pi_fork_request(messages: &[Value], turns_to_remove: usize) -> Result<Value, String> {
+fn pi_fork_request(
+    messages: &[Value],
+    turns_to_remove: usize,
+    provider: ProviderKind,
+) -> Result<Value, String> {
+    let provider_label = provider.display_name();
     if turns_to_remove > messages.len() {
         return Err(format!(
-            "Pi has only {} native turns, but Waku needs to remove {turns_to_remove}",
+            "{provider_label} has only {} native turns, but Waku needs to remove {turns_to_remove}",
             messages.len()
         ));
     }
     let retained_turns = messages.len() - turns_to_remove;
     if turns_to_remove == 0 {
+        // Pi clones the session as-is; OMP has no clone command, so rewinding
+        // nothing is unsupported there rather than guessing at an entry.
+        if provider == ProviderKind::OhMyPi {
+            return Err("Oh My Pi does not support cloning a session".into());
+        }
         Ok(json!({"type": "clone"}))
     } else {
         let entry_id = messages
             .get(retained_turns)
             .and_then(|message| message.get("entryId"))
             .and_then(Value::as_str)
-            .ok_or_else(|| "Pi returned a fork message without an entry ID".to_owned())?;
-        Ok(json!({"type": "fork", "entryId": entry_id}))
+            .ok_or_else(|| {
+                format!("{provider_label} returned a fork message without an entry ID")
+            })?;
+        let command = if provider == ProviderKind::OhMyPi {
+            "branch"
+        } else {
+            "fork"
+        };
+        Ok(json!({"type": command, "entryId": entry_id}))
     }
 }
 
@@ -812,6 +901,7 @@ fn handle_pi_message(
     commands: &Sender<CommandMessage>,
     events: &impl DriverEventSink,
     state: &mut PiStreamState,
+    provider: ProviderKind,
 ) {
     let event_type = value
         .get("type")
@@ -885,7 +975,7 @@ fn handle_pi_message(
                 }
                 Some("error") => {
                     state.failed = true;
-                    let _ = events.send(DriverEvent::Error(pi_error_message(update)));
+                    let _ = events.send(DriverEvent::Error(pi_error_message(update, provider)));
                 }
                 _ => {}
             }
@@ -965,13 +1055,21 @@ fn handle_pi_message(
                 let _ = events.send(DriverEvent::Error(message.to_owned()));
             }
         }
-        "agent_settled" => {
+        // Pi marks the end of a run with `agent_settled`. OMP never emits that
+        // event: its `turn_start`/`turn_end` repeat for every model round while
+        // a run is in flight (e.g. around tool calls), and the run itself ends
+        // with a single `agent_end` — the faithful counterpart.
+        "agent_settled" | "agent_end" => {
             if state.run_started {
                 let success = !state.failed;
                 let _ = events.send(DriverEvent::TurnFinished {
                     success,
-                    summary: (!success)
-                        .then(|| tr!("errors.provider_complete_turn", provider = "Pi")),
+                    summary: (!success).then(|| {
+                        tr!(
+                            "errors.provider_complete_turn",
+                            provider = provider.display_name()
+                        )
+                    }),
                 });
             }
             *state = PiStreamState::default();
@@ -986,7 +1084,7 @@ fn handle_pi_message(
             }
         }
         "extension_error" => {
-            let _ = events.send(DriverEvent::Error(pi_error_message(&value)));
+            let _ = events.send(DriverEvent::Error(pi_error_message(&value, provider)));
         }
         _ => {}
     }
@@ -1030,14 +1128,19 @@ fn emit_completed_message_fallback(
     }
 }
 
-fn pi_error_message(value: &Value) -> String {
+fn pi_error_message(value: &Value, provider: ProviderKind) -> String {
     value
         .get("error")
         .and_then(Value::as_str)
         .or_else(|| value.get("errorMessage").and_then(Value::as_str))
         .or_else(|| value.get("reason").and_then(Value::as_str))
         .map(str::to_owned)
-        .unwrap_or_else(|| tr!("errors.pi_reported_error"))
+        .unwrap_or_else(|| {
+            tr!(
+                "errors.provider_reported_error",
+                provider = provider.display_name()
+            )
+        })
 }
 
 fn classify_tool(name: &str) -> ActivityKind {
@@ -1085,6 +1188,7 @@ mod tests {
         let binary = crate::command_env::find_executable("pi").expect("pi is not installed");
         let (events, event_rx) = crate::driver::test_event_channel();
         let driver = PiDriver::start(
+            ProviderKind::Pi,
             DriverStartOptions {
                 binary,
                 cwd: std::env::temp_dir(),
@@ -1147,6 +1251,7 @@ mod tests {
         let driver = PiDriver {
             commands,
             computer_use: None,
+            access_mode: RuntimeMode::FullAccess,
         };
         let options = |mode, interaction_mode| SessionOptions {
             mode,
@@ -1228,18 +1333,37 @@ mod tests {
             json!({"entryId": "turn-3"}),
         ];
         assert_eq!(
-            pi_fork_request(&messages, 0).unwrap(),
+            pi_fork_request(&messages, 0, ProviderKind::Pi).unwrap(),
             json!({"type": "clone"})
         );
         assert_eq!(
-            pi_fork_request(&messages, 2).unwrap(),
+            pi_fork_request(&messages, 2, ProviderKind::Pi).unwrap(),
             json!({"type": "fork", "entryId": "turn-2"})
         );
         assert_eq!(
-            pi_fork_request(&messages, 3).unwrap(),
+            pi_fork_request(&messages, 3, ProviderKind::Pi).unwrap(),
             json!({"type": "fork", "entryId": "turn-1"})
         );
-        assert!(pi_fork_request(&messages, 4).is_err());
+        assert!(pi_fork_request(&messages, 4, ProviderKind::Pi).is_err());
+    }
+
+    #[test]
+    fn omp_branch_selects_the_first_removed_user_turn_and_never_clones() {
+        let messages = [
+            json!({"entryId": "turn-1"}),
+            json!({"entryId": "turn-2"}),
+            json!({"entryId": "turn-3"}),
+        ];
+        assert_eq!(
+            pi_fork_request(&messages, 2, ProviderKind::OhMyPi).unwrap(),
+            json!({"type": "branch", "entryId": "turn-2"})
+        );
+        assert_eq!(
+            pi_fork_request(&messages, 3, ProviderKind::OhMyPi).unwrap(),
+            json!({"type": "branch", "entryId": "turn-1"})
+        );
+        assert!(pi_fork_request(&messages, 0, ProviderKind::OhMyPi).is_err());
+        assert!(pi_fork_request(&messages, 4, ProviderKind::OhMyPi).is_err());
     }
 
     #[test]
@@ -1273,7 +1397,14 @@ mod tests {
             json!({"type": "agent_end", "willRetry": false}),
             json!({"type": "agent_settled"}),
         ] {
-            handle_pi_message(value, &pending, &commands, &events, &mut state);
+            handle_pi_message(
+                value,
+                &pending,
+                &commands,
+                &events,
+                &mut state,
+                ProviderKind::Pi,
+            );
         }
 
         assert!(matches!(event_rx.recv().unwrap(), DriverEvent::TurnStarted));
@@ -1326,6 +1457,7 @@ mod tests {
             &commands,
             &events,
             &mut state,
+            ProviderKind::Pi,
         );
         assert!(matches!(
             event_rx.try_recv().unwrap(),
@@ -1338,6 +1470,7 @@ mod tests {
             &commands,
             &events,
             &mut state,
+            ProviderKind::Pi,
         );
         assert!(matches!(
             event_rx.try_recv().unwrap(),
@@ -1361,6 +1494,7 @@ mod tests {
             &commands,
             &events,
             &mut state,
+            ProviderKind::Pi,
         );
 
         assert!(matches!(event_rx.try_recv(), Err(TryRecvError::Empty)));
@@ -1385,6 +1519,7 @@ mod tests {
             &commands,
             &events,
             &mut state,
+            ProviderKind::Pi,
         );
 
         assert!(matches!(
@@ -1420,6 +1555,7 @@ mod tests {
             &commands,
             &events,
             &mut state,
+            ProviderKind::Pi,
         );
 
         assert!(matches!(
@@ -1467,7 +1603,14 @@ mod tests {
             }),
             json!({"type": "agent_settled"}),
         ] {
-            handle_pi_message(value, &pending, &commands, &events, &mut state);
+            handle_pi_message(
+                value,
+                &pending,
+                &commands,
+                &events,
+                &mut state,
+                ProviderKind::Pi,
+            );
         }
 
         assert!(matches!(event_rx.recv().unwrap(), DriverEvent::TurnStarted));
@@ -1500,7 +1643,14 @@ mod tests {
             json!({"type": "auto_retry_end", "success": true}),
             json!({"type": "agent_settled"}),
         ] {
-            handle_pi_message(value, &pending, &commands, &events, &mut state);
+            handle_pi_message(
+                value,
+                &pending,
+                &commands,
+                &events,
+                &mut state,
+                ProviderKind::Pi,
+            );
         }
 
         assert!(matches!(event_rx.recv().unwrap(), DriverEvent::TurnStarted));
