@@ -51,6 +51,7 @@ mod review_diff;
 mod skills;
 mod terminal;
 mod theme;
+mod typography;
 mod ui;
 mod updater;
 mod usage;

@@ -846,7 +846,7 @@ impl Waku {
                 div()
                     .min_w(px(56.0))
                     .flex_none()
-                    .text_size(px(10.5))
+                    .text_size_px(10.5)
                     .whitespace_nowrap()
                     .text_color(if count_is_bad {
                         theme.danger
@@ -1024,8 +1024,8 @@ impl Waku {
             .flex()
             .items_center()
             .gap(px(2.0))
-            .text_size(px(11.5))
-            .line_height(px(16.0))
+            .text_size_px(11.5)
+            .line_height(rems_from_px(16.0))
             .child(div().min_w_0().flex_1().child(input.clone()))
     }
 }

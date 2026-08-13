@@ -33,6 +33,7 @@ use gpui::{
 
 use crate::input::{ComposerEvent, ComposerInput};
 use crate::theme::Theme;
+use crate::typography::{TextSizeExt, rems_from_px};
 use crate::ui::icon;
 use crate::ui::text_field::TextField;
 use crate::ui::tooltip::Tooltip;
@@ -1187,7 +1188,7 @@ impl BrowserView {
             .child(
                 div()
                     .mt(px(14.0))
-                    .text_size(px(13.0))
+                    .text_size_px(13.0)
                     .font_weight(gpui::FontWeight::MEDIUM)
                     .text_color(theme.text)
                     .child(tr!("browser.browse_web")),
@@ -1197,8 +1198,8 @@ impl BrowserView {
                     .mt(px(6.0))
                     .max_w(px(310.0))
                     .text_center()
-                    .text_size(px(11.0))
-                    .line_height(px(17.0))
+                    .text_size_px(11.0)
+                    .line_height(rems_from_px(17.0))
                     .text_color(theme.text_tertiary)
                     .whitespace_normal()
                     .child(tr!("browser.start_hint")),
@@ -1219,7 +1220,7 @@ impl BrowserView {
             .child(
                 div()
                     .mt(px(14.0))
-                    .text_size(px(13.0))
+                    .text_size_px(13.0)
                     .font_weight(gpui::FontWeight::MEDIUM)
                     .text_color(theme.text)
                     .child(tr!("browser.unavailable")),
@@ -1229,8 +1230,8 @@ impl BrowserView {
                     .mt(px(6.0))
                     .max_w(px(340.0))
                     .text_center()
-                    .text_size(px(11.0))
-                    .line_height(px(17.0))
+                    .text_size_px(11.0)
+                    .line_height(rems_from_px(17.0))
                     .text_color(theme.text_tertiary)
                     .whitespace_normal()
                     .child(message),

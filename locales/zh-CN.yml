@@ -55,7 +55,7 @@ settings.providers: 服务商
 settings.usage: 用量
 settings.computer_use: 电脑操作
 settings.general_keywords: 通用 本地 项目 对话 隐私 匿名 使用数据 分析 分享 更新 自动 版本
-settings.appearance_keywords: 外观 主题 系统 浅色 深色 语言 英语 中文 简体
+settings.appearance_keywords: 外观 主题 系统 浅色 深色 字体 文字 字号 大小 默认 语言 英语 中文 简体
 settings.providers_keywords: 服务商 智能体 模型 命令行 版本 安装 检测 claude codex cursor opencode amp grok pi
 settings.skills: 技能
 settings.skills_keywords: 技能 技能库 智能体 禁用 启用 删除 claude codex cursor opencode pi amp 共享
@@ -68,6 +68,12 @@ settings.theme_description: 选择跟随系统、浅色或深色主题
 settings.theme_system: 跟随系统
 settings.theme_light: 浅色
 settings.theme_dark: 深色
+settings.font_size: 文字大小
+settings.font_size_description: 调整 Waku 全局文字的显示大小
+settings.font_size_small: 小 · 90%
+settings.font_size_default: 默认 · 100%
+settings.font_size_large: 大 · 115%
+settings.font_size_extra_large: 特大 · 130%
 input.do_anything: 做什么都可以…
 input.search_models: 搜索模型…
 input.search_branches: 搜索分支

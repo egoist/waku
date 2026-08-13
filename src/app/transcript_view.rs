@@ -535,8 +535,8 @@ impl Render for ConversationNavigationRail {
                     div()
                         .w_full()
                         .truncate()
-                        .text_size(px(14.0))
-                        .line_height(px(20.0))
+                        .text_size_px(14.0)
+                        .line_height(rems_from_px(20.0))
                         .font_weight(FontWeight::SEMIBOLD)
                         .text_color(theme.text)
                         .child(SharedString::from(turn.prompt.clone())),
@@ -548,8 +548,8 @@ impl Render for ConversationNavigationRail {
                             .max_h(px(60.0))
                             .overflow_hidden()
                             .whitespace_normal()
-                            .text_size(px(13.0))
-                            .line_height(px(20.0))
+                            .text_size_px(13.0)
+                            .line_height(rems_from_px(20.0))
                             .text_color(theme.text_tertiary)
                             .child(SharedString::from(turn.response.clone())),
                     )
@@ -1136,7 +1136,7 @@ impl Waku {
             .items_center()
             .gap(px(5.0))
             .cursor_default()
-            .text_size(px(11.5))
+            .text_size_px(11.5)
             .font_weight(FontWeight::MEDIUM)
             .text_color(theme.text_secondary)
             .focus_visible(|style| style.border_color(theme.accent))
@@ -1200,7 +1200,7 @@ impl Waku {
                             .child(
                                 div()
                                     .truncate()
-                                    .text_size(px(12.5))
+                                    .text_size_px(12.5)
                                     .font_weight(FontWeight::MEDIUM)
                                     .text_color(theme.text)
                                     .child(title),
@@ -1210,8 +1210,8 @@ impl Waku {
                                     .flex()
                                     .items_center()
                                     .gap(px(6.0))
-                                    .text_size(px(11.0))
-                                    .line_height(px(14.0))
+                                    .text_size_px(11.0)
+                                    .line_height(rems_from_px(14.0))
                                     .child(
                                         div()
                                             .text_color(theme.success)
@@ -1251,7 +1251,7 @@ impl Waku {
                             .min_w_0()
                             .flex_1()
                             .truncate()
-                            .text_size(px(11.5))
+                            .text_size_px(11.5)
                             .text_color(theme.text_secondary)
                             .tooltip(Tooltip::text(file.path.clone()))
                             .child(file.path.clone()),
@@ -1259,14 +1259,14 @@ impl Waku {
                     .child(
                         div()
                             .flex_none()
-                            .text_size(px(10.5))
+                            .text_size_px(10.5)
                             .text_color(theme.success)
                             .child(format!("+{}", file.additions)),
                     )
                     .child(
                         div()
                             .flex_none()
-                            .text_size(px(10.5))
+                            .text_size_px(10.5)
                             .text_color(theme.danger)
                             .child(format!("-{}", file.deletions)),
                     ),
@@ -1300,7 +1300,7 @@ impl Waku {
                     .items_center()
                     .gap(px(6.0))
                     .cursor_default()
-                    .text_size(px(11.5))
+                    .text_size_px(11.5)
                     .font_weight(FontWeight::MEDIUM)
                     .text_color(theme.text_secondary)
                     .focus_visible(|style| style.bg(theme.overlay_strong))
@@ -1376,8 +1376,8 @@ impl Waku {
                     .items_center()
                     .gap(px(5.0))
                     .cursor_default()
-                    .text_size(px(11.5))
-                    .line_height(px(16.0))
+                    .text_size_px(11.5)
+                    .line_height(rems_from_px(16.0))
                     .font_weight(FontWeight::MEDIUM)
                     .text_color(theme.text_tertiary)
                     .child(SharedString::from(label))
@@ -1417,8 +1417,8 @@ impl Waku {
             .child(working_wave_dots(theme.text_tertiary))
             .child(
                 div()
-                    .text_size(px(11.5))
-                    .line_height(px(16.0))
+                    .text_size_px(11.5)
+                    .line_height(rems_from_px(16.0))
                     .font_weight(FontWeight::MEDIUM)
                     .text_color(theme.text_tertiary)
                     .child(SharedString::from(tr!(
@@ -1503,8 +1503,8 @@ impl Waku {
                     .flex()
                     .items_center()
                     .gap(px(6.0))
-                    .text_size(px(11.0))
-                    .line_height(px(14.0))
+                    .text_size_px(11.0)
+                    .line_height(rems_from_px(14.0))
                     .cursor_default()
                     .when(running, |element| {
                         element.child(pulse_dot(
@@ -1563,7 +1563,7 @@ impl Waku {
                     .flex()
                     .items_center()
                     .cursor_default()
-                    .text_size(px(9.5))
+                    .text_size_px(9.5)
                     .text_color(color)
                     .focus_visible(|style| style.border_color(theme.accent))
                     .hover(|style| style.bg(theme.overlay_strong))
@@ -1616,8 +1616,8 @@ impl Waku {
                     .flex()
                     .items_center()
                     .gap(px(8.0))
-                    .text_size(px(11.5))
-                    .line_height(px(14.0))
+                    .text_size_px(11.5)
+                    .line_height(rems_from_px(14.0))
                     .when(has_detail, |element| {
                         element
                             .cursor_default()
@@ -1665,7 +1665,7 @@ impl Waku {
                             .flex_1()
                             .min_w_0()
                             .truncate()
-                            .text_size(px(11.0))
+                            .text_size_px(11.0)
                             .text_color(theme.text_ghost)
                             .when(item_expanded, |element| element.invisible())
                             .child(SharedString::from(preview)),
@@ -1728,8 +1728,8 @@ impl Waku {
                     .flex_col()
                     .gap(px(8.0))
                     .font_family(md::render::MONO_FAMILY)
-                    .text_size(px(10.5))
-                    .line_height(px(16.0))
+                    .text_size_px(10.5)
+                    .line_height(rems_from_px(16.0))
                     .text_color(theme.text_secondary)
                     .whitespace_normal()
                     .overflow_hidden();
@@ -1806,8 +1806,8 @@ impl Waku {
                             div()
                                 .w_full()
                                 .min_w_0()
-                                .text_size(px(10.5))
-                                .line_height(px(16.0))
+                                .text_size_px(10.5)
+                                .line_height(rems_from_px(16.0))
                                 .child(md::render::plain_text(
                                     content.clone(),
                                     md::render::MONO_FAMILY,

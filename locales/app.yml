@@ -115,7 +115,7 @@ settings.computer_use:
 settings.general_keywords:
   en: general local projects conversations privacy analytics telemetry anonymous sharing updates automatic sparkle version
 settings.appearance_keywords:
-  en: appearance theme system light dark language english chinese simplified
+  en: appearance theme system light dark font text size small default large language english chinese simplified
 settings.providers_keywords:
   en: providers agents models cli version install detect claude codex cursor opencode amp grok pi
 settings.skills:
@@ -140,6 +140,18 @@ settings.theme_light:
   en: Light
 settings.theme_dark:
   en: Dark
+settings.font_size:
+  en: Text size
+settings.font_size_description:
+  en: Adjust the size of text throughout Waku
+settings.font_size_small:
+  en: Small · 90%
+settings.font_size_default:
+  en: Default · 100%
+settings.font_size_large:
+  en: Large · 115%
+settings.font_size_extra_large:
+  en: Extra large · 130%
 
 input.do_anything:
   en: Do anything…

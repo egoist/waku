@@ -11,13 +11,14 @@ pub mod tooltip;
 
 use crate::model::{ActivityKind, ProviderKind, SessionStatus};
 use crate::theme::Theme;
+use crate::typography::{TextSizeExt, rems_from_px};
 
 /// A monochrome icon from the embedded set, tinted via text color.
 pub fn icon(path: &'static str, size: f32, color: Hsla) -> Svg {
     svg()
         .path(path)
-        .w(px(size))
-        .h(px(size))
+        .w(rems_from_px(size))
+        .h(rems_from_px(size))
         .flex_none()
         .text_color(color)
 }
@@ -26,7 +27,10 @@ pub fn icon(path: &'static str, size: f32, color: Hsla) -> Svg {
 /// are preserved. GPUI's `svg()` element intentionally renders an alpha mask
 /// tinted with one text color.
 pub fn file_icon(path: &'static str, size: f32) -> Img {
-    img(path).w(px(size)).h(px(size)).flex_none()
+    img(path)
+        .w(rems_from_px(size))
+        .h(rems_from_px(size))
+        .flex_none()
 }
 
 /// A compact ghost icon button: the only button shape outside the composer's
@@ -34,7 +38,9 @@ pub fn file_icon(path: &'static str, size: f32) -> Img {
 pub fn icon_button(id: impl Into<ElementId>, path: &'static str, theme: Theme) -> Stateful<Div> {
     div()
         .id(id)
-        .size(px(22.0))
+        .size(rems_from_px(22.0))
+        .min_w(px(22.0))
+        .min_h(px(22.0))
         .rounded(px(6.0))
         .flex()
         .items_center()
@@ -221,8 +227,8 @@ impl RenderOnce for MenuChip {
             .flex()
             .items_center()
             .gap(px(6.0))
-            .text_size(px(11.5))
-            .line_height(px(14.0))
+            .text_size_px(11.5)
+            .line_height(rems_from_px(14.0))
             .cursor_default()
             .focus_visible(|style| style.border_1().border_color(theme.accent))
             .when(self.outlined, |element| {

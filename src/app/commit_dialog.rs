@@ -513,7 +513,9 @@ impl Waku {
                 })
                 .child(
                     div()
-                        .size(px(15.0))
+                        .size(rems_from_px(15.0))
+                        .min_w(px(15.0))
+                        .min_h(px(15.0))
                         .rounded(px(4.0))
                         .border_1()
                         .border_color(if include_unstaged {
@@ -537,7 +539,7 @@ impl Waku {
                     div()
                         .min_w_0()
                         .flex_1()
-                        .text_size(px(14.0))
+                        .text_size_px(14.0)
                         .text_color(if include_enabled {
                             theme.text
                         } else {
@@ -551,7 +553,7 @@ impl Waku {
                         .flex()
                         .items_center()
                         .gap(px(6.0))
-                        .text_size(px(13.5))
+                        .text_size_px(13.5)
                         .font_weight(FontWeight::MEDIUM)
                         .child(
                             div()
@@ -672,7 +674,7 @@ impl Waku {
                     .flex()
                     .items_center()
                     .gap(px(9.0))
-                    .text_size(px(14.0))
+                    .text_size_px(14.0)
                     .text_color(theme.text)
                     .child(icon("icons/git-branch.svg", 15.0, theme.text))
                     .child(div().min_w_0().truncate().child(branch)),
@@ -682,8 +684,8 @@ impl Waku {
                     .h(px(112.0))
                     .px(px(16.0))
                     .py(px(10.0))
-                    .text_size(px(14.0))
-                    .line_height(px(21.0))
+                    .text_size_px(14.0)
+                    .line_height(rems_from_px(21.0))
                     .text_color(theme.text)
                     .child(message),
             )
@@ -693,8 +695,8 @@ impl Waku {
                     div()
                         .px(px(20.0))
                         .pb(px(10.0))
-                        .text_size(px(11.5))
-                        .line_height(px(16.0))
+                        .text_size_px(11.5)
+                        .line_height(rems_from_px(16.0))
                         .text_color(theme.danger)
                         .child(error),
                 )
@@ -784,7 +786,7 @@ fn render_commit_action_row(
         .items_center()
         .gap(px(10.0))
         .cursor_default()
-        .text_size(px(14.0))
+        .text_size_px(14.0)
         .text_color(foreground)
         .focus_visible(|style| style.border_1().border_color(theme.accent))
         .when(enabled, |row| {
@@ -804,7 +806,7 @@ fn render_commit_action_row(
                     .items_center()
                     .justify_center()
                     .bg(theme.overlay_strong)
-                    .text_size(px(11.5))
+                    .text_size_px(11.5)
                     .text_color(if enabled {
                         theme.text_secondary
                     } else {
