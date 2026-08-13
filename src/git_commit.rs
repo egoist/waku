@@ -289,6 +289,12 @@ fn agent_arguments(
                 push(&mut args, model);
             }
         }
+        ProviderKind::DeepSeek => {
+            // The headless profile is Harness's one-shot, stdout-only client.
+            // The commit prompt embeds all context and explicitly forbids tools.
+            push(&mut args, "--profile");
+            push(&mut args, "headless");
+        }
         ProviderKind::OpenCode => {
             push(&mut args, "run");
             push(&mut args, "--pure");
@@ -730,6 +736,9 @@ mod tests {
                     assert!(has(&args, "--print"));
                     assert!(has_pair(&args, "--mode", "ask"));
                     assert!(has_pair(&args, "--sandbox", "enabled"));
+                }
+                ProviderKind::DeepSeek => {
+                    assert!(has_pair(&args, "--profile", "headless"));
                 }
                 ProviderKind::Grok => {
                     assert!(has_pair(&args, "--single", prompt));

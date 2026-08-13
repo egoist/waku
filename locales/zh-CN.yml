@@ -271,6 +271,17 @@ mode.supervised_description: 执行命令或修改文件前先征求许可
 mode.auto_accept_edits_description: 自动批准文件修改，执行其他操作前先询问
 mode.auto_description: 由 AI 审核并批准常规操作；高风险操作仍会询问
 mode.full_access_description: 无需确认即可执行命令和修改文件
+agent_preset.standard: 标准模式
+agent_preset.code: 代码模式
+agent_preset.minimal: 极简模式
+agent_preset.creator: 创造模式
+agent_preset.standard_description: 功能完整的编码 Agent，支持文件编辑、Shell、文件与网页检索、Skills、计划、目标、子代理和工作流。
+agent_preset.code_description: 具备标准模式的全部能力，并通过 Code Mode SDK 提供工具，让模型在一个 TypeScript 程序中组合多步操作。
+agent_preset.minimal_description: 仅提供持久 bash 与 str_replace_editor 的双工具编码 Agent。
+agent_preset.creator_description: 用于创建自定义 Agent 预设：具备标准模式的全部能力，并提供运行时检查、插件实验和预设创作指导。
+agent_preset.custom: 自定义
+agent_preset.no_description: 暂无描述。
+agent_preset.minimal_no_plan: 极简模式不包含计划功能
 computer_use.allow_for_task: 本次任务允许
 computer_use.always_allow_app: 始终允许此应用
 computer_use.allow_control: 允许 Waku 控制“%{app}”吗？

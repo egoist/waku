@@ -665,6 +665,9 @@ impl Waku {
         if let Some(session) = self.selected_session_mut() {
             session.provider = provider;
             session.model = Some(model.clone());
+            if provider_changed {
+                session.agent_preset = None;
+            }
             session.reasoning_effort.clone_from(&reasoning_effort);
             session.service_tier.clone_from(&service_tier);
             self.state.last_provider = provider;
@@ -809,6 +812,38 @@ impl Waku {
             self.state.last_service_tier = Some(tier);
             self.remember_selected_model_traits();
             self.apply_session_options(session_id);
+            self.save();
+            cx.notify();
+        }
+    }
+
+    pub(super) fn set_agent_preset(&mut self, agent_preset: String, cx: &mut Context<Self>) {
+        let selectable = self
+            .provider_probe(ProviderKind::DeepSeek)
+            .is_some_and(|probe| {
+                probe
+                    .agent_presets
+                    .iter()
+                    .any(|preset| preset.id == agent_preset)
+            });
+        if !selectable {
+            return;
+        }
+        if let Some(session) = self.selected_session_mut()
+            && session.provider == ProviderKind::DeepSeek
+            && !session.has_started()
+            && !session.is_busy()
+            && session.agent_preset.as_deref() != Some(agent_preset.as_str())
+        {
+            let session_id = session.id;
+            if agent_preset == "minimal" {
+                session.interaction_mode = InteractionMode::Build;
+            }
+            session.agent_preset = Some(agent_preset);
+            // A provider cursor makes a session started, so this is normally a
+            // no-op. It also closes the narrow race where a blank runtime was
+            // prepared but had not reported its native session yet.
+            self.reset_session_runtime(session_id);
             self.save();
             cx.notify();
         }

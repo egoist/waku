@@ -76,6 +76,16 @@ impl Metrics {
         block_gap: 10.0,
     };
 
+    /// User-message scale. Markdown blocks keep the bubble's established body
+    /// geometry instead of making every existing plain prompt subtly reflow.
+    pub const USER_MESSAGE: Self = Self {
+        text_size: 14.0,
+        line_height: 20.0,
+        code_text_size: 11.5,
+        code_line_height: 17.5,
+        block_gap: 10.0,
+    };
+
     /// Compact scale for tool output and other secondary detail.
     pub const COMPACT: Self = Self {
         text_size: 11.5,

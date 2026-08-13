@@ -16,6 +16,12 @@ the original feature bullet instead of adding separate entries for them.
 
 ## [unreleased]
 
+## [0.0.13]
+
+- Add DeepSeek Harness provider
+- Render user message as Markdown and linkify bare URLs
+- Share one resident OpenCode serve per workspace across sessions
+
 ## [0.0.12]
 
 - Inherit the login-shell environment for provider commands

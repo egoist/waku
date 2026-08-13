@@ -291,6 +291,18 @@ mode.auto_accept_edits_description: 編集は自動承認し、その他の操�
 mode.auto_description: 通常の操作は AI レビュアーが承認し、リスクのある操作は事前に確認します
 mode.full_access_description: 確認なしでコマンドの実行と編集を許可します
 
+agent_preset.standard: 標準モード
+agent_preset.code: コードモード
+agent_preset.minimal: ミニマルモード
+agent_preset.creator: クリエイターモード
+agent_preset.standard_description: ファイル編集、シェル、ファイルと Web の検索、スキル、プランニング、ゴール、サブエージェント、ワークフローを備えた完全なコーディングエージェントです。
+agent_preset.code_description: 標準モードの全機能に加え、Code Mode SDK を通じてツールを提供し、モデルが複数の操作を一つの TypeScript プログラムにまとめられます。
+agent_preset.minimal_description: 永続 bash と str_replace_editor の二つだけを使うコーディングエージェントです。
+agent_preset.creator_description: カスタムエージェントプリセットの作成向けです。標準モードの全機能に加え、ランタイム検査、プラグイン実験、プリセット作成ガイドを備えます。
+agent_preset.custom: カスタム
+agent_preset.no_description: 説明はありません。
+agent_preset.minimal_no_plan: ミニマルモードにはプラン機能がありません
+
 computer_use.allow_for_task: このタスクで許可
 computer_use.always_allow_app: このアプリを常に許可
 computer_use.allow_control: Waku に「%{app}」の操作を許可しますか？

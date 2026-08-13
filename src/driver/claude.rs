@@ -134,6 +134,7 @@ impl ClaudeDriver {
             model,
             reasoning_effort,
             service_tier: _,
+            agent_preset: _,
             computer_use_enabled: _,
             provider_cursor,
         } = options;
@@ -1312,6 +1313,7 @@ mod tests {
                 model: None,
                 reasoning_effort: None,
                 service_tier: None,
+                agent_preset: None,
                 computer_use_enabled: false,
                 provider_cursor: None,
             },
@@ -1379,6 +1381,7 @@ mod tests {
                 model: Some("claude-haiku-4-5-20251001".into()),
                 reasoning_effort: None,
                 service_tier: None,
+                agent_preset: None,
                 computer_use_enabled: false,
                 provider_cursor: None,
             },
