@@ -525,6 +525,139 @@ pub struct Project {
     pub created_at: u64,
 }
 
+/// A user-created sidebar folder.
+///
+/// Folders are a filing device, not a container: a session names its folder,
+/// so removing a folder simply leaves its sessions unfiled.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct SessionFolder {
+    pub id: Uuid,
+    pub name: String,
+    /// Order shown in the sidebar.
+    #[serde(default)]
+    pub position: u32,
+    /// When the folder was created, unix seconds.
+    #[serde(default)]
+    pub created_at: u64,
+}
+
+impl SessionFolder {
+    pub fn new(name: String, position: u32) -> Self {
+        Self {
+            id: Uuid::new_v4(),
+            name,
+            position,
+            created_at: unix_time(),
+        }
+    }
+}
+
+/// What the sidebar's session groups mean.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum SidebarGrouping {
+    /// Calendar periods — today, yesterday, this week, and so on.
+    #[default]
+    Date,
+    /// One group per project the sessions belong to.
+    Project,
+    /// One group per user-created folder, plus everything still unfiled.
+    Folder,
+    /// No groups at all; one flat list in the current sort order.
+    Flat,
+}
+
+impl SidebarGrouping {
+    pub const ALL: [Self; 4] = [Self::Date, Self::Project, Self::Folder, Self::Flat];
+}
+
+/// How sessions are ordered inside each sidebar group.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum SidebarSort {
+    /// Most recent activity first, falling back to when the task was created.
+    #[default]
+    Recent,
+    /// Oldest activity first.
+    Oldest,
+    /// By displayed title, case-insensitively.
+    Title,
+    /// Sessions still working or waiting on the user first, each block in
+    /// recency order. For watching a fan-out of tasks rather than reading back.
+    Activity,
+    /// The order the user dragged sessions into. Sessions never moved by hand
+    /// keep their recency order below the ones that were.
+    Manual,
+}
+
+impl SidebarSort {
+    pub const ALL: [Self; 5] = [
+        Self::Recent,
+        Self::Oldest,
+        Self::Title,
+        Self::Activity,
+        Self::Manual,
+    ];
+}
+
+/// Which sessions the sidebar shows at all.
+///
+/// Filters compose: a session must satisfy every one that is set. Archived
+/// sessions are excluded unless [`Self::show_archived`] is on, whatever the
+/// other filters say.
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SidebarFilter {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<ProviderKind>,
+    /// Show only sessions that are mid-turn or waiting on the user.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub active_only: bool,
+    /// Hide sessions whose last activity is older than this many days. `None`
+    /// keeps the whole history.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_age_days: Option<u32>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub show_archived: bool,
+}
+
+impl SidebarFilter {
+    /// Cutoffs offered in the filter menu, in days.
+    pub const AGE_OPTIONS: [u32; 3] = [1, 7, 30];
+
+    /// Whether anything is narrowing the list, for the control's badge.
+    pub fn is_narrowed(&self) -> bool {
+        self.provider.is_some() || self.active_only || self.max_age_days.is_some()
+    }
+
+    /// `now` is passed in rather than read here so one pass over the sidebar
+    /// judges every session against the same instant.
+    pub fn matches(&self, session: &AgentSession, now: u64) -> bool {
+        if session.archived && !self.show_archived {
+            return false;
+        }
+        if self
+            .provider
+            .is_some_and(|provider| provider != session.provider)
+        {
+            return false;
+        }
+        if self.active_only && !session.is_busy() {
+            return false;
+        }
+        if let Some(days) = self.max_age_days {
+            let cutoff = u64::from(days) * 86_400;
+            // A session that is still working stays visible however old its
+            // conversation is; hiding live work would lose track of it.
+            let age = now.saturating_sub(session.last_reply_at.unwrap_or(session.created_at));
+            if age > cutoff && !session.is_busy() {
+                return false;
+            }
+        }
+        true
+    }
+}
+
 /// Filesystem context a task runs in.
 ///
 /// Drafts may carry [`Self::NewWorktree`] until their first prompt. Waku then
@@ -825,6 +958,21 @@ pub struct AgentSession {
     /// then refreshed when the turn settles, whatever its outcome.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_reply_at: Option<u64>,
+    /// Kept in the sidebar's sticky top section, above every other group.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub pinned: bool,
+    /// Filed out of the main sidebar list. An archived session is still
+    /// selectable and still streams; it is only hidden from the default view.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub archived: bool,
+    /// User-created folder this session belongs to. A folder that no longer
+    /// exists reads as unfiled, so deleting one never orphans a session.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub folder_id: Option<Uuid>,
+    /// Hand-picked position from a drag. `None` means the session has never
+    /// been moved by hand and falls back to whatever the sort says.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub position: Option<i64>,
     #[serde(default)]
     pub provider_cursor: Option<ProviderResumeCursor>,
     /// Slash commands the provider reported for this session's live process,
@@ -888,6 +1036,10 @@ impl AgentSession {
             created_at: now,
             updated_at: now,
             last_reply_at: None,
+            pinned: false,
+            archived: false,
+            folder_id: None,
+            position: None,
             detail_loaded: true,
             provider_cursor: None,
             available_commands: Vec::new(),

@@ -302,6 +302,78 @@ sidebar.days_ago:
   en: "%{count}d"
 sidebar.unknown_project:
   en: Unknown project
+sidebar.pinned:
+  en: Pinned
+sidebar.archived:
+  en: Archived
+sidebar.unfiled:
+  en: Unfiled
+sidebar.pin:
+  en: Pin
+sidebar.unpin:
+  en: Unpin
+sidebar.archive:
+  en: Archive
+sidebar.unarchive:
+  en: Unarchive
+sidebar.move_to_folder:
+  en: Move to Folder
+sidebar.no_folder:
+  en: No Folder
+sidebar.new_folder:
+  en: New Folder
+sidebar.new_folder_name:
+  en: New folder
+sidebar.delete_folder:
+  en: Delete Folder
+sidebar.add_project:
+  en: Add project
+sidebar.group_by:
+  en: Group by
+sidebar.group_by_date:
+  en: Date
+sidebar.group_by_project:
+  en: Project
+sidebar.group_by_folder:
+  en: Folder
+sidebar.group_by_none:
+  en: None
+sidebar.sort_by:
+  en: Sort by
+sidebar.sort_recent:
+  en: Most recent
+sidebar.sort_oldest:
+  en: Oldest first
+sidebar.sort_title:
+  en: Title
+sidebar.sort_activity:
+  en: Active first
+sidebar.last_active:
+  en: Last active
+sidebar.any_age:
+  en: Any time
+sidebar.age_day:
+  en: Past day
+sidebar.age_week:
+  en: Past week
+sidebar.age_month:
+  en: Past month
+sidebar.age_days:
+  en: Past %{count} days
+sidebar.filter:
+  en: Filter
+sidebar.filter_active:
+  en: Filter (active)
+sidebar.provider:
+  en: Agent
+sidebar.all_providers:
+  en: All agents
+sidebar.active_only:
+  en: Active only
+sidebar.show_archived:
+  en: Show archived
+sidebar.no_matching_sessions:
+  en: No tasks match the current filter.
 
 project.new_project:
   en: New project…
@@ -1613,3 +1685,11 @@ usage_error.unknown_error:
   en: unknown error
 usage_error.curl_no_status:
   en: curl returned no HTTP status line
+sidebar.sort_manual:
+  en: Custom order
+sidebar.drop_to_pin:
+  en: Drop to pin
+sidebar.drop_to_archive:
+  en: Drop to archive
+sidebar.drop_to_file:
+  en: Drop to file here

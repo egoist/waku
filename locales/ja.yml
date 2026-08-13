@@ -155,6 +155,42 @@ sidebar.minutes_ago: "%{count} 分前"
 sidebar.hours_ago: "%{count} 時間前"
 sidebar.days_ago: "%{count} 日前"
 sidebar.unknown_project: 不明なプロジェクト
+sidebar.pinned: ピン留め
+sidebar.archived: アーカイブ済み
+sidebar.unfiled: 未整理
+sidebar.pin: ピン留め
+sidebar.unpin: ピン留めを解除
+sidebar.archive: アーカイブ
+sidebar.unarchive: アーカイブを解除
+sidebar.move_to_folder: フォルダへ移動
+sidebar.no_folder: フォルダなし
+sidebar.new_folder: 新規フォルダ
+sidebar.new_folder_name: 新規フォルダ
+sidebar.delete_folder: フォルダを削除
+sidebar.add_project: プロジェクトを追加
+sidebar.group_by: グループ化
+sidebar.group_by_date: 日付
+sidebar.group_by_project: プロジェクト
+sidebar.group_by_folder: フォルダ
+sidebar.group_by_none: なし
+sidebar.sort_by: 並べ替え
+sidebar.sort_recent: 最近の順
+sidebar.sort_oldest: 古い順
+sidebar.sort_title: タイトル
+sidebar.sort_activity: 実行中を優先
+sidebar.last_active: 最終アクティビティ
+sidebar.any_age: すべての期間
+sidebar.age_day: 過去1日
+sidebar.age_week: 過去1週間
+sidebar.age_month: 過去1か月
+sidebar.age_days: 過去%{count}日
+sidebar.filter: フィルタ
+sidebar.filter_active: フィルタ (適用中)
+sidebar.provider: エージェント
+sidebar.all_providers: すべてのエージェント
+sidebar.active_only: 実行中のみ
+sidebar.show_archived: アーカイブを表示
+sidebar.no_matching_sessions: 条件に一致するタスクはありません。
 
 project.new_project: 新規プロジェクト…
 project.no_project: プロジェクトを使用しない
@@ -823,3 +859,7 @@ usage_error.curl_did_not_finish: curl がリクエストを完了しませんで
 usage_error.curl_failed: "curl に失敗しました：%{error}"
 usage_error.unknown_error: 不明なエラー
 usage_error.curl_no_status: curl から HTTP ステータス行が返されませんでした
+sidebar.sort_manual: カスタム順
+sidebar.drop_to_pin: ドロップでピン留め
+sidebar.drop_to_archive: ドロップでアーカイブ
+sidebar.drop_to_file: ドロップでここに追加

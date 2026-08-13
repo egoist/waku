@@ -77,6 +77,51 @@ pub fn reduce_motion_enabled() -> bool {
     false
 }
 
+/// The tick a trackpad gives when a drag snaps to a new target.
+///
+/// AppKit offers no intensity control — only three patterns, of which
+/// `Alignment` is the lightest. It is the one macOS itself uses for guides and
+/// snapping, which is exactly what a drop target is, so both the snap and the
+/// landing use it rather than the noticeably heavier `Generic`.
+///
+/// Hardware without a Force Touch trackpad simply feels nothing, and the
+/// system's own "Force Click and haptic feedback" setting is honored for us —
+/// `LevelChange` would be the one pattern that overrides it, so it is never
+/// used here.
+#[cfg(target_os = "macos")]
+pub fn haptic_alignment_tick() {
+    perform_haptic(objc2_app_kit::NSHapticFeedbackPattern::Alignment);
+}
+
+#[cfg(target_os = "macos")]
+pub fn haptic_drop_tick() {
+    perform_haptic(objc2_app_kit::NSHapticFeedbackPattern::Alignment);
+}
+
+#[cfg(target_os = "macos")]
+fn perform_haptic(pattern: objc2_app_kit::NSHapticFeedbackPattern) {
+    use objc2_app_kit::{
+        NSHapticFeedbackManager, NSHapticFeedbackPerformanceTime, NSHapticFeedbackPerformer,
+    };
+
+    // The performer must be used on the main thread, which is where every
+    // caller of this already runs: these are pointer gestures.
+    let performer = NSHapticFeedbackManager::defaultPerformer();
+    // `DrawCompleted` lets AppKit line the tap up with the frame that shows
+    // the result, instead of firing ahead of it — the same tap reads as
+    // softer when it is not early.
+    performer.performFeedbackPattern_performanceTime(
+        pattern,
+        NSHapticFeedbackPerformanceTime::DrawCompleted,
+    );
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn haptic_alignment_tick() {}
+
+#[cfg(not(target_os = "macos"))]
+pub fn haptic_drop_tick() {}
+
 /// Deliver an audible macOS notification. GPUI owns the notification-center
 /// delegate (and therefore click responses); Waku only supplies content here
 /// because GPUI's generic payload does not currently expose a sound field.
