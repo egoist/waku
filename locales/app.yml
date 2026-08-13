@@ -140,6 +140,24 @@ settings.theme_light:
   en: Light
 settings.theme_dark:
   en: Dark
+settings.theme_light_palette:
+  en: Light palette
+settings.theme_light_palette_description:
+  en: The palette used while the app is in light appearance
+settings.theme_dark_palette:
+  en: Dark palette
+settings.theme_dark_palette_description:
+  en: The palette used while the app is in dark appearance
+settings.theme_preview:
+  en: Preview
+settings.theme_preview_title:
+  en: Rename the theme tokens
+settings.theme_preview_body:
+  en: Surfaces, text tiers, accent and diff colors as they appear in a session.
+settings.theme_preview_action:
+  en: Send
+settings.theme_preview_caption:
+  en: waku/src/theme.rs
 
 input.do_anything:
   en: Do anything…

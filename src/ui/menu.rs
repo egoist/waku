@@ -188,6 +188,9 @@ struct MenuState {
     /// outside-click capture must leave that click alone so the later trigger
     /// handler can close it; a context-menu row has no such handler.
     trigger_click_toggles: bool,
+    /// AppKit is drawing this menu, so the site reports itself open — for a
+    /// trigger's pressed styling — while drawing no card of its own.
+    native: bool,
 }
 
 /// Cross-frame state for one context menu. The owner keeps one per menu site.
@@ -205,6 +208,11 @@ pub struct ContextMenuHandle {
     /// own on top.
     #[allow(clippy::type_complexity)]
     on_toggle: Rc<Vec<Rc<dyn Fn(bool, &mut Window, &mut App)>>>,
+    /// The site's item builder, recorded on every frame [`context_menu`]
+    /// renders, so a menu can also be raised from outside that call — a
+    /// keyboard trigger, or AppKit's own menu.
+    #[allow(clippy::type_complexity)]
+    items: Rc<RefCell<Option<Rc<dyn Fn(&mut App) -> Vec<MenuItem>>>>>,
 }
 
 impl ContextMenuHandle {
@@ -215,6 +223,7 @@ impl ContextMenuHandle {
             focus: cx.focus_handle(),
             trigger_bounds: Rc::new(Cell::new(None)),
             on_toggle: Rc::new(Vec::new()),
+            items: Rc::new(RefCell::new(None)),
         }
     }
 
@@ -257,6 +266,9 @@ impl ContextMenuHandle {
             .get()
             .map(|bounds| Point::new(bounds.left() + px(8.0), bounds.bottom()))
             .unwrap_or_else(|| window.mouse_position());
+        if open_native_menu(self, position, window, cx) {
+            return;
+        }
         open_menu(self, position, SurfaceFocus::Card, false, window, cx);
     }
 
@@ -267,6 +279,7 @@ impl ContextMenuHandle {
             state.open = None;
             state.highlighted = None;
             state.trigger_click_toggles = false;
+            state.native = false;
             was_open
         };
         if was_open {
@@ -349,6 +362,94 @@ fn open_menu(
         });
     }
     window.refresh();
+}
+
+/// Raise this site's menu as a real AppKit menu, returning whether it opened.
+///
+/// Falls back to the in-app card when there is no native window (tests), when
+/// the site has not rendered its item builder yet, or when the item list needs
+/// a drawn row that no `NSMenuItem` can carry.
+///
+/// AppKit's tracking loop blocks, so it runs from a foreground task rather than
+/// inside the event handler: by then GPUI holds no borrow, and the app keeps
+/// drawing and animating underneath the open menu.
+fn open_native_menu(
+    handle: &ContextMenuHandle,
+    position: Point<Pixels>,
+    window: &mut Window,
+    cx: &mut App,
+) -> bool {
+    // A test window has no platform window to ask, and answers the question by
+    // panicking rather than by failing, so it never gets asked.
+    if cfg!(test) {
+        return false;
+    }
+    let Some(native): Option<crate::platform::NativeContextMenu> =
+        crate::platform::prepare_context_menu(window)
+    else {
+        return false;
+    };
+    let Some(build) = handle.items.borrow().clone() else {
+        return false;
+    };
+    let items = build(cx);
+    if items
+        .iter()
+        .any(|item| matches!(item, MenuItem::Custom { .. }))
+    {
+        return false;
+    }
+
+    let entries: Vec<crate::platform::NativeMenuItem> = items
+        .iter()
+        .map(|item| match item {
+            MenuItem::Entry {
+                label,
+                selected,
+                disabled,
+                ..
+            } => crate::platform::NativeMenuItem {
+                label: label.to_string(),
+                enabled: !disabled,
+                checked: *selected,
+                separator: false,
+            },
+            MenuItem::Header(label) => crate::platform::NativeMenuItem {
+                label: label.to_string(),
+                enabled: false,
+                checked: false,
+                separator: false,
+            },
+            MenuItem::Separator | MenuItem::Custom { .. } => crate::platform::NativeMenuItem {
+                label: String::new(),
+                enabled: false,
+                checked: false,
+                separator: true,
+            },
+        })
+        .collect();
+    let actions: Vec<Option<Rc<dyn Fn(&mut Window, &mut App)>>> =
+        items.into_iter().map(MenuItem::click_handler).collect();
+
+    handle.open_at(position, false, window, cx);
+    handle.state.borrow_mut().native = true;
+    window.refresh();
+
+    let handle = handle.clone();
+    let mut async_window = window.to_async(cx);
+    cx.foreground_executor()
+        .spawn(async move {
+            let chosen = native.show(position, &entries);
+            let _ = async_window.update(|window, cx| {
+                handle.close(window, cx);
+                if let Some(action) = chosen.and_then(|index| actions[index].clone()) {
+                    action(window, cx);
+                }
+                window.refresh();
+            });
+        })
+        .detach();
+    true
 }
 
 /// A zero-cost canvas that records its parent's bounds into the handle.
@@ -844,7 +945,12 @@ where
     E: ParentElement + Styled + InteractiveElement + IntoElement + 'static,
 {
     let id: ElementId = id.into();
-    let open_at = handle.state.borrow().open;
+    let items: Rc<dyn Fn(&mut App) -> Vec<MenuItem>> = Rc::new(items);
+    *handle.items.borrow_mut() = Some(items.clone());
+    let (open_at, native) = {
+        let state = handle.state.borrow();
+        (state.open, state.native)
+    };
     let handle_for_down = handle.clone();
 
     let element = element
@@ -853,20 +959,22 @@ where
         .on_mouse_down(
             MouseButton::Right,
             move |event: &MouseDownEvent, window, cx| {
-                open_menu(
-                    &handle_for_down,
-                    event.position,
-                    SurfaceFocus::Card,
-                    false,
-                    window,
-                    cx,
-                );
+                if !open_native_menu(&handle_for_down, event.position, window, cx) {
+                    open_menu(
+                        &handle_for_down,
+                        event.position,
+                        SurfaceFocus::Card,
+                        false,
+                        window,
+                        cx,
+                    );
+                }
                 cx.stop_propagation();
                 window.prevent_default();
             },
         );
 
-    let Some(position) = open_at else {
+    let Some(position) = open_at.filter(|_| !native) else {
         return element.into_any_element();
     };
 
@@ -879,7 +987,7 @@ where
                     .child(MenuCard {
                         id,
                         handle: handle.clone(),
-                        items: Rc::new(items),
+                        items,
                     }),
             )
             .with_priority(1),
