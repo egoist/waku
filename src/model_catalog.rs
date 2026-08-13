@@ -49,17 +49,7 @@ pub fn fallback_models(provider: ProviderKind) -> Vec<ProviderModel> {
                 )
         })
         .collect(),
-        ProviderKind::Claude => vec![
-            claude_reasoning_model("claude-fable-5", "Claude Fable 5"),
-            claude_reasoning_model("claude-opus-5", "Claude Opus 5"),
-            claude_reasoning_model("claude-opus-4-8", "Claude Opus 4.8"),
-            claude_reasoning_model("claude-opus-4-7", "Claude Opus 4.7"),
-            claude_reasoning_model("claude-opus-4-6", "Claude Opus 4.6"),
-            claude_reasoning_model("claude-opus-4-5", "Claude Opus 4.5"),
-            claude_reasoning_model("claude-sonnet-5", "Claude Sonnet 5").default(),
-            claude_reasoning_model("claude-sonnet-4-6", "Claude Sonnet 4.6"),
-            ProviderModel::new("claude-haiku-4-5", "Claude Haiku 4.5"),
-        ],
+        ProviderKind::Claude => claude_fallback_models(),
         // Cursor's full catalog is account-specific and exposed by the
         // installed CLI. Auto remains the provider-owned default and keeps
         // older CLIs selectable if model discovery is unavailable.
@@ -715,6 +705,47 @@ fn claude_reasoning_model(id: &str, name: &str) -> ProviderModel {
     )
 }
 
+fn claude_reasoning_model_1m(id: &str, name: &str) -> ProviderModel {
+    claude_reasoning_model(&format!("{id}[1m]"), &format!("{name} · 1M"))
+}
+
+fn claude_fallback_models() -> Vec<ProviderModel> {
+    vec![
+        claude_reasoning_model_1m("claude-fable-5", "Claude Fable 5"),
+        claude_reasoning_model_1m("claude-opus-5", "Claude Opus 5"),
+        claude_reasoning_model("claude-opus-5", "Claude Opus 5"),
+        claude_reasoning_model_1m("claude-opus-4-8", "Claude Opus 4.8"),
+        claude_reasoning_model("claude-opus-4-8", "Claude Opus 4.8"),
+        claude_reasoning_model_1m("claude-opus-4-7", "Claude Opus 4.7"),
+        claude_reasoning_model("claude-opus-4-7", "Claude Opus 4.7"),
+        claude_reasoning_model_1m("claude-opus-4-6", "Claude Opus 4.6"),
+        claude_reasoning_model("claude-opus-4-6", "Claude Opus 4.6"),
+        claude_reasoning_model("claude-opus-4-5", "Claude Opus 4.5"),
+        claude_reasoning_model_1m("claude-sonnet-5", "Claude Sonnet 5").default(),
+        claude_reasoning_model("claude-sonnet-5", "Claude Sonnet 5"),
+        claude_reasoning_model_1m("claude-sonnet-4-6", "Claude Sonnet 4.6"),
+        claude_reasoning_model("claude-sonnet-4-6", "Claude Sonnet 4.6"),
+        ProviderModel::new("claude-haiku-4-5", "Claude Haiku 4.5"),
+    ]
+}
+
+/// Returns the request ID used for Claude's always-extended Fable 5 model.
+///
+/// Older Waku sessions persisted the bare Fable 5 ID. Keep those sessions and
+/// favorites pointing at the single picker entry while sending the explicit
+/// Claude Code selector required by gateways that do not infer 1M support.
+pub fn canonical_model_id(provider: ProviderKind, model: &str) -> String {
+    if provider == ProviderKind::Claude && model == "claude-fable-5" {
+        "claude-fable-5[1m]".to_owned()
+    } else {
+        model.to_owned()
+    }
+}
+
+pub fn model_ids_match(provider: ProviderKind, left: &str, right: &str) -> bool {
+    canonical_model_id(provider, left) == canonical_model_id(provider, right)
+}
+
 fn recv_rpc_response(rx: &Receiver<Value>, id: u64, timeout: Duration) -> Option<Value> {
     let deadline = Instant::now() + timeout;
     loop {
@@ -883,6 +914,72 @@ mod tests {
         assert_eq!(models.len(), 1);
         assert_eq!(models[0].id, "auto");
         assert!(models[0].is_default);
+    }
+
+    #[test]
+    fn claude_catalog_exposes_supported_1m_variants() {
+        let models = fallback_models(ProviderKind::Claude);
+        let ids = models
+            .iter()
+            .map(|model| model.id.as_str())
+            .collect::<Vec<_>>();
+
+        for model in [
+            "claude-fable-5",
+            "claude-opus-5",
+            "claude-opus-4-8",
+            "claude-opus-4-7",
+            "claude-opus-4-6",
+            "claude-sonnet-5",
+            "claude-sonnet-4-6",
+        ] {
+            let extended_id = format!("{model}[1m]");
+            assert!(ids.iter().any(|id| *id == extended_id.as_str()));
+        }
+
+        assert!(!ids.contains(&"claude-fable-5"));
+        for model in [
+            "claude-opus-5",
+            "claude-opus-4-8",
+            "claude-opus-4-7",
+            "claude-opus-4-6",
+            "claude-sonnet-5",
+            "claude-sonnet-4-6",
+        ] {
+            assert!(ids.contains(&model));
+        }
+
+        assert!(!ids.contains(&"claude-opus-4-5[1m]"));
+        assert!(!ids.contains(&"claude-haiku-4-5[1m]"));
+        assert_eq!(
+            models
+                .iter()
+                .find(|model| model.is_default)
+                .map(|model| model.id.as_str()),
+            Some("claude-sonnet-5[1m]")
+        );
+    }
+
+    #[test]
+    fn canonicalizes_legacy_fable_model_without_merging_other_variants() {
+        assert_eq!(
+            canonical_model_id(ProviderKind::Claude, "claude-fable-5"),
+            "claude-fable-5[1m]"
+        );
+        assert!(model_ids_match(
+            ProviderKind::Claude,
+            "claude-fable-5",
+            "claude-fable-5[1m]"
+        ));
+        assert!(!model_ids_match(
+            ProviderKind::Claude,
+            "claude-opus-5",
+            "claude-opus-5[1m]"
+        ));
+        assert_eq!(
+            canonical_model_id(ProviderKind::Codex, "gpt-5.5"),
+            "gpt-5.5"
+        );
     }
 
     #[test]

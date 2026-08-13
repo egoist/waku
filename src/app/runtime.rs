@@ -926,12 +926,21 @@ impl Waku {
         })
     }
 
+    pub(super) fn model_id_for_request(&self, session: &AgentSession) -> Option<String> {
+        self.model_for_session(session)
+            .map(|model| crate::model_catalog::canonical_model_id(session.provider, model))
+    }
+
     pub(super) fn model_display_name(&self, provider: ProviderKind, model: Option<&str>) -> String {
         let Some(model) = model else {
             return provider.short_name().to_owned();
         };
         self.provider_probe(provider)
-            .and_then(|probe| probe.models.iter().find(|candidate| candidate.id == model))
+            .and_then(|probe| {
+                probe.models.iter().find(|candidate| {
+                    crate::model_catalog::model_ids_match(provider, &candidate.id, model)
+                })
+            })
             .map(|candidate| candidate.name.clone())
             .unwrap_or_else(|| model.to_owned())
     }
@@ -944,7 +953,9 @@ impl Waku {
         self.provider_probe(session.provider)?
             .models
             .iter()
-            .find(|candidate| candidate.id == model)
+            .find(|candidate| {
+                crate::model_catalog::model_ids_match(session.provider, &candidate.id, model)
+            })
     }
 
     pub(super) fn selected_transcript_blocks(&self) -> &[TranscriptBlock] {
@@ -1873,11 +1884,7 @@ impl Waku {
     /// and in-session option changes both go through this so they cannot
     /// disagree about what the session is currently set to.
     pub(super) fn session_options(&self, session: &AgentSession) -> SessionOptions {
-        let model = session.model.clone().or_else(|| {
-            self.provider_probe(session.provider)
-                .and_then(ProviderProbe::preferred_model)
-                .map(|model| model.id.clone())
-        });
+        let model = self.model_id_for_request(session);
         let model_metadata = self.model_metadata_for_session(session);
         let reasoning_effort = session.reasoning_effort.clone().filter(|effort| {
             model_metadata.is_some_and(|model| {
