@@ -261,12 +261,20 @@ pub fn start_window_move(window: &Window) {
     window.start_window_move();
 }
 
+/// Whether the user has asked the system to reduce transparency. Read live so
+/// a change in System Settings is honored at the next theme application.
+#[cfg(target_os = "macos")]
+fn reduce_transparency() -> bool {
+    use objc2_app_kit::NSWorkspace;
+    NSWorkspace::sharedWorkspace().accessibilityDisplayShouldReduceTransparency()
+}
+
 /// Match Cursor's macOS glass window stack without asking GPUI's transparent
 /// Metal target to blend two translucent quads. The semantic tint is a native
 /// view above active Sidebar vibrancy; GPUI paints clear sidebar chrome and one
 /// translucent interaction layer above it.
 #[cfg(target_os = "macos")]
-pub fn configure_sidebar_material(window: &Window, dark: bool) {
+pub fn configure_sidebar_material(window: &Window, dark: bool, tint: gpui::Hsla) {
     use objc2::{MainThreadMarker, MainThreadOnly};
     use objc2_app_kit::{
         NSAutoresizingMaskOptions, NSColor, NSView, NSVisualEffectBlendingMode,
@@ -291,8 +299,14 @@ pub fn configure_sidebar_material(window: &Window, dark: bool) {
         let Some(native_window) = view.window() else {
             return;
         };
+        let backdrop = gpui::Rgba::from(tint);
         let background = if dark {
-            NSColor::colorWithSRGBRed_green_blue_alpha(0.0, 0.0, 0.0, 0.25)
+            NSColor::colorWithSRGBRed_green_blue_alpha(
+                f64::from(backdrop.r),
+                f64::from(backdrop.g),
+                f64::from(backdrop.b),
+                0.25,
+            )
         } else {
             NSColor::colorWithSRGBRed_green_blue_alpha(1.0, 1.0, 1.0, 0.0)
         };
@@ -316,8 +330,17 @@ pub fn configure_sidebar_material(window: &Window, dark: bool) {
             return;
         }
 
-        let channel = if dark { 0x18 } else { 0xF3 } as f64 / 255.0;
-        let tint = NSColor::colorWithSRGBRed_green_blue_alpha(channel, channel, channel, 0.92);
+        // The palette owns this color. Vibrancy still shows through, and the
+        // system's reduce-transparency setting closes that gap entirely rather
+        // than leaving the sidebar the one surface a theme cannot reach.
+        let tint = gpui::Rgba::from(tint);
+        let opacity = if reduce_transparency() { 1.0 } else { 0.92 };
+        let tint = NSColor::colorWithSRGBRed_green_blue_alpha(
+            f64::from(tint.r),
+            f64::from(tint.g),
+            f64::from(tint.b),
+            opacity,
+        );
 
         SIDEBAR_TINT_VIEW.with_borrow_mut(|slot| {
             let needs_new_view = slot.as_ref().is_none_or(|tint_view| {
@@ -348,7 +371,7 @@ pub fn configure_sidebar_material(window: &Window, dark: bool) {
 }
 
 #[cfg(not(target_os = "macos"))]
-pub fn configure_sidebar_material(_: &Window, _: bool) {}
+pub fn configure_sidebar_material(_: &Window, _: bool, _: gpui::Hsla) {}
 
 #[cfg(target_os = "macos")]
 pub fn set_sidebar_material_width(window: &Window, width: f32) {
