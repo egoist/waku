@@ -12,17 +12,19 @@ pub enum ProviderKind {
     #[default]
     Codex,
     Cursor,
+    DeepSeek,
     OpenCode,
     Grok,
     Pi,
 }
 
 impl ProviderKind {
-    pub const ALL: [Self; 7] = [
+    pub const ALL: [Self; 8] = [
         Self::Amp,
         Self::Claude,
         Self::Codex,
         Self::Cursor,
+        Self::DeepSeek,
         Self::OpenCode,
         Self::Grok,
         Self::Pi,
@@ -34,6 +36,7 @@ impl ProviderKind {
             Self::Claude => "claude",
             Self::Codex => "codex",
             Self::Cursor => "cursor",
+            Self::DeepSeek => "deepseek",
             Self::OpenCode => "opencode",
             Self::Grok => "grok",
             Self::Pi => "pi",
@@ -46,6 +49,7 @@ impl ProviderKind {
             Self::Claude => "Claude Code",
             Self::Codex => "Codex CLI",
             Self::Cursor => "Cursor CLI",
+            Self::DeepSeek => "DeepSeek Harness",
             Self::OpenCode => "OpenCode",
             Self::Grok => "Grok Build",
             Self::Pi => "Pi",
@@ -58,6 +62,7 @@ impl ProviderKind {
             Self::Claude => "Claude",
             Self::Codex => "Codex",
             Self::Cursor => "Cursor",
+            Self::DeepSeek => "DeepSeek",
             Self::OpenCode => "OpenCode",
             Self::Grok => "Grok",
             Self::Pi => "Pi",
@@ -72,6 +77,7 @@ impl ProviderKind {
             // Cursor documents `agent` as its primary command, but that name is
             // shared by other CLIs. The backward-compatible alias is unambiguous.
             Self::Cursor => "cursor-agent",
+            Self::DeepSeek => "dsh",
             Self::OpenCode => "opencode",
             Self::Grok => "grok",
             Self::Pi => "pi",
@@ -85,6 +91,7 @@ impl ProviderKind {
                 | Self::Claude
                 | Self::Codex
                 | Self::Cursor
+                | Self::DeepSeek
                 | Self::OpenCode
                 | Self::Grok
                 | Self::Pi
@@ -98,6 +105,7 @@ impl ProviderKind {
                 | Self::Claude
                 | Self::Codex
                 | Self::Cursor
+                | Self::DeepSeek
                 | Self::OpenCode
                 | Self::Grok
                 | Self::Pi
@@ -107,7 +115,7 @@ impl ProviderKind {
     pub fn supports_model_discovery(self) -> bool {
         matches!(
             self,
-            Self::Codex | Self::Cursor | Self::OpenCode | Self::Grok | Self::Pi
+            Self::Codex | Self::Cursor | Self::DeepSeek | Self::OpenCode | Self::Grok | Self::Pi
         )
     }
 }
@@ -140,6 +148,9 @@ pub enum ProviderResumeCursor {
     OpenCode {
         session_id: String,
     },
+    DeepSeek {
+        session_id: String,
+    },
     Grok {
         session_id: String,
     },
@@ -166,6 +177,7 @@ impl ProviderResumeCursor {
                 session_id: id,
                 fork_context: None,
             },
+            ProviderKind::DeepSeek => Self::DeepSeek { session_id: id },
             ProviderKind::OpenCode => Self::OpenCode { session_id: id },
             ProviderKind::Grok => Self::Grok { session_id: id },
             ProviderKind::Pi => Self::Pi {
@@ -181,6 +193,7 @@ impl ProviderResumeCursor {
             Self::Claude { .. } => ProviderKind::Claude,
             Self::Codex { .. } => ProviderKind::Codex,
             Self::Cursor { .. } => ProviderKind::Cursor,
+            Self::DeepSeek { .. } => ProviderKind::DeepSeek,
             Self::OpenCode { .. } => ProviderKind::OpenCode,
             Self::Grok { .. } => ProviderKind::Grok,
             Self::Pi { .. } => ProviderKind::Pi,
@@ -192,6 +205,7 @@ impl ProviderResumeCursor {
             Self::Amp { thread_id, .. } => thread_id,
             Self::Claude { session_id, .. }
             | Self::Cursor { session_id, .. }
+            | Self::DeepSeek { session_id }
             | Self::OpenCode { session_id }
             | Self::Grok { session_id }
             | Self::Pi { session_id, .. } => session_id,
@@ -317,6 +331,77 @@ pub struct FavoriteModel {
     pub model: String,
 }
 
+/// One provider-owned agent composition available when a task starts.
+///
+/// DeepSeek Harness calls these agent presets. They are intentionally kept
+/// separate from [`InteractionMode`]: a preset chooses the tools and prompt
+/// composition, while Build/Plan controls what that composition should do.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ProviderAgentPreset {
+    pub id: String,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub is_default: bool,
+    #[serde(default)]
+    pub is_custom: bool,
+}
+
+impl ProviderAgentPreset {
+    pub fn new(id: impl Into<String>, name: impl Into<String>) -> Self {
+        Self {
+            id: id.into(),
+            name: name.into(),
+            description: None,
+            is_default: false,
+            is_custom: false,
+        }
+    }
+
+    pub fn description(mut self, description: impl Into<String>) -> Self {
+        let description = description.into();
+        if !description.trim().is_empty() {
+            self.description = Some(description);
+        }
+        self
+    }
+
+    pub fn default(mut self) -> Self {
+        self.is_default = true;
+        self
+    }
+
+    /// Harness localizes its four shipped presets in the Web client rather
+    /// than in the Host roster, whose metadata may use the install language.
+    /// Mirror that boundary while leaving user-authored metadata untouched.
+    pub fn display_name(&self) -> String {
+        if !self.is_custom {
+            match self.id.as_str() {
+                "standard" => return tr!("agent_preset.standard"),
+                "code" => return tr!("agent_preset.code"),
+                "minimal" => return tr!("agent_preset.minimal"),
+                "cordis" => return tr!("agent_preset.creator"),
+                _ => {}
+            }
+        }
+        self.name.clone()
+    }
+
+    pub fn display_description(&self) -> Option<String> {
+        if !self.is_custom {
+            match self.id.as_str() {
+                "standard" => return Some(tr!("agent_preset.standard_description")),
+                "code" => return Some(tr!("agent_preset.code_description")),
+                "minimal" => return Some(tr!("agent_preset.minimal_description")),
+                "cordis" => return Some(tr!("agent_preset.creator_description")),
+                _ => {}
+            }
+        }
+        self.description.clone()
+    }
+}
+
 impl ProviderModel {
     pub fn new(id: impl Into<String>, name: impl Into<String>) -> Self {
         Self {
@@ -369,6 +454,8 @@ pub struct ProviderProbe {
     pub path: Option<PathBuf>,
     #[serde(default)]
     pub models: Vec<ProviderModel>,
+    #[serde(default)]
+    pub agent_presets: Vec<ProviderAgentPreset>,
 }
 
 impl ProviderProbe {
@@ -379,6 +466,7 @@ impl ProviderProbe {
             installed: path.is_some(),
             path,
             models: crate::model_catalog::fallback_models(provider),
+            agent_presets: crate::model_catalog::fallback_agent_presets(provider),
         }
     }
 
@@ -392,6 +480,7 @@ impl ProviderProbe {
             installed: path.is_some(),
             path,
             models: crate::model_catalog::fallback_models(provider),
+            agent_presets: crate::model_catalog::fallback_agent_presets(provider),
         }
     }
 
@@ -399,7 +488,10 @@ impl ProviderProbe {
         if self.provider.supports_model_discovery()
             && let Some(path) = self.path.as_deref()
         {
-            self.models = crate::model_catalog::discover_models(self.provider, path);
+            let (models, agent_presets) =
+                crate::model_catalog::discover_catalog(self.provider, path);
+            self.models = models;
+            self.agent_presets = agent_presets;
         }
         self
     }
@@ -409,6 +501,13 @@ impl ProviderProbe {
             .iter()
             .find(|model| model.is_default)
             .or_else(|| self.models.first())
+    }
+
+    pub fn preferred_agent_preset(&self) -> Option<&ProviderAgentPreset> {
+        self.agent_presets
+            .iter()
+            .find(|preset| preset.is_default)
+            .or_else(|| self.agent_presets.first())
     }
 }
 
@@ -664,6 +763,11 @@ pub struct AgentSession {
     pub reasoning_effort: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub service_tier: Option<String>,
+    /// Provider-owned agent composition selected before the first turn.
+    /// Currently populated by DeepSeek Harness; unlike Build/Plan, Harness
+    /// locks this value once conversation history exists.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_preset: Option<String>,
     pub status: SessionStatus,
     pub created_at: u64,
     /// Any mutation, including title edits and truncation. Use
@@ -730,6 +834,7 @@ impl AgentSession {
             interaction_mode: InteractionMode::Build,
             reasoning_effort: None,
             service_tier: None,
+            agent_preset: None,
             status: SessionStatus::Idle,
             created_at: now,
             updated_at: now,
@@ -1378,6 +1483,10 @@ pub enum DriverEvent {
     Connected {
         provider_cursor: Option<ProviderResumeCursor>,
     },
+    /// The provider-owned agent composition this session actually runs. A
+    /// fresh Harness session may resolve its deployment default when Waku did
+    /// not name one explicitly, so the driver reports the resolved value.
+    AgentPresetSelected(Option<String>),
     /// A provider-owned, automatically generated session title. `None`
     /// clears that fallback but never overwrites a user-owned title.
     AutoTitleUpdated(Option<String>),
@@ -2535,6 +2644,17 @@ mod tests {
                 1,
             ),
             (
+                ProviderKind::DeepSeek,
+                serde_json::json!({
+                    "path": "src/deepseek.rs",
+                    "oldText": "old",
+                    "newText": "new\nmore"
+                }),
+                "src/deepseek.rs",
+                2,
+                1,
+            ),
+            (
                 ProviderKind::OpenCode,
                 serde_json::json!({
                     "filePath": "src/opencode.rs",
@@ -2692,6 +2812,7 @@ mod tests {
         assert_eq!(ProviderKind::Claude.id(), "claude");
         assert_eq!(ProviderKind::Codex.command(), "codex");
         assert_eq!(ProviderKind::Cursor.command(), "cursor-agent");
+        assert_eq!(ProviderKind::DeepSeek.command(), "dsh");
         assert_eq!(ProviderKind::OpenCode.command(), "opencode");
         assert_eq!(ProviderKind::Grok.command(), "grok");
         assert_eq!(ProviderKind::Pi.command(), "pi");
@@ -2704,6 +2825,7 @@ mod tests {
             ProviderKind::Claude,
             ProviderKind::Codex,
             ProviderKind::Cursor,
+            ProviderKind::DeepSeek,
             ProviderKind::OpenCode,
             ProviderKind::Grok,
             ProviderKind::Pi,
@@ -2719,6 +2841,7 @@ mod tests {
         assert!(!ProviderKind::Claude.supports_model_discovery());
         assert!(ProviderKind::Codex.supports_model_discovery());
         assert!(ProviderKind::Cursor.supports_model_discovery());
+        assert!(ProviderKind::DeepSeek.supports_model_discovery());
         assert!(ProviderKind::OpenCode.supports_model_discovery());
         assert!(ProviderKind::Grok.supports_model_discovery());
         assert!(ProviderKind::Pi.supports_model_discovery());

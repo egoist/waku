@@ -10,8 +10,17 @@
 //! non-locally, so a source containing one drops back to full reparses.
 
 use std::ops::Range;
+use std::sync::LazyLock;
 
 use pulldown_cmark::{Alignment, CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag};
+use regex::Regex;
+
+/// CommonMark only recognizes angle-bracket autolinks. Transcript content is
+/// conversational, so bare web URLs should be useful without requiring the
+/// author to write `<https://...>` or `[label](https://...)`.
+static BARE_WEB_URL: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#"(?i)\bhttps?://[^\s<>"`\\]+"#).expect("bare web URL regex should compile")
+});
 
 // ── Tree model ─────────────────────────────────────────────────────────────
 
@@ -545,6 +554,48 @@ fn parse_inline_event(cursor: &mut Cursor, pieces: &mut Vec<InlinePiece>, style:
     }
 }
 
+/// Sentence punctuation and unmatched closing delimiters are prose around a
+/// URL, not part of it. Balanced delimiters remain valid URL characters, as in
+/// Wikipedia paths ending in `(disambiguation)`.
+fn trimmed_bare_url_end(text: &str, start: usize, candidate_end: usize) -> usize {
+    let mut end = candidate_end;
+    let mut parens = delimiter_balance(&text[start..end], '(', ')');
+    let mut brackets = delimiter_balance(&text[start..end], '[', ']');
+    let mut braces = delimiter_balance(&text[start..end], '{', '}');
+    loop {
+        let Some((offset, last)) = text[start..end].char_indices().next_back() else {
+            return start;
+        };
+        let last_index = start + offset;
+        let should_trim = match last {
+            '.' | ',' | ':' | ';' | '?' | '!' | '\'' => true,
+            ')' if parens < 0 => {
+                parens += 1;
+                true
+            }
+            ']' if brackets < 0 => {
+                brackets += 1;
+                true
+            }
+            '}' if braces < 0 => {
+                braces += 1;
+                true
+            }
+            _ => false,
+        };
+        if !should_trim {
+            return end;
+        }
+        end = last_index;
+    }
+}
+
+fn delimiter_balance(text: &str, open: char, close: char) -> i32 {
+    text.chars().fold(0, |balance, character| {
+        balance + i32::from(character == open) - i32::from(character == close)
+    })
+}
+
 /// Coalesce neighbouring runs that share a style, leaving images in place.
 fn merge_pieces(pieces: Vec<InlinePiece>) -> Vec<InlinePiece> {
     let mut merged: Vec<InlinePiece> = Vec::with_capacity(pieces.len());
@@ -560,7 +611,55 @@ fn merge_pieces(pieces: Vec<InlinePiece>) -> Vec<InlinePiece> {
             image => merged.push(image),
         }
     }
-    merged
+    linkify_bare_urls(merged)
+}
+
+/// Linkify after Markdown has produced and merged its inline runs. Pulldown
+/// can split ordinary text at potential emphasis punctuation inside a URL;
+/// merging first lets the detector recover the whole displayed target.
+fn linkify_bare_urls(pieces: Vec<InlinePiece>) -> Vec<InlinePiece> {
+    let mut linked = Vec::with_capacity(pieces.len());
+    for piece in pieces {
+        match piece {
+            InlinePiece::Run(run) if !run.style.code && run.style.link.is_none() => {
+                push_linkified_run(run, &mut linked);
+            }
+            piece => linked.push(piece),
+        }
+    }
+    linked
+}
+
+fn push_linkified_run(run: InlineRun, pieces: &mut Vec<InlinePiece>) {
+    let mut cursor = 0;
+    for candidate in BARE_WEB_URL.find_iter(&run.text) {
+        let end = trimmed_bare_url_end(&run.text, candidate.start(), candidate.end());
+        if end <= candidate.start() {
+            continue;
+        }
+        if cursor < candidate.start() {
+            pieces.push(InlinePiece::Run(InlineRun {
+                text: run.text[cursor..candidate.start()].to_owned(),
+                style: run.style.clone(),
+            }));
+        }
+
+        let url = &run.text[candidate.start()..end];
+        let mut link_style = run.style.clone();
+        link_style.link = Some(url.to_owned());
+        pieces.push(InlinePiece::Run(InlineRun {
+            text: url.to_owned(),
+            style: link_style,
+        }));
+        cursor = end;
+    }
+
+    if cursor < run.text.len() {
+        pieces.push(InlinePiece::Run(InlineRun {
+            text: run.text[cursor..].to_owned(),
+            style: run.style,
+        }));
+    }
 }
 
 /// Coalesce neighbouring runs that share a style, so shaping sees the fewest
@@ -805,6 +904,62 @@ mod tests {
 
         // Adjacent identically styled runs are coalesced.
         assert_eq!(runs[0].text, "plain ");
+    }
+
+    #[test]
+    fn bare_web_urls_become_links_without_swallowing_prose_punctuation() {
+        let tree = parse(
+            "See https://example.com/docs?q=one, then \
+             (https://en.wikipedia.org/wiki/Rust_(programming_language)).",
+        );
+        let Block::Paragraph { runs } = &tree.blocks[0].block else {
+            panic!("expected a paragraph");
+        };
+        let links = runs
+            .iter()
+            .filter_map(|run| {
+                run.style
+                    .link
+                    .as_deref()
+                    .map(|target| (run.text.as_str(), target))
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            links,
+            vec![
+                (
+                    "https://example.com/docs?q=one",
+                    "https://example.com/docs?q=one"
+                ),
+                (
+                    "https://en.wikipedia.org/wiki/Rust_(programming_language)",
+                    "https://en.wikipedia.org/wiki/Rust_(programming_language)"
+                ),
+            ]
+        );
+        assert_eq!(
+            paragraph_text(&tree.blocks[0].block),
+            "See https://example.com/docs?q=one, then \
+             (https://en.wikipedia.org/wiki/Rust_(programming_language))."
+        );
+    }
+
+    #[test]
+    fn explicit_links_and_inline_code_are_not_relinkified() {
+        let tree =
+            parse("[docs at https://example.com](https://waku.gg) and `https://example.com/code`");
+        let Block::Paragraph { runs } = &tree.blocks[0].block else {
+            panic!("expected a paragraph");
+        };
+
+        assert!(runs.iter().any(|run| {
+            run.text == "docs at https://example.com"
+                && run.style.link.as_deref() == Some("https://waku.gg")
+        }));
+        assert!(runs.iter().any(|run| {
+            run.text == "https://example.com/code" && run.style.code && run.style.link.is_none()
+        }));
     }
 
     #[test]

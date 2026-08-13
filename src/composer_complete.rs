@@ -328,7 +328,8 @@ pub fn discover_slash_commands(provider: ProviderKind, project_root: &Path) -> V
                 scan_skill_files(&home.join(".config/agents/skills"), &mut commands);
             }
         }
-        ProviderKind::Grok => {}
+        // Harness commands are session-scoped and reported live by the Host.
+        ProviderKind::DeepSeek | ProviderKind::Grok => {}
     }
     // The cross-tool skill standard, read by Amp and OpenCode among others;
     // Waku lists it for every provider.

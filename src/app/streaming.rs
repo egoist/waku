@@ -240,6 +240,11 @@ impl Waku {
                     }
                 }
             }
+            DriverEvent::AgentPresetSelected(agent_preset) => {
+                if let Some(session) = self.state.session_mut(session_id) {
+                    session.agent_preset = agent_preset;
+                }
+            }
             DriverEvent::AutoTitleUpdated(title) => {
                 if let Some(session) = self.state.session_mut(session_id) {
                     session.set_auto_title(title);
