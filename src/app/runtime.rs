@@ -2174,6 +2174,14 @@ impl Waku {
         cx.notify();
     }
 
+    pub(super) fn resume_queue_after_stop(&mut self, session_id: Uuid, cx: &mut Context<Self>) {
+        if self.ending_checkpoint_pending(session_id) {
+            self.defer_queue_drain(session_id);
+        } else {
+            self.drain_queued_message(session_id, cx);
+        }
+    }
+
     /// Start the next queued follow-up as a fresh turn. Only called once a
     /// settled turn has been fully closed, so the session is Idle.
     fn drain_queued_message(&mut self, session_id: Uuid, cx: &mut Context<Self>) {

@@ -18,7 +18,7 @@
 //! against the real CLI; the attribute is in the manual's Streaming JSON
 //! section.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Command, Stdio};
 use std::sync::Arc;
@@ -32,10 +32,14 @@ use parking_lot::Mutex;
 use serde_json::{Value, json};
 
 use super::activity;
+use super::support::subagent_item;
 use crate::driver::{
     DriverControl, DriverEventSender, DriverEventSink, DriverStartOptions, SessionOptions,
 };
-use crate::model::{ActivityKind, DriverEvent, InteractionMode, ProviderResumeCursor, RuntimeMode};
+use crate::model::{
+    ActivityKind, BackgroundWorkEvent, BackgroundWorkItem, BackgroundWorkKind,
+    BackgroundWorkStatus, DriverEvent, InteractionMode, ProviderResumeCursor, RuntimeMode,
+};
 
 enum CommandMessage {
     Prompt(String),
@@ -404,6 +408,9 @@ fn write_line(writer: &mut impl Write, value: &Value) -> std::io::Result<()> {
 #[derive(Default)]
 struct AmpStreamState {
     tools: HashMap<String, (ActivityKind, String)>,
+    /// Tool-use ids of calls that launched a subagent, so the matching result
+    /// settles that subagent rather than looking like an ordinary tool return.
+    subagents: HashSet<String>,
     thread_id: Option<String>,
 }
 
@@ -471,6 +478,26 @@ fn handle_message(
                                 activity::input_title(block.get("input")).unwrap_or(wire_title);
                             if let Some(id) = &id {
                                 state.tools.insert(id.clone(), (kind, title.clone()));
+                                // Amp declares `parent_tool_use_id` but always
+                                // sends null, so the spawning call is the only
+                                // handle on a subagent. Surface it as live work
+                                // now; the tool result settles it.
+                                if let Some(launch) = super::support::subagent_launch(
+                                    block
+                                        .get("name")
+                                        .and_then(Value::as_str)
+                                        .unwrap_or_default(),
+                                    block.get("input"),
+                                ) {
+                                    state.subagents.insert(id.clone());
+                                    let _ = events.send(DriverEvent::BackgroundWork(
+                                        BackgroundWorkEvent::Upsert(subagent_item(
+                                            id,
+                                            &launch,
+                                            BackgroundWorkStatus::Running,
+                                        )),
+                                    ));
+                                }
                             }
                             let _ =
                                 events.send(DriverEvent::RichActivity(activity::tool_activity(
@@ -521,6 +548,24 @@ fn handle_message(
                     .and_then(|id| state.tools.remove(id))
                     .unwrap_or((ActivityKind::Tool, "Tool".to_owned()));
                 let failed = block.get("is_error").and_then(Value::as_bool) == Some(true);
+                if let Some(id) = id.as_ref().filter(|id| state.subagents.remove(*id)) {
+                    let mut item = BackgroundWorkItem::new(
+                        BackgroundWorkKind::Subagent,
+                        id.clone(),
+                        String::new(),
+                        if failed {
+                            BackgroundWorkStatus::Failed
+                        } else {
+                            BackgroundWorkStatus::Completed
+                        },
+                    );
+                    // The subagent's report is the tool result; Amp streams
+                    // nothing from inside the child thread.
+                    item.output = block.get("content").and_then(activity::format_output);
+                    let _ = events.send(DriverEvent::BackgroundWork(BackgroundWorkEvent::Upsert(
+                        item,
+                    )));
+                }
                 let _ = events.send(DriverEvent::RichActivity(activity::tool_activity(
                     id,
                     kind,

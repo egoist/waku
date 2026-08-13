@@ -159,6 +159,10 @@ settings.theme_preview_action:
 settings.theme_preview_caption:
   en: waku/src/theme.rs
 
+composer.subagent_read_only:
+  en: This agent was launched by the task. You can watch it and stop it, but not message it.
+composer.subagent_read_only_role:
+  en: This %{role} agent was launched by the task. You can watch it and stop it, but not message it.
 input.do_anything:
   en: Do anything…
 input.search_models:
@@ -1038,6 +1042,10 @@ right_panel.browser:
   en: Browser
 right_panel.terminal:
   en: Terminal
+right_panel.agents:
+  en: Agents
+right_panel.agents_description:
+  en: Watch the subagents this task is running
 right_panel.files:
   en: Files
 right_panel.diff:
@@ -1113,6 +1121,16 @@ background.processes:
   en: Background processes
 background.agents:
   en: Subagents
+background.agents_working:
+  en: Working
+background.agents_finished:
+  en: Finished
+background.agents_all_finished:
+  en: All agents finished
+background.no_agents:
+  en: No subagents yet
+background.no_agents_description:
+  en: Agents this task delegates to will appear here while they work.
 background.process:
   en: Process
 background.monitor:

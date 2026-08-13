@@ -472,6 +472,9 @@ enum RightPanelSurface {
         key: BackgroundWorkKey,
         title: String,
     },
+    /// The session's subagent roster. `BackgroundWork` is one agent's detail;
+    /// this is the list that says what is running at all.
+    Agents,
     Files,
     Diff,
     File(String),

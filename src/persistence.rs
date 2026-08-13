@@ -1320,10 +1320,13 @@ impl StateStore {
         // does not leave this connection believing rows it never wrote are on
         // disk — which would make the next save skip them for good.
         let mut written_messages = Vec::new();
+        // Subagent conversations are runtime-only. They belong to a turn, the
+        // provider keeps its own transcript of them, and persisting a fan-out
+        // of them would bury the task list they are deliberately kept out of.
         for session in state
             .sessions
             .iter()
-            .filter(|session| session.has_started())
+            .filter(|session| session.has_started() && session.is_task())
         {
             live.insert(session.id);
             // A skeleton's empty transcript means "not fetched", not "empty".
@@ -1461,6 +1464,8 @@ fn session_skeleton(row: SessionColumns) -> Option<AgentSession> {
     ) = row;
     Some(AgentSession {
         id: Uuid::parse_str(&id).ok()?,
+        // Only tasks are stored, so a row is never a subagent.
+        subagent: None,
         title,
         auto_title,
         project_id: Uuid::parse_str(&project_id).ok()?,
