@@ -456,6 +456,8 @@ automations.edit:
   en: Edit
 automations.delete:
   en: Delete
+automations.confirm_delete:
+  en: Confirm delete
 automations.run_now:
   en: Run now
 automations.badge:

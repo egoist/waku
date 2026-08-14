@@ -1100,6 +1100,17 @@ impl Waku {
         }
     }
 
+    /// Whether a specific automation has a run connecting or working right now.
+    fn automation_is_running(&self, automation_id: Uuid) -> bool {
+        self.state.sessions.iter().any(|session| {
+            session.originating_automation == Some(automation_id)
+                && matches!(
+                    session.status,
+                    SessionStatus::Connecting | SessionStatus::Working
+                )
+        })
+    }
+
     /// One automation's collapsible run group: its name, a run count, and a
     /// chevron. Collapsed by default; expanding reveals its runs as `Session`
     /// rows. Falls back to a generic label if the automation was since deleted.
@@ -1135,6 +1146,24 @@ impl Waku {
             });
         let highlight = owns_selection && !expanded;
 
+        // Pulse this automation's bolt while one of its runs is active.
+        let running = self.automation_is_running(automation_id);
+        let zap = if running {
+            div()
+                .flex_none()
+                .child(icon("icons/zap.svg", 12.0, theme.accent))
+                .with_animation(
+                    SharedString::from(format!("automation-group-zap-{automation_id}")),
+                    Animation::new(Duration::from_millis(1600))
+                        .repeat()
+                        .with_easing(pulsating_between(0.3, 1.0)),
+                    |element, delta| element.opacity(delta),
+                )
+                .into_any_element()
+        } else {
+            icon("icons/zap.svg", 12.0, theme.text_tertiary).into_any_element()
+        };
+
         let chevron = icon("icons/chevron-down.svg", 11.0, theme.text_ghost).when(!expanded, |icon| {
             icon.with_transformation(gpui::Transformation::rotate(gpui::percentage(0.75)))
         });
@@ -1156,7 +1185,7 @@ impl Waku {
                 element.bg(theme.sidebar_item_background)
             })
             .hover(|element| element.bg(theme.sidebar_item_background))
-            .child(icon("icons/zap.svg", 12.0, theme.text_tertiary))
+            .child(zap)
             .child(
                 div()
                     .flex_1()
@@ -1351,10 +1380,16 @@ impl Waku {
                 .whitespace_normal()
                 .line_clamp(1)
                 .text_overflow(gpui::TextOverflow::Truncate("...".into()))
-                .text_size(px(13.5))
-                .text_color(theme.text)
                 // Automation runs all share the prompt as their title, so the
-                // run time is what tells them apart under the group.
+                // run time is what tells them apart under the group. Style it
+                // like the folder subtitle — small and muted — since it reads
+                // more as metadata than a title.
+                .text_size(if show_run_time { px(11.5) } else { px(13.5) })
+                .text_color(if show_run_time {
+                    theme.text_tertiary
+                } else {
+                    theme.text
+                })
                 .child(SharedString::from(if show_run_time {
                     format_run_timestamp(session.created_at)
                 } else {

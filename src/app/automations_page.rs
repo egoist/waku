@@ -341,6 +341,7 @@ impl Waku {
     }
 
     fn delete_automation(&mut self, id: Uuid, cx: &mut Context<Self>) {
+        self.automation_delete_arming = None;
         if self.state.remove_automation(id) {
             self.save();
             cx.notify();
@@ -630,7 +631,6 @@ impl Waku {
 
     fn render_automations_list(&self, cx: &mut Context<Self>) -> AnyElement {
         let theme = Theme::current(cx);
-        let weak = cx.entity().downgrade();
 
         let header = div()
             .flex_none()
@@ -700,7 +700,7 @@ impl Waku {
             );
         } else {
             for automation in &self.state.automations {
-                list = list.child(self.render_automation_row(automation, &theme, weak.clone(), cx));
+                list = list.child(self.render_automation_row(automation, &theme, cx));
             }
         }
 
@@ -729,7 +729,6 @@ impl Waku {
         &self,
         automation: &Automation,
         theme: &Theme,
-        weak: WeakEntity<Self>,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let id = automation.id;
@@ -750,6 +749,7 @@ impl Waku {
 
         div()
             .id(SharedString::from(format!("automation-row-{id}")))
+            .tab_index(0)
             .flex()
             .items_center()
             .gap(px(12.0))
@@ -758,6 +758,20 @@ impl Waku {
             .border_1()
             .border_color(theme.border)
             .bg(theme.raised)
+            .cursor_default()
+            .focus_visible(|style| style.border_color(theme.accent))
+            .hover(|element| element.border_color(theme.border_strong))
+            // The whole card opens the editor; the inner controls stop
+            // propagation so they keep their own actions.
+            .on_click(cx.listener(move |this, _, window, cx| {
+                this.open_automation_editor(Some(id), window, cx);
+            }))
+            .on_key_down(cx.listener(move |this, event: &KeyDownEvent, window, cx| {
+                if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                    this.open_automation_editor(Some(id), window, cx);
+                    cx.stop_propagation();
+                }
+            }))
             .child(
                 div()
                     .flex_1()
@@ -826,6 +840,7 @@ impl Waku {
                     .child(tr!("automations.run_now"))
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.run_automation_now(id, cx);
+                        cx.stop_propagation();
                     }))
                     .on_key_down(cx.listener(move |this, event: &KeyDownEvent, _, cx| {
                         if matches!(event.keystroke.key.as_str(), "enter" | "space") {
@@ -835,32 +850,82 @@ impl Waku {
                     })),
             )
             .child(self.render_automation_enable_toggle(id, enabled, theme, cx))
-            .child(
-                icon_button(
-                    SharedString::from(format!("automation-edit-{id}")),
-                    "icons/pencil.svg",
-                    theme.clone(),
-                )
-                .tab_index(0)
-                .tooltip(Tooltip::text(tr!("automations.edit")))
-                .on_click(cx.listener(move |this, _, window, cx| {
-                    this.open_automation_editor(Some(id), window, cx);
-                })),
-            )
-            .child({
-                let weak = weak.clone();
-                icon_button(
-                    SharedString::from(format!("automation-delete-{id}")),
-                    "icons/trash.svg",
-                    theme.clone(),
-                )
-                .tab_index(0)
-                .tooltip(Tooltip::text(tr!("automations.delete")))
-                .on_click(move |_, _, cx| {
-                    let _ = weak.update(cx, |this, cx| this.delete_automation(id, cx));
-                })
-            })
+            .child(self.render_automation_delete_button(id, theme, cx))
             .into_any_element()
+    }
+
+    /// The delete control: a single click arms it (danger styling, "Confirm
+    /// delete"), and a second click removes the automation. Clicking away
+    /// disarms, so a stray click can never delete. Mirrors the skills page.
+    fn render_automation_delete_button(
+        &self,
+        id: Uuid,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
+        let armed = self.automation_delete_arming == Some(id);
+        div()
+            .id(SharedString::from(format!("automation-delete-{id}")))
+            .tab_index(0)
+            .focus_visible(|style| style.border_color(theme.accent))
+            .h(px(28.0))
+            .px(px(10.0))
+            .rounded(px(6.0))
+            .border_1()
+            .border_color(if armed {
+                theme.danger
+            } else {
+                theme.border
+            })
+            .when(armed, |element| element.bg(theme.danger.opacity(0.12)))
+            .flex()
+            .flex_none()
+            .items_center()
+            .gap(px(5.0))
+            .cursor_default()
+            .text_size(px(12.0))
+            .text_color(if armed {
+                theme.danger
+            } else {
+                theme.text_secondary
+            })
+            .hover(|element| element.bg(theme.overlay).text_color(theme.danger))
+            .child(icon(
+                "icons/trash.svg",
+                12.0,
+                if armed { theme.danger } else { theme.text_tertiary },
+            ))
+            .child(if armed {
+                tr!("automations.confirm_delete")
+            } else {
+                tr!("automations.delete")
+            })
+            .on_click(cx.listener(move |this, _, _, cx| {
+                if this.automation_delete_arming == Some(id) {
+                    this.delete_automation(id, cx);
+                } else {
+                    this.automation_delete_arming = Some(id);
+                    cx.notify();
+                }
+                cx.stop_propagation();
+            }))
+            .on_key_down(cx.listener(move |this, event: &KeyDownEvent, _, cx| {
+                if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                    if this.automation_delete_arming == Some(id) {
+                        this.delete_automation(id, cx);
+                    } else {
+                        this.automation_delete_arming = Some(id);
+                        cx.notify();
+                    }
+                    cx.stop_propagation();
+                }
+            }))
+            .on_mouse_down_out(cx.listener(move |this, _, _, cx| {
+                if this.automation_delete_arming == Some(id) {
+                    this.automation_delete_arming = None;
+                    cx.notify();
+                }
+            }))
     }
 
     fn render_automation_enable_toggle(
@@ -897,6 +962,7 @@ impl Waku {
             }))
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.toggle_automation_enabled(id, cx);
+                cx.stop_propagation();
             }))
             .on_key_down(cx.listener(move |this, event: &KeyDownEvent, _, cx| {
                 if matches!(event.keystroke.key.as_str(), "enter" | "space") {
