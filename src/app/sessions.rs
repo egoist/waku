@@ -160,6 +160,9 @@ impl Waku {
     }
 
     fn activate_session(&mut self, session_id: Uuid, cx: &mut Context<Self>) {
+        // Showing a session leaves the Automations page (unlike Settings, its
+        // sidebar stays visible, so a session row can be clicked from it).
+        self.automations_page = None;
         let session_changed = self.state.selected_session != Some(session_id);
         if session_changed {
             self.capture_and_save_current_composer_draft(cx);
@@ -410,6 +413,7 @@ impl Waku {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.automations_page = None;
         self.settings_page = Some(SettingsPage::General);
         self.settings_scroll.set_offset(gpui::Point::default());
         // Sparkle owns this value and its consent prompt can flip it outside
@@ -713,6 +717,19 @@ impl Waku {
         if self.settings_page.take().is_some() {
             let focus_handle = self.composer_focus(cx);
             window.focus(&focus_handle, cx);
+            cx.notify();
+            return;
+        }
+        if let Some(page) = self.automations_page.as_ref() {
+            // Escape backs the editor out to the list, then closes the page.
+            if matches!(page, automations_page::AutomationsPage::Editor(_)) {
+                self.automations_page = Some(automations_page::AutomationsPage::List);
+                window.focus(&self.automations_focus, cx);
+            } else {
+                let focus_handle = self.composer_focus(cx);
+                self.automations_page = None;
+                window.focus(&focus_handle, cx);
+            }
             cx.notify();
             return;
         }

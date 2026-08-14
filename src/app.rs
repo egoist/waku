@@ -125,6 +125,13 @@ const IDLE_SESSION_SWEEP_INTERVAL: Duration = Duration::from_secs(5 * 60);
 const BACKGROUND_WORK_REFRESH_INTERVAL: Duration = Duration::from_secs(5);
 const BACKGROUND_WORK_TICK_INTERVAL: Duration = Duration::from_secs(1);
 const PLAN_USAGE_MAINTENANCE_INTERVAL: Duration = Duration::from_secs(30);
+/// How often the scheduler asks the planner which automations are due. Coarse
+/// enough to be cheap, fine enough that a slot fires within half a minute.
+const AUTOMATION_TICK_INTERVAL: Duration = Duration::from_secs(30);
+/// An occurrence older than this when the tick sees it was missed while nothing
+/// ran (app closed or asleep), so it fires as a coalesced catch-up rather than
+/// an on-time run. Comfortably larger than the tick interval.
+const AUTOMATION_CATCH_UP_GRACE_SECS: i64 = 5 * 60;
 const STREAM_SAVE_INTERVAL: Duration = Duration::from_secs(1);
 /// Zed keeps status toasts on screen for ten seconds, pausing the countdown
 /// while the pointer is over the toast so a long message remains readable.
@@ -1032,6 +1039,7 @@ pub struct Waku {
     daemon_reconfigure_pending: bool,
     daemon_token_revealed: bool,
     settings_focus: FocusHandle,
+    automations_focus: FocusHandle,
     onboarding_add_project_focus: FocusHandle,
     onboarding_projectless_focus: FocusHandle,
     /// Mirror of Sparkle's persisted automatic-check setting. Refreshed when
@@ -1319,6 +1327,16 @@ pub struct Waku {
     /// swapping in frozen page pixels while an overlay is open.
     scene_overlay_enabled: bool,
     settings_page: Option<SettingsPage>,
+    /// The Automations full-page view, when open. `None` means the normal
+    /// transcript layout shows. A peer of `settings_page`, not nested under it.
+    automations_page: Option<automations_page::AutomationsPage>,
+    /// The automation editor's name field, reused across edits like the session
+    /// rename input.
+    automation_name_input: Entity<ComposerInput>,
+    /// The automation editor's prompt field.
+    automation_prompt_input: Entity<ComposerInput>,
+    /// Scroll position of the Automations page content.
+    automations_scroll: ScrollHandle,
     /// The Skills page's library snapshot, scanned off-thread. Frames read
     /// only this; `None` means the first scan has not landed yet.
     skills_catalog: Option<Rc<crate::skills::SkillsCatalog>>,
@@ -1473,6 +1491,7 @@ pub struct Waku {
 }
 
 mod autocomplete;
+mod automations_page;
 mod background_work;
 mod branches;
 mod command_palette;
@@ -1870,6 +1889,16 @@ impl Waku {
                 .search_field()
                 .placeholder(tr!("skills.search"))
         });
+        let automation_name_input = cx.new(|cx| {
+            ComposerInput::new(window, cx)
+                .search_field()
+                .placeholder(tr!("automations.name_placeholder"))
+        });
+        let automation_prompt_input = cx.new(|cx| {
+            ComposerInput::new(window, cx)
+                .search_field()
+                .placeholder(tr!("automations.prompt_placeholder"))
+        });
         let session_rename_input = cx.new(|cx| ComposerInput::new(window, cx).search_field());
         let provider_path_input = cx.new(|cx| {
             ComposerInput::new(window, cx)
@@ -2127,6 +2156,7 @@ impl Waku {
             .unwrap_or_default();
         let entity = cx.new(|cx| {
             let settings_focus = cx.focus_handle();
+            let automations_focus = cx.focus_handle();
             let onboarding_add_project_focus = cx.focus_handle();
             let onboarding_projectless_focus = cx.focus_handle();
             let updater_button_focus = cx.focus_handle();
@@ -2388,6 +2418,24 @@ impl Waku {
             )
             .detach();
             cx.subscribe(
+                &automation_name_input,
+                |_: &mut Self, _, event: &ComposerEvent, cx| {
+                    if matches!(event, ComposerEvent::Edited) {
+                        cx.notify();
+                    }
+                },
+            )
+            .detach();
+            cx.subscribe(
+                &automation_prompt_input,
+                |_: &mut Self, _, event: &ComposerEvent, cx| {
+                    if matches!(event, ComposerEvent::Edited) {
+                        cx.notify();
+                    }
+                },
+            )
+            .detach();
+            cx.subscribe(
                 &session_rename_input,
                 |this: &mut Self, _, event: &ComposerEvent, cx| match event {
                     ComposerEvent::Submit(_) => this.commit_session_rename(cx),
@@ -2517,6 +2565,24 @@ impl Waku {
             })
             .detach();
 
+            // The automation scheduler. Ticks once at startup so a slot missed
+            // while the app was closed catches up promptly, then on its own
+            // cadence. A thin shell: all schedule math lives in the pure planner.
+            cx.spawn(async move |this, cx| {
+                loop {
+                    if this
+                        .update(cx, |this, cx| this.tick_automations(cx))
+                        .is_err()
+                    {
+                        break;
+                    }
+                    cx.background_executor()
+                        .timer(AUTOMATION_TICK_INTERVAL)
+                        .await;
+                }
+            })
+            .detach();
+
             let markdown_link_handler: md::render::LinkHandler = {
                 let waku = cx.entity().downgrade();
                 Rc::new(move |target, _, cx| {
@@ -2553,6 +2619,7 @@ impl Waku {
                 daemon_reconfigure_pending: false,
                 daemon_token_revealed: false,
                 settings_focus,
+                automations_focus,
                 onboarding_add_project_focus,
                 onboarding_projectless_focus,
                 automatic_updates_enabled: cx
@@ -2709,6 +2776,10 @@ impl Waku {
                 right_panel_pending_browser_focus: None,
                 scene_overlay_enabled,
                 settings_page: None,
+                automations_page: None,
+                automation_name_input,
+                automation_prompt_input,
+                automations_scroll: ScrollHandle::new(),
                 skills_catalog: None,
                 skills_scan_generation: 0,
                 skills_scan_pending: false,

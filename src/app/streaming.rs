@@ -586,6 +586,11 @@ impl Waku {
                         cx,
                     );
                 }
+                // Resolve the run in its automation's history and, per that
+                // automation's config, fire a completion notification. A no-op
+                // for manual sessions and for follow-up turns on an already
+                // resolved run.
+                self.complete_automation_run(session_id, success, cx);
             }
             DriverEvent::Error(error) => {
                 let error = compact_driver_error(&error);
@@ -659,6 +664,8 @@ impl Waku {
                         .is_some();
                 if finished_turn {
                     self.capture_latest_turn_checkpoint_for(session_id);
+                    // A crashed provider is a failed automation run.
+                    self.complete_automation_run(session_id, false, cx);
                 }
                 if let Some(previous_kinds) = previous_kinds.as_deref() {
                     self.splice_active_transcript_rows_after_visibility_change(previous_kinds);

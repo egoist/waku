@@ -420,6 +420,128 @@ sidebar.today:
   en: Today
 sidebar.search:
   en: Search
+sidebar.automations:
+  en: Automations
+automations.title:
+  en: Automations
+automations.new:
+  en: New automation
+automations.empty_title:
+  en: No automations yet
+automations.empty_body:
+  en: Create an automation to run a saved prompt on a daily, weekly, or monthly schedule.
+automations.default_name:
+  en: New automation
+automations.name_placeholder:
+  en: Automation name
+automations.prompt_placeholder:
+  en: What should this automation do?
+automations.create_title:
+  en: New automation
+automations.edit_title:
+  en: Edit automation
+automations.save:
+  en: Save
+automations.cancel:
+  en: Cancel
+automations.edit:
+  en: Edit
+automations.delete:
+  en: Delete
+automations.run_now:
+  en: Run now
+automations.badge:
+  en: From automation
+automations.notify_succeeded:
+  en: Automation run completed
+automations.notify_failed:
+  en: Automation run failed
+automations.enabled:
+  en: Enabled
+automations.disabled:
+  en: Disabled
+automations.next_run:
+  en: "Next run %{time}"
+automations.next_run_none:
+  en: Not scheduled
+automations.section_prompt:
+  en: Prompt
+automations.section_agent:
+  en: Agent
+automations.section_schedule:
+  en: Schedule
+automations.section_behavior:
+  en: Behavior
+automations.field_name:
+  en: Name
+automations.field_provider:
+  en: Provider
+automations.field_model:
+  en: Model
+automations.field_effort:
+  en: Reasoning effort
+automations.field_permission:
+  en: Permission
+automations.field_project:
+  en: Project
+automations.field_schedule_frequency:
+  en: Frequency
+automations.field_time:
+  en: Time
+automations.field_days:
+  en: Days
+automations.field_overlap:
+  en: If already running
+automations.field_notifications:
+  en: Notifications
+automations.field_notify_when:
+  en: Notify
+automations.model_default:
+  en: Provider default
+automations.effort_default:
+  en: Default
+automations.no_project:
+  en: No project
+automations.workspace_worktree:
+  en: Fresh worktree per run
+automations.overlap_skip:
+  en: Skip this run
+automations.overlap_queue:
+  en: Queue until free
+automations.overlap_concurrent:
+  en: Run anyway
+automations.notify_always:
+  en: Always
+automations.notify_success:
+  en: On success
+automations.notify_failure:
+  en: On failure
+automations.frequency_daily:
+  en: Daily
+automations.frequency_weekly:
+  en: Weekly
+automations.frequency_monthly:
+  en: Monthly
+automations.summary_daily:
+  en: "Daily at %{time}"
+automations.summary_weekly:
+  en: "Weekly on %{days} at %{time}"
+automations.summary_monthly:
+  en: "Monthly on day %{days} at %{time}"
+automations.weekday_mon:
+  en: Mon
+automations.weekday_tue:
+  en: Tue
+automations.weekday_wed:
+  en: Wed
+automations.weekday_thu:
+  en: Thu
+automations.weekday_fri:
+  en: Fri
+automations.weekday_sat:
+  en: Sat
+automations.weekday_sun:
+  en: Sun
 sidebar.yesterday:
   en: Yesterday
 sidebar.this_week:

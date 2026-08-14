@@ -36,6 +36,8 @@ export const sessions = sqliteTable(
     provider: text("provider").notNull(),
     model: text("model"),
     status: text("status").notNull(),
+    /** Automation this session was spawned by, when it originated from one. */
+    originatingAutomation: text("originating_automation"),
     /** Session creation time, unix seconds. */
     createdAt: integer("created_at").notNull(),
     /** Any mutation, unix seconds — including title edits and truncation. */
@@ -87,5 +89,19 @@ export const messages = sqliteTable(
  */
 export const sessionDetails = sqliteTable("session_details", {
   sessionId: text("session_id").primaryKey(),
+  data: text("data").notNull(),
+});
+
+/**
+ * Scheduling automations: named, saved prompts that spawn agent sessions on a
+ * daily/weekly/monthly schedule.
+ *
+ * Automations are few and always read whole (the Automations page computes each
+ * one's next run and schedule summary from its full config), so unlike
+ * `sessions` there are no promoted list columns — the entire `Automation`,
+ * including its bounded run history, lives in the JSON `data` blob.
+ */
+export const automations = sqliteTable("automations", {
+  id: text("id").primaryKey(),
   data: text("data").notNull(),
 });

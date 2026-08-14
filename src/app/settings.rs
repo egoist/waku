@@ -294,7 +294,7 @@ impl Waku {
                 ),
             )
             .child(
-                self.render_settings_drag_region("settings-sidebar-titlebar-drag-region", cx)
+                self.render_page_drag_region("settings-sidebar-titlebar-drag-region", cx)
                     .h(px(height))
                     .flex_1(),
             )
@@ -322,7 +322,7 @@ impl Waku {
                 .border_color(theme.sidebar_border)
                 .bg(theme.surface)
                 .children(right_window_controls.map(|controls| {
-                    self.render_settings_drag_region("settings-skills-titlebar", cx)
+                    self.render_page_drag_region("settings-skills-titlebar", cx)
                         .flex()
                         .items_center()
                         .justify_end()
@@ -395,7 +395,7 @@ impl Waku {
             .border_color(theme.sidebar_border)
             .bg(theme.surface)
             .child(
-                self.render_settings_drag_region("settings-content-titlebar", cx)
+                self.render_page_drag_region("settings-content-titlebar", cx)
                     .flex()
                     .items_center()
                     .justify_end()
@@ -2293,7 +2293,10 @@ impl Waku {
         None
     }
 
-    fn render_settings_drag_region(
+    /// A transparent full-width titlebar strip that keeps the window draggable
+    /// on a full-page view (settings, automations). Parameterized by `id` so
+    /// each page owns its own drag region.
+    pub(super) fn render_page_drag_region(
         &self,
         id: &'static str,
         cx: &mut Context<Self>,

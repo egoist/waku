@@ -162,21 +162,73 @@ impl Render for Waku {
         self.schedule_time_label_wake(cx);
 
         let theme = Theme::current(cx);
-        let empty = should_render_empty_state(self.selected_session());
-        let permission = self.render_permission(cx);
-        let computer_use = self.render_computer_use_overlay(cx);
         let command_palette = self.render_command_palette(window, cx);
         let commit_dialog = self.render_commit_dialog(cx);
-        self.start_toast_dismiss_timer(cx);
-        let toast = self
-            .toast
-            .as_ref()
-            .map(|toast| (toast.message.clone(), toast.tone, toast.id));
-        let toast = toast.map(|(message, tone, generation)| {
-            self.render_toast(message, tone, generation, cx)
-                .into_any_element()
-        });
         let (sidebar_width, right_panel_width) = self.effective_panel_widths(window);
+        // The Automations page is a full-page view of the main content column —
+        // it replaces the transcript and composer but leaves the sidebar (and
+        // its resize handle) in place, so the history stays reachable.
+        let sidebar_resize_handle = self.sidebar_visible.then(|| {
+            self.render_panel_resize_handle("sidebar-resize-handle", PanelResizeTarget::Sidebar, cx)
+        });
+        let main_column = if self.automations_page.is_some() {
+            div()
+                .flex_1()
+                .h_full()
+                .min_w_0()
+                .flex()
+                .flex_col()
+                .bg(theme.surface)
+                .when(self.sidebar_visible, |element| {
+                    element.border_l_1().border_color(theme.sidebar_border)
+                })
+                .child(self.render_automations(window, cx))
+                .relative()
+                .children(sidebar_resize_handle)
+        } else {
+            let empty = should_render_empty_state(self.selected_session());
+            let permission = self.render_permission(cx);
+            let computer_use = self.render_computer_use_overlay(cx);
+            self.start_toast_dismiss_timer(cx);
+            let toast = self
+                .toast
+                .as_ref()
+                .map(|toast| (toast.message.clone(), toast.tone, toast.id));
+            let toast = toast.map(|(message, tone, generation)| {
+                self.render_toast(message, tone, generation, cx)
+                    .into_any_element()
+            });
+            div()
+                .flex_1()
+                .h_full()
+                .min_w_0()
+                .flex()
+                .flex_col()
+                .bg(theme.surface)
+                .when(self.sidebar_visible, |element| {
+                    element.border_l_1().border_color(theme.sidebar_border)
+                })
+                .child(self.render_header(window, cx))
+                .child(if empty {
+                    self.render_empty_state(cx).into_any_element()
+                } else {
+                    self.transcript_pane
+                        .clone()
+                        .cached(StyleRefinement::default().flex_1().min_h(px(0.0)).w_full())
+                        .into_any_element()
+                })
+                .children(permission)
+                .when(self.selected_project().is_some(), |element| {
+                    element
+                        .children(self.render_queued_messages(cx))
+                        .child(self.render_composer(window, cx))
+                        .child(self.render_workspace_footer(cx))
+                })
+                .relative()
+                .children(toast)
+                .children(computer_use)
+                .children(sidebar_resize_handle)
+        };
         let content = div()
             .key_context("Waku")
             .on_action(cx.listener(Self::close_window_or_right_panel_tab_action))
@@ -213,61 +265,29 @@ impl Render for Waku {
             .text_color(theme.text)
             .font_family(".SystemUIFont")
             .when(self.sidebar_visible, |root| {
-                root.child(self.sidebar_pane.clone().cached(
-                    StyleRefinement::default()
-                        .w(px(sidebar_width))
-                        .h_full()
-                        .flex_none(),
-                ))
+                root.child(
+                    self.sidebar_pane.clone().cached(
+                        StyleRefinement::default()
+                            .w(px(sidebar_width))
+                            .h_full()
+                            .flex_none(),
+                    ),
+                )
             })
-            .child(
-                div()
-                    .flex_1()
-                    .h_full()
-                    .min_w_0()
-                    .flex()
-                    .flex_col()
-                    .bg(theme.surface)
-                    .when(self.sidebar_visible, |element| {
-                        element.border_l_1().border_color(theme.sidebar_border)
-                    })
-                    .child(self.render_header(window, cx))
-                    .child(if empty {
-                        self.render_empty_state(cx).into_any_element()
-                    } else {
-                        self.transcript_pane
-                            .clone()
-                            .cached(
-                                StyleRefinement::default().flex_1().min_h(px(0.0)).w_full(),
-                            )
-                            .into_any_element()
-                    })
-                    .children(permission)
-                    .when(self.selected_project().is_some(), |element| {
-                        element
-                            .children(self.render_queued_messages(cx))
-                            .child(self.render_composer(window, cx))
-                            .child(self.render_workspace_footer(cx))
-                    })
-                    .relative()
-                    .children(toast)
-                    .children(computer_use)
-                    .when(self.sidebar_visible, |element| {
-                        element.child(self.render_panel_resize_handle(
-                            "sidebar-resize-handle",
-                            PanelResizeTarget::Sidebar,
-                            cx,
-                        ))
-                    }),
+            .child(main_column)
+            .when(
+                self.right_panel_visible && self.automations_page.is_none(),
+                |root| {
+                    root.child(
+                        self.right_panel_pane.clone().cached(
+                            StyleRefinement::default()
+                                .w(px(right_panel_width))
+                                .h_full()
+                                .flex_none(),
+                        ),
+                    )
+                },
             )
-            .when(self.right_panel_visible, |root| {
-                root.child(self.right_panel_pane.clone().cached(
-                    StyleRefinement::default()
-                        .w(px(right_panel_width))
-                        .h_full()
-                        .flex_none(),
-                ))
-            })
             .children(command_palette)
             .children(commit_dialog)
             .children(image_preview)

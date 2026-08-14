@@ -420,6 +420,7 @@ impl Waku {
         id: &'static str,
         icon_path: &'static str,
         label: String,
+        selected: bool,
         cx: &mut Context<Self>,
     ) -> Stateful<Div> {
         let theme = Theme::current(cx);
@@ -436,6 +437,9 @@ impl Waku {
             .gap(px(10.0))
             .cursor_default()
             .focus_visible(|style| style.border_1().border_color(theme.accent))
+            .when(selected, |element| {
+                element.bg(theme.sidebar_item_background)
+            })
             .hover(|element| element.bg(theme.sidebar_item_background))
             .active(|element| element.bg(theme.overlay_strong))
             .child(
@@ -462,6 +466,7 @@ impl Waku {
             "sidebar-new-session",
             "icons/compose.svg",
             tr!("menu.new_task"),
+            false,
             cx,
         )
         .on_click(cx.listener(|this, _, window, cx| {
@@ -475,12 +480,32 @@ impl Waku {
         }))
     }
 
+    fn render_sidebar_automations(&self, cx: &mut Context<Self>) -> Stateful<Div> {
+        self.render_sidebar_action_row(
+            "sidebar-automations",
+            "icons/zap.svg",
+            tr!("sidebar.automations"),
+            self.automations_page.is_some(),
+            cx,
+        )
+        .on_click(cx.listener(|this, _, window, cx| {
+            this.open_automations(window, cx);
+        }))
+        .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+            if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                this.open_automations(window, cx);
+                cx.stop_propagation();
+            }
+        }))
+    }
+
     fn render_sidebar_search(&self, cx: &mut Context<Self>) -> Div {
         let search = self
             .render_sidebar_action_row(
                 "sidebar-search",
                 "icons/search.svg",
                 tr!("sidebar.search"),
+                false,
                 cx,
             )
             .on_click(cx.listener(|this, _, window, cx| {
@@ -695,6 +720,12 @@ impl Waku {
                     .flex_none()
                     .px(px(10.0))
                     .child(self.render_sidebar_new_session(cx)),
+            )
+            .child(
+                div()
+                    .flex_none()
+                    .px(px(10.0))
+                    .child(self.render_sidebar_automations(cx)),
             )
             .child(
                 div()
@@ -1012,16 +1043,20 @@ impl Waku {
         else {
             return div().into_any_element();
         };
-        let selected = sidebar_session_selected(
-            self.state.selected_session,
-            self.pending_session_activation
-                .map(|pending| pending.session_id),
-            session_id,
-        );
+        // While the Automations page is open it owns the selection highlight, so
+        // the underlying selected session row does not also appear selected.
+        let selected = self.automations_page.is_none()
+            && sidebar_session_selected(
+                self.state.selected_session,
+                self.pending_session_activation
+                    .map(|pending| pending.session_id),
+                session_id,
+            );
         let working = matches!(
             session.status,
             SessionStatus::Connecting | SessionStatus::Working
         );
+        let from_automation = session.originating_automation.is_some();
         let project_name = self
             .state
             .projects
@@ -1095,6 +1130,19 @@ impl Waku {
                     .overflow_hidden()
                     .line_height(px(18.0))
                     .child(title)
+                    .when(from_automation, |element| {
+                        element.child(
+                            div()
+                                .id(SharedString::from(format!(
+                                    "session-automation-badge-{session_id}"
+                                )))
+                                .flex_none()
+                                .flex()
+                                .items_center()
+                                .tooltip(Tooltip::text(tr!("automations.badge")))
+                                .child(icon("icons/zap.svg", 11.0, theme.text_tertiary)),
+                        )
+                    })
                     .when(working, |element| {
                         element.child(motion::spin_slow(icon(
                             "icons/loader-circle.svg",
