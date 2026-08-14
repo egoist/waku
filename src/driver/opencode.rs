@@ -82,6 +82,7 @@ impl OpenCodeDriver {
             model,
             reasoning_effort: _,
             service_tier: _,
+            agent_preset: _,
             computer_use_enabled,
             provider_cursor,
         } = options;
@@ -1110,6 +1111,7 @@ mod tests {
                 model: None,
                 reasoning_effort: None,
                 service_tier: None,
+                agent_preset: None,
                 computer_use_enabled: false,
                 provider_cursor: None,
             },
@@ -1197,6 +1199,7 @@ mod tests {
                 model: None,
                 reasoning_effort: None,
                 service_tier: None,
+                agent_preset: None,
                 computer_use_enabled: false,
                 provider_cursor: None,
             },

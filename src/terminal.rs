@@ -23,7 +23,7 @@ use crossbeam_channel::{Receiver, Sender, unbounded};
 use gpui::{
     App, AppContext, Bounds, ClipboardItem, Context, FocusHandle, Focusable, FontFallbacks,
     FontStyle, FontWeight, Hsla, InteractiveElement, IntoElement, KeyDownEvent, Keystroke,
-    ModifiersChangedEvent, MouseButton, MouseDownEvent, MouseExitEvent, MouseMoveEvent,
+    Modifiers, ModifiersChangedEvent, MouseButton, MouseDownEvent, MouseExitEvent, MouseMoveEvent,
     MouseUpEvent, ParentElement, Pixels, Point, Render, ScrollDelta, ScrollWheelEvent,
     SharedString, StrikethroughStyle, Styled, StyledText, Subscription, Task, TextRun,
     UnderlineStyle, Window, canvas, div, font, px, rgb,
@@ -36,6 +36,21 @@ use crate::theme::Theme;
 const TERMINAL_CELL_WIDTH: f32 = 7.2;
 const TERMINAL_CELL_HEIGHT: f32 = 16.0;
 const TERMINAL_FONT_SIZE: f32 = 11.5;
+
+#[inline]
+fn primary_modifier_pressed(modifiers: &Modifiers) -> bool {
+    modifiers.secondary()
+}
+
+#[inline]
+fn terminal_clipboard_modifier_pressed(modifiers: &Modifiers) -> bool {
+    if cfg!(target_os = "macos") {
+        modifiers.secondary() && !modifiers.control && !modifiers.alt
+    } else {
+        // Preserve Ctrl+C for SIGINT and follow Linux terminal convention.
+        modifiers.control && modifiers.shift && !modifiers.alt && !modifiers.platform
+    }
+}
 const TERMINAL_PADDING_X: f32 = 10.0;
 const TERMINAL_PADDING_Y: f32 = 8.0;
 const TERMINAL_TOOLBAR_HEIGHT: f32 = 34.0;
@@ -191,9 +206,12 @@ impl TerminalSession {
             proxy.clone(),
         )));
 
-        let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".into());
+        let shell = crate::command_env::default_terminal_shell();
         let mut options = tty::Options {
-            shell: Some(Shell::new(shell, vec!["-l".into()])),
+            shell: Some(Shell::new(
+                shell.to_string_lossy().into_owned(),
+                vec!["-l".into()],
+            )),
             working_directory: Some(working_directory.to_path_buf()),
             drain_on_exit: false,
             ..Default::default()
@@ -679,13 +697,17 @@ impl TerminalView {
     fn on_key_down(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         self.pause_cursor_blink(cx);
         let keystroke = &event.keystroke;
-        if keystroke.modifiers.platform && keystroke.key.eq_ignore_ascii_case("c") {
+        if terminal_clipboard_modifier_pressed(&keystroke.modifiers)
+            && keystroke.key.eq_ignore_ascii_case("c")
+        {
             self.copy_selection(cx);
             window.prevent_default();
             cx.stop_propagation();
             return;
         }
-        if keystroke.modifiers.platform && keystroke.key.eq_ignore_ascii_case("a") {
+        if terminal_clipboard_modifier_pressed(&keystroke.modifiers)
+            && keystroke.key.eq_ignore_ascii_case("a")
+        {
             self.select_all(cx);
             window.prevent_default();
             cx.stop_propagation();
@@ -695,7 +717,9 @@ impl TerminalView {
         let Some(session) = &self.session else {
             return;
         };
-        if keystroke.modifiers.platform && keystroke.key.eq_ignore_ascii_case("v") {
+        if terminal_clipboard_modifier_pressed(&keystroke.modifiers)
+            && keystroke.key.eq_ignore_ascii_case("v")
+        {
             if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
                 session.term.lock().selection = None;
                 let bytes = bracketed_paste(text, session.mode());
@@ -745,7 +769,7 @@ impl TerminalView {
             return;
         };
 
-        if event.modifiers.platform
+        if primary_modifier_pressed(&event.modifiers)
             && let Some(link) = self
                 .session
                 .as_mut()
@@ -757,7 +781,9 @@ impl TerminalView {
             self.hovered_link = Some(link);
             match target {
                 TerminalLinkTarget::Url(url) => cx.open_url(&url),
-                TerminalLinkTarget::File(path) => crate::platform::reveal_in_finder(&path),
+                TerminalLinkTarget::File(path) => {
+                    crate::platform::reveal_in_file_manager(&path, cx)
+                }
             }
             window.prevent_default();
             cx.stop_propagation();
@@ -794,7 +820,7 @@ impl TerminalView {
         let hover_changed = if self.selecting {
             self.set_hovered_link(None)
         } else {
-            self.refresh_hovered_link(event.modifiers.platform, event.position)
+            self.refresh_hovered_link(primary_modifier_pressed(&event.modifiers), event.position)
         };
         if !self.selecting || event.pressed_button != Some(MouseButton::Left) {
             if hover_changed {
@@ -835,7 +861,10 @@ impl TerminalView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.refresh_hovered_link(event.modifiers.platform, window.mouse_position()) {
+        if self.refresh_hovered_link(
+            primary_modifier_pressed(&event.modifiers),
+            window.mouse_position(),
+        ) {
             cx.notify();
         }
     }
@@ -989,7 +1018,10 @@ impl Render for TerminalView {
         if self.selecting {
             self.set_hovered_link(None);
         } else {
-            self.refresh_hovered_link(window.modifiers().platform, window.mouse_position());
+            self.refresh_hovered_link(
+                primary_modifier_pressed(&window.modifiers()),
+                window.mouse_position(),
+            );
         }
         let hovered_link = self.hovered_link.as_ref().map(|link| &link.bounds);
         let snapshot = self
@@ -1441,12 +1473,16 @@ fn terminal_key_bytes(keystroke: &Keystroke, mode: TermMode) -> Option<Vec<u8>> 
     let key = keystroke.key.as_str();
 
     if modifiers.platform {
+        #[cfg(target_os = "macos")]
         return match key {
             "left" => Some(vec![0x01]),
             "right" => Some(vec![0x05]),
             "backspace" => Some(vec![0x15]),
             _ => None,
         };
+
+        #[cfg(not(target_os = "macos"))]
+        return None;
     }
 
     let modifier = 1
@@ -1767,6 +1803,24 @@ mod tests {
             ),
             Some(b"\x1b[1;5D".to_vec())
         );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_terminal_clipboard_shortcuts_preserve_ctrl_c_for_sigint() {
+        let control = Modifiers {
+            control: true,
+            ..Default::default()
+        };
+        let control_shift = Modifiers {
+            control: true,
+            shift: true,
+            ..Default::default()
+        };
+
+        assert!(primary_modifier_pressed(&control));
+        assert!(!terminal_clipboard_modifier_pressed(&control));
+        assert!(terminal_clipboard_modifier_pressed(&control_shift));
     }
 
     #[test]

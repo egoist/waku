@@ -1665,7 +1665,7 @@ fn settings_search_filters_pages_for_arrow_cycling() {
         SettingsPage::Skills,
         SettingsPage::Usage,
     ];
-    if cfg!(debug_assertions) {
+    if cfg!(all(debug_assertions, target_os = "macos")) {
         all_pages.push(SettingsPage::ComputerUse);
     }
     assert_eq!(pages(""), all_pages);
@@ -1679,7 +1679,7 @@ fn settings_search_filters_pages_for_arrow_cycling() {
         SettingsPage::Skills,
         SettingsPage::Usage,
     ];
-    if cfg!(debug_assertions) {
+    if cfg!(all(debug_assertions, target_os = "macos")) {
         codex_pages.push(SettingsPage::ComputerUse);
     }
     assert_eq!(pages("codex"), codex_pages);
@@ -1688,13 +1688,13 @@ fn settings_search_filters_pages_for_arrow_cycling() {
 }
 
 #[test]
-fn computer_use_navigation_is_debug_only() {
+fn computer_use_navigation_is_macos_debug_only() {
     use super::SettingsPage;
 
     assert!(SettingsPage::General.is_visible_in_navigation());
     assert_eq!(
         SettingsPage::ComputerUse.is_visible_in_navigation(),
-        cfg!(debug_assertions)
+        cfg!(all(debug_assertions, target_os = "macos"))
     );
 }
 
@@ -1709,6 +1709,7 @@ fn switched_off_providers_leave_the_picker_except_for_their_locked_session() {
         installed: true,
         path: Some(std::path::PathBuf::from(format!("/bin/{}", provider.id()))),
         models: vec![ProviderModel::new(model, model)],
+        agent_presets: Vec::new(),
     };
     let probes = [
         probe(ProviderKind::Claude, "claude-sonnet-5"),
@@ -1797,6 +1798,7 @@ fn tab_cycle_walks_favorites_then_usable_providers_in_rail_order() {
         installed,
         path: installed.then(|| std::path::PathBuf::from(format!("/bin/{}", provider.id()))),
         models: vec![ProviderModel::new("model", "model")],
+        agent_presets: Vec::new(),
     };
     let probes = [
         probe(ProviderKind::Claude, true),

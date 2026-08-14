@@ -180,6 +180,7 @@ impl CodexDriver {
             model,
             reasoning_effort,
             service_tier,
+            agent_preset: _,
             computer_use_enabled,
             provider_cursor,
         } = options;

@@ -83,6 +83,7 @@ pub struct DeepSeekDriver {
     server: Option<PooledDeepSeekServer>,
     session_id: String,
     cwd: std::path::PathBuf,
+    agent_preset: Option<String>,
     commands: Sender<CommandMessage>,
     completed_turn_seqs: Arc<Mutex<Vec<u64>>>,
 }
@@ -97,12 +98,13 @@ impl DeepSeekDriver {
             model,
             reasoning_effort,
             service_tier,
+            agent_preset,
             computer_use_enabled: _,
             provider_cursor,
         } = options;
-        let requested_session_id = match provider_cursor {
+        let (requested_session_id, resuming) = match provider_cursor {
             Some(ProviderResumeCursor::DeepSeek { session_id }) if !session_id.is_empty() => {
-                session_id
+                (session_id, true)
             }
             Some(cursor) => {
                 return Err(anyhow!(
@@ -110,7 +112,7 @@ impl DeepSeekDriver {
                     cursor.provider().display_name()
                 ));
             }
-            _ => Uuid::new_v4().to_string(),
+            _ => (Uuid::new_v4().to_string(), false),
         };
 
         let server = crate::deepseek_pool::acquire(&binary)?;
@@ -120,10 +122,15 @@ impl DeepSeekDriver {
         let created = server
             .rpc(
                 "session.create",
-                json!({
-                    "cwd": cwd.to_string_lossy(),
-                    "sessionId": requested_session_id,
-                }),
+                session_create_payload(
+                    &cwd,
+                    &requested_session_id,
+                    if resuming {
+                        None
+                    } else {
+                        agent_preset.as_deref()
+                    },
+                ),
             )
             .context("could not open a DeepSeek Harness session")?;
         let session_id = created
@@ -134,9 +141,20 @@ impl DeepSeekDriver {
         if session_id != requested_session_id {
             bail!("DeepSeek Harness returned a different session ID than requested");
         }
+        let selected_agent_preset = created
+            .get("agentPreset")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+            .or(agent_preset);
 
         let baseline = fetch_history(&server, &session_id)
             .context("could not read DeepSeek Harness session history")?;
+        let available_commands = fetch_commands(&server, &session_id)
+            .context("could not read DeepSeek Harness commands")?;
+        let command_names = available_commands
+            .iter()
+            .map(|command| command.name.clone())
+            .collect::<HashSet<_>>();
         let initial_options = SessionOptions {
             mode,
             interaction_mode,
@@ -149,6 +167,7 @@ impl DeepSeekDriver {
             &session_id,
             &initial_options,
             baseline.projection_values.as_ref(),
+            &command_names,
         )
         .context("could not configure the DeepSeek Harness session")?;
         // Selecting a model or changing a native command-backed option appends
@@ -156,18 +175,14 @@ impl DeepSeekDriver {
         // already-buffered stream frames are deduplicated by sequence.
         let history = fetch_history(&server, &session_id)
             .context("could not refresh DeepSeek Harness session history")?;
-        let available_commands = fetch_commands(&server, &session_id)
-            .context("could not read DeepSeek Harness commands")?;
-        let command_names = available_commands
-            .iter()
-            .map(|command| command.name.clone())
-            .collect();
-
         let _ = events.send(DriverEvent::Connected {
             provider_cursor: Some(ProviderResumeCursor::DeepSeek {
                 session_id: session_id.clone(),
             }),
         });
+        let _ = events.send(DriverEvent::AgentPresetSelected(
+            selected_agent_preset.clone(),
+        ));
         let _ = events.send(DriverEvent::AvailableCommands(available_commands));
         if let Some(values) = history.projection_values.as_ref() {
             emit_projection_values(values, &events);
@@ -232,6 +247,7 @@ impl DeepSeekDriver {
             server: Some(server),
             session_id,
             cwd,
+            agent_preset: selected_agent_preset,
             commands,
             completed_turn_seqs,
         })
@@ -291,10 +307,7 @@ impl DriverControl for DeepSeekDriver {
             let session_id = Uuid::new_v4().to_string();
             let created = server.rpc(
                 "session.create",
-                json!({
-                    "cwd": self.cwd.to_string_lossy(),
-                    "sessionId": session_id,
-                }),
+                session_create_payload(&self.cwd, &session_id, self.agent_preset.as_deref()),
             )?;
             created
                 .get("sessionId")
@@ -324,6 +337,21 @@ impl Drop for DeepSeekDriver {
         drop(self.server.take());
         let _ = self.commands.send(CommandMessage::Shutdown);
     }
+}
+
+fn session_create_payload(
+    cwd: &std::path::Path,
+    session_id: &str,
+    agent_preset: Option<&str>,
+) -> Value {
+    let mut payload = json!({
+        "cwd": cwd.to_string_lossy(),
+        "sessionId": session_id,
+    });
+    if let Some(agent_preset) = agent_preset {
+        payload["agentPreset"] = Value::String(agent_preset.to_owned());
+    }
+    payload
 }
 
 fn handle_command(
@@ -444,7 +472,13 @@ fn handle_command(
             let projections = fetch_history(server, session_id)
                 .ok()
                 .and_then(|history| history.projection_values);
-            match apply_session_options(server, session_id, &options, projections.as_ref()) {
+            match apply_session_options(
+                server,
+                session_id,
+                &options,
+                projections.as_ref(),
+                &state.command_names,
+            ) {
                 Ok(()) => *mode.lock() = options.mode,
                 Err(error) => {
                     let _ = events.send(DriverEvent::Error(format!(
@@ -1183,6 +1217,7 @@ fn apply_session_options(
     session_id: &str,
     options: &SessionOptions,
     projections: Option<&Value>,
+    command_names: &HashSet<String>,
 ) -> anyhow::Result<()> {
     if let Some(model) = options.model.as_deref() {
         let (provider, model) = match model.split_once('/') {
@@ -1235,7 +1270,11 @@ fn apply_session_options(
         .and_then(|values| values.pointer("/plan/pending"))
         .and_then(Value::as_bool)
         .unwrap_or(false);
-    if current_plan != Some(plan) || pending_plan {
+    let supports_plan = command_names.contains("plan") || current_plan.is_some();
+    if plan && !supports_plan {
+        bail!("the selected Harness agent preset does not support Plan mode");
+    }
+    if supports_plan && (current_plan != Some(plan) || pending_plan) {
         let execution =
             execute_harness_command(server, session_id, if plan { "/plan" } else { "/plan off" })?;
         if !execution.success {
@@ -1359,6 +1398,27 @@ mod tests {
         );
         assert_eq!(harness_command_name("explain /plan"), None);
         assert_eq!(harness_command_name("/"), None);
+    }
+
+    #[test]
+    fn fresh_session_creation_carries_the_agent_preset() {
+        assert_eq!(
+            session_create_payload(
+                std::path::Path::new("/tmp/project"),
+                "session-1",
+                Some("code")
+            ),
+            json!({
+                "cwd": "/tmp/project",
+                "sessionId": "session-1",
+                "agentPreset": "code"
+            })
+        );
+        assert!(
+            session_create_payload(std::path::Path::new("/tmp/project"), "session-2", None)
+                .get("agentPreset")
+                .is_none()
+        );
     }
 
     #[test]

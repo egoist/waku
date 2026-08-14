@@ -33,6 +33,7 @@ pub enum UpdateStatus {
 }
 
 #[derive(Clone, Debug)]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub enum UpdaterEvent {
     StatusChanged(UpdateStatus),
     UpToDate,

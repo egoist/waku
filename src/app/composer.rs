@@ -1286,12 +1286,127 @@ impl Waku {
         )
     }
 
+    pub(super) fn render_agent_preset_control(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let session = self
+            .selected_session()
+            .filter(|session| session.provider == ProviderKind::DeepSeek)?;
+        if session.has_started() || session.is_busy() {
+            return None;
+        }
+        let presets = self
+            .provider_probe(ProviderKind::DeepSeek)
+            .map(|probe| probe.agent_presets.clone())
+            .unwrap_or_default();
+        if presets.is_empty() {
+            return None;
+        }
+        let selected_id = self.agent_preset_for_session(session)?;
+        let selected_label = self.agent_preset_label_for_session(session)?;
+        let theme = Theme::current(cx);
+        let handle = self.menu_handle("agent-preset", cx);
+        let trigger = MenuChip::new("agent-preset")
+            .icon("icons/bot.svg", theme.text_tertiary)
+            .label(selected_label)
+            .selected(handle.is_open());
+
+        let weak = cx.entity().downgrade();
+        Some(dropdown_menu(
+            trigger,
+            "agent-preset-menu",
+            &handle,
+            MenuAlign::AboveLeft,
+            move |_| {
+                presets
+                    .clone()
+                    .into_iter()
+                    .map(|preset| {
+                        let weak = weak.clone();
+                        let preset_id = preset.id.clone();
+                        let selected = preset_id == selected_id;
+                        let name = if preset.is_custom {
+                            format!("{} · {}", preset.display_name(), tr!("agent_preset.custom"))
+                        } else {
+                            preset.display_name()
+                        };
+                        let description = preset
+                            .display_description()
+                            .unwrap_or_else(|| tr!("agent_preset.no_description"))
+                            // GPUI wraps at Unicode line-break opportunities,
+                            // but an underscored tool name is otherwise one
+                            // indivisible word. The zero-width spaces preserve
+                            // its visible spelling while allowing the menu to
+                            // keep it inside the card.
+                            .replace('_', "_\u{200b}");
+                        MenuItem::custom(move |_, _| {
+                            div()
+                                .w(px(340.0))
+                                .py(px(5.0))
+                                .overflow_hidden()
+                                .flex()
+                                .items_center()
+                                .gap(px(10.0))
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .min_w_0()
+                                        .child(
+                                            div()
+                                                .w_full()
+                                                .truncate()
+                                                .text_size(px(12.0))
+                                                .font_weight(if selected {
+                                                    FontWeight::SEMIBOLD
+                                                } else {
+                                                    FontWeight::MEDIUM
+                                                })
+                                                .text_color(theme.text)
+                                                .child(name.clone()),
+                                        )
+                                        .child(
+                                            div()
+                                                .w_full()
+                                                .mt(px(2.0))
+                                                .text_size(px(10.5))
+                                                .line_height(px(14.0))
+                                                .whitespace_normal()
+                                                .overflow_hidden()
+                                                .text_color(theme.text_tertiary)
+                                                .child(description.clone()),
+                                        ),
+                                )
+                                .when(selected, |element| {
+                                    element.child(icon(
+                                        "icons/check.svg",
+                                        11.0,
+                                        theme.text_tertiary,
+                                    ))
+                                })
+                                .into_any_element()
+                        })
+                        .on_click(move |_, cx| {
+                            let _ = weak.update(cx, |this, cx| {
+                                this.set_agent_preset(preset_id.clone(), cx);
+                            });
+                        })
+                    })
+                    .collect()
+            },
+        ))
+    }
+
     pub(super) fn render_interaction_mode_control(&self, cx: &mut Context<Self>) -> AnyElement {
         let theme = Theme::current(cx);
         let mode = self
             .selected_session()
             .map(|session| session.interaction_mode)
             .unwrap_or_default();
+        let supports_plan = self.selected_session().is_none_or(|session| {
+            session.provider != ProviderKind::DeepSeek
+                || self.agent_preset_for_session(session).as_deref() != Some("minimal")
+        });
+        // A stale state can still be switched back to Build; Minimal simply
+        // cannot be toggled from Build into a plan capability it does not mount.
+        let interactive = mode == InteractionMode::Plan || supports_plan;
         let next_mode = if mode == InteractionMode::Plan {
             InteractionMode::Build
         } else {
@@ -1314,7 +1429,6 @@ impl Waku {
             } else {
                 theme.text_secondary
             })
-            .hover(|element| element.bg(theme.overlay))
             .child(icon(
                 if mode == InteractionMode::Plan {
                     "icons/list.svg"
@@ -1329,10 +1443,19 @@ impl Waku {
                 },
             ))
             .child(mode.label())
-            .on_click(move |_, _, cx| {
-                let _ = weak.update(cx, |this, cx| {
-                    this.set_interaction_mode(next_mode, cx);
-                });
+            .when(interactive, |element| {
+                element
+                    .hover(|element| element.bg(theme.overlay))
+                    .on_click(move |_, _, cx| {
+                        let _ = weak.update(cx, |this, cx| {
+                            this.set_interaction_mode(next_mode, cx);
+                        });
+                    })
+            })
+            .when(!interactive, |element| {
+                element
+                    .opacity(0.7)
+                    .tooltip(Tooltip::text(tr!("agent_preset.minimal_no_plan")))
             })
             .into_any_element()
     }
@@ -1868,6 +1991,7 @@ impl Waku {
                         .line_height(px(14.0))
                         .child(self.render_provider_model_control(cx))
                         .children(self.render_model_traits_control(cx))
+                        .children(self.render_agent_preset_control(cx))
                         .child(self.render_access_control(cx))
                         .child(self.render_interaction_mode_control(cx))
                         .child(div().flex_1())
@@ -1948,7 +2072,13 @@ impl Waku {
                                             .hover(|element| element.bg(theme.overlay))
                                             .active(|element| element.opacity(0.8))
                                             .child(icon("icons/zap.svg", 13.0, theme.warning))
-                                            .tooltip(Tooltip::text(tr!("composer.steer_turn")))
+                                            .tooltip(Tooltip::text(tr!(
+                                                "composer.steer_turn",
+                                                shortcut = crate::platform::primary_shortcut(
+                                                    "⌘↩",
+                                                    "Ctrl+Enter"
+                                                )
+                                            )))
                                             .on_click(cx.listener(|this, _, _, cx| {
                                                 let prompt =
                                                     this.composer.read(cx).content().to_owned();

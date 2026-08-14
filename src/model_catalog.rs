@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 
-use crate::model::{ProviderKind, ProviderModel, ProviderModelOption};
+use crate::model::{ProviderAgentPreset, ProviderKind, ProviderModel, ProviderModelOption};
 
 const CODEX_RPC_TIMEOUT: Duration = Duration::from_secs(5);
 const PI_RPC_TIMEOUT: Duration = Duration::from_secs(10);
@@ -178,23 +178,46 @@ fn non_empty_trimmed(value: &str) -> Option<String> {
     (!value.is_empty()).then(|| value.to_owned())
 }
 
-pub fn discover_models(provider: ProviderKind, binary: &Path) -> Vec<ProviderModel> {
-    let discovered = match provider {
+pub fn fallback_agent_presets(provider: ProviderKind) -> Vec<ProviderAgentPreset> {
+    if provider != ProviderKind::DeepSeek {
+        return Vec::new();
+    }
+    vec![
+        ProviderAgentPreset::new("standard", tr!("agent_preset.standard"))
+            .description(tr!("agent_preset.standard_description"))
+            .default(),
+        ProviderAgentPreset::new("code", tr!("agent_preset.code"))
+            .description(tr!("agent_preset.code_description")),
+        ProviderAgentPreset::new("minimal", tr!("agent_preset.minimal"))
+            .description(tr!("agent_preset.minimal_description")),
+        ProviderAgentPreset::new("cordis", tr!("agent_preset.creator"))
+            .description(tr!("agent_preset.creator_description")),
+    ]
+}
+
+/// Discovers both ordinary models and provider-owned agent compositions in
+/// one provider process. Harness serves both catalogs from the same resident
+/// Host, so querying them together avoids starting it twice during detection.
+pub fn discover_catalog(
+    provider: ProviderKind,
+    binary: &Path,
+) -> (Vec<ProviderModel>, Vec<ProviderAgentPreset>) {
+    let (discovered, discovered_presets) = match provider {
         // Amp exposes stable agent modes rather than a model inventory. Keep
         // the picker aligned with the modes advertised by the current CLI.
-        ProviderKind::Amp => Vec::new(),
-        ProviderKind::Codex => discover_codex_models(binary),
+        ProviderKind::Amp => (Vec::new(), None),
+        ProviderKind::Codex => (discover_codex_models(binary), None),
         // Claude Code has no inventory command, but its settings expose the
         // user's gateway and pinned model entries. Merge those into the
         // curated catalog without inventing models from search input.
-        ProviderKind::Claude => discover_claude_models(),
-        ProviderKind::Cursor => discover_cursor_models(binary),
-        ProviderKind::DeepSeek => discover_deepseek_models(binary),
-        ProviderKind::OpenCode => discover_opencode_models(binary),
-        ProviderKind::Grok => discover_grok_models(binary),
-        ProviderKind::Pi => discover_pi_models(binary),
+        ProviderKind::Claude => (discover_claude_models(), None),
+        ProviderKind::Cursor => (discover_cursor_models(binary), None),
+        ProviderKind::DeepSeek => discover_deepseek_catalog(binary),
+        ProviderKind::OpenCode => (discover_opencode_models(binary), None),
+        ProviderKind::Grok => (discover_grok_models(binary), None),
+        ProviderKind::Pi => (discover_pi_models(binary), None),
     };
-    if discovered.is_empty() {
+    let models = if discovered.is_empty() {
         // A failed or empty probe keeps the last successful discovery over
         // the hardcoded catalog, so one bad CLI run can't shrink the picker.
         cached_models(provider).unwrap_or_else(|| fallback_models(provider))
@@ -202,7 +225,9 @@ pub fn discover_models(provider: ProviderKind, binary: &Path) -> Vec<ProviderMod
         let models = deduplicate(discovered);
         write_cached_models(provider, &models);
         models
-    }
+    };
+    let presets = discovered_presets.unwrap_or_else(|| fallback_agent_presets(provider));
+    (models, presets)
 }
 
 /// Where a provider's last discovered catalog is cached. Debug builds keep it
@@ -326,14 +351,56 @@ fn discover_opencode_models(binary: &Path) -> Vec<ProviderModel> {
     parse_opencode_models(&String::from_utf8_lossy(&output.stdout))
 }
 
-fn discover_deepseek_models(binary: &Path) -> Vec<ProviderModel> {
+fn discover_deepseek_catalog(
+    binary: &Path,
+) -> (Vec<ProviderModel>, Option<Vec<ProviderAgentPreset>>) {
     let Ok(server) = crate::deepseek_pool::acquire(binary) else {
-        return Vec::new();
+        return (Vec::new(), None);
     };
-    let Ok(catalog) = server.rpc("llm.models", json!({})) else {
-        return Vec::new();
-    };
-    parse_deepseek_model_catalog(&catalog)
+    let models = server
+        .rpc("llm.models", json!({}))
+        .map(|catalog| parse_deepseek_model_catalog(&catalog))
+        .unwrap_or_default();
+    let presets = server
+        .rpc("agentPreset.list", json!({}))
+        .ok()
+        .map(|roster| parse_deepseek_agent_presets(&roster));
+    (models, presets)
+}
+
+fn parse_deepseek_agent_presets(roster: &Value) -> Vec<ProviderAgentPreset> {
+    roster
+        .get("presets")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        // Harness deliberately leaves broken presets in its management
+        // roster, but its own session picker excludes them.
+        .filter(|value| value.get("broken").is_none())
+        .filter_map(|value| {
+            let id = value
+                .get("id")
+                .and_then(Value::as_str)
+                .filter(|id| !id.trim().is_empty())?;
+            let name = value
+                .get("name")
+                .and_then(Value::as_str)
+                .filter(|name| !name.trim().is_empty())
+                .unwrap_or(id);
+            let mut preset = ProviderAgentPreset::new(id, name);
+            preset.is_default = value
+                .get("isDefault")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            preset.is_custom = value.get("trust").and_then(Value::as_str) == Some("user");
+            preset.description = value
+                .get("description")
+                .and_then(Value::as_str)
+                .filter(|description| !description.trim().is_empty())
+                .map(str::to_owned);
+            Some(preset)
+        })
+        .collect()
 }
 
 fn parse_deepseek_model_catalog(catalog: &Value) -> Vec<ProviderModel> {
@@ -1119,11 +1186,48 @@ mod tests {
     }
 
     #[test]
+    fn parses_only_selectable_deepseek_agent_presets() {
+        let presets = parse_deepseek_agent_presets(&json!({
+            "presets": [
+                {
+                    "id": "standard",
+                    "trust": "system",
+                    "isDefault": true,
+                    "name": "Host-localized standard"
+                },
+                {
+                    "id": "my-agent",
+                    "trust": "user",
+                    "isDefault": false,
+                    "name": "My agent",
+                    "description": "A local composition"
+                },
+                {
+                    "id": "broken",
+                    "trust": "user",
+                    "isDefault": false,
+                    "broken": "plugin failed"
+                }
+            ]
+        }));
+
+        assert_eq!(presets.len(), 2);
+        assert_eq!(presets[0].id, "standard");
+        assert!(presets[0].is_default);
+        assert_eq!(presets[1].name, "My agent");
+        assert!(presets[1].is_custom);
+        assert_eq!(
+            presets[1].description.as_deref(),
+            Some("A local composition")
+        );
+    }
+
+    #[test]
     #[ignore = "requires an installed DeepSeek Harness"]
     fn installed_deepseek_harness_reports_models() {
         let binary =
             crate::command_env::find_executable("dsh").expect("DeepSeek Harness is not installed");
-        let models = discover_deepseek_models(&binary);
+        let models = discover_catalog(ProviderKind::DeepSeek, &binary).0;
         assert!(
             !models.is_empty(),
             "the installed DeepSeek Harness reported no models"
