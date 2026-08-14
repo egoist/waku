@@ -436,6 +436,8 @@ automations.name_placeholder:
   en: Automation name
 automations.prompt_placeholder:
   en: What should this automation do?
+automations.prompt_required:
+  en: Add a prompt before saving this automation.
 automations.create_title:
   en: New automation
 automations.edit_title:

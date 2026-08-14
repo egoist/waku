@@ -249,6 +249,14 @@ impl Waku {
             .content()
             .trim()
             .to_owned();
+        // A prompt-less automation can never do anything — the spawn path no-ops
+        // on empty input — so reject it at save time with a visible message
+        // rather than persist a run that silently does nothing forever.
+        if prompt.is_empty() {
+            self.show_toast(tr!("automations.prompt_required"));
+            cx.notify();
+            return;
+        }
 
         match editor.id {
             Some(id) => {

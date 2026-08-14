@@ -171,6 +171,18 @@ impl Render for Waku {
         let sidebar_resize_handle = self.sidebar_visible.then(|| {
             self.render_panel_resize_handle("sidebar-resize-handle", PanelResizeTarget::Sidebar, cx)
         });
+        // The toast is a page-agnostic overlay, so compute it once and render it
+        // over whichever main column is active. Without this the Automations page
+        // would swallow save/spawn error toasts until you navigated away.
+        self.start_toast_dismiss_timer(cx);
+        let toast = self
+            .toast
+            .as_ref()
+            .map(|toast| (toast.message.clone(), toast.tone, toast.id));
+        let toast = toast.map(|(message, tone, generation)| {
+            self.render_toast(message, tone, generation, cx)
+                .into_any_element()
+        });
         let main_column = if self.automations_page.is_some() {
             div()
                 .flex_1()
@@ -184,20 +196,12 @@ impl Render for Waku {
                 })
                 .child(self.render_automations(window, cx))
                 .relative()
+                .children(toast)
                 .children(sidebar_resize_handle)
         } else {
             let empty = should_render_empty_state(self.selected_session());
             let permission = self.render_permission(cx);
             let computer_use = self.render_computer_use_overlay(cx);
-            self.start_toast_dismiss_timer(cx);
-            let toast = self
-                .toast
-                .as_ref()
-                .map(|toast| (toast.message.clone(), toast.tone, toast.id));
-            let toast = toast.map(|(message, tone, generation)| {
-                self.render_toast(message, tone, generation, cx)
-                    .into_any_element()
-            });
             div()
                 .flex_1()
                 .h_full()
