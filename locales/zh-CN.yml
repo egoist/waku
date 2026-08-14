@@ -303,6 +303,7 @@ models.none_found: 未找到模型
 models.favorite_hint: 为模型加星标即可固定在这里
 models.loading: 正在加载模型…
 models.none_reported: 此服务商未提供任何模型
+models.local_config: 本地配置
 models.standard: 标准
 models.reasoning: 推理强度
 models.service_tier: 服务等级

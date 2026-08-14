@@ -628,6 +628,8 @@ models.loading:
   en: Loading models…
 models.none_reported:
   en: No models reported by this provider
+models.local_config:
+  en: Local config
 models.standard:
   en: Standard
 models.reasoning:

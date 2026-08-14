@@ -39,12 +39,16 @@ pub fn fork_session_at(
 }
 
 fn projects_directory() -> anyhow::Result<PathBuf> {
-    let config_directory = std::env::var_os("CLAUDE_CONFIG_DIR")
+    let config_directory = config_directory()
+        .ok_or_else(|| anyhow!("Claude's configuration directory could not be located"))?;
+    Ok(config_directory.join("projects"))
+}
+
+pub(crate) fn config_directory() -> Option<PathBuf> {
+    std::env::var_os("CLAUDE_CONFIG_DIR")
         .filter(|value| !value.is_empty())
         .map(PathBuf::from)
         .or_else(|| dirs::home_dir().map(|home| home.join(".claude")))
-        .ok_or_else(|| anyhow!("Claude's configuration directory could not be located"))?;
-    Ok(config_directory.join("projects"))
 }
 
 fn find_session_file(projects_directory: &Path, session_id: &str) -> anyhow::Result<PathBuf> {

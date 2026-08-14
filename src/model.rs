@@ -115,7 +115,13 @@ impl ProviderKind {
     pub fn supports_model_discovery(self) -> bool {
         matches!(
             self,
-            Self::Codex | Self::Cursor | Self::DeepSeek | Self::OpenCode | Self::Grok | Self::Pi
+            Self::Claude
+                | Self::Codex
+                | Self::Cursor
+                | Self::DeepSeek
+                | Self::OpenCode
+                | Self::Grok
+                | Self::Pi
         )
     }
 }
@@ -2741,9 +2747,9 @@ mod tests {
     }
 
     #[test]
-    fn only_dynamic_provider_catalogs_are_discovered() {
+    fn configurable_provider_catalogs_are_discovered() {
         assert!(!ProviderKind::Amp.supports_model_discovery());
-        assert!(!ProviderKind::Claude.supports_model_discovery());
+        assert!(ProviderKind::Claude.supports_model_discovery());
         assert!(ProviderKind::Codex.supports_model_discovery());
         assert!(ProviderKind::Cursor.supports_model_discovery());
         assert!(ProviderKind::DeepSeek.supports_model_discovery());
