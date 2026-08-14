@@ -224,10 +224,15 @@ impl Waku {
         cx: &mut Context<Self>,
     ) -> Stateful<Div> {
         region
-            .on_click(|event, window, _| {
-                if event.click_count() == 2 {
-                    crate::platform::titlebar_double_click(window);
-                }
+            .when(cfg!(target_os = "windows"), |region| {
+                region.window_control_area(gpui::WindowControlArea::Drag)
+            })
+            .when(cfg!(not(target_os = "windows")), |region| {
+                region.on_click(|event, window, _| {
+                    if event.click_count() == 2 {
+                        crate::platform::titlebar_double_click(window);
+                    }
+                })
             })
             .on_mouse_down_out(cx.listener(|this, _, _, _| {
                 this.header_drag_armed = false;
@@ -250,6 +255,136 @@ impl Waku {
                     crate::platform::start_window_move(window);
                 }
             }))
+    }
+
+    #[cfg(target_os = "windows")]
+    fn render_windows_caption_button(
+        &self,
+        id: &'static str,
+        icon_path: &'static str,
+        tooltip: String,
+        focus: &FocusHandle,
+        control_area: gpui::WindowControlArea,
+        close: bool,
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
+        let theme = Theme::current(cx);
+        let visual_id = match control_area {
+            gpui::WindowControlArea::Min => "windows-minimize-visual",
+            gpui::WindowControlArea::Max => "windows-maximize-visual",
+            gpui::WindowControlArea::Close => "windows-close-visual",
+            gpui::WindowControlArea::Drag => "windows-caption-visual",
+        };
+        let hover = if close {
+            rgb(0xC42B1C).into()
+        } else {
+            theme.overlay
+        };
+        let active = if close {
+            rgb(0xA62518).into()
+        } else {
+            theme.overlay_strong
+        };
+        div()
+            .id(id)
+            .w(px(46.0))
+            .h_full()
+            .flex_none()
+            .group(id)
+            .flex()
+            .items_center()
+            .justify_center()
+            .cursor_default()
+            .window_control_area(control_area)
+            .tooltip(Tooltip::text(tooltip))
+            .child(
+                div()
+                    .id(visual_id)
+                    .track_focus(focus)
+                    .tab_index(0)
+                    .size(px(26.0))
+                    .rounded(px(6.0))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .group_hover(id, move |element| element.bg(hover))
+                    .group_active(id, move |element| element.bg(active))
+                    .focus_visible(|style| style.border_1().border_color(theme.accent))
+                    .child(
+                        icon(icon_path, 14.0, theme.text_tertiary).when(close, |icon| {
+                            icon.group_hover(id, |icon| icon.text_color(gpui::white()))
+                        }),
+                    )
+                    .on_key_down(cx.listener(move |this, event: &KeyDownEvent, window, cx| {
+                        if !matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                            return;
+                        }
+                        match control_area {
+                            gpui::WindowControlArea::Min => window.minimize_window(),
+                            gpui::WindowControlArea::Max => {
+                                crate::platform::toggle_window_maximized(window)
+                            }
+                            gpui::WindowControlArea::Close => crate::platform::hide_window(window),
+                            gpui::WindowControlArea::Drag => return,
+                        }
+                        this.header_drag_armed = false;
+                        cx.stop_propagation();
+                    })),
+            )
+    }
+
+    #[cfg(target_os = "windows")]
+    pub(super) fn render_windows_caption_buttons(
+        &self,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
+        let maximize_icon = if window.is_maximized() {
+            "icons/window-restore.svg"
+        } else {
+            "icons/window-maximize.svg"
+        };
+        let maximize_tooltip = if window.is_maximized() {
+            tr!("window.restore")
+        } else {
+            tr!("window.maximize")
+        };
+        div()
+            .id("windows-caption-buttons")
+            .tab_index(0)
+            .tab_group()
+            .tab_stop(false)
+            .h(px(48.0))
+            .flex_none()
+            .flex()
+            .items_center()
+            .child(self.render_windows_caption_button(
+                "windows-minimize",
+                "icons/window-minimize.svg",
+                tr!("window.minimize"),
+                &self.windows_minimize_focus,
+                gpui::WindowControlArea::Min,
+                false,
+                cx,
+            ))
+            .child(self.render_windows_caption_button(
+                "windows-maximize",
+                maximize_icon,
+                maximize_tooltip,
+                &self.windows_maximize_focus,
+                gpui::WindowControlArea::Max,
+                false,
+                cx,
+            ))
+            .child(self.render_windows_caption_button(
+                "windows-close",
+                "icons/x.svg",
+                tr!("window.close"),
+                &self.windows_close_focus,
+                gpui::WindowControlArea::Close,
+                true,
+                cx,
+            ))
     }
     // ── Sidebar ────────────────────────────────────────────────────────────
 
@@ -1241,14 +1376,22 @@ impl Waku {
             } else {
                 px(0.0)
             })
-            .pr(px(14.0))
+            .pr(if cfg!(target_os = "windows") {
+                px(0.0)
+            } else {
+                px(14.0)
+            })
             .when(!self.sidebar_visible, |element| {
                 element
                     .child(
                         self.window_drag_region(
                             div()
                                 .id("header-traffic-light-drag-region")
-                                .w(px(TRAFFIC_LIGHT_CLEARANCE - 8.0))
+                                .w(px(if cfg!(target_os = "macos") {
+                                    TRAFFIC_LIGHT_CLEARANCE - 8.0
+                                } else {
+                                    TRAFFIC_LIGHT_CLEARANCE
+                                }))
                                 .h_full()
                                 .flex_none(),
                             cx,
@@ -1336,6 +1479,15 @@ impl Waku {
                     .child(self.render_right_panel_toggle(cx))
             })
             .children(right_window_controls)
+            .when(
+                cfg!(target_os = "windows") && !self.right_panel_visible,
+                |element| {
+                    #[cfg(target_os = "windows")]
+                    return element.child(self.render_windows_caption_buttons(window, cx));
+                    #[cfg(not(target_os = "windows"))]
+                    element
+                },
+            )
     }
 
     // ── Empty states ───────────────────────────────────────────────────────

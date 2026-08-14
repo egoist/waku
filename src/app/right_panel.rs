@@ -96,6 +96,14 @@ fn percent_decode_file_path(path: &str) -> String {
 
 fn markdown_file_link_path(target: &str) -> Option<PathBuf> {
     let target = strip_file_location(target.trim());
+    #[cfg(windows)]
+    if target.len() >= 3
+        && target.as_bytes()[0].is_ascii_alphabetic()
+        && target.as_bytes()[1] == b':'
+        && matches!(target.as_bytes()[2], b'\\' | b'/')
+    {
+        return Some(PathBuf::from(percent_decode_file_path(target)));
+    }
     let path = if target.starts_with('/') {
         target
     } else if let Some(path) = target.strip_prefix("file://") {
@@ -115,6 +123,15 @@ fn markdown_file_link_path(target: &str) -> Option<PathBuf> {
     } else {
         return None;
     };
+    #[cfg(windows)]
+    let path = path
+        .strip_prefix('/')
+        .filter(|path| {
+            path.len() >= 2
+                && path.as_bytes()[0].is_ascii_alphabetic()
+                && path.as_bytes()[1] == b':'
+        })
+        .unwrap_or(path);
     let path = PathBuf::from(percent_decode_file_path(path));
     path.is_absolute().then_some(path)
 }
@@ -139,7 +156,7 @@ fn workspace_relative_file_path(workspace: &Path, target: &Path) -> Option<Strin
         if relative.as_os_str().is_empty() {
             return None;
         }
-        Some(relative.to_string_lossy().into_owned())
+        Some(relative.to_string_lossy().replace('\\', "/"))
     }
 
     let workspace = normalized_path(workspace);
@@ -566,7 +583,7 @@ fn visible_working_tree_entries(
             let expanded = is_dir && expanded_paths.contains(&absolute_path);
             let file_icon = (!is_dir).then(|| file_icon_for_name(&name));
             entries.push(WorkingTreeEntry {
-                relative_path: relative_path.to_string_lossy().into_owned(),
+                relative_path: relative_path.to_string_lossy().replace('\\', "/"),
                 absolute_path: absolute_path.clone(),
                 name,
                 is_dir,
@@ -899,38 +916,44 @@ mod tests {
 
     #[test]
     fn transcript_file_links_route_by_the_active_workspace() {
-        let workspace = Path::new("/Users/egoist/dev/waku");
+        let workspace = std::env::temp_dir()
+            .join("waku-transcript-link-route")
+            .join("workspace");
+        let project_file = workspace.join("src/app/right_panel.rs");
+        let outside_file = workspace.parent().unwrap().join("kero/src/app.rs");
+        let project_target = format!("{}:1596", project_file.display());
+        let project_target_with_column = format!("{}:1596:8", project_file.display());
+        let file_url = url::Url::from_file_path(workspace.join("My File.rs"))
+            .unwrap()
+            .to_string();
+        let outside_target = format!("{}:20", outside_file.display());
 
         assert_eq!(
-            transcript_link_route(
-                "/Users/egoist/dev/waku/src/app/right_panel.rs:1596",
-                Some(workspace),
-            ),
-            TranscriptLinkRoute::ProjectFile("src/app/right_panel.rs".into())
+            transcript_link_route(&project_target, Some(&workspace)),
+            TranscriptLinkRoute::ProjectFile(
+                Path::new("src/app/right_panel.rs")
+                    .to_string_lossy()
+                    .into_owned()
+            )
         );
         assert_eq!(
-            transcript_link_route(
-                "/Users/egoist/dev/waku/src/app/right_panel.rs:1596:8",
-                Some(workspace),
-            ),
-            TranscriptLinkRoute::ProjectFile("src/app/right_panel.rs".into())
+            transcript_link_route(&project_target_with_column, Some(&workspace)),
+            TranscriptLinkRoute::ProjectFile(
+                Path::new("src/app/right_panel.rs")
+                    .to_string_lossy()
+                    .into_owned()
+            )
         );
         assert_eq!(
-            transcript_link_route(
-                "file:///Users/egoist/dev/waku/My%20File.rs#L12C4",
-                Some(workspace),
-            ),
+            transcript_link_route(&format!("{file_url}#L12C4"), Some(&workspace)),
             TranscriptLinkRoute::ProjectFile("My File.rs".into())
         );
         assert_eq!(
-            transcript_link_route(
-                "/Users/egoist/dev/waku/../kero/src/app.rs:20",
-                Some(workspace),
-            ),
-            TranscriptLinkRoute::Finder(PathBuf::from("/Users/egoist/dev/kero/src/app.rs"))
+            transcript_link_route(&outside_target, Some(&workspace)),
+            TranscriptLinkRoute::Finder(outside_file)
         );
         assert_eq!(
-            transcript_link_route("https://example.com/file.rs:12", Some(workspace)),
+            transcript_link_route("https://example.com/file.rs:12", Some(&workspace)),
             TranscriptLinkRoute::External
         );
     }
@@ -2173,7 +2196,11 @@ impl Waku {
             .items_center()
             .gap(px(6.0))
             .pl(px(10.0))
-            .pr(px(14.0))
+            .pr(if cfg!(target_os = "windows") {
+                px(0.0)
+            } else {
+                px(14.0)
+            })
             .child(
                 div()
                     .relative()
@@ -2246,16 +2273,30 @@ impl Waku {
             );
         }
 
-        self.window_drag_region(
-            header.child(self.render_right_panel_toggle(cx)).children(
-                self.render_client_window_controls(
-                    super::window_chrome::WindowControlSide::Right,
-                    window,
-                    cx,
-                ),
+        #[cfg(target_os = "windows")]
+        let header = header.child(
+            self.window_drag_region(
+                div()
+                    .id("right-panel-header-drag-region")
+                    .w(px(24.0))
+                    .h_full()
+                    .flex_none(),
+                cx,
             ),
-            cx,
-        )
+        );
+        let header = header.child(self.render_right_panel_toggle(cx)).children(
+            self.render_client_window_controls(
+                super::window_chrome::WindowControlSide::Right,
+                window,
+                cx,
+            ),
+        );
+        #[cfg(target_os = "windows")]
+        let header = header.child(self.render_windows_caption_buttons(window, cx));
+        #[cfg(target_os = "windows")]
+        return header;
+        #[cfg(not(target_os = "windows"))]
+        self.window_drag_region(header, cx)
     }
 
     fn render_right_panel_chooser(&self, cx: &mut Context<Self>) -> Stateful<Div> {

@@ -16,10 +16,12 @@ pub enum ProviderKind {
     OpenCode,
     Grok,
     Pi,
+    #[serde(rename = "deerflow")]
+    DeerFlow,
 }
 
 impl ProviderKind {
-    pub const ALL: [Self; 8] = [
+    pub const ALL: [Self; 9] = [
         Self::Amp,
         Self::Claude,
         Self::Codex,
@@ -28,6 +30,7 @@ impl ProviderKind {
         Self::OpenCode,
         Self::Grok,
         Self::Pi,
+        Self::DeerFlow,
     ];
 
     pub fn id(self) -> &'static str {
@@ -40,6 +43,7 @@ impl ProviderKind {
             Self::OpenCode => "opencode",
             Self::Grok => "grok",
             Self::Pi => "pi",
+            Self::DeerFlow => "deerflow",
         }
     }
 
@@ -53,6 +57,7 @@ impl ProviderKind {
             Self::OpenCode => "OpenCode",
             Self::Grok => "Grok Build",
             Self::Pi => "Pi",
+            Self::DeerFlow => "DeerFlow ACP",
         }
     }
 
@@ -66,6 +71,7 @@ impl ProviderKind {
             Self::OpenCode => "OpenCode",
             Self::Grok => "Grok",
             Self::Pi => "Pi",
+            Self::DeerFlow => "DeerFlow",
         }
     }
 
@@ -81,6 +87,7 @@ impl ProviderKind {
             Self::OpenCode => "opencode",
             Self::Grok => "grok",
             Self::Pi => "pi",
+            Self::DeerFlow => "deerflow-acp",
         }
     }
 
@@ -159,6 +166,10 @@ pub enum ProviderResumeCursor {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         session_file: Option<PathBuf>,
     },
+    #[serde(rename = "deerflow")]
+    DeerFlow {
+        session_id: String,
+    },
 }
 
 impl ProviderResumeCursor {
@@ -184,6 +195,7 @@ impl ProviderResumeCursor {
                 session_id: id,
                 session_file: None,
             },
+            ProviderKind::DeerFlow => Self::DeerFlow { session_id: id },
         }
     }
 
@@ -197,6 +209,7 @@ impl ProviderResumeCursor {
             Self::OpenCode { .. } => ProviderKind::OpenCode,
             Self::Grok { .. } => ProviderKind::Grok,
             Self::Pi { .. } => ProviderKind::Pi,
+            Self::DeerFlow { .. } => ProviderKind::DeerFlow,
         }
     }
 
@@ -208,7 +221,8 @@ impl ProviderResumeCursor {
             | Self::DeepSeek { session_id }
             | Self::OpenCode { session_id }
             | Self::Grok { session_id }
-            | Self::Pi { session_id, .. } => session_id,
+            | Self::Pi { session_id, .. }
+            | Self::DeerFlow { session_id } => session_id,
             Self::Codex { thread_id } => thread_id,
         }
     }
@@ -460,7 +474,7 @@ pub struct ProviderProbe {
 
 impl ProviderProbe {
     pub fn pending(provider: ProviderKind) -> Self {
-        let path = find_in_path(provider.command());
+        let path = find_provider_binary(provider);
         Self {
             provider,
             installed: path.is_some(),
@@ -511,8 +525,12 @@ impl ProviderProbe {
     }
 }
 
-fn find_in_path(command: &str) -> Option<PathBuf> {
-    crate::command_env::find_executable(command)
+pub(crate) fn find_provider_binary(provider: ProviderKind) -> Option<PathBuf> {
+    if provider == ProviderKind::DeerFlow {
+        crate::command_env::find_deerflow_acp()
+    } else {
+        crate::command_env::find_executable(provider.command())
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -2816,6 +2834,8 @@ mod tests {
         assert_eq!(ProviderKind::OpenCode.command(), "opencode");
         assert_eq!(ProviderKind::Grok.command(), "grok");
         assert_eq!(ProviderKind::Pi.command(), "pi");
+        assert_eq!(ProviderKind::DeerFlow.id(), "deerflow");
+        assert_eq!(ProviderKind::DeerFlow.command(), "deerflow-acp");
     }
 
     #[test]
@@ -2833,6 +2853,8 @@ mod tests {
             assert!(provider.supports_conversation_fork());
             assert!(provider.supports_conversation_rollback());
         }
+        assert!(!ProviderKind::DeerFlow.supports_conversation_fork());
+        assert!(!ProviderKind::DeerFlow.supports_conversation_rollback());
     }
 
     #[test]
@@ -2845,6 +2867,24 @@ mod tests {
         assert!(ProviderKind::OpenCode.supports_model_discovery());
         assert!(ProviderKind::Grok.supports_model_discovery());
         assert!(ProviderKind::Pi.supports_model_discovery());
+        assert!(!ProviderKind::DeerFlow.supports_model_discovery());
+    }
+
+    #[test]
+    fn deerflow_cursor_round_trips_with_a_stable_provider_tag() {
+        let cursor = ProviderResumeCursor::from_session_id(
+            ProviderKind::DeerFlow,
+            "deerflow-session".into(),
+        );
+        let encoded = serde_json::to_string(&cursor).unwrap();
+        let decoded: ProviderResumeCursor = serde_json::from_str(&encoded).unwrap();
+
+        assert_eq!(
+            encoded,
+            r#"{"provider":"deerflow","sessionId":"deerflow-session"}"#
+        );
+        assert_eq!(decoded.provider(), ProviderKind::DeerFlow);
+        assert_eq!(decoded.native_id(), "deerflow-session");
     }
 
     #[test]

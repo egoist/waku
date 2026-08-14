@@ -7,7 +7,7 @@
 use std::fs;
 use std::io::Read as _;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::Output;
 
 #[cfg(unix)]
 use std::ffi::OsString;
@@ -53,7 +53,7 @@ impl BranchSnapshot {
 /// Inspect local branches and which worktree, if any, currently owns each.
 /// `Ok(None)` means `cwd` is not inside a Git repository.
 pub fn inspect(cwd: &Path) -> anyhow::Result<Option<BranchSnapshot>> {
-    let repository_output = Command::new("git")
+    let repository_output = crate::command_env::command("git")
         .args(["rev-parse", "--show-toplevel"])
         .current_dir(cwd)
         .output()
@@ -145,7 +145,7 @@ pub fn inspect(cwd: &Path) -> anyhow::Result<Option<BranchSnapshot>> {
 }
 
 fn worktree_line_counts(cwd: &Path) -> (u64, u64) {
-    let tracked = Command::new("git")
+    let tracked = crate::command_env::command("git")
         .args(["diff", "--numstat", "HEAD", "--"])
         .current_dir(cwd)
         .output()
@@ -181,7 +181,7 @@ fn numstat_line_counts(output: &[u8]) -> (u64, u64) {
 /// source that opens when it is clicked. Bounds keep generated trees from
 /// turning a background metadata refresh into unbounded work.
 fn untracked_line_additions(repository: &Path) -> u64 {
-    let Ok(output) = Command::new("git")
+    let Ok(output) = crate::command_env::command("git")
         .args([
             "ls-files",
             "--others",
@@ -264,7 +264,7 @@ fn path_from_git_bytes(path: &[u8]) -> PathBuf {
 }
 
 pub fn checkout(cwd: &Path, branch: &str) -> anyhow::Result<BranchSnapshot> {
-    let output = Command::new("git")
+    let output = crate::command_env::command("git")
         .args(["switch", "--"])
         .arg(branch)
         .current_dir(cwd)
@@ -281,7 +281,7 @@ pub fn create_and_checkout(cwd: &Path, branch: &str) -> anyhow::Result<BranchSna
     if branch.is_empty() {
         bail!("enter a branch name");
     }
-    let validation = Command::new("git")
+    let validation = crate::command_env::command("git")
         .args(["check-ref-format", "--branch"])
         .arg(branch)
         .current_dir(cwd)
@@ -290,7 +290,7 @@ pub fn create_and_checkout(cwd: &Path, branch: &str) -> anyhow::Result<BranchSna
     if !validation.status.success() {
         bail!("{}", command_error(&validation));
     }
-    let output = Command::new("git")
+    let output = crate::command_env::command("git")
         .args(["switch", "-c"])
         .arg(branch)
         .current_dir(cwd)
@@ -303,7 +303,7 @@ pub fn create_and_checkout(cwd: &Path, branch: &str) -> anyhow::Result<BranchSna
 }
 
 fn git_stdout(cwd: &Path, args: &[&str]) -> anyhow::Result<String> {
-    let output = Command::new("git")
+    let output = crate::command_env::command("git")
         .args(args)
         .current_dir(cwd)
         .output()
@@ -315,7 +315,7 @@ fn git_stdout(cwd: &Path, args: &[&str]) -> anyhow::Result<String> {
 }
 
 fn optional_stdout(cwd: &Path, args: &[&str]) -> anyhow::Result<Option<String>> {
-    let output = Command::new("git")
+    let output = crate::command_env::command("git")
         .args(args)
         .current_dir(cwd)
         .output()
@@ -346,7 +346,7 @@ mod tests {
     use uuid::Uuid;
 
     fn run_git(cwd: &Path, args: &[&str]) {
-        let output = Command::new("git")
+        let output = crate::command_env::command("git")
             .args(args)
             .current_dir(cwd)
             .output()

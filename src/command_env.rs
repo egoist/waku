@@ -28,6 +28,12 @@ type ShellEnvironment = Vec<(OsString, OsString)>;
 static LOGIN_SHELL_ENVIRONMENT: OnceLock<RwLock<Option<ShellEnvironment>>> = OnceLock::new();
 static SHELL_ENV_CAPTURE_ID: AtomicU64 = AtomicU64::new(0);
 
+#[cfg(windows)]
+use std::os::windows::process::CommandExt as _;
+
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
 /// Build a command with the environment a terminal-launched Waku normally
 /// inherits. Apps opened through LaunchServices do not receive variables
 /// exported by the user's shell, including the PATH needed by script-based
@@ -35,8 +41,50 @@ static SHELL_ENV_CAPTURE_ID: AtomicU64 = AtomicU64::new(0);
 /// launcher needs `node`). Callers can add provider-specific overrides after
 /// this.
 pub fn command(program: impl AsRef<OsStr>) -> Command {
+    let program = program.as_ref();
+    #[cfg(windows)]
+    let mut command = match Path::new(program)
+        .extension()
+        .and_then(OsStr::to_str)
+        .map(str::to_ascii_lowercase)
+        .as_deref()
+    {
+        Some("cmd" | "bat") => {
+            let mut command =
+                Command::new(std::env::var_os("COMSPEC").unwrap_or_else(|| "cmd.exe".into()));
+            // `cmd /c "C:\path with spaces\script.cmd" arg` strips the
+            // opening quote and then tries to execute `C:\path`. `call` makes
+            // the script path an ordinary quoted argument and preserves all
+            // following provider arguments.
+            command.args(["/d", "/s", "/c", "call"]).arg(program);
+            command
+        }
+        Some("ps1") => {
+            let mut command = Command::new("powershell.exe");
+            command
+                .args([
+                    "-NoLogo",
+                    "-NoProfile",
+                    "-ExecutionPolicy",
+                    "Bypass",
+                    "-File",
+                ])
+                .arg(program);
+            command
+        }
+        _ => Command::new(program),
+    };
+    #[cfg(not(windows))]
     let mut command = Command::new(program);
     command.envs(shell_environment());
+    // Waku is a GUI-subsystem application on Windows. Console-subsystem
+    // children otherwise allocate a visible console of their own, which
+    // produces a terminal flash even when all stdio is piped.
+    #[cfg(windows)]
+    command.creation_flags(CREATE_NO_WINDOW);
+    if let Ok(path) = std::env::join_paths(executable_search_paths()) {
+        command.env("PATH", path);
+    }
     command
 }
 
@@ -136,10 +184,92 @@ pub fn find_executable(name: &str) -> Option<PathBuf> {
     if candidate.components().count() > 1 && candidate.is_file() {
         return Some(candidate.to_path_buf());
     }
-    executable_search_paths()
-        .into_iter()
-        .map(|directory| directory.join(name))
-        .find(|candidate| candidate.is_file())
+    #[cfg(windows)]
+    let extensions = executable_extensions();
+    #[cfg(not(windows))]
+    let extensions = Vec::new();
+    find_executable_in(name, &executable_search_paths(), &extensions)
+}
+
+/// Find the DeerFlow ACP bridge without baking a machine-specific drive into
+/// the app. Installed bridges still win via PATH. Development checkouts can
+/// opt in explicitly, and a sibling `deerflow-api` checkout is recognized for
+/// the common `.../waku` + `.../deerflow-api` layout.
+pub fn find_deerflow_acp() -> Option<PathBuf> {
+    let mut roots = Vec::new();
+    if let Ok(cwd) = std::env::current_dir() {
+        roots.extend(cwd.ancestors().map(Path::to_path_buf));
+    }
+    if let Ok(executable) = std::env::current_exe() {
+        roots.extend(executable.ancestors().map(Path::to_path_buf));
+    }
+    std::env::var_os("WAKU_DEERFLOW_ACP_BINARY")
+        .map(PathBuf::from)
+        .filter(|path| path.is_file())
+        .or_else(|| find_executable("deerflow-acp"))
+        .or_else(|| find_deerflow_acp_from(None, &roots))
+}
+
+fn find_deerflow_acp_from(explicit: Option<PathBuf>, roots: &[PathBuf]) -> Option<PathBuf> {
+    explicit.filter(|path| path.is_file()).or_else(|| {
+        let executable_name = if cfg!(windows) {
+            "deerflow-acp.exe"
+        } else {
+            "deerflow-acp"
+        };
+        let relative = Path::new("deerflow-api")
+            .join("bridge")
+            .join("target")
+            .join("release")
+            .join(executable_name);
+        roots.iter().find_map(|root| {
+            let candidate = root.join(&relative);
+            candidate.is_file().then_some(candidate)
+        })
+    })
+}
+
+fn find_executable_in(
+    name: &str,
+    directories: &[PathBuf],
+    extensions: &[String],
+) -> Option<PathBuf> {
+    directories.iter().find_map(|directory| {
+        let candidate = directory.join(name);
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+        if Path::new(name).extension().is_none() {
+            for extension in extensions {
+                let candidate = directory.join(format!("{name}{extension}"));
+                if candidate.is_file() {
+                    return Some(candidate);
+                }
+            }
+        }
+        None
+    })
+}
+
+#[cfg(windows)]
+fn executable_extensions() -> Vec<String> {
+    let mut extensions = std::env::var_os("PATHEXT")
+        .map(|value| {
+            value
+                .to_string_lossy()
+                .split(';')
+                .filter(|extension| !extension.is_empty())
+                .map(|extension| extension.to_ascii_lowercase())
+                .collect()
+        })
+        .unwrap_or_else(|| vec![".com".into(), ".exe".into(), ".bat".into(), ".cmd".into()]);
+    // PowerShell resolves `.ps1` commands even though Windows' conventional
+    // PATHEXT omits it. Waku launches these through powershell.exe above, so
+    // discovery must recognize the same scripts that `command` can execute.
+    if !extensions.iter().any(|extension| extension == ".ps1") {
+        extensions.push(".ps1".into());
+    }
+    extensions
 }
 
 /// Resolve a user-supplied binary override: `~` expands to the home
@@ -150,7 +280,7 @@ pub fn resolve_binary_override(spec: &str) -> Option<PathBuf> {
     if spec.is_empty() {
         return None;
     }
-    if let Some(rest) = spec.strip_prefix("~/") {
+    if let Some(rest) = spec.strip_prefix("~/").or_else(|| spec.strip_prefix("~\\")) {
         let candidate = dirs::home_dir()?.join(rest);
         return candidate.is_file().then_some(candidate);
     }
@@ -214,6 +344,14 @@ fn search_paths_from(
         directories.extend(std::env::split_paths(path));
     }
     if let Some(home) = home {
+        #[cfg(windows)]
+        directories.extend([
+            home.join(".local/bin"),
+            home.join(".bun/bin"),
+            home.join(".cargo/bin"),
+            home.join("AppData/Roaming/npm"),
+        ]);
+        #[cfg(not(windows))]
         directories.extend([
             home.join(".local/bin"),
             home.join(".bun/bin"),
@@ -222,6 +360,7 @@ fn search_paths_from(
             home.join(".volta/bin"),
         ]);
     }
+    #[cfg(not(windows))]
     directories.extend([
         PathBuf::from("/opt/homebrew/bin"),
         PathBuf::from("/usr/local/bin"),
@@ -460,6 +599,7 @@ mod tests {
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
 
+    #[cfg(unix)]
     #[test]
     fn output_captures_stdout_and_stderr() {
         let mut command = Command::new("/bin/sh");
@@ -531,6 +671,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(windows))]
     fn launch_services_path_is_extended_for_script_based_clis() {
         let home = Path::new("/Users/example");
         let paths = search_paths_from(None, Some(OsStr::new("/usr/bin:/bin")), Some(home));
@@ -549,6 +690,7 @@ mod tests {
         );
     }
 
+    #[cfg(not(windows))]
     #[test]
     fn login_shell_path_precedes_the_inherited_desktop_path() {
         let paths = search_paths_from(
@@ -642,5 +784,167 @@ mod tests {
         );
         let _ = fs::remove_file(shell);
         let _ = fs::remove_dir(directory);
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn windows_search_paths_include_common_cli_install_locations() {
+        let home = Path::new(r"C:\Users\example");
+        let paths = search_paths_from(
+            None,
+            Some(OsStr::new(r"C:\Windows\System32;C:\Tools")),
+            Some(home),
+        );
+
+        assert_eq!(paths[0], PathBuf::from(r"C:\Windows\System32"));
+        assert_eq!(paths[1], PathBuf::from(r"C:\Tools"));
+        assert!(paths.contains(&home.join(".local/bin")));
+        assert!(paths.contains(&home.join(".bun/bin")));
+        assert!(paths.contains(&home.join(".cargo/bin")));
+        assert!(paths.contains(&home.join("AppData/Roaming/npm")));
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn executable_lookup_uses_windows_extensions() {
+        let root = std::env::temp_dir().join(format!(
+            "waku-command-env-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let executable = root.join("provider.CMD");
+        std::fs::write(&executable, "@echo off\r\n").unwrap();
+
+        assert_eq!(
+            find_executable_in("provider", std::slice::from_ref(&root), &[".CMD".into()]),
+            Some(executable)
+        );
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn powershell_scripts_are_discoverable_even_when_pathext_omits_them() {
+        assert!(
+            executable_extensions()
+                .iter()
+                .any(|extension| extension == ".ps1")
+        );
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn command_scripts_are_wrapped_by_cmd() {
+        use std::ffi::OsString;
+
+        let script = Path::new(r"C:\Tools\provider.cmd");
+        let command = command(script);
+        let args = command.get_args().map(OsString::from).collect::<Vec<_>>();
+
+        assert_eq!(
+            args,
+            ["/d", "/s", "/c", "call"]
+                .into_iter()
+                .map(OsString::from)
+                .chain(std::iter::once(script.as_os_str().to_owned()))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn command_scripts_execute_with_arguments_and_spaces() {
+        let root = std::env::temp_dir().join(format!(
+            "waku command scripts {} {}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+
+        let batch = root.join("provider wrapper.cmd");
+        std::fs::write(&batch, "@echo off\r\necho %~1\r\n").unwrap();
+        let batch_output = command(&batch).arg("batch value").output().unwrap();
+        assert!(batch_output.status.success());
+        assert_eq!(
+            String::from_utf8_lossy(&batch_output.stdout).trim(),
+            "batch value"
+        );
+
+        let powershell = root.join("provider wrapper.ps1");
+        std::fs::write(
+            &powershell,
+            "param([string]$Value)\r\nWrite-Output $Value\r\n",
+        )
+        .unwrap();
+        let powershell_output = command(&powershell)
+            .args(["-Value", "powershell value"])
+            .output()
+            .unwrap();
+        assert!(powershell_output.status.success());
+        assert_eq!(
+            String::from_utf8_lossy(&powershell_output.stdout).trim(),
+            "powershell value"
+        );
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn deerflow_discovery_accepts_the_explicit_bridge_environment() {
+        let root = std::env::temp_dir().join(format!(
+            "waku-deerflow-discovery-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let executable = root.join("custom-deerflow-acp");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(&executable, []).unwrap();
+
+        assert_eq!(
+            find_deerflow_acp_from(Some(executable.clone()), &[]),
+            Some(executable)
+        );
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn deerflow_discovery_recognizes_a_sibling_checkout() {
+        let root = std::env::temp_dir().join(format!(
+            "waku-deerflow-sibling-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let executable = root
+            .join("deerflow-api/bridge/target/release")
+            .join(if cfg!(windows) {
+                "deerflow-acp.exe"
+            } else {
+                "deerflow-acp"
+            });
+        std::fs::create_dir_all(executable.parent().unwrap()).unwrap();
+        std::fs::write(&executable, []).unwrap();
+
+        assert_eq!(
+            find_deerflow_acp_from(None, std::slice::from_ref(&root)),
+            Some(executable)
+        );
+
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

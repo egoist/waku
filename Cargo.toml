@@ -120,6 +120,10 @@ image = { version = "0.25", default-features = false, features = ["png"] }
 # Implements the FreeDesktop Trash specification for files and directories.
 trash = "5.2.6"
 
+[target.'cfg(target_os = "windows")'.dependencies]
+raw-window-handle = "0.6"
+windows = { version = "0.61", features = ["Win32_Foundation", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_WindowsAndMessaging"] }
+
 [profile.release]
 lto = "thin"
 codegen-units = 1

@@ -1,0 +1,57 @@
+name: Windows package
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - feat/windows-support
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-package-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  package:
+    name: Windows x86_64 portable EXE
+    runs-on: windows-latest
+    timeout-minutes: 90
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Install Rust
+        shell: pwsh
+        run: |
+          rustup toolchain install 1.96.0 --profile minimal
+          rustup default 1.96.0
+
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-${{ runner.arch }}-rust-1.96.0-release-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ runner.arch }}-rust-1.96.0-release-
+
+      - name: Build portable package
+        shell: pwsh
+        run: ./scripts/bundle-windows.ps1
+
+      - name: Upload Windows package
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-x86_64
+          path: |
+            target/release/waku-*-x86_64-pc-windows-msvc.exe
+            target/release/waku-*-x86_64-pc-windows-msvc.zip
+          if-no-files-found: error
+          retention-days: 14

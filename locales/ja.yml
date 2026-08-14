@@ -27,6 +27,7 @@ menu.close_window: ウインドウを閉じる
 window.minimize: 最小化
 window.maximize: 最大化
 window.restore: 元に戻す
+window.close: 閉じる
 
 updater.update: アップデート
 updater.checking: アップデートを確認中…

@@ -15,6 +15,12 @@ use rquickjs::context::EvalOptions;
 use rquickjs::{Context, Ctx, Exception, Function, Persistent, Promise, Runtime, Value};
 use serde_json::{Map, Value as JsonValue, json};
 
+#[cfg(windows)]
+use std::os::windows::process::CommandExt as _;
+
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
 const MCP_PROTOCOL_VERSION: &str = "2025-06-18";
 const DEFAULT_EXECUTION_TIMEOUT_MS: u64 = 30_000;
 const MAX_REQUEST_BYTES: usize = 16 * 1024 * 1024;
@@ -915,18 +921,21 @@ impl Drop for RequestWatchdog {
 
 impl HelperConnection {
     fn start(deadline: Option<Instant>) -> anyhow::Result<Self> {
-        let command = std::env::var_os("WAKU_COMPUTER_USE_SERVER")
+        let helper = std::env::var_os("WAKU_COMPUTER_USE_SERVER")
             .map(PathBuf::from)
             .ok_or_else(|| {
                 anyhow!("WAKU_COMPUTER_USE_SERVER is required before the first sky operation")
             })?;
-        let mut child = Command::new(&command)
+        let mut command = Command::new(&helper);
+        #[cfg(windows)]
+        command.creation_flags(CREATE_NO_WINDOW);
+        let mut child = command
             .arg("mcp")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
-            .with_context(|| format!("failed to start {}", command.display()))?;
+            .with_context(|| format!("failed to start {}", helper.display()))?;
         let input = child
             .stdin
             .take()

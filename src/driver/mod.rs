@@ -194,7 +194,7 @@ pub fn start(
         // Cursor and Grok both serve a long-lived ACP session, which is the only
         // way their Supervised mode can actually ask the user rather than
         // silently forcing or denying.
-        ProviderKind::Cursor | ProviderKind::Grok => {
+        ProviderKind::Cursor | ProviderKind::Grok | ProviderKind::DeerFlow => {
             Arc::new(acp::AcpDriver::start(provider, options, events)?)
         }
         ProviderKind::DeepSeek => Arc::new(deepseek::DeepSeekDriver::start(options, events)?),

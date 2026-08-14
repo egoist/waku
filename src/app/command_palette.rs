@@ -1332,6 +1332,7 @@ mod tests {
             .expect("render function must exist");
         let end = source[start..]
             .find("\n}\n\n#[cfg(test)]")
+            .or_else(|| source[start..].find("\r\n}\r\n\r\n#[cfg(test)]"))
             .map(|offset| start + offset)
             .expect("test module marker must exist");
         let render = &source[start..end];

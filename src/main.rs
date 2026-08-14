@@ -1,3 +1,4 @@
+#![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
 #![recursion_limit = "256"]
 
 rust_i18n::i18n!("locales", fallback = "en");
@@ -165,7 +166,7 @@ fn main() {
             });
             cx.on_action(|_: &About, _| crate::platform::show_about_panel());
 
-            cx.bind_keys([
+            let mut keys = vec![
                 // `secondary` is Command on macOS and Control elsewhere.
                 KeyBinding::new("secondary-q", Quit, None),
                 KeyBinding::new("secondary-w", CloseWindow, None),
@@ -225,7 +226,13 @@ fn main() {
                 KeyBinding::new("secondary-v", WebviewPaste, Some("Browser")),
                 KeyBinding::new("secondary-a", WebviewSelectAll, Some("Browser")),
                 KeyBinding::new("escape", BrowserAddressCancel, Some("BrowserAddress")),
-            ]);
+            ];
+
+            if cfg!(target_os = "windows") {
+                keys.push(KeyBinding::new("ctrl-h", OpenFindReplace, Some("Waku")));
+            }
+
+            cx.bind_keys(keys);
 
             cx.on_action(|_: &Quit, cx| cx.quit());
 
@@ -247,7 +254,13 @@ fn main() {
                     WindowOptions {
                         titlebar: Some(TitlebarOptions {
                             title: Some(APP_NAME.into()),
-                            appears_transparent: cfg!(target_os = "macos"),
+                            // macOS and Windows both render their titlebar controls inside
+                            // Waku's header. On Windows GPUI uses this flag to remove the
+                            // native non-client titlebar while retaining the window title.
+                            appears_transparent: cfg!(any(
+                                target_os = "macos",
+                                target_os = "windows"
+                            )),
                             traffic_light_position: cfg!(target_os = "macos")
                                 .then(|| point(px(16.0), px(17.0))),
                         }),
@@ -256,10 +269,10 @@ fn main() {
                         // tiling remain enabled.
                         is_movable: true,
                         app_owns_titlebar_drag: cfg!(target_os = "macos"),
-                        window_background: if cfg!(target_os = "macos") {
-                            WindowBackgroundAppearance::Blurred
-                        } else {
+                        window_background: if cfg!(target_os = "linux") {
                             WindowBackgroundAppearance::Opaque
+                        } else {
+                            WindowBackgroundAppearance::Blurred
                         },
                         app_id: Some(APP_ID.to_owned()),
                         // GPUI defaults to compositor/server decorations. If a

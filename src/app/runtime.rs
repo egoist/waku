@@ -333,6 +333,10 @@ fn perform_provider_rewind(
             let cursor = driver.rollback(request.rollback_turns)?;
             Ok((cursor, None, prepared_driver))
         }
+        ProviderKind::DeerFlow => anyhow::bail!(
+            "{} does not support conversation rollback",
+            provider.display_name()
+        ),
     }
 }
 
@@ -590,6 +594,10 @@ fn perform_response_fork(mut request: ResponseForkRequest) -> Result<PreparedRes
                 let (cursor, prepared_driver) = fork_response_with_driver(&mut request)?;
                 Ok((cursor, None, prepared_driver))
             }
+            ProviderKind::DeerFlow => anyhow::bail!(
+                "{} does not support conversation forks",
+                provider.display_name()
+            ),
         }
     })();
 
@@ -844,7 +852,7 @@ impl Waku {
                 for provider in detect_providers {
                     let path = match overrides.get(&provider) {
                         Some(binary) => crate::command_env::resolve_binary_override(binary),
-                        None => crate::command_env::find_executable(provider.command()),
+                        None => crate::model::find_provider_binary(provider),
                     };
                     if provider_detection_tx
                         .send((provider, path.is_some(), path))

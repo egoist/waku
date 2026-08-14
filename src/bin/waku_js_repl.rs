@@ -1,3 +1,5 @@
+#![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
+
 #[path = "../js_repl.rs"]
 mod js_repl;
 

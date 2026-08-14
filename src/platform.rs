@@ -316,7 +316,45 @@ thread_local! {
 #[cfg(target_os = "macos")]
 const SIDEBAR_WIDTH: f64 = 252.0;
 
+#[cfg(target_os = "windows")]
+fn windows_hwnd(window: &Window) -> Option<windows::Win32::Foundation::HWND> {
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    use windows::Win32::Foundation::HWND;
+
+    let handle = HasWindowHandle::window_handle(window).ok()?;
+    let RawWindowHandle::Win32(handle) = handle.as_raw() else {
+        return None;
+    };
+    Some(HWND(handle.hwnd.get() as *mut _))
+}
+
 pub fn start_window_move(window: &Window) {
+    #[cfg(target_os = "windows")]
+    {
+        use windows::Win32::{
+            Foundation::{LPARAM, WPARAM},
+            UI::{
+                Input::KeyboardAndMouse::ReleaseCapture,
+                WindowsAndMessaging::{HTCAPTION, SC_MOVE, SendMessageW, WM_SYSCOMMAND},
+            },
+        };
+
+        let Some(hwnd) = windows_hwnd(window) else {
+            return;
+        };
+        unsafe {
+            // GPUI may still own mouse capture when the first move event lands.
+            // Release it before asking Windows to enter its native move loop.
+            let _ = ReleaseCapture();
+            SendMessageW(
+                hwnd,
+                WM_SYSCOMMAND,
+                Some(WPARAM((SC_MOVE | HTCAPTION) as usize)),
+                Some(LPARAM(0)),
+            );
+        }
+    }
+    #[cfg(not(target_os = "windows"))]
     window.start_window_move();
 }
 
@@ -330,6 +368,23 @@ pub fn titlebar_double_click(window: &Window) {
     #[cfg(not(target_os = "macos"))]
     if window.window_controls().maximize && window.is_resizable() {
         window.zoom_window();
+    }
+}
+
+#[cfg(target_os = "windows")]
+pub fn toggle_window_maximized(window: &Window) {
+    use windows::Win32::UI::WindowsAndMessaging::{SW_MAXIMIZE, SW_RESTORE, ShowWindowAsync};
+
+    let Some(hwnd) = windows_hwnd(window) else {
+        return;
+    };
+    let command = if window.is_maximized() {
+        SW_RESTORE
+    } else {
+        SW_MAXIMIZE
+    };
+    unsafe {
+        let _ = ShowWindowAsync(hwnd, command);
     }
 }
 

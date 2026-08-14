@@ -702,7 +702,8 @@ mod tests {
 
     #[test]
     fn every_ecosystem_root_is_listed() {
-        let projects = vec![("waku".to_owned(), PathBuf::from("/tmp/waku"))];
+        let project_root = std::env::temp_dir().join("waku");
+        let projects = vec![("waku".to_owned(), project_root.clone())];
         let locations = skill_locations(&projects);
         let roots: Vec<String> = locations
             .iter()
@@ -723,15 +724,16 @@ mod tests {
             );
         }
         for expected in [
-            "/tmp/waku/.agents/skills",
-            "/tmp/waku/.claude/skills",
-            "/tmp/waku/.codex/skills",
-            "/tmp/waku/.opencode/skills",
-            "/tmp/waku/.cursor/skills",
-            "/tmp/waku/.pi/skills",
+            ".agents/skills",
+            ".claude/skills",
+            ".codex/skills",
+            ".opencode/skills",
+            ".cursor/skills",
+            ".pi/skills",
         ] {
+            let expected = project_root.join(expected).display().to_string();
             assert!(
-                roots.iter().any(|root| root == expected),
+                roots.iter().any(|root| root == &expected),
                 "project root missing: {expected}"
             );
         }

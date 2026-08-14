@@ -61,7 +61,7 @@ struct AcpLaunch {
     env: Vec<(String, String)>,
 }
 
-fn launch_for(provider: ProviderKind) -> anyhow::Result<AcpLaunch> {
+fn launch_for(provider: ProviderKind, binary: &Path) -> anyhow::Result<AcpLaunch> {
     match provider {
         ProviderKind::Cursor => Ok(AcpLaunch {
             args: vec!["acp".into()],
@@ -75,6 +75,21 @@ fn launch_for(provider: ProviderKind) -> anyhow::Result<AcpLaunch> {
             args: vec!["acp".into()],
             env: Vec::new(),
         }),
+        ProviderKind::DeerFlow => {
+            let config = binary
+                .parent()
+                .and_then(Path::parent)
+                .and_then(Path::parent)
+                .and_then(Path::parent)
+                .map(|root| root.join("config.yaml"))
+                .filter(|path| path.is_file());
+            Ok(AcpLaunch {
+                args: config
+                    .map(|path| vec!["--config".into(), path.to_string_lossy().into_owned()])
+                    .unwrap_or_default(),
+                env: Vec::new(),
+            })
+        }
         _ => Err(anyhow!(
             "{} does not speak the Agent Client Protocol",
             provider.display_name()
@@ -119,7 +134,7 @@ impl AcpDriver {
             None => None,
         };
 
-        let launch = launch_for(provider)?;
+        let launch = launch_for(provider, &binary)?;
         let computer_use = (provider == ProviderKind::Grok && computer_use_enabled)
             .then(|| super::support::HeadlessComputerUseRuntime::start(provider, events.clone()))
             .transpose()?;
@@ -210,14 +225,61 @@ fn sdk_agent(
     environment.append(&mut launch.env);
     environment.extend(computer_env);
 
-    // `AcpAgentConfig` deliberately contains only argv and environment. macOS
+    // `AcpAgentConfig` deliberately contains only argv and environment. Unix
     // `env -C` supplies the session cwd without a shell, preserving exact
     // argument boundaries and the SDK's process-group lifecycle management.
-    let mut args = vec!["-C".to_owned(), cwd.to_owned(), binary.to_owned()];
-    args.extend(launch.args);
-    let config = AcpAgentConfig::new("/usr/bin/env")
-        .args(args)
-        .envs(environment);
+    #[cfg(not(windows))]
+    let config = {
+        let mut args = vec!["-C".to_owned(), cwd.to_owned(), binary.to_owned()];
+        args.extend(launch.args);
+        AcpAgentConfig::new("/usr/bin/env")
+            .args(args)
+            .envs(environment)
+    };
+    // Windows has no `/usr/bin/env`, and ACP agents are commonly installed as
+    // `.cmd` or PowerShell wrappers. The protocol still receives the requested
+    // session cwd; this layer only preserves executable dispatch and argument
+    // boundaries. The SDK itself applies CREATE_NO_WINDOW to the child.
+    #[cfg(windows)]
+    let config = {
+        let extension = Path::new(binary)
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .map(str::to_ascii_lowercase);
+        let _ = cwd;
+        match extension.as_deref() {
+            Some("cmd" | "bat") => {
+                let mut args = vec![
+                    "/d".to_owned(),
+                    "/s".to_owned(),
+                    "/c".to_owned(),
+                    "call".to_owned(),
+                    binary.to_owned(),
+                ];
+                args.extend(launch.args);
+                AcpAgentConfig::new(std::env::var_os("COMSPEC").unwrap_or_else(|| "cmd.exe".into()))
+                    .args(args)
+                    .envs(environment)
+            }
+            Some("ps1") => {
+                let mut args = vec![
+                    "-NoLogo".to_owned(),
+                    "-NoProfile".to_owned(),
+                    "-ExecutionPolicy".to_owned(),
+                    "Bypass".to_owned(),
+                    "-File".to_owned(),
+                    binary.to_owned(),
+                ];
+                args.extend(launch.args);
+                AcpAgentConfig::new("powershell.exe")
+                    .args(args)
+                    .envs(environment)
+            }
+            _ => AcpAgentConfig::new(binary)
+                .args(launch.args)
+                .envs(environment),
+        }
+    };
     Ok(AcpAgent::new(config).with_debug(move |line, direction| {
         if direction != LineDirection::Stderr || line.trim().is_empty() {
             return;
@@ -1094,6 +1156,34 @@ mod tests {
     use agent_client_protocol::schema::v1::{
         SessionMode, SessionModeState, ToolCallUpdate, ToolCallUpdateFields,
     };
+
+    #[test]
+    fn deerflow_launch_uses_the_checkout_config_without_an_acp_subcommand() {
+        let root =
+            std::env::temp_dir().join(format!("waku-deerflow-launch-{}", std::process::id()));
+        let binary = root
+            .join("bridge")
+            .join("target")
+            .join("release")
+            .join(if cfg!(windows) {
+                "deerflow-acp.exe"
+            } else {
+                "deerflow-acp"
+            });
+        std::fs::create_dir_all(binary.parent().unwrap()).unwrap();
+        std::fs::write(&binary, []).unwrap();
+        let config = root.join("config.yaml");
+        std::fs::write(&config, "local_acp: {}\n").unwrap();
+
+        let launch = launch_for(ProviderKind::DeerFlow, &binary).unwrap();
+        assert_eq!(
+            launch.args,
+            vec!["--config", config.to_string_lossy().as_ref()]
+        );
+        assert!(launch.env.is_empty());
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn plan_mode_selects_the_advertised_plan_mode() {

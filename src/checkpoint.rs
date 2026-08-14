@@ -3,7 +3,7 @@ use std::ffi::OsStr;
 use std::fs;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output, Stdio};
+use std::process::{Output, Stdio};
 
 use anyhow::{Context as _, anyhow, bail};
 use serde::{Deserialize, Serialize};
@@ -395,7 +395,7 @@ pub fn session_turn_refs(cwd: &Path, session_id: Uuid) -> HashSet<usize> {
 }
 
 pub fn delete_ref(cwd: &Path, git_ref: &str) -> anyhow::Result<()> {
-    let output = Command::new("git")
+    let output = crate::command_env::command("git")
         .args(["update-ref", "-d", git_ref])
         .current_dir(cwd)
         .output()
@@ -552,7 +552,7 @@ fn update_refs(cwd: &Path, commands: String) -> anyhow::Result<()> {
     if commands.is_empty() {
         return Ok(());
     }
-    let mut child = Command::new("git")
+    let mut child = crate::command_env::command("git")
         .args(["update-ref", "--stdin"])
         .current_dir(cwd)
         .stdin(Stdio::piped())
@@ -594,7 +594,7 @@ fn diff_files(cwd: &Path, from_ref: &str, to_ref: &str) -> anyhow::Result<Vec<Ch
 }
 
 fn is_git_repository(cwd: &Path) -> bool {
-    Command::new("git")
+    crate::command_env::command("git")
         .args(["rev-parse", "--is-inside-work-tree"])
         .current_dir(cwd)
         .output()
@@ -602,7 +602,7 @@ fn is_git_repository(cwd: &Path) -> bool {
 }
 
 fn symbolic_head(cwd: &Path) -> Option<String> {
-    let output = Command::new("git")
+    let output = crate::command_env::command("git")
         .args(["symbolic-ref", "--quiet", "HEAD"])
         .current_dir(cwd)
         .output()
@@ -648,7 +648,7 @@ fn repository_refs(cwd: &Path) -> anyhow::Result<BTreeMap<String, String>> {
 }
 
 fn has_head(cwd: &Path) -> bool {
-    Command::new("git")
+    crate::command_env::command("git")
         .args(["rev-parse", "--verify", "HEAD"])
         .current_dir(cwd)
         .output()
@@ -656,7 +656,7 @@ fn has_head(cwd: &Path) -> bool {
 }
 
 fn resolve_ref(cwd: &Path, git_ref: &str) -> Option<String> {
-    let output = Command::new("git")
+    let output = crate::command_env::command("git")
         .args(["rev-parse", "--verify", &format!("{git_ref}^{{commit}}")])
         .current_dir(cwd)
         .output()
@@ -673,7 +673,7 @@ where
     I: IntoIterator<Item = S>,
     S: AsRef<OsStr>,
 {
-    let output = Command::new("git")
+    let output = crate::command_env::command("git")
         .args(args)
         .current_dir(cwd)
         .output()
@@ -711,7 +711,7 @@ where
     I: IntoIterator<Item = S>,
     S: AsRef<OsStr>,
 {
-    let mut command = Command::new("git");
+    let mut command = crate::command_env::command("git");
     command
         .args(args)
         .current_dir(cwd)
@@ -745,7 +745,7 @@ mod tests {
     use super::*;
 
     fn git_ok(cwd: &Path, args: &[&str]) {
-        let status = Command::new("git")
+        let status = crate::command_env::command("git")
             .args(args)
             .current_dir(cwd)
             .status()
@@ -754,7 +754,7 @@ mod tests {
     }
 
     fn git_text(cwd: &Path, args: &[&str]) -> String {
-        let output = Command::new("git")
+        let output = crate::command_env::command("git")
             .args(args)
             .current_dir(cwd)
             .output()
@@ -963,12 +963,18 @@ mod tests {
         restore_ref(&directory, &turn.git_ref).unwrap();
 
         assert_eq!(
-            fs::read_to_string(directory.join("tracked.txt")).unwrap(),
-            "changed\n"
+            fs::read_to_string(directory.join("tracked.txt"))
+                .unwrap()
+                .lines()
+                .collect::<Vec<_>>(),
+            ["changed"]
         );
         assert_eq!(
-            fs::read_to_string(directory.join("new.txt")).unwrap(),
-            "new\n"
+            fs::read_to_string(directory.join("new.txt"))
+                .unwrap()
+                .lines()
+                .collect::<Vec<_>>(),
+            ["new"]
         );
         assert!(!directory.join("discard.txt").exists());
 

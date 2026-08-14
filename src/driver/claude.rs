@@ -118,6 +118,9 @@ fn configure_stream_command(
         "stdio",
         "--permission-mode",
         permission_mode(mode, interaction_mode),
+        // Waku does not expose Claude in Chrome and should not let a user-level
+        // integration add browser work to an otherwise native CLI session.
+        "--no-chrome",
     ]);
     if mode == RuntimeMode::FullAccess && interaction_mode != InteractionMode::Plan {
         command.arg("--dangerously-skip-permissions");
@@ -1273,6 +1276,7 @@ mod tests {
                 .windows(2)
                 .any(|arguments| { arguments == ["--thinking-display", "summarized"] })
         );
+        assert!(arguments.iter().any(|argument| argument == "--no-chrome"));
     }
 
     fn harness() -> (
@@ -1303,6 +1307,7 @@ mod tests {
     fn claude_streaming_session_against_the_real_cli() {
         let binary =
             crate::command_env::find_executable("claude").expect("claude is not installed");
+        let model = std::env::var("WAKU_CLAUDE_TEST_MODEL").ok();
         let (events, event_rx) = crate::driver::test_event_channel();
         let driver = ClaudeDriver::start(
             DriverStartOptions {
@@ -1310,7 +1315,7 @@ mod tests {
                 cwd: std::env::temp_dir(),
                 mode: RuntimeMode::FullAccess,
                 interaction_mode: InteractionMode::Build,
-                model: None,
+                model,
                 reasoning_effort: None,
                 service_tier: None,
                 agent_preset: None,

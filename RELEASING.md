@@ -228,8 +228,10 @@ secrets first:
   (`Waku-<v>.dmg`, `Waku-<v>.zip`, `appcast.xml`) must keep their URLs.
   Linux CI releases produce `waku-<v>-<target>.tar.gz` with
   `scripts/bundle-linux.sh` and land in GitHub Releases, then R2 via the
-  sync workflow. Automatic Linux updates are not yet wired. Windows can later join with
-  `Waku-<v>-Setup.exe` + `appcast-windows.xml` (WinSparkle reads the same
-  appcast format). `src/updater.rs` is the per-platform seam, and everything
-  mac-specific in the existing release pipeline lives behind the Darwin guard
-  in `scripts/release.ts` plus `scripts/bundle.sh`.
+  sync workflow. Automatic Linux updates are not yet wired. Windows CI builds
+  an unsigned portable `waku-<v>-x86_64-pc-windows-msvc.exe` plus a zip with
+  the executable and license; an installer and automatic updates can later
+  join with `Waku-<v>-Setup.exe` + `appcast-windows.xml` (WinSparkle reads the
+  same appcast format). `src/updater.rs` is the per-platform seam, and
+  everything mac-specific in the existing release pipeline lives behind the
+  Darwin guard in `scripts/release.ts` plus `scripts/bundle.sh`.
