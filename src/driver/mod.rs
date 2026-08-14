@@ -191,10 +191,10 @@ pub fn start(
     let inner: Arc<dyn DriverControl> = match provider {
         ProviderKind::Codex => Arc::new(codex::CodexDriver::start(options, events)?),
         ProviderKind::Pi => Arc::new(pi::PiDriver::start(options, events)?),
-        // Cursor and Grok both serve a long-lived ACP session, which is the only
-        // way their Supervised mode can actually ask the user rather than
-        // silently forcing or denying.
-        ProviderKind::Cursor | ProviderKind::Grok => {
+        // Cursor, Droid and Grok all serve a long-lived ACP session, which is
+        // the only way their Supervised mode can actually ask the user rather
+        // than silently forcing or denying.
+        ProviderKind::Cursor | ProviderKind::Droid | ProviderKind::Grok => {
             Arc::new(acp::AcpDriver::start(provider, options, events)?)
         }
         ProviderKind::DeepSeek => Arc::new(deepseek::DeepSeekDriver::start(options, events)?),

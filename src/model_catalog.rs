@@ -69,6 +69,12 @@ pub fn fallback_models(provider: ProviderKind) -> Vec<ProviderModel> {
         // Harness reports its account/configuration-specific catalog from its
         // Host. An invented fallback would make unavailable routes selectable.
         ProviderKind::DeepSeek => Vec::new(),
+        // Droid's catalog is account and plan specific, and which models a
+        // seat may reach is not knowable from here. Auto is the one route
+        // every account has, and the CLI reports the rest.
+        ProviderKind::Droid => {
+            vec![ProviderModel::new("auto", tr!("model_option.auto")).default()]
+        }
         ProviderKind::OpenCode => Vec::new(),
         ProviderKind::Grok => {
             vec![ProviderModel::new("grok-build", "Grok Build").default()]
@@ -114,6 +120,7 @@ pub fn discover_catalog(
         ProviderKind::Claude => (Vec::new(), None),
         ProviderKind::Cursor => (discover_cursor_models(binary), None),
         ProviderKind::DeepSeek => discover_deepseek_catalog(binary),
+        ProviderKind::Droid => (discover_droid_models(binary), None),
         ProviderKind::OpenCode => (discover_opencode_models(binary), None),
         ProviderKind::Grok => (discover_grok_models(binary), None),
         ProviderKind::Pi => (discover_pi_models(binary), None),
@@ -176,6 +183,91 @@ fn write_models_file(path: &Path, models: &[ProviderModel]) -> std::io::Result<(
     let temporary = path.with_extension("json.tmp");
     std::fs::write(&temporary, serde_json::to_vec(models)?)?;
     std::fs::rename(temporary, path)
+}
+
+/// Droid has no `models` subcommand: `droid exec --help` is where the CLI
+/// prints the seat's catalog, an `Available Models:` table of ids and names
+/// followed by a `Model details:` list of the reasoning efforts each one
+/// takes. The ACP handshake carries the same catalog, but discovery runs
+/// during detection, before any session exists.
+fn discover_droid_models(binary: &Path) -> Vec<ProviderModel> {
+    let mut command = crate::command_env::command(binary);
+    let output = match crate::command_env::output(command.args(["exec", "--help"])) {
+        Ok(output) => output,
+        Err(_) => return Vec::new(),
+    };
+    let combined = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    parse_droid_models(&combined)
+}
+
+fn parse_droid_models(output: &str) -> Vec<ProviderModel> {
+    let cleaned = strip_ansi(output);
+    let mut in_models = false;
+    let mut models = Vec::new();
+    for line in cleaned.lines() {
+        let line = line.trim_end();
+        if line.trim() == "Available Models:" {
+            in_models = true;
+            continue;
+        }
+        if line.trim() == "Model details:" {
+            break;
+        }
+        if !in_models || line.trim().is_empty() {
+            continue;
+        }
+        let Some((id, name)) = line.trim().split_once(' ') else {
+            continue;
+        };
+        let id = id.trim();
+        let name = name.trim().trim_end_matches(" (default)").trim();
+        if id.is_empty() || name.is_empty() {
+            continue;
+        }
+        let mut model = ProviderModel::new(id, name);
+        model.is_default = line.contains("(default)");
+        models.push(model);
+    }
+
+    let details = cleaned
+        .lines()
+        .filter_map(|line| {
+            let detail = line.trim().strip_prefix("- ")?;
+            let (name, rest) = detail.split_once(": supports reasoning:")?;
+            // `supports reasoning: No` still lists a placeholder `[none]`.
+            // Carrying it through would put a one-entry picker on a model
+            // that has nothing to pick.
+            if rest.trim_start().starts_with("No") {
+                return None;
+            }
+            let supported = rest.split_once("supported: [")?.1.split_once(']')?.0;
+            let efforts = supported
+                .split(',')
+                .map(str::trim)
+                .filter(|effort| !effort.is_empty())
+                .map(|effort| ProviderModelOption::new(effort, reasoning_effort_label(effort)))
+                .collect::<Vec<_>>();
+            if efforts.len() < 2 {
+                return None;
+            }
+            let default = rest
+                .split_once("default:")
+                .map(|(_, value)| value.trim().to_owned());
+            Some((name.trim().to_owned(), (efforts, default)))
+        })
+        .collect::<std::collections::HashMap<_, _>>();
+
+    for model in &mut models {
+        if let Some((efforts, default)) = details.get(&model.name) {
+            model.reasoning_efforts = efforts.clone();
+            model.default_reasoning_effort = default.clone();
+        }
+    }
+    models
 }
 
 fn discover_cursor_models(binary: &Path) -> Vec<ProviderModel> {
@@ -950,6 +1042,41 @@ mod tests {
         assert_eq!(models.len(), 1);
         assert_eq!(models[0].id, "auto");
         assert!(models[0].is_default);
+    }
+
+    #[test]
+    fn parses_droid_help_models_and_reasoning() {
+        // Shaped after `droid exec --help`: the model table is bounded by the
+        // details list, and a model name carries its `(default)` marker.
+        let models = parse_droid_models(concat!(
+            "Tool Controls:\n  --list-tools               Print the tools\n\n",
+            "Available Models:\n",
+            "  auto                         Auto Model\n",
+            "  claude-opus-5                Opus 5 (default)\n",
+            "  gpt-5.3-codex                GPT-5.3-Codex\n",
+            "\n",
+            "Model details:\n",
+            "  - Auto Model: supports reasoning: No; supported: [none]; default: none\n",
+            "  - Opus 5: supports reasoning: Yes; supported: [off, low, high]; default: high\n",
+            "  - GPT-5.3-Codex: supports reasoning: Yes; supported: [low, medium]; default: medium\n",
+            "\nExamples:\n  droid exec \"fix the build\"\n",
+        ));
+        assert_eq!(
+            models
+                .iter()
+                .map(|model| model.id.as_str())
+                .collect::<Vec<_>>(),
+            ["auto", "claude-opus-5", "gpt-5.3-codex"]
+        );
+        assert!(models[1].is_default);
+        assert!(!models[0].is_default);
+        assert_eq!(models[1].name, "Opus 5", "the default marker is not a name");
+        assert_eq!(models[1].reasoning_efforts[1].id, "low");
+        assert_eq!(models[1].default_reasoning_effort.as_deref(), Some("high"));
+        assert!(
+            models[0].reasoning_efforts.is_empty(),
+            "a model that reports no reasoning gets no effort picker"
+        );
     }
 
     #[test]

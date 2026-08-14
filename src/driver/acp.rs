@@ -67,6 +67,13 @@ fn launch_for(provider: ProviderKind) -> anyhow::Result<AcpLaunch> {
             args: vec!["acp".into()],
             env: Vec::new(),
         }),
+        // The daemon is the only `droid exec` output format that speaks ACP;
+        // the model, effort and autonomy flags are ignored in this mode and
+        // configured over the protocol instead.
+        ProviderKind::Droid => Ok(AcpLaunch {
+            args: vec!["exec".into(), "--output-format".into(), "acp-daemon".into()],
+            env: Vec::new(),
+        }),
         ProviderKind::Grok => Ok(AcpLaunch {
             args: vec!["agent".into(), "stdio".into()],
             env: vec![("GROK_OAUTH2_REFERRER".into(), "waku".into())],
@@ -401,6 +408,7 @@ async fn run_sdk_connection(
             let mut current_model = model;
             apply_model(
                 &connection,
+                provider,
                 &session_id,
                 current_model.as_deref(),
                 reasoning_effort.as_deref(),
@@ -492,6 +500,7 @@ async fn run_sdk_connection(
                             current_model = options.model;
                             apply_model(
                                 &connection,
+                                provider,
                                 &session_id,
                                 current_model.as_deref(),
                                 options.reasoning_effort.as_deref(),
@@ -559,17 +568,34 @@ fn desired_mode(
         return None;
     }
     let modes = modes?;
-    let plan = modes
-        .available_modes
-        .iter()
-        .find(|mode| mode.id.to_string().eq_ignore_ascii_case("plan"))?
-        .id
-        .clone();
+    // Cursor and Grok call it `plan`; Droid calls the same read-only,
+    // write-a-plan-first mode `spec`. Prefer an exact `plan` so an agent that
+    // offers both is not sent to the narrower one.
+    let plan = ["plan", "spec"].into_iter().find_map(|wanted| {
+        modes
+            .available_modes
+            .iter()
+            .find(|mode| mode.id.to_string().eq_ignore_ascii_case(wanted))
+            .map(|mode| mode.id.clone())
+    })?;
     (modes.current_mode_id != plan).then_some(plan)
+}
+
+/// The `session/set_config_option` id each agent files reasoning effort under.
+/// ACP does not standardize the id, and an agent rejects one it does not know,
+/// so guessing wrong silently drops the user's choice.
+fn reasoning_effort_config_id(provider: ProviderKind) -> &'static str {
+    match provider {
+        // Probed against `droid exec --output-format acp-daemon`: `mode` comes
+        // back "Unknown config option", `reasoning_effort` is accepted.
+        ProviderKind::Droid => "reasoning_effort",
+        _ => "mode",
+    }
 }
 
 async fn apply_model(
     connection: &ConnectionTo<Agent>,
+    provider: ProviderKind,
     session_id: &SessionId,
     model: Option<&str>,
     reasoning_effort: Option<&str>,
@@ -604,7 +630,7 @@ async fn apply_model(
         let _ = connection
             .send_request(SetSessionConfigOptionRequest::new(
                 session_id.clone(),
-                "mode",
+                reasoning_effort_config_id(provider),
                 effort,
             ))
             .block_task()
@@ -1120,6 +1146,47 @@ mod tests {
     }
 
     #[test]
+    fn plan_mode_falls_back_to_the_spec_mode_droid_advertises() {
+        let modes = SessionModeState::new(
+            "normal",
+            vec![
+                SessionMode::new("normal", "Auto (Off)"),
+                SessionMode::new("spec", "Spec"),
+                SessionMode::new("auto-high", "Auto (High)"),
+            ],
+        );
+        assert_eq!(
+            desired_mode(Some(&modes), RuntimeMode::FullAccess, InteractionMode::Plan)
+                .map(|mode| mode.to_string()),
+            Some("spec".to_owned())
+        );
+    }
+
+    #[test]
+    fn reasoning_effort_uses_the_config_id_each_agent_accepts() {
+        assert_eq!(
+            reasoning_effort_config_id(ProviderKind::Droid),
+            "reasoning_effort"
+        );
+        assert_eq!(reasoning_effort_config_id(ProviderKind::Cursor), "mode");
+        assert_eq!(reasoning_effort_config_id(ProviderKind::Grok), "mode");
+    }
+
+    #[test]
+    fn every_acp_provider_has_a_launch_recipe() {
+        for provider in ProviderKind::ALL {
+            let acp = matches!(
+                provider,
+                ProviderKind::Cursor
+                    | ProviderKind::Droid
+                    | ProviderKind::Grok
+                    | ProviderKind::OpenCode
+            );
+            assert_eq!(launch_for(provider).is_ok(), acp, "{provider:?}");
+        }
+    }
+
+    #[test]
     fn a_steer_only_settles_when_the_last_sdk_request_finishes() {
         let requests = Mutex::new(PendingPrompts::default());
         requests
@@ -1280,6 +1347,56 @@ mod tests {
             match event {
                 DriverEvent::Connected {
                     provider_cursor: Some(ProviderResumeCursor::Grok { .. }),
+                } => break,
+                DriverEvent::Error(error) => panic!("the agent reported: {error}"),
+                _ => {}
+            }
+        }
+        driver.prompt("hi".into());
+        let mut finished = None;
+        while let Ok(event) = event_rx.recv_timeout(Duration::from_secs(120)) {
+            match event {
+                DriverEvent::TurnFinished { success, .. } => {
+                    finished = Some(success);
+                    break;
+                }
+                DriverEvent::Error(error) => panic!("the agent reported: {error}"),
+                _ => {}
+            }
+        }
+        assert_eq!(finished, Some(true));
+    }
+
+    #[test]
+    #[ignore = "requires an installed, authenticated droid"]
+    fn droid_prompt_response_from_the_sdk_finishes_the_turn() {
+        let binary = crate::command_env::find_executable("droid").expect("droid is not installed");
+        let (events, event_rx) = crate::driver::test_event_channel();
+        let driver = AcpDriver::start(
+            ProviderKind::Droid,
+            DriverStartOptions {
+                binary,
+                cwd: std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")),
+                mode: RuntimeMode::FullAccess,
+                interaction_mode: InteractionMode::Build,
+                model: Some("claude-haiku-4-5-20251001".into()),
+                reasoning_effort: Some("off".into()),
+                service_tier: None,
+                agent_preset: None,
+                computer_use_enabled: false,
+                provider_cursor: None,
+            },
+            events,
+        )
+        .expect("the ACP session should open");
+
+        loop {
+            let event = event_rx
+                .recv_timeout(Duration::from_secs(60))
+                .expect("the agent should report its session");
+            match event {
+                DriverEvent::Connected {
+                    provider_cursor: Some(ProviderResumeCursor::Droid { .. }),
                 } => break,
                 DriverEvent::Error(error) => panic!("the agent reported: {error}"),
                 _ => {}

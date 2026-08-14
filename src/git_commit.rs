@@ -295,6 +295,23 @@ fn agent_arguments(
             push(&mut args, "--profile");
             push(&mut args, "headless");
         }
+        ProviderKind::Droid => {
+            push(&mut args, "exec");
+            push(&mut args, "--output-format");
+            push(&mut args, "text");
+            // No `--auto`: the default autonomy level is read-only, which is
+            // all a commit message needs. `--disable-builtin-skills` keeps the
+            // shipped skills from competing with the prompt.
+            push(&mut args, "--disable-builtin-skills");
+            if let Some(model) = model {
+                push(&mut args, "--model");
+                push(&mut args, model);
+            }
+            if let Some(effort) = reasoning_effort {
+                push(&mut args, "--reasoning-effort");
+                push(&mut args, effort);
+            }
+        }
         ProviderKind::OpenCode => {
             push(&mut args, "run");
             push(&mut args, "--pure");
@@ -739,6 +756,16 @@ mod tests {
                 }
                 ProviderKind::DeepSeek => {
                     assert!(has_pair(&args, "--profile", "headless"));
+                }
+                ProviderKind::Droid => {
+                    assert_eq!(args.first().and_then(|arg| arg.to_str()), Some("exec"));
+                    assert!(has_pair(&args, "--output-format", "text"));
+                    assert!(has(&args, "--disable-builtin-skills"));
+                    assert!(has_pair(&args, "--reasoning-effort", "low"));
+                    // The default autonomy level is read-only; a commit message
+                    // must never come back having touched the worktree.
+                    assert!(!has(&args, "--auto"));
+                    assert!(!has(&args, "--skip-permissions-unsafe"));
                 }
                 ProviderKind::Grok => {
                     assert!(has_pair(&args, "--single", prompt));
