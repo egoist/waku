@@ -167,7 +167,10 @@ mod tests {
 
     #[test]
     fn manual_never_fires() {
-        assert_eq!(next_occurrence(&Schedule::Manual, at(2026, 8, 13, 8, 0)), None);
+        assert_eq!(
+            next_occurrence(&Schedule::Manual, at(2026, 8, 13, 8, 0)),
+            None
+        );
     }
 
     #[test]
