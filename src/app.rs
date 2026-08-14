@@ -1263,6 +1263,13 @@ pub struct Waku {
     /// Date groups the user has folded in the sidebar. This is intentionally
     /// runtime-only, like transcript disclosure state.
     sidebar_collapsed_groups: HashSet<SessionDateGroup>,
+    /// Whether the automations section at the top of the sidebar is folded.
+    /// Runtime-only, like `sidebar_collapsed_groups`.
+    sidebar_automations_collapsed: bool,
+    /// Per-automation run groups the user has expanded in the sidebar. Groups
+    /// are collapsed by default (absent from the set), so a busy automation
+    /// shows as a single named row until opened. Runtime-only.
+    sidebar_expanded_automations: HashSet<Uuid>,
     sidebar_visible: bool,
     sidebar_width: f32,
     right_panel_visible: bool,
@@ -2767,6 +2774,8 @@ impl Waku {
                 session_rename: None,
                 session_rename_input,
                 sidebar_collapsed_groups: HashSet::new(),
+                sidebar_automations_collapsed: false,
+                sidebar_expanded_automations: HashSet::new(),
                 sidebar_visible,
                 sidebar_width,
                 right_panel_visible,

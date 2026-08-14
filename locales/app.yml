@@ -422,6 +422,8 @@ sidebar.search:
   en: Search
 sidebar.automations:
   en: Automations
+sidebar.automation_deleted:
+  en: Automation
 automations.title:
   en: Automations
 automations.new:
