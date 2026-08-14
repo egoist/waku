@@ -1335,6 +1335,9 @@ pub struct Waku {
     automation_name_input: Entity<ComposerInput>,
     /// The automation editor's prompt field.
     automation_prompt_input: Entity<ComposerInput>,
+    /// Freeform hour/minute fields for the schedule time, typed by hand.
+    automation_hour_input: Entity<ComposerInput>,
+    automation_minute_input: Entity<ComposerInput>,
     /// Scroll position of the Automations page content.
     automations_scroll: ScrollHandle,
     /// The Skills page's library snapshot, scanned off-thread. Frames read
@@ -1902,6 +1905,18 @@ impl Waku {
                 .code_editor(None)
                 .placeholder(tr!("automations.prompt_placeholder"))
         });
+        let automation_hour_input = cx.new(|cx| {
+            ComposerInput::new(window, cx)
+                .search_field()
+                .select_all_on_focus_click()
+                .placeholder(tr!("automations.hour_placeholder"))
+        });
+        let automation_minute_input = cx.new(|cx| {
+            ComposerInput::new(window, cx)
+                .search_field()
+                .select_all_on_focus_click()
+                .placeholder(tr!("automations.minute_placeholder"))
+        });
         let session_rename_input = cx.new(|cx| ComposerInput::new(window, cx).search_field());
         let provider_path_input = cx.new(|cx| {
             ComposerInput::new(window, cx)
@@ -2439,6 +2454,24 @@ impl Waku {
             )
             .detach();
             cx.subscribe(
+                &automation_hour_input,
+                |this: &mut Self, _, event: &ComposerEvent, cx| {
+                    if matches!(event, ComposerEvent::Edited) {
+                        this.on_automation_time_edited(false, cx);
+                    }
+                },
+            )
+            .detach();
+            cx.subscribe(
+                &automation_minute_input,
+                |this: &mut Self, _, event: &ComposerEvent, cx| {
+                    if matches!(event, ComposerEvent::Edited) {
+                        this.on_automation_time_edited(true, cx);
+                    }
+                },
+            )
+            .detach();
+            cx.subscribe(
                 &session_rename_input,
                 |this: &mut Self, _, event: &ComposerEvent, cx| match event {
                     ComposerEvent::Submit(_) => this.commit_session_rename(cx),
@@ -2782,6 +2815,8 @@ impl Waku {
                 automations_page: None,
                 automation_name_input,
                 automation_prompt_input,
+                automation_hour_input,
+                automation_minute_input,
                 automations_scroll: ScrollHandle::new(),
                 skills_catalog: None,
                 skills_scan_generation: 0,

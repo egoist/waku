@@ -436,6 +436,10 @@ automations.name_placeholder:
   en: Automation name
 automations.prompt_placeholder:
   en: What should this automation do?
+automations.hour_placeholder:
+  en: HH
+automations.minute_placeholder:
+  en: MM
 automations.prompt_required:
   en: Add a prompt before saving this automation.
 automations.create_title:

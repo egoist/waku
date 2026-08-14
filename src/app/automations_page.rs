@@ -15,10 +15,6 @@ use crate::automation::{
 };
 use crate::model::{InteractionMode, ProviderKind, RuntimeMode, SessionWorkspace};
 
-/// Minute increments offered by the time picker. Fine enough to schedule
-/// around, coarse enough to keep the menu short.
-const MINUTE_STEPS: [u8; 4] = [0, 15, 30, 45];
-
 /// Which view of the Automations page is showing.
 pub(super) enum AutomationsPage {
     List,
@@ -227,6 +223,12 @@ impl Waku {
             .update(cx, |input, cx| input.set_content(name, cx));
         self.automation_prompt_input
             .update(cx, |input, cx| input.set_content(prompt, cx));
+        let hour_text = format!("{:02}", editor.hour);
+        let minute_text = format!("{:02}", editor.minute);
+        self.automation_hour_input
+            .update(cx, |input, cx| input.set_content(hour_text, cx));
+        self.automation_minute_input
+            .update(cx, |input, cx| input.set_content(minute_text, cx));
         self.automations_page = Some(AutomationsPage::Editor(editor));
         self.automations_scroll.set_offset(gpui::Point::default());
         window.focus(&self.automations_focus, cx);
@@ -251,6 +253,41 @@ impl Waku {
         if let Some(AutomationsPage::Editor(editor)) = self.automations_page.as_mut() {
             change(editor);
             cx.notify();
+        }
+    }
+
+    /// Backs the freeform hour/minute schedule fields. Keeps only digits (at
+    /// most two), clamps to a valid clock value (0–23 / 0–59), and writes it
+    /// onto the open editor. The visible text is rewritten only when it diverges
+    /// from the sanitized value, so it never fights the caret mid-type.
+    pub(super) fn on_automation_time_edited(&mut self, minute_field: bool, cx: &mut Context<Self>) {
+        let input = if minute_field {
+            self.automation_minute_input.clone()
+        } else {
+            self.automation_hour_input.clone()
+        };
+        let raw = input.read(cx).content().to_string();
+        let max: u8 = if minute_field { 59 } else { 23 };
+        let digits: String = raw.chars().filter(|c| c.is_ascii_digit()).take(2).collect();
+        let parsed = digits.parse::<u8>().ok();
+        let clamped = parsed.map(|value| value.min(max));
+        if let Some(value) = clamped {
+            self.edit_automation_form(cx, |editor| {
+                if minute_field {
+                    editor.minute = value;
+                } else {
+                    editor.hour = value;
+                }
+            });
+        }
+        // Preserve the typed digits (including a leading zero) unless the value
+        // was out of range or carried non-digits, in which case snap the text.
+        let normalized = match (parsed, clamped) {
+            (Some(parsed), Some(clamped)) if parsed != clamped => clamped.to_string(),
+            _ => digits,
+        };
+        if normalized != raw {
+            input.update(cx, |input, cx| input.set_content(normalized, cx));
         }
     }
 
@@ -1128,61 +1165,24 @@ impl Waku {
             },
         );
 
-        // Time-of-day: hour and minute.
-        let hour = editor.hour;
-        let hour_weak = weak.clone();
-        let hour_picker = self.picker(
-            "automation-hour",
-            format!("{hour:02}"),
-            72.0,
-            false,
-            cx,
-            move |_| {
-                let weak = hour_weak.clone();
-                (0u8..24)
-                    .map(|option| {
-                        let weak = weak.clone();
-                        MenuItem::new(format!("{option:02}"), move |_, cx| {
-                            let _ = weak.update(cx, |this, cx| {
-                                this.edit_automation_form(cx, |editor| editor.hour = option);
-                            });
-                        })
-                        .selected(option == hour)
-                    })
-                    .collect()
-            },
-        );
-        let minute = editor.minute;
-        let minute_weak = weak.clone();
-        let minute_picker = self.picker(
-            "automation-minute",
-            format!("{minute:02}"),
-            72.0,
-            false,
-            cx,
-            move |_| {
-                let weak = minute_weak.clone();
-                MINUTE_STEPS
-                    .into_iter()
-                    .map(|option| {
-                        let weak = weak.clone();
-                        MenuItem::new(format!("{option:02}"), move |_, cx| {
-                            let _ = weak.update(cx, |this, cx| {
-                                this.edit_automation_form(cx, |editor| editor.minute = option);
-                            });
-                        })
-                        .selected(option == minute)
-                    })
-                    .collect()
-            },
-        );
+        // Time-of-day: freeform hour and minute fields the user types by hand.
+        // The `on_automation_time_edited` subscription clamps and validates.
         let time_picker = div()
             .flex()
             .items_center()
             .gap(px(6.0))
-            .child(hour_picker)
+            .child(
+                TextField::new("automation-hour-field", self.automation_hour_input.clone())
+                    .w(px(52.0)),
+            )
             .child(div().text_color(theme.text_tertiary).child(":"))
-            .child(minute_picker)
+            .child(
+                TextField::new(
+                    "automation-minute-field",
+                    self.automation_minute_input.clone(),
+                )
+                .w(px(52.0)),
+            )
             .into_any_element();
 
         let mut section = div()
