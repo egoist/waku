@@ -386,21 +386,29 @@ impl Waku {
             return;
         }
 
-        match editor.id {
+        let saved_id = match editor.id {
             Some(id) => {
                 if let Some(automation) = self.state.automation_mut(id) {
                     editor.apply_to(automation, name, prompt);
                 }
+                id
             }
             None => {
                 let mut automation =
                     Automation::new(name.clone(), editor.provider, crate::model::unix_time());
                 editor.apply_to(&mut automation, name, prompt);
+                let id = automation.id;
                 self.state.push_automation(automation);
+                id
             }
-        }
+        };
         self.save();
-        self.automations_page = Some(AutomationsPage::List);
+        // Stay on the editor after saving. Promote a freshly created automation
+        // to an existing one so a second save updates it (and Run now becomes
+        // available) instead of pushing a duplicate.
+        if let Some(AutomationsPage::Editor(editor)) = self.automations_page.as_mut() {
+            editor.id = Some(saved_id);
+        }
         cx.notify();
     }
 
@@ -781,7 +789,18 @@ impl Waku {
             }
         }
 
-        div()
+        // Fixed header bar mirroring the editor's, so the "Automations" title
+        // sits at identical coordinates when switching between list and editor.
+        let header_bar = div().flex_none().pt(px(8.0)).pb(px(8.0)).child(
+            div()
+                .w_full()
+                .max_w(px(CONTENT_MAX_WIDTH))
+                .mx_auto()
+                .px(px(24.0))
+                .child(header),
+        );
+
+        let scroll = div()
             .id("automations-scroll")
             .track_scroll(&self.automations_scroll)
             .overflow_y_scroll()
@@ -793,12 +812,16 @@ impl Waku {
                     .max_w(px(CONTENT_MAX_WIDTH))
                     .mx_auto()
                     .px(px(24.0))
-                    .flex()
-                    .flex_col()
-                    .gap(px(16.0))
-                    .child(header)
                     .child(list),
-            )
+            );
+
+        div()
+            .flex()
+            .flex_col()
+            .flex_1()
+            .min_h_0()
+            .child(header_bar)
+            .child(scroll)
             .into_any_element()
     }
 

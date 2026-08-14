@@ -959,8 +959,9 @@ impl Waku {
             SidebarRow::AutomationGroup(automation_id) => {
                 self.render_sidebar_automation_group(automation_id, cx)
             }
-            SidebarRow::AutomationRun(session_id) => self
-                .render_sidebar_session_item(session_id, true, cx)
+            SidebarRow::AutomationRun(session_id) => div()
+                .pl(px(16.0))
+                .child(self.render_sidebar_session_item(session_id, true, cx))
                 .into_any_element(),
             SidebarRow::AutomationRunsToggle(automation_id) => {
                 self.render_sidebar_automation_runs_toggle(automation_id, cx)
@@ -1318,8 +1319,10 @@ impl Waku {
             ));
 
         // Right-click (or Shift+F10) to run now, edit, or toggle enabled.
+        // The bottom gap separates the group row from its runs, matching the
+        // spacing between the run rows themselves.
         context_menu(
-            div().w_full().child(row),
+            div().w_full().pb(px(SIDEBAR_SESSION_ROW_GAP)).child(row),
             SharedString::from(format!("automation-menu-{automation_id}")),
             &menu,
             move |_| {
@@ -1419,7 +1422,8 @@ impl Waku {
             .flex()
             .items_center()
             .gap(px(5.0))
-            .px(px(8.0))
+            .pl(px(24.0))
+            .pr(px(8.0))
             .py(px(5.0))
             .rounded(px(7.0))
             .cursor_default()
