@@ -16,7 +16,7 @@ use crate::usage::PlanUsage;
 use crate::usage_history::{UsageHistory, UsageWindow};
 use crate::workspace::{WorkspaceOperation, WorkspaceResult};
 
-pub const PROTOCOL_VERSION: u32 = 1;
+pub const PROTOCOL_VERSION: u32 = 2;
 pub const MAX_WIRE_MESSAGE_BYTES: usize = 48 * 1024 * 1024;
 pub const DAEMON_TOKEN_ENV: &str = "WAKU_DAEMON_TOKEN";
 pub const DAEMON_ADDRESS_ENV: &str = "WAKU_DAEMON_ADDRESS";
@@ -31,7 +31,11 @@ pub struct DaemonReady {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, TS)]
-#[serde(tag = "type", rename_all = "camelCase")]
+#[serde(
+    tag = "type",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
 pub enum ClientMessage {
     Hello {
         protocol_version: u32,
@@ -45,6 +49,7 @@ pub enum ClientMessage {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
 pub struct Request {
     pub request_id: Uuid,
     pub session_id: Uuid,
@@ -57,11 +62,17 @@ pub struct Request {
 pub struct ReplayCursor {
     pub session_id: Uuid,
     pub runtime_id: Uuid,
+    /// Identifies the daemon process that assigned `sequence`.
+    pub epoch: Uuid,
     pub sequence: u64,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, TS)]
-#[serde(tag = "type", rename_all = "camelCase")]
+#[serde(
+    tag = "type",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
 pub enum Command {
     Start {
         options: WireDriverStartOptions,
@@ -232,12 +243,19 @@ impl WireDriverEvent {
 pub struct SequencedEvent {
     pub session_id: Uuid,
     pub runtime_id: Uuid,
+    /// Changes whenever the daemon restarts, so a reused runtime id can begin
+    /// again at sequence one without being mistaken for an old event.
+    pub epoch: Uuid,
     pub sequence: u64,
     pub event: WireDriverEvent,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, TS)]
-#[serde(tag = "type", rename_all = "camelCase")]
+#[serde(
+    tag = "type",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
 pub enum ServerMessage {
     Hello {
         protocol_version: u32,
@@ -255,14 +273,22 @@ pub enum ServerMessage {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, TS)]
-#[serde(tag = "status", rename_all = "camelCase")]
+#[serde(
+    tag = "status",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
 pub enum ResponseOutcome {
     Ok { payload: ResponsePayload },
     Error { error: RpcError },
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, TS)]
-#[serde(tag = "type", rename_all = "camelCase")]
+#[serde(
+    tag = "type",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
 pub enum ResponsePayload {
     Ack,
     Started {
@@ -395,15 +421,20 @@ mod tests {
             resume_from: vec![ReplayCursor {
                 session_id,
                 runtime_id,
+                epoch: Uuid::from_u128(3),
                 sequence: 9,
             }],
         };
         let json = serde_json::to_value(message).unwrap();
 
         assert_eq!(json["type"], "hello");
-        assert_eq!(json["protocol_version"], PROTOCOL_VERSION);
-        assert_eq!(json["resume_from"][0]["sessionId"], session_id.to_string());
-        assert_eq!(json["resume_from"][0]["runtimeId"], runtime_id.to_string());
-        assert!(json.get("protocolVersion").is_none());
+        assert_eq!(json["protocolVersion"], PROTOCOL_VERSION);
+        assert_eq!(json["resumeFrom"][0]["sessionId"], session_id.to_string());
+        assert_eq!(json["resumeFrom"][0]["runtimeId"], runtime_id.to_string());
+        assert_eq!(
+            json["resumeFrom"][0]["epoch"],
+            Uuid::from_u128(3).to_string()
+        );
+        assert!(json.get("protocol_version").is_none());
     }
 }

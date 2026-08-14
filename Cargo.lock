@@ -8253,6 +8253,7 @@ dependencies = [
  "serde",
  "serde_json",
  "smol",
+ "subtle",
  "toml 0.8.23",
  "trash",
  "tungstenite",

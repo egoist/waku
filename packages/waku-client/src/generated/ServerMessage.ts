@@ -2,4 +2,4 @@
 import type { ResponseOutcome } from "./ResponseOutcome";
 import type { SequencedEvent } from "./SequencedEvent";
 
-export type ServerMessage = { "type": "hello", protocol_version: number, daemon_version: string, } | { "type": "rejected", message: string, } | { "type": "response", request_id: string, outcome: ResponseOutcome, } | { "type": "event" } & SequencedEvent | { "type": "shuttingDown" };
+export type ServerMessage = { "type": "hello", protocolVersion: number, daemonVersion: string, } | { "type": "rejected", message: string, } | { "type": "response", requestId: string, outcome: ResponseOutcome, } | { "type": "event" } & SequencedEvent | { "type": "shuttingDown" };

@@ -2,4 +2,4 @@
 import type { ReplayCursor } from "./ReplayCursor";
 import type { Request } from "./Request";
 
-export type ClientMessage = { "type": "hello", protocol_version: number, token: string, client_id: string, resume_from: Array<ReplayCursor>, } | { "type": "request" } & Request | { "type": "shutdown" };
+export type ClientMessage = { "type": "hello", protocolVersion: number, token: string, clientId: string, resumeFrom: Array<ReplayCursor>, } | { "type": "request" } & Request | { "type": "shutdown" };

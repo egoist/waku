@@ -633,22 +633,21 @@ try {
   // archive as Waku-<version>.md; generate_appcast links it as the update's
   // release notes, which Sparkle renders in the prompt.
   const changelogFile = Bun.file(join(projectRoot, "CHANGELOG.md"));
-  if (await changelogFile.exists()) {
-    const notes = extractReleaseNotes(await changelogFile.text(), version);
-    if (notes) {
-      await Bun.write(
-        join(updatesDirectory, `${appName}-${version}.md`),
-        `${notes}\n`,
-      );
-      console.log(`Attached release notes for ${version}.`);
-    } else {
-      console.log(
-        `No "${version}" section in CHANGELOG.md — releasing without notes.`,
-      );
-    }
-  } else {
-    console.log("No CHANGELOG.md — releasing without notes.");
-  }
+  const notes = (await changelogFile.exists())
+    ? extractReleaseNotes(await changelogFile.text(), version)
+    : null;
+  const notesName = `${appName}-${version}.md`;
+  const notesContents = `${notes ?? "See CHANGELOG.md for details."}\n`;
+  await Bun.write(join(updatesDirectory, notesName), notesContents);
+  // The tag workflow publishes files from dist/ as GitHub release assets;
+  // sync-release then mirrors those assets to R2. Keep the notes beside the
+  // appcast there as well so Sparkle's release-notes URL cannot 404.
+  await Bun.write(join(projectRoot, "dist", notesName), notesContents);
+  console.log(
+    notes
+      ? `Attached release notes for ${version}.`
+      : `No "${version}" section in CHANGELOG.md — attached fallback notes.`,
+  );
 
   logStep("Generating the signed appcast");
   await generateAppcast(updatesDirectory, downloadUrlPrefix);

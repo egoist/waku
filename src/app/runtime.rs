@@ -2136,7 +2136,7 @@ impl Waku {
     /// Applies a changed model, effort, tier, or mode to a session. Transports
     /// that carry these per turn absorb the change and keep running; the rest
     /// are torn down so the next prompt starts with the new options.
-    pub(super) fn apply_session_options(&mut self, session_id: Uuid) {
+    pub(super) fn apply_session_options(&mut self, session_id: Uuid, cx: &mut Context<Self>) {
         let Some(options) = self
             .state
             .sessions
@@ -2146,13 +2146,29 @@ impl Waku {
         else {
             return;
         };
-        let applied = self
-            .runtimes
-            .get(&session_id)
-            .is_none_or(|runtime| runtime.driver.apply_options(options));
-        if !applied {
-            self.reset_session_runtime(session_id);
-        }
+        let Some(runtime) = self.runtimes.get_mut(&session_id) else {
+            return;
+        };
+        runtime.options_generation = runtime.options_generation.wrapping_add(1);
+        let generation = runtime.options_generation;
+        let driver = runtime.driver.clone();
+        cx.spawn(async move |waku, cx| {
+            let applied = cx
+                .background_executor()
+                .spawn(async move { driver.apply_options(options) })
+                .await;
+            let _ = waku.update(cx, |waku, cx| {
+                let is_current = waku
+                    .runtimes
+                    .get(&session_id)
+                    .is_some_and(|runtime| runtime.options_generation == generation);
+                if is_current && !applied {
+                    waku.reset_session_runtime(session_id);
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
     }
 
     fn driver_start_request_for_session(
@@ -2209,6 +2225,7 @@ impl Waku {
             session_id,
             SessionRuntime {
                 driver: prepared.handle,
+                options_generation: 0,
                 events: prepared.events,
                 pending_events: VecDeque::new(),
                 pending_steers: VecDeque::new(),

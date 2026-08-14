@@ -4,6 +4,7 @@ use std::collections::HashSet;
 use std::fs;
 use std::io;
 use std::path::{Component, Path, PathBuf};
+use std::time::SystemTime;
 
 use base64::Engine as _;
 use uuid::Uuid;
@@ -113,6 +114,24 @@ impl AttachmentStore {
     /// persisted messages or composer drafts. In-progress staging directories
     /// are deliberately ignored so an upload cannot race a cleanup pass.
     pub fn retain(&self, live: &HashSet<String>) -> io::Result<u64> {
+        self.retain_with_cutoff(live, None)
+    }
+
+    /// Reclaims only attachment trees old enough that no upload-to-draft or
+    /// upload-to-session handoff can still be committing their references.
+    pub fn retain_unreferenced_older_than(
+        &self,
+        live: &HashSet<String>,
+        cutoff: SystemTime,
+    ) -> io::Result<u64> {
+        self.retain_with_cutoff(live, Some(cutoff))
+    }
+
+    fn retain_with_cutoff(
+        &self,
+        live: &HashSet<String>,
+        cutoff: Option<SystemTime>,
+    ) -> io::Result<u64> {
         let Ok(entries) = fs::read_dir(&self.root) else {
             return Ok(0);
         };
@@ -125,6 +144,14 @@ impl AttachmentStore {
                 continue;
             };
             if live.contains(&format!("{ATTACHMENT_SCHEME}{id}")) {
+                continue;
+            }
+            if cutoff.is_some_and(|cutoff| {
+                entry
+                    .metadata()
+                    .and_then(|metadata| metadata.modified())
+                    .map_or(true, |modified| modified >= cutoff)
+            }) {
                 continue;
             }
             reclaimed += directory_size(&entry.path()).unwrap_or_default();
@@ -236,6 +263,33 @@ mod tests {
         assert_eq!(store.retain(&live).unwrap(), 6);
         assert!(keep.path.is_file());
         assert!(!remove.path.exists());
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn recent_unreferenced_attachments_survive_a_grace_period_sweep() {
+        let root = std::env::temp_dir().join(format!("waku-attachments-{}", Uuid::new_v4()));
+        let store = AttachmentStore::new(root.clone());
+        let recent = store
+            .import(
+                "recent.txt",
+                AttachmentUpload::File {
+                    data_base64: "cmVjZW50".into(),
+                },
+            )
+            .unwrap();
+        let cutoff = SystemTime::now()
+            .checked_sub(std::time::Duration::from_secs(60))
+            .unwrap();
+
+        assert_eq!(
+            store
+                .retain_unreferenced_older_than(&HashSet::new(), cutoff)
+                .unwrap(),
+            0
+        );
+        assert!(recent.path.exists());
 
         fs::remove_dir_all(root).unwrap();
     }

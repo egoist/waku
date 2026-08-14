@@ -55,11 +55,13 @@ function fixture() {
   return { client, sockets };
 }
 
-async function connect(client: WakuClient, socket: FakeSocket): Promise<void> {
+async function connect(client: WakuClient, sockets: FakeSocket[]): Promise<FakeSocket> {
   const connected = client.connect();
+  const socket = sockets.at(-1)!;
   socket.open();
-  socket.receive({ type: "hello", protocol_version: 1, daemon_version: "test" });
+  socket.receive({ type: "hello", protocolVersion: 2, daemonVersion: "test" });
   await connected;
+  return socket;
 }
 
 describe("WakuClient", () => {
@@ -70,19 +72,19 @@ describe("WakuClient", () => {
     socket.open();
     expect(JSON.parse(socket.sent[0]!)).toEqual({
       type: "hello",
-      protocol_version: 1,
+      protocolVersion: 2,
       token: "secret",
-      client_id: "00000000-0000-4000-8000-000000000001",
-      resume_from: [],
+      clientId: "00000000-0000-4000-8000-000000000001",
+      resumeFrom: [],
     });
-    socket.receive({ type: "hello", protocol_version: 1, daemon_version: "test" });
+    socket.receive({ type: "hello", protocolVersion: 2, daemonVersion: "test" });
     await connected;
 
     const response = client.request({ type: "getSettings" });
     const request = JSON.parse(socket.sent[1]!);
     socket.receive({
       type: "response",
-      request_id: request.request_id,
+      requestId: request.requestId,
       outcome: { status: "ok", payload: { type: "ack" } },
     });
     await expect(response).resolves.toEqual({ type: "ack" });
@@ -94,14 +96,14 @@ describe("WakuClient", () => {
     const connected = client.connect();
     const active = sockets[0] ?? socket;
     active.open();
-    active.receive({ type: "hello", protocol_version: 1, daemon_version: "test" });
+    active.receive({ type: "hello", protocolVersion: 2, daemonVersion: "test" });
     await connected;
 
     const response = client.request({ type: "getSettings" });
     const request = JSON.parse(active.sent[1]!);
     active.receive({
       type: "response",
-      request_id: request.request_id,
+      requestId: request.requestId,
       outcome: { status: "error", error: { message: "nope" } },
     });
     await expect(response).rejects.toBeInstanceOf(WakuRpcError);
@@ -112,7 +114,7 @@ describe("WakuClient", () => {
     const firstConnection = client.connect();
     const first = sockets[0]!;
     first.open();
-    first.receive({ type: "hello", protocol_version: 1, daemon_version: "test" });
+    first.receive({ type: "hello", protocolVersion: 2, daemonVersion: "test" });
     await firstConnection;
 
     const received: number[] = [];
@@ -121,6 +123,7 @@ describe("WakuClient", () => {
       type: "event",
       sessionId: "session",
       runtimeId: "runtime",
+      epoch: "epoch-one",
       sequence: 4,
       event: { kind: "textDelta", payload: { text: "hi" } },
     };
@@ -132,10 +135,10 @@ describe("WakuClient", () => {
     const secondConnection = client.connect();
     const second = sockets[1]!;
     second.open();
-    expect(JSON.parse(second.sent[0]!).resume_from).toEqual([
-      { sessionId: "session", runtimeId: "runtime", sequence: 4 },
+    expect(JSON.parse(second.sent[0]!).resumeFrom).toEqual([
+      { sessionId: "session", runtimeId: "runtime", epoch: "epoch-one", sequence: 4 },
     ]);
-    second.receive({ type: "hello", protocol_version: 1, daemon_version: "test" });
+    second.receive({ type: "hello", protocolVersion: 2, daemonVersion: "test" });
     await secondConnection;
   });
 
@@ -148,8 +151,51 @@ describe("WakuClient", () => {
     const secondConnection = client.connect();
     const second = sockets[1]!;
     second.open();
-    second.receive({ type: "hello", protocol_version: 1, daemon_version: "test" });
+    second.receive({ type: "hello", protocolVersion: 2, daemonVersion: "test" });
     await expect(secondConnection).resolves.toBeUndefined();
+  });
+
+  test("accepts sequence one again when the daemon epoch changes", async () => {
+    const { client, sockets } = fixture();
+    const socket = await connect(client, sockets);
+    const received: Array<[string, number]> = [];
+    client.subscribe("session", "runtime", (event) => {
+      received.push([event.epoch, event.sequence]);
+    });
+
+    socket.receive({
+      type: "event",
+      sessionId: "session",
+      runtimeId: "runtime",
+      epoch: "old",
+      sequence: 9,
+      event: { kind: "textDelta", payload: null },
+    });
+    socket.receive({
+      type: "event",
+      sessionId: "session",
+      runtimeId: "runtime",
+      epoch: "new",
+      sequence: 1,
+      event: { kind: "textDelta", payload: null },
+    });
+
+    expect(received).toEqual([
+      ["old", 9],
+      ["new", 1],
+    ]);
+  });
+
+  test("disconnected requests reject instead of throwing synchronously", async () => {
+    const { client } = fixture();
+    const request = client.request({ type: "getSettings" });
+    await expect(request).rejects.toThrow("Waku daemon is disconnected");
+  });
+
+  test("disconnected notifications reject instead of throwing synchronously", async () => {
+    const { client } = fixture();
+    const notification = client.notify({ type: "refreshBackgroundWork" });
+    await expect(notification).rejects.toThrow("Waku daemon is disconnected");
   });
 });
 

@@ -10,6 +10,7 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::SystemTime;
 
 use base64::Engine as _;
 
@@ -131,7 +132,18 @@ impl BlobStore {
         // Content-addressed: an existing file with this name already holds
         // these exact bytes, so identical screenshots cost nothing.
         if fs::metadata(&path).is_ok_and(|metadata| metadata.len() as usize == bytes.len()) {
-            return Ok(());
+            // A newly-issued reference is a lease even when the content was
+            // already present from an abandoned upload. Refresh its timestamp
+            // so the grace-period sweep below cannot reclaim it before the
+            // client commits the reference to a draft or session row.
+            if fs::File::options()
+                .write(true)
+                .open(&path)
+                .and_then(|file| file.set_modified(SystemTime::now()))
+                .is_ok()
+            {
+                return Ok(());
+            }
         }
         fs::create_dir_all(&directory)?;
         let temporary = path.with_extension("tmp");
@@ -144,6 +156,25 @@ impl BlobStore {
 
     /// Deletes blobs no longer named by any live reference.
     pub fn retain(&self, live: &std::collections::HashSet<String>) -> io::Result<u64> {
+        self.retain_with_cutoff(live, None)
+    }
+
+    /// Deletes unreferenced blobs only when their last write predates
+    /// `cutoff`. Store and commit are separate RPC/SQLite operations, so a
+    /// recent unreferenced file may still be in flight.
+    pub fn retain_unreferenced_older_than(
+        &self,
+        live: &std::collections::HashSet<String>,
+        cutoff: SystemTime,
+    ) -> io::Result<u64> {
+        self.retain_with_cutoff(live, Some(cutoff))
+    }
+
+    fn retain_with_cutoff(
+        &self,
+        live: &std::collections::HashSet<String>,
+        cutoff: Option<SystemTime>,
+    ) -> io::Result<u64> {
         let mut reclaimed = 0;
         let Ok(shards) = fs::read_dir(&self.root) else {
             return Ok(0);
@@ -159,7 +190,25 @@ impl BlobStore {
                 if live.contains(&format!("{BLOB_SCHEME}{name}")) {
                     continue;
                 }
-                let size = entry.metadata().map(|metadata| metadata.len()).unwrap_or(0);
+                let metadata = match entry.metadata() {
+                    Ok(metadata) => metadata,
+                    // Unknown age is not permission to destroy a payload
+                    // during a grace-period sweep. The immediate `retain`
+                    // variant preserves its previous best-effort behavior.
+                    Err(_) if cutoff.is_some() => continue,
+                    Err(_) => {
+                        let _ = fs::remove_file(entry.path());
+                        continue;
+                    }
+                };
+                if cutoff.is_some_and(|cutoff| {
+                    metadata
+                        .modified()
+                        .map_or(true, |modified| modified >= cutoff)
+                }) {
+                    continue;
+                }
+                let size = metadata.len();
                 if fs::remove_file(entry.path()).is_ok() {
                     reclaimed += size;
                 }
@@ -242,6 +291,26 @@ mod tests {
         assert_eq!(reclaimed, 16 * 1024);
         assert!(store.path_for(&kept).unwrap().exists());
         assert!(!store.path_for(&dropped).unwrap().exists());
+
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn recent_unreferenced_blobs_survive_a_grace_period_sweep() {
+        let root = temporary_root();
+        let store = BlobStore::new(root.clone());
+        let reference = store.store_data_url(&data_url("image/png", &vec![2u8; 16 * 1024]));
+        let cutoff = SystemTime::now()
+            .checked_sub(std::time::Duration::from_secs(60))
+            .unwrap();
+
+        assert_eq!(
+            store
+                .retain_unreferenced_older_than(&HashSet::new(), cutoff)
+                .unwrap(),
+            0
+        );
+        assert!(store.path_for(&reference).unwrap().exists());
 
         fs::remove_dir_all(root).ok();
     }

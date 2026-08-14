@@ -46,6 +46,11 @@ interface PendingRequest {
   timeout: ReturnType<typeof setTimeout>;
 }
 
+interface LastSequence {
+  epoch: string;
+  sequence: number;
+}
+
 type ConnectionState = "disconnected" | "connecting" | "connected";
 
 /** Browser-safe client for Waku's versioned JSON-over-WebSocket protocol. */
@@ -61,7 +66,7 @@ export class WakuClient {
   private state: ConnectionState = "disconnected";
   private pending = new Map<string, PendingRequest>();
   private subscriptions = new Map<string, Set<EventListener>>();
-  private sequences = new Map<string, number>();
+  private sequences = new Map<string, LastSequence>();
   private connectionGeneration = 0;
   private rejectConnect?: (error: Error) => void;
 
@@ -125,10 +130,10 @@ export class WakuClient {
         if (generation !== this.connectionGeneration) return;
         const hello: ClientMessage = {
           type: "hello",
-          protocol_version: PROTOCOL_VERSION,
+          protocolVersion: PROTOCOL_VERSION,
           token: this.token,
-          client_id: this.clientId,
-          resume_from: this.replayCursors(),
+          clientId: this.clientId,
+          resumeFrom: this.replayCursors(),
         };
         socket.send(JSON.stringify(hello));
       });
@@ -144,10 +149,10 @@ export class WakuClient {
 
         if (!handshakeSettled) {
           if (message.type === "hello") {
-            if (message.protocol_version !== PROTOCOL_VERSION) {
+            if (message.protocolVersion !== PROTOCOL_VERSION) {
               failHandshake(
                 new Error(
-                  `daemon protocol ${message.protocol_version} does not match client protocol ${PROTOCOL_VERSION}`,
+                  `daemon protocol ${message.protocolVersion} does not match client protocol ${PROTOCOL_VERSION}`,
                 ),
               );
               socket.close(1002, "protocol version mismatch");
@@ -186,13 +191,18 @@ export class WakuClient {
     sessionId = NIL_UUID,
     runtimeId = NIL_UUID,
   ): Promise<ResponsePayload> {
-    const socket = this.requireSocket();
+    let socket: WebSocketLike;
+    try {
+      socket = this.requireSocket();
+    } catch (error) {
+      return Promise.reject(asError(error));
+    }
     const requestId = this.randomUUID();
     const message: ClientMessage = {
       type: "request",
-      request_id: requestId,
-      session_id: sessionId,
-      runtime_id: runtimeId,
+      requestId,
+      sessionId,
+      runtimeId,
       command,
     };
 
@@ -212,12 +222,16 @@ export class WakuClient {
     });
   }
 
-  notify(command: Command, sessionId = NIL_UUID, runtimeId = NIL_UUID): void {
+  async notify(
+    command: Command,
+    sessionId = NIL_UUID,
+    runtimeId = NIL_UUID,
+  ): Promise<void> {
     const message: ClientMessage = {
       type: "request",
-      request_id: this.randomUUID(),
-      session_id: sessionId,
-      runtime_id: runtimeId,
+      requestId: this.randomUUID(),
+      sessionId,
+      runtimeId,
       command,
     };
     this.requireSocket().send(JSON.stringify(message));
@@ -238,9 +252,9 @@ export class WakuClient {
   }
 
   replayCursors(): ReplayCursor[] {
-    return [...this.sequences].map(([key, sequence]) => {
+    return [...this.sequences].map(([key, cursor]) => {
       const [sessionId, runtimeId] = key.split(":", 2) as [string, string];
-      return { sessionId, runtimeId, sequence };
+      return { sessionId, runtimeId, ...cursor };
     });
   }
 
@@ -270,9 +284,9 @@ export class WakuClient {
 
   private handleMessage(message: ServerMessage): void {
     if (message.type === "response") {
-      const pending = this.pending.get(message.request_id);
+      const pending = this.pending.get(message.requestId);
       if (!pending) return;
-      this.pending.delete(message.request_id);
+      this.pending.delete(message.requestId);
       clearTimeout(pending.timeout);
       if (message.outcome.status === "ok") pending.resolve(message.outcome.payload);
       else pending.reject(new WakuRpcError(message.outcome.error.message));
@@ -280,9 +294,17 @@ export class WakuClient {
     }
     if (message.type === "event") {
       const key = subscriptionKey(message.sessionId, message.runtimeId);
-      const previous = this.sequences.get(key) ?? 0;
-      if (message.sequence <= previous) return;
-      this.sequences.set(key, message.sequence);
+      const previous = this.sequences.get(key);
+      if (
+        previous?.epoch === message.epoch &&
+        message.sequence <= previous.sequence
+      ) {
+        return;
+      }
+      this.sequences.set(key, {
+        epoch: message.epoch,
+        sequence: message.sequence,
+      });
       for (const listener of this.subscriptions.get(key) ?? []) listener(message);
       return;
     }

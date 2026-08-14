@@ -31,8 +31,14 @@ struct ClientInner {
     outgoing: Sender<Outgoing>,
     pending: Mutex<HashMap<Uuid, Sender<Result<ResponsePayload, RpcError>>>>,
     sessions: Mutex<HashMap<(Uuid, Uuid), Sender<SequencedEvent>>>,
-    last_sequences: Mutex<HashMap<(Uuid, Uuid), u64>>,
+    last_sequences: Mutex<HashMap<(Uuid, Uuid), LastSequence>>,
     disconnected: AtomicBool,
+}
+
+#[derive(Clone, Copy)]
+struct LastSequence {
+    epoch: Uuid,
+    sequence: u64,
 }
 
 #[derive(Clone)]
@@ -52,7 +58,15 @@ impl DaemonClient {
     ) -> anyhow::Result<Self> {
         let last_sequences = resume_from
             .iter()
-            .map(|cursor| ((cursor.session_id, cursor.runtime_id), cursor.sequence))
+            .map(|cursor| {
+                (
+                    (cursor.session_id, cursor.runtime_id),
+                    LastSequence {
+                        epoch: cursor.epoch,
+                        sequence: cursor.sequence,
+                    },
+                )
+            })
             .collect();
         let url = daemon_url(address)?;
         let config = WebSocketConfig::default()
@@ -177,10 +191,11 @@ impl DaemonClient {
             .last_sequences
             .lock()
             .iter()
-            .map(|(&(session_id, runtime_id), &sequence)| ReplayCursor {
+            .map(|(&(session_id, runtime_id), cursor)| ReplayCursor {
                 session_id,
                 runtime_id,
-                sequence,
+                epoch: cursor.epoch,
+                sequence: cursor.sequence,
             })
             .collect()
     }
@@ -247,11 +262,16 @@ fn run_client(
                             let mut sequences = inner.last_sequences.lock();
                             let previous = sequences
                                 .entry((event.session_id, event.runtime_id))
-                                .or_default();
-                            if event.sequence <= *previous {
+                                .or_insert(LastSequence {
+                                    epoch: event.epoch,
+                                    sequence: 0,
+                                });
+                            if previous.epoch == event.epoch && event.sequence <= previous.sequence
+                            {
                                 false
                             } else {
-                                *previous = event.sequence;
+                                previous.epoch = event.epoch;
+                                previous.sequence = event.sequence;
                                 true
                             }
                         };
@@ -288,15 +308,19 @@ fn run_client(
     }
     let sessions = std::mem::take(&mut *inner.sessions.lock());
     for ((session_id, runtime_id), events) in sessions {
-        let sequence = {
-            let mut sequences = inner.last_sequences.lock();
-            let sequence = sequences.entry((session_id, runtime_id)).or_default();
-            *sequence = sequence.saturating_add(1);
-            *sequence
-        };
+        // This event is synthesized locally and is not present in the
+        // daemon's replay journal. Do not advance the replay cursor for it or
+        // reconnecting to the same daemon would skip the next real event.
+        let (epoch, sequence) = inner
+            .last_sequences
+            .lock()
+            .get(&(session_id, runtime_id))
+            .map(|cursor| (cursor.epoch, cursor.sequence))
+            .unwrap_or((Uuid::nil(), 0));
         let _ = events.send(SequencedEvent {
             session_id,
             runtime_id,
+            epoch,
             sequence,
             event: WireDriverEvent::new("processExited", serde_json::Value::Null),
         });

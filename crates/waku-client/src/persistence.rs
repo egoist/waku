@@ -4,6 +4,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
@@ -471,6 +472,11 @@ pub struct StateStore {
     legacy_settings_paths: Vec<PathBuf>,
     daemon: DaemonSupervisor,
     remote_default_cwd: Mutex<Option<PathBuf>>,
+    /// A task snapshot may only be written after this client has successfully
+    /// loaded the daemon's authoritative state. Falling back to an empty UI
+    /// after a transient RPC failure must never turn the next ordinary save
+    /// into a destructive replacement of the daemon database.
+    task_state_loaded: AtomicBool,
 }
 
 impl StateStore {
@@ -508,6 +514,7 @@ impl StateStore {
             path,
             daemon,
             remote_default_cwd: Mutex::new(None),
+            task_state_loaded: AtomicBool::new(false),
         }
     }
 
@@ -534,13 +541,14 @@ impl StateStore {
     }
 
     pub fn load_or_fresh(&self, cwd: PathBuf) -> PersistedState {
-        let mut state = self.load().unwrap_or_else(|_| {
-            if cwd.parent().is_none() {
-                PersistedState::empty()
-            } else {
-                PersistedState::fresh(cwd)
+        let mut state = match self.load() {
+            Ok(state) => {
+                self.task_state_loaded.store(true, Ordering::Release);
+                state
             }
-        });
+            Err(_) if cwd.parent().is_none() => PersistedState::empty(),
+            Err(_) => PersistedState::fresh(cwd),
+        };
         if state.projects.is_empty()
             && let Some(cwd) = self.remote_default_cwd.lock().clone()
             && cwd.parent().is_some()
@@ -629,6 +637,12 @@ impl StateStore {
     pub fn save(&self, state: &mut PersistedState) -> io::Result<()> {
         self.write_app_settings(&state.app_settings())?;
         self.write_app_state(&state.app_state())?;
+        if !self.task_state_loaded.load(Ordering::Acquire) {
+            return Err(io::Error::new(
+                io::ErrorKind::NotConnected,
+                "task state was not loaded; refusing to overwrite daemon data",
+            ));
+        }
         let dirty_ids = state.dirty_sessions.clone();
         let sessions = state
             .sessions

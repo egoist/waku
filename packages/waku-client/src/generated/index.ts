@@ -1,4 +1,5 @@
 export { MAX_WIRE_MESSAGE_BYTES, PROTOCOL_VERSION } from "./constants";
+export type { JsonValue } from "./serde_json/JsonValue";
 export type { ActivityFileChange } from "./ActivityFileChange";
 export type { ActivityItem } from "./ActivityItem";
 export type { ActivityKind } from "./ActivityKind";

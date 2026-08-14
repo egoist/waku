@@ -5,6 +5,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use parking_lot::Mutex;
+use uuid::Uuid;
 pub use waku_protocol::settings::DaemonSettings;
 
 pub struct DaemonSettingsStore {
@@ -24,8 +25,18 @@ impl DaemonSettingsStore {
         path: PathBuf,
         legacy_paths: impl IntoIterator<Item = PathBuf>,
     ) -> io::Result<Self> {
-        let (mut settings, migrated) = match fs::read(&path) {
-            Ok(bytes) => (serde_json::from_slice(&bytes).map_err(to_io_error)?, false),
+        let (mut settings, write_current) = match fs::read(&path) {
+            Ok(bytes) => match serde_json::from_slice(&bytes) {
+                Ok(settings) => (settings, false),
+                Err(error) => {
+                    let backup = quarantine_corrupt_settings(&path)?;
+                    eprintln!(
+                        "Waku daemon moved invalid settings to {}: {error}",
+                        backup.display()
+                    );
+                    (DaemonSettings::default(), true)
+                }
+            },
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
                 let mut restored: Option<DaemonSettings> = None;
                 for legacy_path in legacy_paths {
@@ -34,8 +45,10 @@ impl DaemonSettingsStore {
                     }
                     match fs::read(legacy_path) {
                         Ok(bytes) => {
-                            restored = Some(serde_json::from_slice(&bytes).map_err(to_io_error)?);
-                            break;
+                            if let Ok(settings) = serde_json::from_slice(&bytes) {
+                                restored = Some(settings);
+                                break;
+                            }
                         }
                         Err(error) if error.kind() == io::ErrorKind::NotFound => {}
                         Err(error) => return Err(error),
@@ -47,7 +60,7 @@ impl DaemonSettingsStore {
             Err(error) => return Err(error),
         };
         settings.discard_legacy_app_keys();
-        if migrated {
+        if write_current {
             write_atomic(&path, &settings)?;
         }
         Ok(Self {
@@ -67,6 +80,13 @@ impl DaemonSettingsStore {
         *current = settings;
         Ok(())
     }
+}
+
+fn quarantine_corrupt_settings(path: &Path) -> io::Result<PathBuf> {
+    let extension = format!("json.corrupt-{}", Uuid::new_v4().simple());
+    let backup = path.with_extension(extension);
+    fs::rename(path, &backup)?;
+    Ok(backup)
 }
 
 fn write_atomic(path: &Path, settings: &DaemonSettings) -> io::Result<()> {
@@ -132,6 +152,26 @@ mod tests {
         assert_eq!(migrated["disabled_providers"][0], "claude");
         assert!(migrated.get("theme").is_none());
         assert!(legacy.exists());
+        fs::remove_dir_all(directory).ok();
+    }
+
+    #[test]
+    fn corrupt_current_settings_are_quarantined_and_replaced() {
+        let directory = std::env::temp_dir().join(format!("waku-settings-{}", Uuid::new_v4()));
+        let path = directory.join("settings.json");
+        fs::create_dir_all(&directory).unwrap();
+        fs::write(&path, b"{ definitely not json").unwrap();
+
+        let store = DaemonSettingsStore::open(path.clone()).unwrap();
+
+        assert_eq!(store.get(), DaemonSettings::default());
+        assert!(serde_json::from_slice::<DaemonSettings>(&fs::read(&path).unwrap()).is_ok());
+        assert!(fs::read_dir(&directory).unwrap().flatten().any(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with("settings.json.corrupt-")
+        }));
         fs::remove_dir_all(directory).ok();
     }
 }

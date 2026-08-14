@@ -1,15 +1,20 @@
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::io;
 use std::net::{TcpListener, TcpStream};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Weak};
 use std::time::Duration;
 
 use anyhow::{Context as _, bail};
 use crossbeam_channel::{Receiver, Sender, unbounded};
 use parking_lot::Mutex;
+use subtle::ConstantTimeEq as _;
+use tungstenite::handshake::server::{
+    ErrorResponse, Request as HandshakeRequest, Response as HandshakeResponse,
+};
+use tungstenite::http::{StatusCode, header::ORIGIN};
 use tungstenite::protocol::WebSocketConfig;
-use tungstenite::{Message, WebSocket, accept_with_config};
+use tungstenite::{Message, WebSocket, accept_hdr_with_config};
 use uuid::Uuid;
 
 use crate::protocol::MAX_WIRE_MESSAGE_BYTES;
@@ -20,8 +25,29 @@ use crate::protocol::{
 
 const ACCEPT_POLL_INTERVAL: Duration = Duration::from_millis(25);
 const SOCKET_POLL_INTERVAL: Duration = Duration::from_millis(25);
+const MAX_HANDSHAKE_MESSAGE_BYTES: usize = 64 * 1024;
+const MAX_CONNECTIONS: usize = 64;
 const MAX_REPLAY_EVENTS_PER_SESSION: usize = 4096;
 const MAX_CACHED_RESPONSES: usize = 2048;
+
+#[derive(Clone, Debug, Default)]
+pub struct ServerOptions {
+    /// Browser WebSocket handshakes always carry an Origin header. Native
+    /// clients do not. An empty set therefore permits native clients only.
+    pub allowed_origins: HashSet<String>,
+    /// Only a daemon owned by the desktop process should accept the global
+    /// shutdown control message. Service-managed daemons keep running when an
+    /// authenticated client disconnects.
+    pub allow_shutdown: bool,
+}
+
+struct ConnectionPermit(Arc<AtomicUsize>);
+
+impl Drop for ConnectionPermit {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::AcqRel);
+    }
+}
 
 pub trait Backend: Send + Sync + 'static {
     fn handle(&self, request: Request, events: EventSink) -> anyhow::Result<ResponsePayload>;
@@ -53,9 +79,18 @@ struct HubState {
     responses: VecDeque<(Uuid, ResponseOutcome)>,
 }
 
-#[derive(Default)]
 struct Hub {
+    epoch: Uuid,
     state: Mutex<HubState>,
+}
+
+impl Default for Hub {
+    fn default() -> Self {
+        Self {
+            epoch: Uuid::new_v4(),
+            state: Mutex::new(HubState::default()),
+        }
+    }
 }
 
 struct DispatchedRequest {
@@ -111,6 +146,7 @@ impl Hub {
         let event = SequencedEvent {
             session_id,
             runtime_id,
+            epoch: self.epoch,
             sequence: *sequence,
             event,
         };
@@ -130,7 +166,11 @@ impl Hub {
         for (&(session_id, runtime_id), events) in &state.journal {
             let sequence = resume_from
                 .iter()
-                .find(|cursor| cursor.session_id == session_id && cursor.runtime_id == runtime_id)
+                .find(|cursor| {
+                    cursor.session_id == session_id
+                        && cursor.runtime_id == runtime_id
+                        && cursor.epoch == self.epoch
+                })
                 .map(|cursor| cursor.sequence)
                 .unwrap_or_default();
             for event in events.iter().filter(|event| event.sequence > sequence) {
@@ -273,24 +313,38 @@ pub fn serve(
     token: String,
     backend: Arc<dyn Backend>,
     shutdown: Arc<AtomicBool>,
+    options: ServerOptions,
 ) -> anyhow::Result<()> {
     listener
         .set_nonblocking(true)
         .context("could not configure Waku daemon listener")?;
     let hub = Arc::new(Hub::default());
     let dispatcher = Arc::new(RequestDispatcher::new(backend.clone(), hub.clone()));
+    let options = Arc::new(options);
+    let active_connections = Arc::new(AtomicUsize::new(0));
     while !shutdown.load(Ordering::Acquire) {
         match listener.accept() {
             Ok((stream, _)) => {
+                if active_connections
+                    .fetch_update(Ordering::AcqRel, Ordering::Acquire, |active| {
+                        (active < MAX_CONNECTIONS).then_some(active + 1)
+                    })
+                    .is_err()
+                {
+                    continue;
+                }
+                let connection_permit = ConnectionPermit(active_connections.clone());
                 let token = token.clone();
                 let dispatcher = dispatcher.clone();
                 let hub = hub.clone();
                 let shutdown = shutdown.clone();
+                let options = options.clone();
                 std::thread::Builder::new()
                     .name("waku-daemon-connection".into())
                     .spawn(move || {
+                        let _connection_permit = connection_permit;
                         if let Err(error) =
-                            handle_connection(stream, &token, dispatcher, hub, shutdown)
+                            handle_connection(stream, &token, dispatcher, hub, shutdown, &options)
                         {
                             eprintln!("waku-daemon connection ended: {error:#}");
                         }
@@ -314,6 +368,7 @@ fn handle_connection(
     dispatcher: Arc<RequestDispatcher>,
     hub: Arc<Hub>,
     shutdown: Arc<AtomicBool>,
+    options: &ServerOptions,
 ) -> anyhow::Result<()> {
     // Accepted sockets can inherit the listener's nonblocking flag on some
     // platforms. The handshake is deliberately blocking; steady-state reads
@@ -321,10 +376,17 @@ fn handle_connection(
     stream.set_nonblocking(false)?;
     stream.set_read_timeout(Some(Duration::from_secs(5)))?;
     let config = WebSocketConfig::default()
-        .max_message_size(Some(MAX_WIRE_MESSAGE_BYTES))
-        .max_frame_size(Some(MAX_WIRE_MESSAGE_BYTES));
-    let mut socket =
-        accept_with_config(stream, Some(config)).context("WebSocket handshake failed")?;
+        .max_message_size(Some(MAX_HANDSHAKE_MESSAGE_BYTES))
+        .max_frame_size(Some(MAX_HANDSHAKE_MESSAGE_BYTES));
+    let allowed_origins = options.allowed_origins.clone();
+    let mut socket = accept_hdr_with_config(
+        stream,
+        move |request: &HandshakeRequest, response: HandshakeResponse| {
+            validate_handshake(request, response, &allowed_origins)
+        },
+        Some(config),
+    )
+    .context("WebSocket handshake failed")?;
     let hello = read_client_message(&mut socket)?;
     let resume_from = match hello {
         ClientMessage::Hello {
@@ -332,7 +394,9 @@ fn handle_connection(
             token,
             resume_from,
             ..
-        } if protocol_version == PROTOCOL_VERSION && token == expected_token => resume_from,
+        } if protocol_version == PROTOCOL_VERSION && token_matches(expected_token, &token) => {
+            resume_from
+        }
         ClientMessage::Hello {
             protocol_version, ..
         } if protocol_version != PROTOCOL_VERSION => {
@@ -364,6 +428,10 @@ fn handle_connection(
             daemon_version: env!("CARGO_PKG_VERSION").into(),
         },
     )?;
+    socket.set_config(|config| {
+        config.max_message_size = Some(MAX_WIRE_MESSAGE_BYTES);
+        config.max_frame_size = Some(MAX_WIRE_MESSAGE_BYTES);
+    });
     socket
         .get_mut()
         .set_read_timeout(Some(SOCKET_POLL_INTERVAL))?;
@@ -383,9 +451,17 @@ fn handle_connection(
                     dispatcher.dispatch(request, outgoing.clone());
                 }
                 Ok(ClientMessage::Shutdown) => {
-                    write_json(&mut socket, &ServerMessage::ShuttingDown)?;
-                    shutdown.store(true, Ordering::Release);
-                    break;
+                    if options.allow_shutdown {
+                        write_json(&mut socket, &ServerMessage::ShuttingDown)?;
+                        shutdown.store(true, Ordering::Release);
+                        break;
+                    }
+                    write_json(
+                        &mut socket,
+                        &ServerMessage::Rejected {
+                            message: "daemon shutdown is managed by its service owner".into(),
+                        },
+                    )?;
                 }
                 Ok(ClientMessage::Hello { .. }) => {}
                 Err(error) => {
@@ -404,6 +480,43 @@ fn handle_connection(
     }
     hub.unsubscribe(subscriber_id);
     Ok(())
+}
+
+fn validate_handshake(
+    request: &HandshakeRequest,
+    response: HandshakeResponse,
+    allowed_origins: &HashSet<String>,
+) -> Result<HandshakeResponse, ErrorResponse> {
+    if request.uri().path() != "/v1" {
+        return Err(handshake_error(
+            StatusCode::NOT_FOUND,
+            "unknown daemon endpoint",
+        ));
+    }
+    if let Some(origin) = request.headers().get(ORIGIN) {
+        let allowed = origin
+            .to_str()
+            .ok()
+            .is_some_and(|origin| allowed_origins.contains(origin));
+        if !allowed {
+            return Err(handshake_error(
+                StatusCode::FORBIDDEN,
+                "WebSocket origin is not allowed",
+            ));
+        }
+    }
+    Ok(response)
+}
+
+fn handshake_error(status: StatusCode, message: &str) -> ErrorResponse {
+    tungstenite::http::Response::builder()
+        .status(status)
+        .body(Some(message.to_owned()))
+        .expect("static WebSocket rejection is valid")
+}
+
+fn token_matches(expected: &str, candidate: &str) -> bool {
+    expected.as_bytes().ct_eq(candidate.as_bytes()).into()
 }
 
 fn command_targets_runtime(command: &Command) -> bool {
@@ -649,10 +762,18 @@ mod tests {
                 "secret".into(),
                 Arc::new(TestBackend),
                 server_shutdown,
+                ServerOptions {
+                    allow_shutdown: true,
+                    ..ServerOptions::default()
+                },
             )
             .unwrap()
         });
 
+        assert!(
+            DaemonClient::connect(&address.to_string(), "wrong-secret".into()).is_err(),
+            "the server must reject a client before it can issue requests"
+        );
         let client = DaemonClient::connect(&address.to_string(), "secret".into()).unwrap();
         let session_id = Uuid::new_v4();
         let runtime_id = Uuid::new_v4();
@@ -697,6 +818,34 @@ mod tests {
     }
 
     #[test]
+    fn browser_origins_are_denied_unless_explicitly_allowed() {
+        let request = HandshakeRequest::builder()
+            .uri("/v1")
+            .header(ORIGIN, "https://app.waku.test")
+            .body(())
+            .unwrap();
+        let response = HandshakeResponse::new(());
+        assert_eq!(
+            validate_handshake(&request, response, &HashSet::new())
+                .unwrap_err()
+                .status(),
+            StatusCode::FORBIDDEN
+        );
+
+        let allowed = HashSet::from(["https://app.waku.test".to_owned()]);
+        assert!(validate_handshake(&request, HandshakeResponse::new(()), &allowed).is_ok());
+        let native = HandshakeRequest::builder().uri("/v1").body(()).unwrap();
+        assert!(validate_handshake(&native, HandshakeResponse::new(()), &HashSet::new()).is_ok());
+    }
+
+    #[test]
+    fn daemon_tokens_require_an_exact_match() {
+        assert!(token_matches("secret", "secret"));
+        assert!(!token_matches("secret", "Secret"));
+        assert!(!token_matches("secret", "secret-extra"));
+    }
+
+    #[test]
     fn replaced_runtime_ignores_late_events_from_the_old_generation() {
         let hub = Arc::new(Hub::default());
         let session_id = Uuid::new_v4();
@@ -730,6 +879,34 @@ mod tests {
         assert_eq!(event.sequence, 1);
         assert_eq!(event.event.kind, "new");
         assert!(events.try_recv().is_err());
+    }
+
+    #[test]
+    fn replay_cursor_from_an_old_daemon_epoch_does_not_hide_new_events() {
+        let hub = Arc::new(Hub::default());
+        let session_id = Uuid::new_v4();
+        let runtime_id = Uuid::new_v4();
+        hub.begin_runtime(session_id, runtime_id);
+        hub.event_sink(session_id, runtime_id)
+            .send(WireDriverEvent::new("new-daemon", serde_json::Value::Null))
+            .unwrap();
+
+        let (outgoing, events) = unbounded();
+        hub.subscribe(
+            &[ReplayCursor {
+                session_id,
+                runtime_id,
+                epoch: Uuid::nil(),
+                sequence: u64::MAX,
+            }],
+            outgoing,
+        );
+
+        let ServerMessage::Event(event) = events.recv().unwrap() else {
+            panic!("expected the new daemon event to replay");
+        };
+        assert_eq!(event.epoch, hub.epoch);
+        assert_eq!(event.sequence, 1);
     }
 
     struct BlockingProbeBackend {

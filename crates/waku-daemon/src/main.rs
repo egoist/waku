@@ -1,5 +1,5 @@
 use std::io::Write as _;
-use std::net::TcpListener;
+use std::net::{SocketAddr, TcpListener};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
@@ -11,9 +11,14 @@ fn main() -> anyhow::Result<()> {
     let arguments = Arguments::parse(std::env::args().skip(1))?;
     let token =
         std::env::var(DAEMON_TOKEN_ENV).context("Waku daemon authentication token is missing")?;
+    // The bearer capability belongs only to this server process. Remove it
+    // before any provider or workspace subprocess can inherit the daemon's
+    // environment.
+    unsafe { std::env::remove_var(DAEMON_TOKEN_ENV) };
     let listener = TcpListener::bind(&arguments.bind)
         .with_context(|| format!("could not bind Waku daemon to {}", arguments.bind))?;
     let address = listener.local_addr()?;
+    ensure_loopback(address)?;
     let ready = DaemonReady {
         address: address.to_string(),
         protocol_version: PROTOCOL_VERSION,
@@ -50,18 +55,33 @@ fn main() -> anyhow::Result<()> {
         token,
         Arc::new(waku_core::daemon::WakuBackend::new(settings, task_store)?),
         shutdown,
+        waku_core::ServerOptions {
+            allowed_origins: arguments.allowed_origins.into_iter().collect(),
+            allow_shutdown: arguments.parent_pid.is_some(),
+        },
+    )
+}
+
+fn ensure_loopback(address: SocketAddr) -> anyhow::Result<()> {
+    if address.ip().is_loopback() {
+        return Ok(());
+    }
+    bail!(
+        "refusing non-loopback daemon bind {address}; expose a loopback daemon through an authenticated TLS proxy or SSH tunnel"
     )
 }
 
 struct Arguments {
     bind: String,
     parent_pid: Option<u32>,
+    allowed_origins: Vec<String>,
 }
 
 impl Arguments {
     fn parse(arguments: impl IntoIterator<Item = String>) -> anyhow::Result<Self> {
         let mut bind = "127.0.0.1:0".to_owned();
         let mut parent_pid = None;
+        let mut allowed_origins = Vec::new();
         let mut arguments = arguments.into_iter();
         while let Some(argument) = arguments.next() {
             match argument.as_str() {
@@ -79,9 +99,16 @@ impl Arguments {
                             .context("--parent-pid is not a valid process id")?,
                     );
                 }
+                "--allow-origin" => {
+                    let origin = arguments
+                        .next()
+                        .filter(|origin| !origin.trim().is_empty())
+                        .ok_or_else(|| anyhow!("--allow-origin requires an origin"))?;
+                    allowed_origins.push(origin);
+                }
                 "--help" | "-h" => {
                     println!(
-                        "usage: {} [--bind ADDRESS] [--parent-pid PID]",
+                        "usage: {} [--bind LOOPBACK_ADDRESS] [--parent-pid PID] [--allow-origin ORIGIN]...",
                         env!("CARGO_BIN_NAME")
                     );
                     std::process::exit(0);
@@ -89,7 +116,11 @@ impl Arguments {
                 unknown => bail!("unknown argument {unknown:?}"),
             }
         }
-        Ok(Self { bind, parent_pid })
+        Ok(Self {
+            bind,
+            parent_pid,
+            allowed_origins,
+        })
     }
 }
 
@@ -102,4 +133,33 @@ fn process_is_alive(pid: u32) -> bool {
 #[cfg(not(unix))]
 fn process_is_alive(_pid: u32) -> bool {
     true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn accepts_only_loopback_listener_addresses() {
+        assert!(ensure_loopback("127.0.0.1:3000".parse().unwrap()).is_ok());
+        assert!(ensure_loopback("[::1]:3000".parse().unwrap()).is_ok());
+        assert!(ensure_loopback("0.0.0.0:3000".parse().unwrap()).is_err());
+        assert!(ensure_loopback("[::]:3000".parse().unwrap()).is_err());
+    }
+
+    #[test]
+    fn parses_repeated_browser_origin_allowlist_entries() {
+        let arguments = Arguments::parse([
+            "--allow-origin".into(),
+            "https://app.waku.test".into(),
+            "--allow-origin".into(),
+            "http://localhost:3000".into(),
+        ])
+        .unwrap();
+
+        assert_eq!(
+            arguments.allowed_origins,
+            ["https://app.waku.test", "http://localhost:3000"]
+        );
+    }
 }

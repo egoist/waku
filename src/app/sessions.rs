@@ -808,7 +808,7 @@ impl Waku {
                 // A different provider is also a different command registry.
                 self.refresh_composer_sources(cx);
             } else {
-                self.apply_session_options(session_id);
+                self.apply_session_options(session_id, cx);
             }
             self.save();
             cx.notify();
@@ -897,7 +897,7 @@ impl Waku {
         {
             let session_id = session.id;
             session.runtime_mode = mode;
-            self.apply_session_options(session_id);
+            self.apply_session_options(session_id, cx);
             self.save();
             cx.notify();
         }
@@ -909,7 +909,7 @@ impl Waku {
         {
             let session_id = session.id;
             session.interaction_mode = mode;
-            self.apply_session_options(session_id);
+            self.apply_session_options(session_id, cx);
             self.save();
             cx.notify();
         }
@@ -923,7 +923,7 @@ impl Waku {
             session.reasoning_effort = Some(effort.clone());
             self.state.last_reasoning_effort = Some(effort);
             self.remember_selected_model_traits();
-            self.apply_session_options(session_id);
+            self.apply_session_options(session_id, cx);
             self.save();
             cx.notify();
         }
@@ -937,7 +937,7 @@ impl Waku {
             session.service_tier = Some(tier.clone());
             self.state.last_service_tier = Some(tier);
             self.remember_selected_model_traits();
-            self.apply_session_options(session_id);
+            self.apply_session_options(session_id, cx);
             self.save();
             cx.notify();
         }

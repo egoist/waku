@@ -129,7 +129,9 @@ fn write_index(output: &Path) -> std::io::Result<()> {
         .map(|module| format!("export type {{ {module} }} from \"./{module}\";\n"))
         .collect::<String>();
     let contents = format!(
-        "export {{ MAX_WIRE_MESSAGE_BYTES, PROTOCOL_VERSION }} from \"./constants\";\n{type_exports}"
+        "export {{ MAX_WIRE_MESSAGE_BYTES, PROTOCOL_VERSION }} from \"./constants\";\n\
+         export type {{ JsonValue }} from \"./serde_json/JsonValue\";\n\
+         {type_exports}"
     );
     fs::write(PathBuf::from(output).join("index.ts"), contents)
 }

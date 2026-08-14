@@ -741,6 +741,9 @@ struct NavigationRailVisualState {
 
 struct SessionRuntime {
     driver: DriverHandle,
+    /// Invalidates stale ApplyOptions responses when settings change again or
+    /// this runtime is replaced while the RPC is in flight.
+    options_generation: u64,
     events: Receiver<DriverEvent>,
     pending_events: VecDeque<DriverEvent>,
     /// Presentation metadata for steering messages awaiting the provider's

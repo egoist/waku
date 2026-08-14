@@ -17,6 +17,7 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::{Duration, SystemTime};
 
 use parking_lot::Mutex;
 use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
@@ -39,6 +40,10 @@ pub use waku_protocol::persistence::{
 const STATE_VERSION: u32 = 5;
 const APP_STATE_VERSION: u32 = 1;
 const COMPOSER_DRAFTS_FILENAME: &str = "composer-drafts.json";
+/// Uploading a blob and committing the reference are separate operations. A
+/// sweep may reclaim abandoned payloads, but never ones a client could still
+/// be handing off to a draft or task save.
+const ASSET_SWEEP_GRACE_PERIOD: Duration = Duration::from_secs(60 * 60);
 
 pub const DEFAULT_SIDEBAR_WIDTH: f32 = 252.0;
 pub const DEFAULT_RIGHT_PANEL_WIDTH: f32 = 460.0;
@@ -1360,6 +1365,9 @@ impl StateStore {
             .unwrap_or_else(|| Path::new("."))
             .join(COMPOSER_DRAFTS_FILENAME);
         move || {
+            let cutoff = SystemTime::now()
+                .checked_sub(ASSET_SWEEP_GRACE_PERIOD)
+                .unwrap_or(SystemTime::UNIX_EPOCH);
             let Ok(connection) = Connection::open(&path) else {
                 return;
             };
@@ -1369,7 +1377,7 @@ impl StateStore {
             if let Ok(drafts) = fs::read_to_string(drafts_path) {
                 collect_blob_references(&drafts, &mut live);
             }
-            let _ = blobs.retain(&live);
+            let _ = blobs.retain_unreferenced_older_than(&live, cutoff);
             let Ok(mut live_attachments) = live_attachment_references(&connection) else {
                 return;
             };
@@ -1381,7 +1389,7 @@ impl StateStore {
                 collect_attachment_references(&drafts, &mut live_attachments);
             }
             let _ = crate::attachments::AttachmentStore::new(attachments_root)
-                .retain(&live_attachments);
+                .retain_unreferenced_older_than(&live_attachments, cutoff);
         }
     }
 }
