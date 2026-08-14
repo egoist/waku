@@ -985,3 +985,86 @@ usage_error.curl_did_not_finish: curl 未能完成请求
 usage_error.curl_failed: "curl 失败：%{error}"
 usage_error.unknown_error: 未知错误
 usage_error.curl_no_status: curl 未返回 HTTP 状态行
+
+sidebar.automations: 自动化
+sidebar.automation_deleted: 自动化
+sidebar.show_more_runs: "显示另外 %{count} 项"
+sidebar.show_fewer_runs: 收起
+
+command_palette.automations: 自动化
+command_palette.new_automation: 新建自动化…
+command_palette.automation_run: "自动化：%{name}"
+
+automations.title: 自动化
+automations.new: 新建自动化
+automations.create_title: 新建自动化
+automations.edit_title: 编辑自动化
+automations.default_name: 新建自动化
+automations.empty_title: 暂无自动化
+automations.empty_body: 创建自动化，按每日、每周或每月的计划运行已保存的提示词。
+automations.badge: 来自自动化
+automations.section_prompt: 提示词
+automations.section_schedule: 计划
+automations.section_agent: 智能体
+automations.section_behavior: 行为
+automations.field_name: 名称
+automations.field_project: 项目
+automations.field_provider: 服务商
+automations.field_model: 模型
+automations.field_effort: 推理强度
+automations.field_permission: 权限
+automations.field_schedule_frequency: 频率
+automations.field_time: 时间
+automations.field_days: 运行日
+automations.field_overlap: 若正在运行
+automations.field_notifications: 通知
+automations.field_notify_when: 通知时机
+automations.name_placeholder: 自动化名称
+automations.prompt_placeholder: 这个自动化要做什么？
+automations.hour_placeholder: 时
+automations.minute_placeholder: 分
+automations.at_minute: "在 :"
+automations.model_default: 服务商默认
+automations.effort_default: 默认
+automations.no_project: 无项目
+automations.workspace_worktree: 每次运行使用全新工作树
+automations.frequency_daily: 每天
+automations.frequency_weekly: 每周
+automations.frequency_monthly: 每月
+automations.preset_manual: 手动
+automations.preset_hourly: 每小时
+automations.preset_weekdays: 工作日
+automations.hint_manual: 仅在手动启动时运行
+automations.weekday_mon: 一
+automations.weekday_tue: 二
+automations.weekday_wed: 三
+automations.weekday_thu: 四
+automations.weekday_fri: 五
+automations.weekday_sat: 六
+automations.weekday_sun: 日
+automations.overlap_skip: 跳过本次运行
+automations.overlap_queue: 排队至空闲
+automations.overlap_concurrent: 仍然运行
+automations.notify_always: 始终
+automations.notify_success: 成功时
+automations.notify_failure: 失败时
+automations.notify_succeeded: 自动化运行完成
+automations.notify_failed: 自动化运行失败
+automations.enabled: 已启用
+automations.disabled: 已禁用
+automations.menu_enable: 启用
+automations.menu_disable: 禁用
+automations.edit: 编辑
+automations.delete: 删除
+automations.confirm_delete: 确认删除
+automations.run_now: 立即运行
+automations.save: 保存
+automations.cancel: 取消
+automations.next_run: "下次运行 %{time}"
+automations.next_run_none: 未排期
+automations.summary_daily: "每天 %{time}"
+automations.summary_weekly: "每周 %{days} %{time}"
+automations.summary_monthly: "每月 %{days} 日 %{time}"
+automations.summary_hourly: "每小时 :%{minute}"
+automations.summary_manual: 手动 — 无计划
+automations.prompt_required: 请先输入提示词再保存此自动化。

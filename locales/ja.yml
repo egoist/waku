@@ -1037,3 +1037,86 @@ usage_error.curl_did_not_finish: curl がリクエストを完了しませんで
 usage_error.curl_failed: "curl に失敗しました：%{error}"
 usage_error.unknown_error: 不明なエラー
 usage_error.curl_no_status: curl から HTTP ステータス行が返されませんでした
+
+sidebar.automations: 自動化
+sidebar.automation_deleted: 自動化
+sidebar.show_more_runs: "他 %{count} 件を表示"
+sidebar.show_fewer_runs: 折りたたむ
+
+command_palette.automations: 自動化
+command_palette.new_automation: 新規自動化…
+command_palette.automation_run: "自動化：%{name}"
+
+automations.title: 自動化
+automations.new: 新規自動化
+automations.create_title: 新規自動化
+automations.edit_title: 自動化を編集
+automations.default_name: 新規自動化
+automations.empty_title: 自動化がまだありません
+automations.empty_body: 保存したプロンプトを毎日・毎週・毎月のスケジュールで実行する自動化を作成します。
+automations.badge: 自動化から
+automations.section_prompt: プロンプト
+automations.section_schedule: スケジュール
+automations.section_agent: エージェント
+automations.section_behavior: 動作
+automations.field_name: 名前
+automations.field_project: プロジェクト
+automations.field_provider: プロバイダー
+automations.field_model: モデル
+automations.field_effort: 推論の強度
+automations.field_permission: 権限
+automations.field_schedule_frequency: 頻度
+automations.field_time: 時刻
+automations.field_days: 実行日
+automations.field_overlap: 実行中の場合
+automations.field_notifications: 通知
+automations.field_notify_when: 通知するタイミング
+automations.name_placeholder: 自動化の名前
+automations.prompt_placeholder: この自動化で何をしますか？
+automations.hour_placeholder: 時
+automations.minute_placeholder: 分
+automations.at_minute: ":"
+automations.model_default: プロバイダーのデフォルト
+automations.effort_default: デフォルト
+automations.no_project: プロジェクトなし
+automations.workspace_worktree: 実行ごとに新しいワークツリー
+automations.frequency_daily: 毎日
+automations.frequency_weekly: 毎週
+automations.frequency_monthly: 毎月
+automations.preset_manual: 手動
+automations.preset_hourly: 毎時
+automations.preset_weekdays: 平日
+automations.hint_manual: 手動で開始したときのみ実行されます
+automations.weekday_mon: 月
+automations.weekday_tue: 火
+automations.weekday_wed: 水
+automations.weekday_thu: 木
+automations.weekday_fri: 金
+automations.weekday_sat: 土
+automations.weekday_sun: 日
+automations.overlap_skip: この実行をスキップ
+automations.overlap_queue: 空くまで待機
+automations.overlap_concurrent: そのまま実行
+automations.notify_always: 常に
+automations.notify_success: 成功時
+automations.notify_failure: 失敗時
+automations.notify_succeeded: 自動化の実行が完了しました
+automations.notify_failed: 自動化の実行が失敗しました
+automations.enabled: 有効
+automations.disabled: 無効
+automations.menu_enable: 有効化
+automations.menu_disable: 無効化
+automations.edit: 編集
+automations.delete: 削除
+automations.confirm_delete: 削除を確認
+automations.run_now: 今すぐ実行
+automations.save: 保存
+automations.cancel: キャンセル
+automations.next_run: "次回の実行 %{time}"
+automations.next_run_none: スケジュールなし
+automations.summary_daily: "毎日 %{time}"
+automations.summary_weekly: "毎週 %{days} %{time}"
+automations.summary_monthly: "毎月 %{days} 日 %{time}"
+automations.summary_hourly: "毎時 :%{minute}"
+automations.summary_manual: 手動 — スケジュールなし
+automations.prompt_required: 保存する前にプロンプトを入力してください。
