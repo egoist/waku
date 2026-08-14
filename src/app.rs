@@ -1270,6 +1270,10 @@ pub struct Waku {
     /// are collapsed by default (absent from the set), so a busy automation
     /// shows as a single named row until opened. Runtime-only.
     sidebar_expanded_automations: HashSet<Uuid>,
+    /// Automation groups whose run list is fully expanded past the collapsed
+    /// preview (first few runs). Absent means only the preview shows with a
+    /// "Show more" toggle. Runtime-only, like `sidebar_expanded_automations`.
+    sidebar_expanded_automation_runs: HashSet<Uuid>,
     sidebar_visible: bool,
     sidebar_width: f32,
     right_panel_visible: bool,
@@ -2779,6 +2783,7 @@ impl Waku {
                 sidebar_collapsed_groups: HashSet::new(),
                 sidebar_automations_collapsed: false,
                 sidebar_expanded_automations: HashSet::new(),
+                sidebar_expanded_automation_runs: HashSet::new(),
                 sidebar_visible,
                 sidebar_width,
                 right_panel_visible,

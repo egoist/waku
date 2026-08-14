@@ -205,6 +205,10 @@ impl Weekday {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum Schedule {
+    /// Never fires on its own; runs only when the user starts it (Run-now).
+    Manual,
+    /// Every hour at `minute` past the hour.
+    Hourly { minute: u8 },
     /// Every day at `time`.
     Daily { time: TimeOfDay },
     /// On each selected weekday at `time`.
@@ -226,10 +230,14 @@ impl Default for Schedule {
 }
 
 impl Schedule {
-    /// The time-of-day slot, common to every current variant.
-    pub fn time(&self) -> TimeOfDay {
+    /// The time-of-day slot for the variants that carry one. `Manual` has no
+    /// schedule and `Hourly` only pins a minute, so both return `None`.
+    pub fn time(&self) -> Option<TimeOfDay> {
         match self {
-            Self::Daily { time } | Self::Weekly { time, .. } | Self::Monthly { time, .. } => *time,
+            Self::Daily { time } | Self::Weekly { time, .. } | Self::Monthly { time, .. } => {
+                Some(*time)
+            }
+            Self::Manual | Self::Hourly { .. } => None,
         }
     }
 }

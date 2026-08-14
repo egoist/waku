@@ -5,7 +5,7 @@
 //! timezone. Callers convert a stored unix timestamp to local wall clock at the
 //! boundary (see the scheduler tick) and back again for storage.
 
-use chrono::{Datelike, NaiveDate, NaiveDateTime, NaiveTime};
+use chrono::{Datelike, NaiveDate, NaiveDateTime, NaiveTime, Timelike};
 
 use super::{Schedule, TimeOfDay};
 
@@ -28,9 +28,22 @@ impl TimeOfDay {
 /// forward to the next valid day; a monthly day a month lacks clamps to that
 /// month's last day.
 pub fn next_occurrence(schedule: &Schedule, after: NaiveDateTime) -> Option<NaiveDateTime> {
-    let time = schedule.time().naive()?;
     match schedule {
+        // Manual automations never fire on their own.
+        Schedule::Manual => None,
+        Schedule::Hourly { minute } => {
+            let minute = u32::from(*minute).min(59);
+            // The `:minute` slot in the current hour, then walk hours forward
+            // until it lands strictly after `after` (covers the hour and day
+            // rollover in one loop).
+            let mut slot = after.date().and_hms_opt(after.hour(), minute, 0)?;
+            while slot <= after {
+                slot += chrono::Duration::hours(1);
+            }
+            Some(slot)
+        }
         Schedule::Daily { .. } => {
+            let time = schedule.time()?.naive()?;
             let today = after.date().and_time(time);
             if today > after {
                 Some(today)
@@ -39,6 +52,7 @@ pub fn next_occurrence(schedule: &Schedule, after: NaiveDateTime) -> Option<Naiv
             }
         }
         Schedule::Weekly { weekdays, .. } => {
+            let time = schedule.time()?.naive()?;
             if weekdays.is_empty() {
                 return None;
             }
@@ -57,6 +71,7 @@ pub fn next_occurrence(schedule: &Schedule, after: NaiveDateTime) -> Option<Naiv
             None
         }
         Schedule::Monthly { days, .. } => {
+            let time = schedule.time()?.naive()?;
             if days.is_empty() {
                 return None;
             }
@@ -148,6 +163,40 @@ mod tests {
         Schedule::Daily {
             time: TimeOfDay::new(hour, minute),
         }
+    }
+
+    #[test]
+    fn manual_never_fires() {
+        assert_eq!(next_occurrence(&Schedule::Manual, at(2026, 8, 13, 8, 0)), None);
+    }
+
+    #[test]
+    fn hourly_finds_the_next_minute_slot() {
+        let schedule = Schedule::Hourly { minute: 15 };
+        // Before this hour's slot: fires this hour.
+        assert_eq!(
+            next_occurrence(&schedule, at(2026, 8, 13, 9, 0)),
+            Some(at(2026, 8, 13, 9, 15))
+        );
+        // After this hour's slot: rolls to the next hour.
+        assert_eq!(
+            next_occurrence(&schedule, at(2026, 8, 13, 9, 30)),
+            Some(at(2026, 8, 13, 10, 15))
+        );
+        // Exactly at the slot: strictly-after means the next hour.
+        assert_eq!(
+            next_occurrence(&schedule, at(2026, 8, 13, 9, 15)),
+            Some(at(2026, 8, 13, 10, 15))
+        );
+    }
+
+    #[test]
+    fn hourly_crosses_a_day_boundary() {
+        let schedule = Schedule::Hourly { minute: 30 };
+        assert_eq!(
+            next_occurrence(&schedule, at(2026, 8, 13, 23, 45)),
+            Some(at(2026, 8, 14, 0, 30))
+        );
     }
 
     #[test]

@@ -470,6 +470,10 @@ automations.enabled:
   en: Enabled
 automations.disabled:
   en: Disabled
+automations.menu_disable:
+  en: Disable
+automations.menu_enable:
+  en: Enable
 automations.next_run:
   en: "Next run %{time}"
 automations.next_run_none:
@@ -532,12 +536,26 @@ automations.frequency_weekly:
   en: Weekly
 automations.frequency_monthly:
   en: Monthly
+automations.preset_manual:
+  en: Manual
+automations.preset_hourly:
+  en: Hourly
+automations.preset_weekdays:
+  en: Weekdays
+automations.hint_manual:
+  en: Runs only when you start it
+automations.at_minute:
+  en: "At :"
 automations.summary_daily:
   en: "Daily at %{time}"
 automations.summary_weekly:
   en: "Weekly on %{days} at %{time}"
 automations.summary_monthly:
   en: "Monthly on day %{days} at %{time}"
+automations.summary_manual:
+  en: Manual — no schedule
+automations.summary_hourly:
+  en: "Every hour at :%{minute}"
 automations.weekday_mon:
   en: Mon
 automations.weekday_tue:
@@ -592,6 +610,10 @@ sidebar.status_waiting:
   en: Waiting
 sidebar.status_failed:
   en: Failed
+sidebar.show_more_runs:
+  en: Show %{count} more
+sidebar.show_fewer_runs:
+  en: Show less
 
 project.new_project:
   en: New project…

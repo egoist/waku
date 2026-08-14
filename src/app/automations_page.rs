@@ -21,13 +21,49 @@ pub(super) enum AutomationsPage {
     Editor(AutomationEditor),
 }
 
-/// The frequency families the schedule picker offers. Maps onto [`Schedule`]'s
-/// variants; a raw-cron family can be added here later.
+/// The schedule presets the picker offers, in display order. Each maps onto a
+/// [`Schedule`] value; `Weekdays` is a UI shortcut for `Weekly` with Mon–Fri.
+/// A raw-cron `Custom` preset can be added here later.
 #[derive(Clone, Copy, Eq, PartialEq)]
-pub(super) enum Frequency {
+pub(super) enum SchedulePreset {
+    Manual,
+    Hourly,
     Daily,
+    Weekdays,
     Weekly,
     Monthly,
+}
+
+impl SchedulePreset {
+    /// Every preset, in the order they render across the segmented control.
+    const ALL: [Self; 6] = [
+        Self::Manual,
+        Self::Hourly,
+        Self::Daily,
+        Self::Weekdays,
+        Self::Weekly,
+        Self::Monthly,
+    ];
+}
+
+/// Monday–Friday, the fixed day set behind the `Weekdays` preset.
+fn weekdays_mon_fri() -> Vec<Weekday> {
+    vec![
+        Weekday::Monday,
+        Weekday::Tuesday,
+        Weekday::Wednesday,
+        Weekday::Thursday,
+        Weekday::Friday,
+    ]
+}
+
+/// Whether a weekly selection is exactly Mon–Fri (order-independent), so a
+/// stored `Weekly` schedule reads back as the `Weekdays` preset.
+fn is_weekdays_mon_fri(weekdays: &[Weekday]) -> bool {
+    let mut set = weekdays.to_vec();
+    set.sort_by_key(|day| day.chrono().number_from_monday());
+    set.dedup();
+    set == weekdays_mon_fri()
 }
 
 /// Live form state for creating or editing one automation. Name and prompt live
@@ -53,7 +89,7 @@ pub(super) struct AutomationEditor {
     pub(super) fresh_worktree: bool,
     /// Preserved so editing keeps an existing worktree's base branch.
     pub(super) base_branch: Option<String>,
-    frequency: Frequency,
+    preset: SchedulePreset,
     hour: u8,
     minute: u8,
     weekdays: Vec<Weekday>,
@@ -79,7 +115,7 @@ impl AutomationEditor {
             project_id: None,
             fresh_worktree: false,
             base_branch: None,
-            frequency: Frequency::Daily,
+            preset: SchedulePreset::Daily,
             hour: 9,
             minute: 0,
             weekdays: vec![Weekday::Monday],
@@ -93,12 +129,29 @@ impl AutomationEditor {
 
     /// Seeds the form from an existing automation.
     fn from_automation(automation: &Automation) -> Self {
-        let time = automation.schedule.time();
-        let (frequency, weekdays, monthdays) = match &automation.schedule {
-            Schedule::Daily { .. } => (Frequency::Daily, vec![Weekday::Monday], vec![1]),
-            Schedule::Weekly { weekdays, .. } => (Frequency::Weekly, weekdays.clone(), vec![1]),
+        let time = automation.schedule.time().unwrap_or_default();
+        // `minute` seeds both the time field (Daily/Weekly/Monthly) and the
+        // Hourly minute — only one is shown at a time, so they share the field.
+        let mut minute = time.minute;
+        let (preset, weekdays, monthdays) = match &automation.schedule {
+            Schedule::Manual => (SchedulePreset::Manual, vec![Weekday::Monday], vec![1]),
+            Schedule::Hourly { minute: hourly } => {
+                minute = *hourly;
+                (SchedulePreset::Hourly, vec![Weekday::Monday], vec![1])
+            }
+            Schedule::Daily { .. } => (SchedulePreset::Daily, vec![Weekday::Monday], vec![1]),
+            Schedule::Weekly { weekdays, .. } => {
+                // Mon–Fri reads back as the Weekdays shortcut; any other set is
+                // a general Weekly schedule.
+                let preset = if is_weekdays_mon_fri(weekdays) {
+                    SchedulePreset::Weekdays
+                } else {
+                    SchedulePreset::Weekly
+                };
+                (preset, weekdays.clone(), vec![1])
+            }
             Schedule::Monthly { days, .. } => {
-                (Frequency::Monthly, vec![Weekday::Monday], days.clone())
+                (SchedulePreset::Monthly, vec![Weekday::Monday], days.clone())
             }
         };
         let (fresh_worktree, base_branch) = match &automation.workspace {
@@ -118,9 +171,9 @@ impl AutomationEditor {
             project_id: automation.project_id,
             fresh_worktree,
             base_branch,
-            frequency,
+            preset,
             hour: time.hour.min(23),
-            minute: time.minute.min(59),
+            minute: minute.min(59),
             weekdays: if weekdays.is_empty() {
                 vec![Weekday::Monday]
             } else {
@@ -141,14 +194,22 @@ impl AutomationEditor {
     /// The schedule assembled from the current picker state.
     fn schedule(&self) -> Schedule {
         let time = TimeOfDay::new(self.hour, self.minute);
-        match self.frequency {
-            Frequency::Daily => Schedule::Daily { time },
-            Frequency::Weekly => {
+        match self.preset {
+            SchedulePreset::Manual => Schedule::Manual,
+            SchedulePreset::Hourly => Schedule::Hourly {
+                minute: self.minute,
+            },
+            SchedulePreset::Daily => Schedule::Daily { time },
+            SchedulePreset::Weekdays => Schedule::Weekly {
+                time,
+                weekdays: weekdays_mon_fri(),
+            },
+            SchedulePreset::Weekly => {
                 let mut weekdays = self.weekdays.clone();
                 weekdays.sort_by_key(|day| day.chrono().number_from_monday());
                 Schedule::Weekly { time, weekdays }
             }
-            Frequency::Monthly => {
+            SchedulePreset::Monthly => {
                 let mut days = self.monthdays.clone();
                 days.sort_unstable();
                 Schedule::Monthly { time, days }
@@ -200,13 +261,16 @@ impl Waku {
         cx.notify();
     }
 
-    /// Opens the editor for `id`, or a blank one when `None`.
-    fn open_automation_editor(
+    /// Opens the editor for `id`, or a blank one when `None`. Reachable from the
+    /// sidebar's automation context menu as well as the list, so it clears any
+    /// open settings page to bring the editor to the foreground.
+    pub(super) fn open_automation_editor(
         &mut self,
         id: Option<Uuid>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.settings_page = None;
         let (editor, name, prompt) = match id.and_then(|id| self.state.automation(id)) {
             Some(automation) => (
                 AutomationEditor::from_automation(automation),
@@ -343,12 +407,25 @@ impl Waku {
     fn delete_automation(&mut self, id: Uuid, cx: &mut Context<Self>) {
         self.automation_delete_arming = None;
         if self.state.remove_automation(id) {
+            // Deleting the automation whose editor is open returns to the list.
+            if matches!(&self.automations_page, Some(AutomationsPage::Editor(editor)) if editor.id == Some(id))
+            {
+                self.automations_page = Some(AutomationsPage::List);
+            }
             self.save();
             cx.notify();
         }
     }
 
-    fn toggle_automation_enabled(&mut self, id: Uuid, cx: &mut Context<Self>) {
+    /// Closes the editor and returns to the automations list.
+    fn close_automation_editor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.automation_delete_arming = None;
+        self.automations_page = Some(AutomationsPage::List);
+        window.focus(&self.automations_focus, cx);
+        cx.notify();
+    }
+
+    pub(super) fn toggle_automation_enabled(&mut self, id: Uuid, cx: &mut Context<Self>) {
         if let Some(automation) = self.state.automation_mut(id) {
             automation.enabled = !automation.enabled;
             automation.updated_at = crate::model::unix_time();
@@ -578,7 +655,7 @@ impl Waku {
     }
 
     /// Run-now: spawn the run, then open its transcript so the result is visible.
-    fn run_automation_now(&mut self, id: Uuid, cx: &mut Context<Self>) {
+    pub(super) fn run_automation_now(&mut self, id: Uuid, cx: &mut Context<Self>) {
         let Some(session_id) = self.spawn_automation_run(id, false, cx) else {
             return;
         };
@@ -713,7 +790,7 @@ impl Waku {
             .child(
                 div()
                     .w_full()
-                    .max_w(px(760.0))
+                    .max_w(px(CONTENT_MAX_WIDTH))
                     .mx_auto()
                     .px(px(24.0))
                     .flex()
@@ -741,7 +818,7 @@ impl Waku {
             ("icons/check.svg", theme.success, tr!("automations.enabled"))
         } else {
             (
-                "icons/block.svg",
+                "icons/pause.svg",
                 theme.text_tertiary,
                 tr!("automations.disabled"),
             )
@@ -819,47 +896,8 @@ impl Waku {
                     ),
             )
             .child(self.render_automation_enable_toggle(id, enabled, theme, cx))
-            .child(
-                // Run Now stacked on top of Delete, sharing a column width.
-                div()
-                    .flex_none()
-                    .flex()
-                    .flex_col()
-                    .gap(px(6.0))
-                    .child(
-                        div()
-                            .id(SharedString::from(format!("automation-run-{id}")))
-                            .tab_index(0)
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .gap(px(5.0))
-                            .h(px(28.0))
-                            .px(px(10.0))
-                            .rounded(px(7.0))
-                            .cursor_default()
-                            .text_size(px(12.0))
-                            .text_color(theme.text_secondary)
-                            .border_1()
-                            .border_color(theme.border)
-                            .focus_visible(|style| style.border_color(theme.accent))
-                            .hover(|element| element.bg(theme.sidebar_item_background))
-                            .child(icon("icons/zap.svg", 12.0, theme.text_secondary))
-                            .child(tr!("automations.run_now"))
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.run_automation_now(id, cx);
-                                cx.stop_propagation();
-                            }))
-                            .on_key_down(cx.listener(move |this, event: &KeyDownEvent, _, cx| {
-                                if matches!(event.keystroke.key.as_str(), "enter" | "space") {
-                                    this.run_automation_now(id, cx);
-                                    cx.stop_propagation();
-                                }
-                            })),
-                    )
-                    .child(self.render_automation_delete_button(id, theme, cx)),
-            )
-            // A right chevron hints that the card itself opens the editor.
+            // A right chevron hints that the card itself opens the editor, where
+            // Run now and Delete live.
             .child(icon("icons/chevron-right.svg", 16.0, theme.text_tertiary))
             .into_any_element()
     }
@@ -989,92 +1027,108 @@ impl Waku {
             return div().into_any_element();
         };
         let editor = editor.clone();
-        let creating = editor.id.is_none();
+        let id = editor.id;
+        let crumb_name = match id.and_then(|id| self.state.automation(id)) {
+            Some(automation) => SharedString::from(automation.name.clone()),
+            None => SharedString::from(tr!("automations.create_title")),
+        };
+
+        // "Automations" returns to the list (replacing Cancel), then the
+        // current automation's name.
+        let breadcrumb = div()
+            .flex()
+            .items_center()
+            .gap(px(6.0))
+            .min_w_0()
+            .text_size(px(20.0))
+            .font_weight(FontWeight::MEDIUM)
+            .child(
+                div()
+                    .id("automation-breadcrumb-home")
+                    .tab_index(0)
+                    .flex_none()
+                    .cursor_default()
+                    .text_color(theme.text_tertiary)
+                    .focus_visible(|style| style.border_1().border_color(theme.accent))
+                    .hover(|element| element.text_color(theme.text))
+                    .child(tr!("automations.title"))
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.close_automation_editor(window, cx);
+                    }))
+                    .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                        if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                            this.close_automation_editor(window, cx);
+                            cx.stop_propagation();
+                        }
+                    })),
+            )
+            .child(icon("icons/chevron-right.svg", 14.0, theme.text_tertiary))
+            .child(
+                div()
+                    .min_w_0()
+                    .truncate()
+                    .text_color(theme.text)
+                    .child(crumb_name),
+            );
+
+        let save = div()
+            .id("automation-save")
+            .tab_index(0)
+            .flex_none()
+            .h(px(30.0))
+            .px(px(14.0))
+            .rounded(px(7.0))
+            .flex()
+            .items_center()
+            .cursor_default()
+            .text_size(px(13.0))
+            .bg(theme.inverse)
+            .text_color(theme.on_inverse)
+            .focus_visible(|style| style.border_1().border_color(theme.accent))
+            .hover(|element| element.opacity(0.9))
+            .child(tr!("automations.save"))
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.save_automation_editor(cx);
+            }));
+
+        // Delete is only meaningful for an existing automation; Run now now
+        // lives in the composer, bottom-right where the send button sits.
+        let delete = id.map(|id| self.render_automation_delete_button(id, &theme, cx));
 
         let header = div()
             .flex_none()
             .flex()
             .items_center()
             .justify_between()
-            .child(
-                div()
-                    .text_size(px(20.0))
-                    .font_weight(FontWeight::MEDIUM)
-                    .child(if creating {
-                        tr!("automations.create_title")
-                    } else {
-                        tr!("automations.edit_title")
-                    }),
-            )
+            .gap(px(12.0))
+            .child(breadcrumb)
             .child(
                 div()
                     .flex()
                     .items_center()
+                    .flex_none()
                     .gap(px(8.0))
-                    .child(
-                        div()
-                            .id("automation-cancel")
-                            .tab_index(0)
-                            .h(px(30.0))
-                            .px(px(12.0))
-                            .rounded(px(7.0))
-                            .flex()
-                            .items_center()
-                            .cursor_default()
-                            .text_size(px(13.0))
-                            .text_color(theme.text_secondary)
-                            .border_1()
-                            .border_color(theme.border)
-                            .focus_visible(|style| style.border_color(theme.accent))
-                            .hover(|element| element.bg(theme.sidebar_item_background))
-                            .child(tr!("automations.cancel"))
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.automations_page = Some(AutomationsPage::List);
-                                window.focus(&this.automations_focus, cx);
-                                cx.notify();
-                            })),
-                    )
-                    .child(
-                        div()
-                            .id("automation-save")
-                            .tab_index(0)
-                            .h(px(30.0))
-                            .px(px(14.0))
-                            .rounded(px(7.0))
-                            .flex()
-                            .items_center()
-                            .cursor_default()
-                            .text_size(px(13.0))
-                            .bg(theme.inverse)
-                            .text_color(theme.on_inverse)
-                            .focus_visible(|style| style.border_1().border_color(theme.accent))
-                            .hover(|element| element.opacity(0.9))
-                            .child(tr!("automations.save"))
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.save_automation_editor(cx);
-                            })),
-                    ),
+                    .children(delete)
+                    .child(save),
             );
 
-        let form = div()
-            .flex()
-            .flex_col()
-            .gap(px(4.0))
-            .pb(px(32.0))
+        // The header stays fixed at the top so the breadcrumb and Save are
+        // always reachable.
+        let header_bar = div()
+            .flex_none()
+            .pt(px(8.0))
+            .pb(px(8.0))
             .child(
-                self.editor_section(
-                    &theme,
-                    tr!("automations.field_name"),
-                    TextField::new("automation-name-field", self.automation_name_input.clone())
-                        .w_full()
-                        .into_any_element(),
-                ),
-            )
-            .child(self.editor_agent_section(&theme, cx))
-            .child(self.editor_schedule_section(&editor, &theme, cx))
-            .child(self.editor_behavior_section(&editor, &theme, cx));
+                div()
+                    .w_full()
+                    .max_w(px(CONTENT_MAX_WIDTH))
+                    .mx_auto()
+                    .px(px(24.0))
+                    .child(header),
+            );
 
-        div()
+        // Everything except the composer scrolls in the middle.
+        let settings = div()
             .id("automations-scroll")
             .track_scroll(&self.automations_scroll)
             .overflow_y_scroll()
@@ -1083,15 +1137,52 @@ impl Waku {
             .child(
                 div()
                     .w_full()
-                    .max_w(px(680.0))
+                    .max_w(px(CONTENT_MAX_WIDTH))
                     .mx_auto()
                     .px(px(24.0))
+                    .pb(px(16.0))
                     .flex()
                     .flex_col()
-                    .gap(px(20.0))
-                    .child(header)
-                    .child(form),
-            )
+                    .gap(px(4.0))
+                    .child(
+                        self.editor_section(
+                            &theme,
+                            tr!("automations.field_name"),
+                            TextField::new(
+                                "automation-name-field",
+                                self.automation_name_input.clone(),
+                            )
+                            .w_full()
+                            .into_any_element(),
+                        ),
+                    )
+                    .child(self.editor_schedule_section(&editor, &theme, cx))
+                    .child(self.editor_behavior_section(&editor, &theme, cx)),
+            );
+
+        // The composer (prompt + agent controls + project/workspace) is pinned
+        // to the bottom, just like the chat composer.
+        let composer = div()
+            .flex_none()
+            .pt(px(8.0))
+            .pb(px(16.0))
+            .child(
+                div()
+                    .w_full()
+                    .max_w(px(CONTENT_MAX_WIDTH))
+                    .mx_auto()
+                    .px(px(24.0))
+                    .child(self.editor_agent_section(id, &theme, cx)),
+            );
+
+        div()
+            .flex()
+            .flex_col()
+            .flex_1()
+            .min_h_0()
+            .child(header_bar)
+            .child(settings)
+            .child(composer)
             .into_any_element()
     }
 
@@ -1144,14 +1235,24 @@ impl Waku {
         )
     }
 
-    fn editor_agent_section(&self, theme: &Theme, cx: &mut Context<Self>) -> Div {
+    fn editor_agent_section(
+        &self,
+        id: Option<Uuid>,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> Div {
         // A composer-style card: the prompt textarea with the model/access
         // controls docked beneath it, mirroring the new-task composer so the
         // editor's core reads like the surface a user already knows.
         let prompt_area = div()
             .id("automation-prompt-area")
             .w_full()
+            // Bounded like the chat composer: a few lines tall, capped so a long
+            // prompt scrolls inside the field instead of growing the pinned
+            // composer until it swallows the whole page.
             .min_h(px(120.0))
+            .max_h(px(260.0))
+            .overflow_y_scroll()
             .px(px(4.0))
             .pt(px(2.0))
             .text_size(px(13.5))
@@ -1168,19 +1269,60 @@ impl Waku {
                 }),
             );
 
+        // Run now sits at the composer's bottom-right, where the chat composer's
+        // send button lives. Only an existing automation can be run.
+        let run_now = id.map(|id| {
+            div()
+                .id("automation-editor-run")
+                .tab_index(0)
+                .flex_none()
+                .w(px(26.0))
+                .h(px(26.0))
+                .rounded_full()
+                .flex()
+                .items_center()
+                .justify_center()
+                .cursor_default()
+                .bg(theme.inverse)
+                .focus_visible(|style| style.border_1().border_color(theme.accent))
+                .hover(|element| element.opacity(0.9))
+                .active(|element| element.opacity(0.8))
+                .child(icon("icons/zap.svg", 14.0, theme.on_inverse))
+                .tooltip(Tooltip::text(tr!("automations.run_now")))
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.run_automation_now(id, cx);
+                }))
+                .on_key_down(cx.listener(move |this, event: &KeyDownEvent, _, cx| {
+                    if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                        this.run_automation_now(id, cx);
+                        cx.stop_propagation();
+                    }
+                }))
+        });
+
         // The exact composer controls, one source of truth, editing the open
-        // form instead of a live session.
+        // form instead of a live session. The controls wrap in a flexible left
+        // cluster so Run now stays pinned to the right, like the send button.
         let toolbar = div()
             .mt(px(8.0))
             .flex()
-            .flex_wrap()
             .items_center()
             .gap(px(6.0))
-            .child(self.render_provider_model_control(AgentControlTarget::Automation, cx))
-            .children(self.render_model_traits_control(AgentControlTarget::Automation, cx))
-            .children(self.render_agent_preset_control(AgentControlTarget::Automation, cx))
-            .child(self.render_access_control(AgentControlTarget::Automation, cx))
-            .child(self.render_interaction_mode_control(AgentControlTarget::Automation, cx));
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .flex_wrap()
+                    .items_center()
+                    .gap(px(6.0))
+                    .child(self.render_provider_model_control(AgentControlTarget::Automation, cx))
+                    .children(self.render_model_traits_control(AgentControlTarget::Automation, cx))
+                    .children(self.render_agent_preset_control(AgentControlTarget::Automation, cx))
+                    .child(self.render_access_control(AgentControlTarget::Automation, cx))
+                    .child(self.render_interaction_mode_control(AgentControlTarget::Automation, cx)),
+            )
+            .children(run_now);
 
         let card = div()
             .rounded(px(13.0))
@@ -1214,29 +1356,27 @@ impl Waku {
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> Div {
-        let weak = cx.entity().downgrade();
-
-        // Frequency.
-        let frequency = editor.frequency;
-        let frequency_weak = weak.clone();
-        let frequency_picker = self.picker(
+        // Schedule preset dropdown.
+        let preset = editor.preset;
+        let preset_weak = cx.entity().downgrade();
+        let preset_picker = self.picker(
             "automation-frequency",
-            frequency_label(frequency),
+            preset_label(preset),
             200.0,
             false,
             cx,
             move |_| {
-                let weak = frequency_weak.clone();
-                [Frequency::Daily, Frequency::Weekly, Frequency::Monthly]
+                let weak = preset_weak.clone();
+                SchedulePreset::ALL
                     .into_iter()
                     .map(|option| {
                         let weak = weak.clone();
-                        MenuItem::new(frequency_label(option), move |_, cx| {
+                        MenuItem::new(preset_label(option), move |_, cx| {
                             let _ = weak.update(cx, |this, cx| {
-                                this.edit_automation_form(cx, |editor| editor.frequency = option);
+                                this.edit_automation_form(cx, |editor| editor.preset = option);
                             });
                         })
-                        .selected(option == frequency)
+                        .selected(option == preset)
                     })
                     .collect()
             },
@@ -1244,23 +1384,26 @@ impl Waku {
 
         // Time-of-day: freeform hour and minute fields the user types by hand.
         // The `on_automation_time_edited` subscription clamps and validates.
-        let time_picker = div()
-            .flex()
-            .items_center()
-            .gap(px(6.0))
-            .child(
-                TextField::new("automation-hour-field", self.automation_hour_input.clone())
-                    .w(px(52.0)),
-            )
-            .child(div().text_color(theme.text_tertiary).child(":"))
-            .child(
-                TextField::new(
-                    "automation-minute-field",
-                    self.automation_minute_input.clone(),
+        // Built lazily since only the presets that carry a full time show it.
+        let time_picker = || {
+            div()
+                .flex()
+                .items_center()
+                .gap(px(6.0))
+                .child(
+                    TextField::new("automation-hour-field", self.automation_hour_input.clone())
+                        .w(px(52.0)),
                 )
-                .w(px(52.0)),
-            )
-            .into_any_element();
+                .child(div().text_color(theme.text_tertiary).child(":"))
+                .child(
+                    TextField::new(
+                        "automation-minute-field",
+                        self.automation_minute_input.clone(),
+                    )
+                    .w(px(52.0)),
+                )
+                .into_any_element()
+        };
 
         let mut section = div()
             .flex()
@@ -1269,31 +1412,74 @@ impl Waku {
             .child(self.editor_section(
                 theme,
                 tr!("automations.field_schedule_frequency"),
-                frequency_picker,
-            ))
-            .child(self.editor_section(theme, tr!("automations.field_time"), time_picker));
+                preset_picker,
+            ));
 
-        // Day selection appears only for the frequency that needs it.
-        match editor.frequency {
-            Frequency::Weekly => {
+        // Each preset shows only the sub-controls it needs.
+        match editor.preset {
+            SchedulePreset::Manual => {
                 section = section.child(self.editor_section(
                     theme,
-                    tr!("automations.field_days"),
-                    self.weekday_chips(editor, theme, cx),
+                    tr!("automations.field_time"),
+                    div()
+                        .text_size(px(12.0))
+                        .text_color(theme.text_tertiary)
+                        .child(tr!("automations.hint_manual"))
+                        .into_any_element(),
                 ));
             }
-            Frequency::Monthly => {
+            SchedulePreset::Hourly => {
+                // Every hour at a chosen minute past the hour: minute only.
+                let minute_picker = div()
+                    .flex()
+                    .items_center()
+                    .gap(px(6.0))
+                    .child(
+                        div()
+                            .text_color(theme.text_tertiary)
+                            .child(tr!("automations.at_minute")),
+                    )
+                    .child(
+                        TextField::new(
+                            "automation-minute-field",
+                            self.automation_minute_input.clone(),
+                        )
+                        .w(px(52.0)),
+                    )
+                    .into_any_element();
                 section = section.child(self.editor_section(
                     theme,
-                    tr!("automations.field_days"),
-                    self.monthday_chips(editor, theme, cx),
+                    tr!("automations.field_time"),
+                    minute_picker,
                 ));
             }
-            Frequency::Daily => {}
+            SchedulePreset::Daily | SchedulePreset::Weekdays => {
+                section =
+                    section.child(self.editor_section(theme, tr!("automations.field_time"), time_picker()));
+            }
+            SchedulePreset::Weekly => {
+                section = section
+                    .child(self.editor_section(theme, tr!("automations.field_time"), time_picker()))
+                    .child(self.editor_section(
+                        theme,
+                        tr!("automations.field_days"),
+                        self.weekday_chips(editor, theme, cx),
+                    ));
+            }
+            SchedulePreset::Monthly => {
+                section = section
+                    .child(self.editor_section(theme, tr!("automations.field_time"), time_picker()))
+                    .child(self.editor_section(
+                        theme,
+                        tr!("automations.field_days"),
+                        self.monthday_chips(editor, theme, cx),
+                    ));
+            }
         }
 
         section
     }
+
 
     fn editor_behavior_section(
         &self,
@@ -1565,13 +1751,17 @@ fn toggle_membership_min_one<T: PartialEq>(items: &mut Vec<T>, value: T) {
     }
 }
 
-fn frequency_label(frequency: Frequency) -> String {
-    match frequency {
-        Frequency::Daily => tr!("automations.frequency_daily"),
-        Frequency::Weekly => tr!("automations.frequency_weekly"),
-        Frequency::Monthly => tr!("automations.frequency_monthly"),
+fn preset_label(preset: SchedulePreset) -> String {
+    match preset {
+        SchedulePreset::Manual => tr!("automations.preset_manual"),
+        SchedulePreset::Hourly => tr!("automations.preset_hourly"),
+        SchedulePreset::Daily => tr!("automations.frequency_daily"),
+        SchedulePreset::Weekdays => tr!("automations.preset_weekdays"),
+        SchedulePreset::Weekly => tr!("automations.frequency_weekly"),
+        SchedulePreset::Monthly => tr!("automations.frequency_monthly"),
     }
 }
+
 
 fn overlap_label(overlap: OverlapPolicy) -> String {
     match overlap {
@@ -1603,24 +1793,27 @@ fn weekday_short(weekday: Weekday) -> String {
 
 /// A human-readable one-line summary of a schedule.
 fn schedule_summary(schedule: &Schedule) -> String {
-    let time = format_time(schedule.time());
     match schedule {
-        Schedule::Daily { .. } => tr!("automations.summary_daily", time = time),
-        Schedule::Weekly { weekdays, .. } => {
+        Schedule::Manual => tr!("automations.summary_manual"),
+        Schedule::Hourly { minute } => {
+            tr!("automations.summary_hourly", minute = format!("{minute:02}"))
+        }
+        Schedule::Daily { time } => tr!("automations.summary_daily", time = format_time(*time)),
+        Schedule::Weekly { weekdays, time } => {
             let days = weekdays
                 .iter()
                 .map(|day| weekday_short(*day))
                 .collect::<Vec<_>>()
                 .join(", ");
-            tr!("automations.summary_weekly", days = days, time = time)
+            tr!("automations.summary_weekly", days = days, time = format_time(*time))
         }
-        Schedule::Monthly { days, .. } => {
+        Schedule::Monthly { days, time } => {
             let days = days
                 .iter()
                 .map(u8::to_string)
                 .collect::<Vec<_>>()
                 .join(", ");
-            tr!("automations.summary_monthly", days = days, time = time)
+            tr!("automations.summary_monthly", days = days, time = format_time(*time))
         }
     }
 }

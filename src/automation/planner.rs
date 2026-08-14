@@ -43,6 +43,7 @@ pub enum PlanDecision {
 }
 
 impl PlanDecision {
+    #[cfg(test)]
     pub fn id(self) -> Uuid {
         match self {
             Self::Fire { id, .. } | Self::Skip { id, .. } => id,
