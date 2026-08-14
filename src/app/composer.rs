@@ -1,3 +1,4 @@
+use super::automations_page::AutomationsPage;
 use super::*;
 
 use anyhow::Context as _;
@@ -21,6 +22,18 @@ pub(super) fn composer_submit_action(
     } else {
         ComposerSubmitAction::Send
     }
+}
+
+/// Which surface the shared agent controls (model picker, reasoning traits,
+/// access, agent preset, interaction mode) read from and write to. The composer
+/// edits the selected session live; the automations editor edits the open
+/// [`AutomationEditor`] form with no driver side effects.
+#[derive(Clone, Copy)]
+pub(super) enum AgentControlTarget {
+    /// The currently selected session (composer).
+    Session,
+    /// The open automation editor form (`AutomationsPage::Editor`).
+    Automation,
 }
 
 impl Waku {
@@ -786,18 +799,580 @@ impl Waku {
         )
     }
 
+    // ── Shared agent controls ───────────────────────────────────────────────
+
+    /// The target the shared agent controls operate on right now, derived from
+    /// which surface is on screen. The composer and the automations editor are
+    /// never visible at once, so the model picker's cached menu-handle observer
+    /// (shared by both surfaces under one id) resolves its target from here
+    /// rather than capturing a stale render-time value.
+    pub(super) fn active_agent_control_target(&self) -> AgentControlTarget {
+        if matches!(self.automations_page, Some(AutomationsPage::Editor(_))) {
+            AgentControlTarget::Automation
+        } else {
+            AgentControlTarget::Session
+        }
+    }
+
+    fn control_provider(&self, target: AgentControlTarget) -> ProviderKind {
+        match target {
+            AgentControlTarget::Session => self
+                .selected_session()
+                .map(|session| session.provider)
+                .unwrap_or_default(),
+            AgentControlTarget::Automation => self
+                .automation_editor()
+                .map(|editor| editor.provider)
+                .unwrap_or_default(),
+        }
+    }
+
+    /// The current model id for the target, falling back to the provider's
+    /// preferred model when none is explicitly set — the same resolution
+    /// [`Self::model_for_session`] performs for a session.
+    fn control_selected_model(&self, target: AgentControlTarget) -> Option<String> {
+        match target {
+            AgentControlTarget::Session => self
+                .selected_session()
+                .and_then(|session| self.model_for_session(session))
+                .map(str::to_owned),
+            AgentControlTarget::Automation => {
+                let editor = self.automation_editor()?;
+                editor.model.clone().or_else(|| {
+                    self.provider_probe(editor.provider)
+                        .and_then(|probe| probe.preferred_model())
+                        .map(|model| model.id.clone())
+                })
+            }
+        }
+    }
+
+    fn control_reasoning_effort(&self, target: AgentControlTarget) -> Option<String> {
+        match target {
+            AgentControlTarget::Session => self
+                .selected_session()
+                .and_then(|session| session.reasoning_effort.clone()),
+            AgentControlTarget::Automation => self
+                .automation_editor()
+                .and_then(|editor| editor.reasoning_effort.clone()),
+        }
+    }
+
+    fn control_service_tier(&self, target: AgentControlTarget) -> Option<String> {
+        match target {
+            AgentControlTarget::Session => self
+                .selected_session()
+                .and_then(|session| session.service_tier.clone()),
+            AgentControlTarget::Automation => self
+                .automation_editor()
+                .and_then(|editor| editor.service_tier.clone()),
+        }
+    }
+
+    fn control_runtime_mode(&self, target: AgentControlTarget) -> RuntimeMode {
+        let mode = match target {
+            AgentControlTarget::Session => {
+                self.selected_session().map(|session| session.runtime_mode)
+            }
+            AgentControlTarget::Automation => {
+                self.automation_editor().map(|editor| editor.runtime_mode)
+            }
+        };
+        // Plan is an interaction mode, not an access level; the access chip
+        // never shows it.
+        mode.filter(|mode| *mode != RuntimeMode::Plan)
+            .unwrap_or_default()
+    }
+
+    fn control_interaction_mode(&self, target: AgentControlTarget) -> InteractionMode {
+        match target {
+            AgentControlTarget::Session => self
+                .selected_session()
+                .map(|session| session.interaction_mode)
+                .unwrap_or_default(),
+            AgentControlTarget::Automation => self
+                .automation_editor()
+                .map(|editor| editor.interaction_mode)
+                .unwrap_or_default(),
+        }
+    }
+
+    /// The resolved agent-preset id for the target, or `None` when the provider
+    /// is not DeepSeek. Mirrors [`Self::agent_preset_for_session`], falling back
+    /// to the provider's preferred preset.
+    fn control_agent_preset(&self, target: AgentControlTarget) -> Option<String> {
+        match target {
+            AgentControlTarget::Session => self
+                .selected_session()
+                .and_then(|session| self.agent_preset_for_session(session)),
+            AgentControlTarget::Automation => {
+                let editor = self.automation_editor()?;
+                if editor.provider != ProviderKind::DeepSeek {
+                    return None;
+                }
+                editor.agent_preset.clone().or_else(|| {
+                    self.provider_probe(ProviderKind::DeepSeek)
+                        .and_then(|probe| probe.preferred_agent_preset())
+                        .map(|preset| preset.id.clone())
+                })
+            }
+        }
+    }
+
+    fn control_agent_preset_label(&self, id: &str) -> String {
+        self.provider_probe(ProviderKind::DeepSeek)
+            .and_then(|probe| probe.agent_presets.iter().find(|preset| preset.id == id))
+            .map(|preset| preset.display_name())
+            .unwrap_or_else(|| id.to_owned())
+    }
+
+    /// Whether the model picker is interactive. A session locks to its provider
+    /// once it has messages; the automation form is always editable.
+    fn control_model_picker_enabled(&self, target: AgentControlTarget) -> bool {
+        match target {
+            AgentControlTarget::Session => self
+                .selected_session()
+                .is_some_and(|session| session.can_choose_model(session.provider)),
+            AgentControlTarget::Automation => true,
+        }
+    }
+
+    /// The provider the picker is pinned to, or `None` when free to switch. A
+    /// session with messages is pinned; the automation form never is.
+    fn control_locked_provider(&self, target: AgentControlTarget) -> Option<ProviderKind> {
+        match target {
+            AgentControlTarget::Session => self
+                .selected_session()
+                .filter(|session| !session.messages.is_empty())
+                .map(|session| session.provider),
+            AgentControlTarget::Automation => None,
+        }
+    }
+
+    fn control_choose_model(
+        &mut self,
+        target: AgentControlTarget,
+        provider: ProviderKind,
+        model: String,
+        cx: &mut Context<Self>,
+    ) {
+        match target {
+            AgentControlTarget::Session => self.choose_model(provider, model, cx),
+            AgentControlTarget::Automation => self.edit_automation_form(cx, |editor| {
+                if editor.provider != provider {
+                    editor.provider = provider;
+                    // The preset belongs to the old provider.
+                    editor.agent_preset = None;
+                }
+                editor.model = Some(model);
+                // Reasoning effort and service tier belong to the old model.
+                editor.reasoning_effort = None;
+                editor.service_tier = None;
+            }),
+        }
+    }
+
+    fn control_set_reasoning_effort(
+        &mut self,
+        target: AgentControlTarget,
+        effort: String,
+        cx: &mut Context<Self>,
+    ) {
+        match target {
+            AgentControlTarget::Session => self.set_reasoning_effort(effort, cx),
+            AgentControlTarget::Automation => {
+                self.edit_automation_form(cx, |editor| editor.reasoning_effort = Some(effort));
+            }
+        }
+    }
+
+    fn control_set_service_tier(
+        &mut self,
+        target: AgentControlTarget,
+        tier: String,
+        cx: &mut Context<Self>,
+    ) {
+        match target {
+            AgentControlTarget::Session => self.set_service_tier(tier, cx),
+            AgentControlTarget::Automation => {
+                self.edit_automation_form(cx, |editor| editor.service_tier = Some(tier));
+            }
+        }
+    }
+
+    fn control_set_runtime_mode(
+        &mut self,
+        target: AgentControlTarget,
+        mode: RuntimeMode,
+        cx: &mut Context<Self>,
+    ) {
+        match target {
+            AgentControlTarget::Session => self.set_runtime_mode(mode, cx),
+            AgentControlTarget::Automation => {
+                self.edit_automation_form(cx, |editor| editor.runtime_mode = mode);
+            }
+        }
+    }
+
+    fn control_set_interaction_mode(
+        &mut self,
+        target: AgentControlTarget,
+        mode: InteractionMode,
+        cx: &mut Context<Self>,
+    ) {
+        match target {
+            AgentControlTarget::Session => self.set_interaction_mode(mode, cx),
+            AgentControlTarget::Automation => {
+                self.edit_automation_form(cx, |editor| editor.interaction_mode = mode);
+            }
+        }
+    }
+
+    fn control_set_agent_preset(
+        &mut self,
+        target: AgentControlTarget,
+        preset: String,
+        cx: &mut Context<Self>,
+    ) {
+        match target {
+            AgentControlTarget::Session => self.set_agent_preset(preset, cx),
+            AgentControlTarget::Automation => self.edit_automation_form(cx, |editor| {
+                // Minimal mounts no plan capability, so it forces Build — the
+                // same coupling `set_agent_preset` enforces on a session.
+                if preset == "minimal" {
+                    editor.interaction_mode = InteractionMode::Build;
+                }
+                editor.agent_preset = Some(preset);
+            }),
+        }
+    }
+
+    // ── Workspace (project + worktree) ─────────────────────────────────────
+
+    /// The project id backing the chip's selected-first ordering. For a session
+    /// this is the globally selected project (which may be a projectless one);
+    /// for an automation it is the bound `project_id`.
+    fn control_project_id(&self, target: AgentControlTarget) -> Option<Uuid> {
+        match target {
+            AgentControlTarget::Session => self.state.selected_project,
+            AgentControlTarget::Automation => self
+                .automation_editor()
+                .and_then(|editor| editor.project_id),
+        }
+    }
+
+    /// Whether the "no project" entry is the active one — a projectless session
+    /// for the composer, an unbound `project_id` for an automation.
+    fn control_no_project_selected(&self, target: AgentControlTarget) -> bool {
+        match target {
+            AgentControlTarget::Session => {
+                self.selected_project().is_some_and(Project::is_projectless)
+            }
+            AgentControlTarget::Automation => self
+                .automation_editor()
+                .is_none_or(|editor| editor.project_id.is_none()),
+        }
+    }
+
+    /// The chip's project label: the bound project's display name, or the
+    /// "choose a project" placeholder when none is bound.
+    fn control_project_label(&self, target: AgentControlTarget) -> SharedString {
+        let name = match target {
+            AgentControlTarget::Session => self.selected_project().and_then(|project| {
+                if project.is_projectless() {
+                    None
+                } else {
+                    Some(project.display_name())
+                }
+            }),
+            AgentControlTarget::Automation => self
+                .automation_editor()
+                .and_then(|editor| editor.project_id)
+                .and_then(|id| self.state.projects.iter().find(|project| project.id == id))
+                .map(|project| project.display_name()),
+        };
+        name.map(SharedString::from)
+            .unwrap_or_else(|| tr!("project.choose_project").into())
+    }
+
+    /// Whether the workspace chips are editable. A session locks once it has
+    /// started or is busy; the automation form is always editable.
+    fn control_can_configure_workspace(&self, target: AgentControlTarget) -> bool {
+        match target {
+            AgentControlTarget::Session => self
+                .selected_session()
+                .is_some_and(|session| !session.has_started() && !session.is_busy()),
+            AgentControlTarget::Automation => true,
+        }
+    }
+
+    /// The workspace the chip reflects. A session carries its own (possibly an
+    /// existing branch worktree); an automation is only ever Local or a fresh
+    /// worktree, reconstructed from `fresh_worktree`/`base_branch`.
+    fn control_workspace(&self, target: AgentControlTarget) -> SessionWorkspace {
+        match target {
+            AgentControlTarget::Session => self
+                .selected_session()
+                .map(|session| session.workspace.clone())
+                .unwrap_or_default(),
+            AgentControlTarget::Automation => self
+                .automation_editor()
+                .map(|editor| {
+                    if editor.fresh_worktree {
+                        SessionWorkspace::NewWorktree {
+                            base_branch: editor.base_branch.clone(),
+                        }
+                    } else {
+                        SessionWorkspace::Local
+                    }
+                })
+                .unwrap_or_default(),
+        }
+    }
+
+    /// Binds the target to `project_id`. The composer switches the live session
+    /// and its selected project; the automation only rewrites its form.
+    fn control_select_project(
+        &mut self,
+        target: AgentControlTarget,
+        project_id: Uuid,
+        cx: &mut Context<Self>,
+    ) {
+        match target {
+            AgentControlTarget::Session => self.select_project_from_composer(project_id, cx),
+            AgentControlTarget::Automation => {
+                self.edit_automation_form(cx, |editor| editor.project_id = Some(project_id));
+            }
+        }
+    }
+
+    /// Selects the "no project" entry. The composer spawns a projectless session
+    /// (only when not already on one); the automation just clears its binding.
+    fn control_select_no_project(&mut self, target: AgentControlTarget, cx: &mut Context<Self>) {
+        match target {
+            AgentControlTarget::Session => {
+                if !self.selected_project().is_some_and(Project::is_projectless) {
+                    self.create_projectless_session_from_composer(cx);
+                }
+            }
+            AgentControlTarget::Automation => {
+                self.edit_automation_form(cx, |editor| editor.project_id = None);
+            }
+        }
+    }
+
+    /// Folder-picks and adds a project. The session composer creates a session
+    /// on the new project (and switches to it); the automation editor only binds
+    /// the project to the open form, never leaving the page.
+    fn control_add_project(&mut self, target: AgentControlTarget, cx: &mut Context<Self>) {
+        match target {
+            AgentControlTarget::Session => self.add_project(cx),
+            AgentControlTarget::Automation => self.add_project_for_automation(cx),
+        }
+    }
+
+    /// Switches the target to a local checkout.
+    fn control_select_workspace_local(
+        &mut self,
+        target: AgentControlTarget,
+        cx: &mut Context<Self>,
+    ) {
+        match target {
+            AgentControlTarget::Session => self.select_workspace(SessionWorkspace::Local, cx),
+            AgentControlTarget::Automation => {
+                self.edit_automation_form(cx, |editor| editor.fresh_worktree = false);
+            }
+        }
+    }
+
+    /// Switches the target to a fresh worktree forked from the default branch.
+    fn control_select_workspace_worktree(
+        &mut self,
+        target: AgentControlTarget,
+        cx: &mut Context<Self>,
+    ) {
+        match target {
+            AgentControlTarget::Session => {
+                self.select_workspace(SessionWorkspace::NewWorktree { base_branch: None }, cx)
+            }
+            AgentControlTarget::Automation => self.edit_automation_form(cx, |editor| {
+                editor.fresh_worktree = true;
+                editor.base_branch = None;
+            }),
+        }
+    }
+
+    /// The project chip shared by the composer footer and the automation editor.
+    /// Reads and writes route through `control_*` so the same chrome drives a
+    /// live session or the open automation form.
+    pub(super) fn render_project_control(
+        &self,
+        target: AgentControlTarget,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let theme = Theme::current(cx);
+        let selected_project_id = self.control_project_id(target);
+        let no_project_selected = self.control_no_project_selected(target);
+        let project_name = self.control_project_label(target);
+        let can_configure = self.control_can_configure_workspace(target);
+
+        let project_handle = self.menu_handle("workspace-project", cx);
+        let project_trigger = MenuChip::new("workspace-project")
+            .icon("icons/folder.svg", theme.text_tertiary)
+            .label(project_name)
+            .caret(false)
+            .disabled(!can_configure)
+            .selected(can_configure && project_handle.is_open())
+            .max_w(px(190.0));
+        if !can_configure {
+            return project_trigger.into_any_element();
+        }
+
+        let project_options = self
+            .state
+            .projects
+            .iter()
+            .filter(|project| !project.is_projectless())
+            .filter(|project| Some(project.id) == selected_project_id)
+            .chain(
+                self.state
+                    .projects
+                    .iter()
+                    .filter(|project| !project.is_projectless())
+                    .filter(|project| Some(project.id) != selected_project_id),
+            )
+            .map(|project| (project.id, project.display_name()))
+            .collect::<Vec<_>>();
+        let weak = cx.entity().downgrade();
+        dropdown_menu(
+            project_trigger,
+            "workspace-project-menu",
+            &project_handle,
+            MenuAlign::AboveLeft,
+            move |_| {
+                let mut items = project_options
+                    .clone()
+                    .into_iter()
+                    .map(|(project_id, project_name)| {
+                        let weak = weak.clone();
+                        MenuItem::new(project_name, move |_, cx| {
+                            if Some(project_id) != selected_project_id {
+                                let _ = weak.update(cx, |this, cx| {
+                                    this.control_select_project(target, project_id, cx);
+                                });
+                            }
+                        })
+                        .selected(Some(project_id) == selected_project_id)
+                    })
+                    .collect::<Vec<_>>();
+                if !items.is_empty() {
+                    items.push(MenuItem::Separator);
+                }
+                let add_project = weak.clone();
+                items.push(
+                    MenuItem::new(tr!("project.new_project"), move |_, cx| {
+                        let _ = add_project.update(cx, |this, cx| {
+                            this.control_add_project(target, cx);
+                        });
+                    })
+                    .icon("icons/folder-new.svg"),
+                );
+                let projectless = weak.clone();
+                items.push(
+                    MenuItem::new(tr!("project.no_project"), move |_, cx| {
+                        let _ = projectless.update(cx, |this, cx| {
+                            this.control_select_no_project(target, cx);
+                        });
+                    })
+                    .icon("icons/x.svg")
+                    .selected(no_project_selected),
+                );
+                items
+            },
+        )
+    }
+
+    /// The Local / New worktree chip shared by the composer footer and the
+    /// automation editor. The branch selector stays composer-only.
+    pub(super) fn render_workspace_kind_control(
+        &self,
+        target: AgentControlTarget,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let theme = Theme::current(cx);
+        let can_configure = self.control_can_configure_workspace(target);
+        let no_project_selected = self.control_no_project_selected(target);
+        let workspace = self.control_workspace(target);
+        let workspace_label = match &workspace {
+            SessionWorkspace::Local => SharedString::from(tr!("workspace.local")),
+            SessionWorkspace::NewWorktree { .. } => {
+                SharedString::from(tr!("workspace.new_worktree"))
+            }
+            SessionWorkspace::Worktree { branch, .. } => SharedString::from(branch.clone()),
+        };
+        let workspace_icon = if workspace.is_local() {
+            "icons/laptop.svg"
+        } else {
+            "icons/fork.svg"
+        };
+        let worktree_handle = self.menu_handle("workspace-worktree", cx);
+        let worktree_trigger = MenuChip::new("workspace-worktree")
+            .icon(workspace_icon, theme.text_tertiary)
+            .label(workspace_label)
+            .caret(false)
+            .disabled(!can_configure)
+            .selected(can_configure && worktree_handle.is_open())
+            .max_w(px(180.0));
+        if !can_configure {
+            return worktree_trigger.into_any_element();
+        }
+
+        let local_selected = workspace.is_local();
+        let worktree_selected = workspace.is_worktree();
+        let weak = cx.entity().downgrade();
+        dropdown_menu(
+            worktree_trigger,
+            "workspace-worktree-menu",
+            &worktree_handle,
+            MenuAlign::AboveLeft,
+            move |_| {
+                let local = weak.clone();
+                let worktree = weak.clone();
+                vec![
+                    MenuItem::Header(tr!("workspace.work_in").into()),
+                    MenuItem::new(tr!("workspace.local"), move |_, cx| {
+                        let _ = local.update(cx, |this, cx| {
+                            this.control_select_workspace_local(target, cx);
+                        });
+                    })
+                    .icon("icons/laptop.svg")
+                    .selected(local_selected),
+                    MenuItem::new(tr!("workspace.new_worktree"), move |_, cx| {
+                        let _ = worktree.update(cx, |this, cx| {
+                            this.control_select_workspace_worktree(target, cx);
+                        });
+                    })
+                    .icon("icons/fork.svg")
+                    .selected(worktree_selected)
+                    .disabled(no_project_selected),
+                ]
+            },
+        )
+    }
+
     // ── Composer ───────────────────────────────────────────────────────────
 
-    pub(super) fn render_provider_model_control(&self, cx: &mut Context<Self>) -> AnyElement {
+    pub(super) fn render_provider_model_control(
+        &self,
+        target: AgentControlTarget,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let theme = Theme::current(cx);
-        let session = self.selected_session();
-        let provider = session.map(|session| session.provider).unwrap_or_default();
-        let selected_model = session.and_then(|session| self.model_for_session(session));
-        let selected_model_name = self.model_display_name(provider, selected_model);
-        let locked_provider = session
-            .filter(|session| !session.messages.is_empty())
-            .map(|session| session.provider);
-        let picker_enabled = session.is_some_and(|session| session.can_choose_model(provider));
+        let provider = self.control_provider(target);
+        let selected_model = self.control_selected_model(target);
+        let selected_model_name = self.model_display_name(provider, selected_model.as_deref());
+        let locked_provider = self.control_locked_provider(target);
+        let picker_enabled = self.control_model_picker_enabled(target);
 
         if !picker_enabled {
             return div()
@@ -825,7 +1400,6 @@ impl Waku {
         let normalized_query = search_query.trim().to_ascii_lowercase();
         let searching = !normalized_query.is_empty();
         let selected_tab = self.model_picker_tab;
-        let selected_model = selected_model.map(str::to_owned);
         let probes = self.probes.clone();
         let disabled_providers = self.state.disabled_providers.clone();
         let pending_discoveries = self.provider_model_discoveries_pending.clone();
@@ -840,17 +1414,16 @@ impl Waku {
             let picker_focus = search_focus.clone();
             self.menu_handle_with(MODEL_PICKER_MENU_ID, cx, move |open, window, cx| {
                 let _ = reset_weak.update(cx, |this, cx| {
+                    // This observer is cached on first use and shared by both
+                    // surfaces under one id, so the target is resolved here from
+                    // the live surface rather than captured at render time.
+                    let target = this.active_agent_control_target();
                     if open {
-                        let provider = this
-                            .selected_session()
-                            .map(|session| session.provider)
-                            .unwrap_or_default();
+                        let provider = this.control_provider(target);
                         // A draft can sit on a provider that was since switched
                         // off; open onto the first usable provider instead of a
                         // tab whose rows the filter would leave empty.
-                        let locked = this
-                            .selected_session()
-                            .is_some_and(|session| !session.messages.is_empty());
+                        let locked = this.control_locked_provider(target).is_some();
                         let provider =
                             if !locked && this.state.disabled_providers.contains(&provider) {
                                 ProviderKind::ALL
@@ -869,8 +1442,16 @@ impl Waku {
                         reset_search.update(cx, |search, cx| search.clear(cx));
                         this.reveal_selected_picker_model();
                     } else {
-                        let focus_handle = this.composer.read(cx).focus();
-                        window.focus(&focus_handle, cx);
+                        // Return focus to the surface that owns the picker.
+                        match target {
+                            AgentControlTarget::Session => {
+                                let focus_handle = this.composer.read(cx).focus();
+                                window.focus(&focus_handle, cx);
+                            }
+                            AgentControlTarget::Automation => {
+                                window.focus(&this.automations_focus, cx);
+                            }
+                        }
                     }
                     cx.notify();
                 });
@@ -1194,7 +1775,7 @@ impl Waku {
                             )
                             .on_click(move |_, window, cx| {
                                 let _ = select_weak.update(cx, |this, cx| {
-                                    this.choose_model(kind, model_id.clone(), cx);
+                                    this.control_choose_model(target, kind, model_id.clone(), cx);
                                 });
                                 select_popover.close(window, cx);
                             }),
@@ -1247,7 +1828,7 @@ impl Waku {
                     })
                     .on_action(move |_: &ConfirmEntry, window, cx| {
                         let _ = confirm_weak.update(cx, |this, cx| {
-                            this.choose_highlighted_model(&confirm_models, cx);
+                            this.choose_highlighted_model(target, &confirm_models, cx);
                         });
                         confirm_popover.close(window, cx);
                         window.refresh();
@@ -1305,10 +1886,7 @@ impl Waku {
         if !self.model_search.read(cx).content().trim().is_empty() {
             return;
         }
-        let locked_provider = self
-            .selected_session()
-            .filter(|session| !session.messages.is_empty())
-            .map(|session| session.provider);
+        let locked_provider = self.control_locked_provider(self.active_agent_control_target());
         let tabs = visible_picker_tabs(
             &self.probes,
             &self.state.disabled_providers,
@@ -1330,12 +1908,10 @@ impl Waku {
     /// they arrive. Without a row to reveal it falls back to the top, so a
     /// scroll offset from an earlier open never leaks into a fresh list.
     pub(super) fn reveal_selected_picker_model(&self) {
-        let session = self.selected_session();
-        let provider = session.map(|session| session.provider).unwrap_or_default();
-        let selected_model = session.and_then(|session| self.model_for_session(session));
-        let locked_provider = session
-            .filter(|session| !session.messages.is_empty())
-            .map(|session| session.provider);
+        let target = self.active_agent_control_target();
+        let provider = self.control_provider(target);
+        let selected_model = self.control_selected_model(target);
+        let locked_provider = self.control_locked_provider(target);
         let index = visible_picker_models(
             &self.probes,
             &self.state.favorite_models,
@@ -1345,7 +1921,9 @@ impl Waku {
             "",
         )
         .iter()
-        .position(|(kind, model)| *kind == provider && selected_model == Some(model.id.as_str()))
+        .position(|(kind, model)| {
+            *kind == provider && selected_model.as_deref() == Some(model.id.as_str())
+        })
         .unwrap_or(0);
         self.model_picker_scroll.scroll_to_item(index);
     }
@@ -1354,6 +1932,7 @@ impl Waku {
     /// works the moment the panel opens.
     fn choose_highlighted_model(
         &mut self,
+        target: AgentControlTarget,
         models: &[(ProviderKind, ProviderModel)],
         cx: &mut Context<Self>,
     ) {
@@ -1361,13 +1940,18 @@ impl Waku {
             return;
         };
         let (kind, model_id) = (*kind, model.id.clone());
-        self.choose_model(kind, model_id, cx);
+        self.control_choose_model(target, kind, model_id, cx);
     }
 
-    pub(super) fn render_model_traits_control(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+    pub(super) fn render_model_traits_control(
+        &self,
+        target: AgentControlTarget,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
         let theme = Theme::current(cx);
-        let session = self.selected_session()?;
-        let model = self.model_metadata_for_session(session)?;
+        let provider = self.control_provider(target);
+        let selected_model = self.control_selected_model(target);
+        let model = self.model_metadata(provider, selected_model.as_deref())?;
         if model.reasoning_efforts.is_empty()
             && model.service_tiers.is_empty()
             && model.context_windows.is_empty()
@@ -1375,8 +1959,9 @@ impl Waku {
             return None;
         }
 
-        let selected_effort = session
-            .reasoning_effort
+        let reasoning_effort = self.control_reasoning_effort(target);
+        let service_tier = self.control_service_tier(target);
+        let selected_effort = reasoning_effort
             .as_deref()
             .filter(|selected| {
                 model
@@ -1400,8 +1985,7 @@ impl Waku {
                 .map(|option| option.label.clone())
         });
 
-        let selected_tier = session
-            .service_tier
+        let selected_tier = service_tier
             .as_deref()
             .filter(|selected| {
                 *selected == "default"
@@ -1494,7 +2078,11 @@ impl Waku {
                             traits_choice(theme, option.label, is_default, selected).on_click(
                                 move |_, cx| {
                                     let _ = weak.update(cx, |this, cx| {
-                                        this.set_reasoning_effort(effort.clone(), cx);
+                                        this.control_set_reasoning_effort(
+                                            target,
+                                            effort.clone(),
+                                            cx,
+                                        );
                                     });
                                 },
                             ),
@@ -1516,7 +2104,7 @@ impl Waku {
                         )
                         .on_click(move |_, cx| {
                             let _ = weak_standard.update(cx, |this, cx| {
-                                this.set_service_tier("default".to_owned(), cx);
+                                this.control_set_service_tier(target, "default".to_owned(), cx);
                             });
                         }),
                     );
@@ -1529,7 +2117,7 @@ impl Waku {
                             traits_choice(theme, option.label, is_default, selected).on_click(
                                 move |_, cx| {
                                     let _ = weak.update(cx, |this, cx| {
-                                        this.set_service_tier(tier.clone(), cx);
+                                        this.control_set_service_tier(target, tier.clone(), cx);
                                     });
                                 },
                             ),
@@ -1562,13 +2150,13 @@ impl Waku {
         ))
     }
 
-    pub(super) fn render_access_control(&self, cx: &mut Context<Self>) -> AnyElement {
+    pub(super) fn render_access_control(
+        &self,
+        target: AgentControlTarget,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let theme = Theme::current(cx);
-        let selected_mode = self
-            .selected_session()
-            .map(|session| session.runtime_mode)
-            .filter(|mode| *mode != RuntimeMode::Plan)
-            .unwrap_or_default();
+        let selected_mode = self.control_runtime_mode(target);
         let weak = cx.entity().downgrade();
         let handle = self.menu_handle("runtime-mode", cx);
         dropdown_menu(
@@ -1632,7 +2220,9 @@ impl Waku {
                                 .into_any_element()
                         })
                         .on_click(move |_, cx| {
-                            let _ = weak.update(cx, |this, cx| this.set_runtime_mode(option, cx));
+                            let _ = weak.update(cx, |this, cx| {
+                                this.control_set_runtime_mode(target, option, cx)
+                            });
                         })
                     })
                     .collect()
@@ -1640,12 +2230,21 @@ impl Waku {
         )
     }
 
-    pub(super) fn render_agent_preset_control(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let session = self
-            .selected_session()
-            .filter(|session| session.provider == ProviderKind::DeepSeek)?;
-        if session.has_started() || session.is_busy() {
+    pub(super) fn render_agent_preset_control(
+        &self,
+        target: AgentControlTarget,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        if self.control_provider(target) != ProviderKind::DeepSeek {
             return None;
+        }
+        // A live session that has begun can no longer switch its preset; the
+        // automation form has no such constraint.
+        if let AgentControlTarget::Session = target {
+            let session = self.selected_session()?;
+            if session.has_started() || session.is_busy() {
+                return None;
+            }
         }
         let presets = self
             .provider_probe(ProviderKind::DeepSeek)
@@ -1654,8 +2253,8 @@ impl Waku {
         if presets.is_empty() {
             return None;
         }
-        let selected_id = self.agent_preset_for_session(session)?;
-        let selected_label = self.agent_preset_label_for_session(session)?;
+        let selected_id = self.control_agent_preset(target)?;
+        let selected_label = self.control_agent_preset_label(&selected_id);
         let theme = Theme::current(cx);
         let weak = cx.entity().downgrade();
         let refresh_weak = weak.clone();
@@ -1747,7 +2346,7 @@ impl Waku {
                         })
                         .on_click(move |_, cx| {
                             let _ = weak.update(cx, |this, cx| {
-                                this.set_agent_preset(preset_id.clone(), cx);
+                                this.control_set_agent_preset(target, preset_id.clone(), cx);
                             });
                         })
                     })
@@ -1756,16 +2355,15 @@ impl Waku {
         ))
     }
 
-    pub(super) fn render_interaction_mode_control(&self, cx: &mut Context<Self>) -> AnyElement {
+    pub(super) fn render_interaction_mode_control(
+        &self,
+        target: AgentControlTarget,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let theme = Theme::current(cx);
-        let mode = self
-            .selected_session()
-            .map(|session| session.interaction_mode)
-            .unwrap_or_default();
-        let supports_plan = self.selected_session().is_none_or(|session| {
-            session.provider != ProviderKind::DeepSeek
-                || self.agent_preset_for_session(session).as_deref() != Some("minimal")
-        });
+        let mode = self.control_interaction_mode(target);
+        let supports_plan = self.control_provider(target) != ProviderKind::DeepSeek
+            || self.control_agent_preset(target).as_deref() != Some("minimal");
         // A stale state can still be switched back to Build; Minimal simply
         // cannot be toggled from Build into a plan capability it does not mount.
         let interactive = mode == InteractionMode::Plan || supports_plan;
@@ -1810,7 +2408,7 @@ impl Waku {
                     .hover(|element| element.bg(theme.overlay))
                     .on_click(move |_, _, cx| {
                         let _ = weak.update(cx, |this, cx| {
-                            this.set_interaction_mode(next_mode, cx);
+                            this.control_set_interaction_mode(target, next_mode, cx);
                         });
                     })
             })
@@ -2590,11 +3188,13 @@ impl Waku {
                         .gap(px(4.0))
                         .text_size(px(11.5))
                         .line_height(px(14.0))
-                        .child(self.render_provider_model_control(cx))
-                        .children(self.render_model_traits_control(cx))
-                        .children(self.render_agent_preset_control(cx))
-                        .child(self.render_access_control(cx))
-                        .child(self.render_interaction_mode_control(cx))
+                        .child(self.render_provider_model_control(AgentControlTarget::Session, cx))
+                        .children(self.render_model_traits_control(AgentControlTarget::Session, cx))
+                        .children(self.render_agent_preset_control(AgentControlTarget::Session, cx))
+                        .child(self.render_access_control(AgentControlTarget::Session, cx))
+                        .child(
+                            self.render_interaction_mode_control(AgentControlTarget::Session, cx),
+                        )
                         .child(div().flex_1())
                         .child(match submit_action {
                             ComposerSubmitAction::Preparing => div()
@@ -3121,161 +3721,8 @@ impl Waku {
     }
 
     pub(super) fn render_workspace_footer(&mut self, cx: &mut Context<Self>) -> Div {
-        let theme = Theme::current(cx);
-        let selected_project_id = self.state.selected_project;
-        let projectless_selected = self.selected_project().is_some_and(Project::is_projectless);
-        let project_name = self
-            .selected_project()
-            .map(|project| {
-                if project.is_projectless() {
-                    tr!("project.choose_project")
-                } else {
-                    project.display_name()
-                }
-            })
-            .unwrap_or_else(|| tr!("project.choose_project"));
-        let can_configure_workspace = self
-            .selected_session()
-            .is_some_and(|session| !session.has_started() && !session.is_busy());
-
-        let project_handle = self.menu_handle("workspace-project", cx);
-        let project_trigger = MenuChip::new("workspace-project")
-            .icon("icons/folder.svg", theme.text_tertiary)
-            .label(project_name)
-            .caret(false)
-            .disabled(!can_configure_workspace)
-            .selected(can_configure_workspace && project_handle.is_open())
-            .max_w(px(190.0));
-        let project_selector = if can_configure_workspace {
-            let project_options = self
-                .state
-                .projects
-                .iter()
-                .filter(|project| !project.is_projectless())
-                .filter(|project| Some(project.id) == selected_project_id)
-                .chain(
-                    self.state
-                        .projects
-                        .iter()
-                        .filter(|project| !project.is_projectless())
-                        .filter(|project| Some(project.id) != selected_project_id),
-                )
-                .map(|project| (project.id, project.display_name()))
-                .collect::<Vec<_>>();
-            let weak = cx.entity().downgrade();
-            dropdown_menu(
-                project_trigger,
-                "workspace-project-menu",
-                &project_handle,
-                MenuAlign::AboveLeft,
-                move |_| {
-                    let mut items = project_options
-                        .clone()
-                        .into_iter()
-                        .map(|(project_id, project_name)| {
-                            let weak = weak.clone();
-                            MenuItem::new(project_name, move |_, cx| {
-                                if Some(project_id) != selected_project_id {
-                                    let _ = weak.update(cx, |this, cx| {
-                                        this.select_project_from_composer(project_id, cx);
-                                    });
-                                }
-                            })
-                            .selected(Some(project_id) == selected_project_id)
-                        })
-                        .collect::<Vec<_>>();
-                    if !items.is_empty() {
-                        items.push(MenuItem::Separator);
-                    }
-                    let add_project = weak.clone();
-                    items.push(
-                        MenuItem::new(tr!("project.new_project"), move |_, cx| {
-                            let _ = add_project.update(cx, |this, cx| this.add_project(cx));
-                        })
-                        .icon("icons/folder-new.svg"),
-                    );
-                    let projectless = weak.clone();
-                    items.push(
-                        MenuItem::new(tr!("project.no_project"), move |_, cx| {
-                            let _ = projectless.update(cx, |this, cx| {
-                                if !this.selected_project().is_some_and(Project::is_projectless) {
-                                    this.create_projectless_session_from_composer(cx);
-                                }
-                            });
-                        })
-                        .icon("icons/x.svg")
-                        .selected(projectless_selected),
-                    );
-                    items
-                },
-            )
-        } else {
-            project_trigger.into_any_element()
-        };
-
-        let workspace = self
-            .selected_session()
-            .map(|session| session.workspace.clone())
-            .unwrap_or_default();
-        let workspace_label = match &workspace {
-            SessionWorkspace::Local => SharedString::from(tr!("workspace.local")),
-            SessionWorkspace::NewWorktree { .. } => {
-                SharedString::from(tr!("workspace.new_worktree"))
-            }
-            SessionWorkspace::Worktree { branch, .. } => SharedString::from(branch.clone()),
-        };
-        let workspace_icon = if workspace.is_local() {
-            "icons/laptop.svg"
-        } else {
-            "icons/fork.svg"
-        };
-        let worktree_handle = self.menu_handle("workspace-worktree", cx);
-        let worktree_trigger = MenuChip::new("workspace-worktree")
-            .icon(workspace_icon, theme.text_tertiary)
-            .label(workspace_label)
-            .caret(false)
-            .disabled(!can_configure_workspace)
-            .selected(can_configure_workspace && worktree_handle.is_open())
-            .max_w(px(180.0));
-        let worktree_selector = if can_configure_workspace {
-            let local_selected = workspace.is_local();
-            let worktree_selected = workspace.is_worktree();
-            let weak = cx.entity().downgrade();
-            dropdown_menu(
-                worktree_trigger,
-                "workspace-worktree-menu",
-                &worktree_handle,
-                MenuAlign::AboveLeft,
-                move |_| {
-                    let local = weak.clone();
-                    let worktree = weak.clone();
-                    vec![
-                        MenuItem::Header(tr!("workspace.work_in").into()),
-                        MenuItem::new(tr!("workspace.local"), move |_, cx| {
-                            let _ = local.update(cx, |this, cx| {
-                                this.select_workspace(SessionWorkspace::Local, cx);
-                            });
-                        })
-                        .icon("icons/laptop.svg")
-                        .selected(local_selected),
-                        MenuItem::new(tr!("workspace.new_worktree"), move |_, cx| {
-                            let _ = worktree.update(cx, |this, cx| {
-                                this.select_workspace(
-                                    SessionWorkspace::NewWorktree { base_branch: None },
-                                    cx,
-                                );
-                            });
-                        })
-                        .icon("icons/fork.svg")
-                        .selected(worktree_selected)
-                        .disabled(projectless_selected),
-                    ]
-                },
-            )
-        } else {
-            worktree_trigger.into_any_element()
-        };
-
+        let project_selector = self.render_project_control(AgentControlTarget::Session, cx);
+        let worktree_selector = self.render_workspace_kind_control(AgentControlTarget::Session, cx);
         let branch_selector = self.render_branch_selector(cx);
 
         let usage_meter = self.render_usage_meter(cx);

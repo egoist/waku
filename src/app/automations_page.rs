@@ -6,13 +6,14 @@
 
 use chrono::{NaiveDateTime, NaiveTime};
 
+use super::composer::AgentControlTarget;
 use super::*;
 use crate::automation::schedule::next_occurrence;
 use crate::automation::{
     Automation, NotificationConfig, NotificationTrigger, OverlapPolicy, Schedule, TimeOfDay,
     Weekday,
 };
-use crate::model::{ProviderKind, RuntimeMode, SessionWorkspace};
+use crate::model::{InteractionMode, ProviderKind, RuntimeMode, SessionWorkspace};
 
 /// Minute increments offered by the time picker. Fine enough to schedule
 /// around, coarse enough to keep the menu short.
@@ -40,14 +41,22 @@ pub(super) enum Frequency {
 pub(super) struct AutomationEditor {
     /// The automation being edited, or `None` when creating a new one.
     id: Option<Uuid>,
-    provider: ProviderKind,
-    model: Option<String>,
-    reasoning_effort: Option<String>,
-    runtime_mode: RuntimeMode,
-    project_id: Option<Uuid>,
-    fresh_worktree: bool,
+    // These agent fields back the shared composer controls (model picker,
+    // reasoning traits, access, agent preset, interaction mode), so they are
+    // read and written from `composer.rs` via `AgentControlTarget::Automation`.
+    pub(super) provider: ProviderKind,
+    pub(super) model: Option<String>,
+    pub(super) reasoning_effort: Option<String>,
+    pub(super) service_tier: Option<String>,
+    pub(super) agent_preset: Option<String>,
+    pub(super) runtime_mode: RuntimeMode,
+    pub(super) interaction_mode: InteractionMode,
+    // These back the shared composer project/workspace chips, so they are read
+    // and written from `composer.rs` via `AgentControlTarget::Automation`.
+    pub(super) project_id: Option<Uuid>,
+    pub(super) fresh_worktree: bool,
     /// Preserved so editing keeps an existing worktree's base branch.
-    base_branch: Option<String>,
+    pub(super) base_branch: Option<String>,
     frequency: Frequency,
     hour: u8,
     minute: u8,
@@ -67,7 +76,10 @@ impl AutomationEditor {
             provider,
             model: None,
             reasoning_effort: None,
+            service_tier: None,
+            agent_preset: None,
             runtime_mode: RuntimeMode::default(),
+            interaction_mode: InteractionMode::default(),
             project_id: None,
             fresh_worktree: false,
             base_branch: None,
@@ -103,7 +115,10 @@ impl AutomationEditor {
             provider: automation.agent.provider,
             model: automation.agent.model.clone(),
             reasoning_effort: automation.agent.reasoning_effort.clone(),
+            service_tier: automation.agent.service_tier.clone(),
+            agent_preset: automation.agent.agent_preset.clone(),
             runtime_mode: automation.agent.runtime_mode,
+            interaction_mode: automation.agent.interaction_mode,
             project_id: automation.project_id,
             fresh_worktree,
             base_branch,
@@ -163,7 +178,10 @@ impl AutomationEditor {
         automation.agent.provider = self.provider;
         automation.agent.model = self.model.clone();
         automation.agent.reasoning_effort = self.reasoning_effort.clone();
+        automation.agent.service_tier = self.service_tier.clone();
+        automation.agent.agent_preset = self.agent_preset.clone();
         automation.agent.runtime_mode = self.runtime_mode;
+        automation.agent.interaction_mode = self.interaction_mode;
         automation.project_id = self.project_id;
         automation.workspace = self.workspace();
         automation.schedule = self.schedule();
@@ -215,8 +233,17 @@ impl Waku {
         cx.notify();
     }
 
+    /// The open automation editor form, if the editor is showing. Lets the
+    /// shared agent controls read the current form values.
+    pub(super) fn automation_editor(&self) -> Option<&AutomationEditor> {
+        match self.automations_page.as_ref() {
+            Some(AutomationsPage::Editor(editor)) => Some(editor),
+            _ => None,
+        }
+    }
+
     /// Mutates the open editor, if any, then repaints.
-    fn edit_automation_form(
+    pub(super) fn edit_automation_form(
         &mut self,
         cx: &mut Context<Self>,
         change: impl FnOnce(&mut AutomationEditor),
@@ -929,19 +956,7 @@ impl Waku {
                         .into_any_element(),
                 ),
             )
-            .child(
-                self.editor_section(
-                    &theme,
-                    tr!("automations.section_prompt"),
-                    TextField::new(
-                        "automation-prompt-field",
-                        self.automation_prompt_input.clone(),
-                    )
-                    .w_full()
-                    .into_any_element(),
-                ),
-            )
-            .child(self.editor_agent_section(&editor, &theme, cx))
+            .child(self.editor_agent_section(&theme, cx))
             .child(self.editor_schedule_section(&editor, &theme, cx))
             .child(self.editor_behavior_section(&editor, &theme, cx));
 
@@ -1015,259 +1030,68 @@ impl Waku {
         )
     }
 
-    fn editor_agent_section(
-        &self,
-        editor: &AutomationEditor,
-        theme: &Theme,
-        cx: &mut Context<Self>,
-    ) -> Div {
-        let weak = cx.entity().downgrade();
+    fn editor_agent_section(&self, theme: &Theme, cx: &mut Context<Self>) -> Div {
+        // A composer-style card: the prompt textarea with the model/access
+        // controls docked beneath it, mirroring the new-task composer so the
+        // editor's core reads like the surface a user already knows.
+        let prompt_area = div()
+            .id("automation-prompt-area")
+            .w_full()
+            .min_h(px(120.0))
+            .px(px(4.0))
+            .pt(px(2.0))
+            .text_size(px(13.5))
+            .line_height(px(22.0))
+            .cursor(gpui::CursorStyle::IBeam)
+            .child(self.automation_prompt_input.clone())
+            // The textarea is taller than its text, so a click in the empty
+            // region still lands focus in the field.
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _: &MouseDownEvent, window, cx| {
+                    let focus = this.automation_prompt_input.read(cx).focus_handle(cx);
+                    window.focus(&focus, cx);
+                }),
+            );
 
-        // Provider picker.
-        let provider = editor.provider;
-        let provider_weak = weak.clone();
-        let provider_picker = self.picker(
-            "automation-provider",
-            provider.display_name(),
-            200.0,
-            false,
-            cx,
-            move |_| {
-                let weak = provider_weak.clone();
-                ProviderKind::ALL
-                    .into_iter()
-                    .map(|option| {
-                        let weak = weak.clone();
-                        MenuItem::new(option.display_name(), move |_, cx| {
-                            let _ = weak.update(cx, |this, cx| {
-                                this.edit_automation_form(cx, |editor| {
-                                    if editor.provider != option {
-                                        editor.provider = option;
-                                        // Model and effort belong to the old
-                                        // provider; reset them.
-                                        editor.model = None;
-                                        editor.reasoning_effort = None;
-                                    }
-                                });
-                            });
-                        })
-                        .selected(option == provider)
-                    })
-                    .collect()
-            },
-        );
-
-        // Model picker, sourced from the provider's discovered catalog.
-        let models = self
-            .provider_probe(provider)
-            .map(|probe| probe.models.clone())
-            .unwrap_or_default();
-        let model_label = editor
-            .model
-            .as_ref()
-            .and_then(|id| models.iter().find(|model| &model.id == id))
-            .map(|model| model.name.clone())
-            .or_else(|| editor.model.clone())
-            .unwrap_or_else(|| tr!("automations.model_default"));
-        let model_weak = weak.clone();
-        let model_options = models.clone();
-        let selected_model = editor.model.clone();
-        let model_picker = self.picker(
-            "automation-model",
-            model_label,
-            200.0,
-            false,
-            cx,
-            move |_| {
-                let weak = model_weak.clone();
-                let mut items = vec![{
-                    let weak = weak.clone();
-                    MenuItem::new(tr!("automations.model_default"), move |_, cx| {
-                        let _ = weak.update(cx, |this, cx| {
-                            this.edit_automation_form(cx, |editor| {
-                                editor.model = None;
-                                editor.reasoning_effort = None;
-                            });
-                        });
-                    })
-                    .selected(selected_model.is_none())
-                }];
-                for model in &model_options {
-                    let weak = weak.clone();
-                    let id = model.id.clone();
-                    let is_selected = selected_model.as_deref() == Some(id.as_str());
-                    items.push(
-                        MenuItem::new(model.name.clone(), move |_, cx| {
-                            let id = id.clone();
-                            let _ = weak.update(cx, |this, cx| {
-                                this.edit_automation_form(cx, |editor| {
-                                    editor.model = Some(id.clone());
-                                    editor.reasoning_effort = None;
-                                });
-                            });
-                        })
-                        .selected(is_selected),
-                    );
-                }
-                items
-            },
-        );
-
-        // Reasoning effort, from the chosen (or default) model's options.
-        let effort_options = models
-            .iter()
-            .find(|model| Some(&model.id) == editor.model.as_ref())
-            .or_else(|| models.iter().find(|model| model.is_default))
-            .map(|model| model.reasoning_efforts.clone())
-            .unwrap_or_default();
-        let effort_label = editor
-            .reasoning_effort
-            .as_ref()
-            .and_then(|id| effort_options.iter().find(|option| &option.id == id))
-            .map(|option| option.label.clone())
-            .or_else(|| editor.reasoning_effort.clone())
-            .unwrap_or_else(|| tr!("automations.effort_default"));
-        let effort_weak = weak.clone();
-        let selected_effort = editor.reasoning_effort.clone();
-        let effort_enabled = !effort_options.is_empty();
-        let effort_picker = self.picker(
-            "automation-effort",
-            effort_label,
-            200.0,
-            !effort_enabled,
-            cx,
-            move |_| {
-                let weak = effort_weak.clone();
-                let mut items = vec![{
-                    let weak = weak.clone();
-                    MenuItem::new(tr!("automations.effort_default"), move |_, cx| {
-                        let _ = weak.update(cx, |this, cx| {
-                            this.edit_automation_form(cx, |editor| editor.reasoning_effort = None);
-                        });
-                    })
-                    .selected(selected_effort.is_none())
-                }];
-                for option in &effort_options {
-                    let weak = weak.clone();
-                    let id = option.id.clone();
-                    let is_selected = selected_effort.as_deref() == Some(id.as_str());
-                    items.push(
-                        MenuItem::new(option.label.clone(), move |_, cx| {
-                            let id = id.clone();
-                            let _ = weak.update(cx, |this, cx| {
-                                this.edit_automation_form(cx, |editor| {
-                                    editor.reasoning_effort = Some(id.clone());
-                                });
-                            });
-                        })
-                        .selected(is_selected),
-                    );
-                }
-                items
-            },
-        );
-
-        // Permission mode.
-        let mode = editor.runtime_mode;
-        let mode_weak = weak.clone();
-        let mode_picker = self.picker(
-            "automation-mode",
-            mode.label(),
-            200.0,
-            false,
-            cx,
-            move |_| {
-                let weak = mode_weak.clone();
-                RuntimeMode::ACCESS_OPTIONS
-                    .into_iter()
-                    .map(|option| {
-                        let weak = weak.clone();
-                        MenuItem::new(option.label(), move |_, cx| {
-                            let _ = weak.update(cx, |this, cx| {
-                                this.edit_automation_form(cx, |editor| {
-                                    editor.runtime_mode = option
-                                });
-                            });
-                        })
-                        .selected(option == mode)
-                    })
-                    .collect()
-            },
-        );
-
-        // Project binding.
-        let project_label = editor
-            .project_id
-            .and_then(|id| self.state.projects.iter().find(|project| project.id == id))
-            .map(|project| project.display_name())
-            .unwrap_or_else(|| tr!("automations.no_project"));
-        let project_weak = weak.clone();
-        let projects: Vec<(Uuid, String)> = self
-            .state
-            .projects
-            .iter()
-            .filter(|project| !project.is_projectless())
-            .map(|project| (project.id, project.display_name()))
-            .collect();
-        let selected_project = editor.project_id;
-        let project_picker = self.picker(
-            "automation-project",
-            project_label,
-            200.0,
-            false,
-            cx,
-            move |_| {
-                let weak = project_weak.clone();
-                let mut items = vec![{
-                    let weak = weak.clone();
-                    MenuItem::new(tr!("automations.no_project"), move |_, cx| {
-                        let _ = weak.update(cx, |this, cx| {
-                            this.edit_automation_form(cx, |editor| editor.project_id = None);
-                        });
-                    })
-                    .selected(selected_project.is_none())
-                }];
-                for (id, name) in &projects {
-                    let weak = weak.clone();
-                    let id = *id;
-                    items.push(
-                        MenuItem::new(name.clone(), move |_, cx| {
-                            let _ = weak.update(cx, |this, cx| {
-                                this.edit_automation_form(cx, |editor| {
-                                    editor.project_id = Some(id);
-                                });
-                            });
-                        })
-                        .selected(selected_project == Some(id)),
-                    );
-                }
-                items
-            },
-        );
-
-        // Fresh-worktree vs. local checkout.
-        let worktree_toggle = self.editor_toggle(
-            "automation-worktree",
-            editor.fresh_worktree,
-            theme,
-            cx,
-            |editor| editor.fresh_worktree = !editor.fresh_worktree,
-        );
-
-        div()
+        // The exact composer controls, one source of truth, editing the open
+        // form instead of a live session.
+        let toolbar = div()
+            .mt(px(8.0))
             .flex()
-            .flex_col()
-            .child(section_heading(theme, tr!("automations.section_agent")))
-            .child(self.editor_section(theme, tr!("automations.field_provider"), provider_picker))
-            .child(self.editor_section(theme, tr!("automations.field_model"), model_picker))
-            .child(self.editor_section(theme, tr!("automations.field_effort"), effort_picker))
-            .child(self.editor_section(theme, tr!("automations.field_permission"), mode_picker))
-            .child(self.editor_section(theme, tr!("automations.field_project"), project_picker))
-            .child(self.editor_section(
-                theme,
-                tr!("automations.workspace_worktree"),
-                worktree_toggle.into_any_element(),
-            ))
+            .flex_wrap()
+            .items_center()
+            .gap(px(6.0))
+            .child(self.render_provider_model_control(AgentControlTarget::Automation, cx))
+            .children(self.render_model_traits_control(AgentControlTarget::Automation, cx))
+            .children(self.render_agent_preset_control(AgentControlTarget::Automation, cx))
+            .child(self.render_access_control(AgentControlTarget::Automation, cx))
+            .child(self.render_interaction_mode_control(AgentControlTarget::Automation, cx));
+
+        let card = div()
+            .rounded(px(13.0))
+            .border_1()
+            .border_color(theme.border)
+            .bg(theme.composer)
+            .p(px(10.0))
+            .child(prompt_area)
+            .child(toolbar);
+
+        // The composer footer's project + workspace chips, docked under the
+        // card exactly as they sit under the new-task composer — same chrome,
+        // editing the open automation form instead of a live session.
+        let workspace_footer = div()
+            .mt(px(8.0))
+            .pl(px(10.0))
+            .flex()
+            .items_center()
+            .gap(px(2.0))
+            .text_size(px(11.0))
+            .line_height(px(14.0))
+            .child(self.render_project_control(AgentControlTarget::Automation, cx))
+            .child(self.render_workspace_kind_control(AgentControlTarget::Automation, cx));
+
+        div().flex().flex_col().child(card).child(workspace_footer)
     }
 
     fn editor_schedule_section(

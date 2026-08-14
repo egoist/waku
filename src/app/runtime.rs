@@ -1512,7 +1512,19 @@ impl Waku {
         session: &AgentSession,
     ) -> Option<&ProviderModel> {
         let model = self.model_for_session(session)?;
-        self.provider_probe(session.provider)?
+        self.model_metadata(session.provider, Some(model))
+    }
+
+    /// The catalog metadata for an explicit `(provider, model_id)`, independent
+    /// of any session. Used by the shared agent controls, which resolve their
+    /// current model from either the session or the automation form.
+    pub(super) fn model_metadata(
+        &self,
+        provider: ProviderKind,
+        model: Option<&str>,
+    ) -> Option<&ProviderModel> {
+        let model = model?;
+        self.provider_probe(provider)?
             .models
             .iter()
             .find(|candidate| candidate.id == model)

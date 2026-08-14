@@ -1895,8 +1895,11 @@ impl Waku {
                 .placeholder(tr!("automations.name_placeholder"))
         });
         let automation_prompt_input = cx.new(|cx| {
+            // A multiline textarea, not a search box: Enter inserts a newline
+            // (the editor has no submit-on-Enter), and pasted line breaks are
+            // preserved rather than flattened to spaces.
             ComposerInput::new(window, cx)
-                .search_field()
+                .code_editor(None)
                 .placeholder(tr!("automations.prompt_placeholder"))
         });
         let session_rename_input = cx.new(|cx| ComposerInput::new(window, cx).search_field());

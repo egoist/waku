@@ -1547,6 +1547,41 @@ impl Waku {
         .detach();
     }
 
+    /// Folder-picks a project and binds it to the open automation editor,
+    /// without creating a session or switching the globally selected project the
+    /// way [`Self::add_project`] does — the automation editor must stay put.
+    pub(super) fn add_project_for_automation(&mut self, cx: &mut Context<Self>) {
+        let receiver = cx.prompt_for_paths(PathPromptOptions {
+            files: false,
+            directories: true,
+            multiple: false,
+            prompt: Some(tr!("project.add_project").into()),
+        });
+        cx.spawn(async move |this, cx| {
+            if let Ok(Ok(Some(paths))) = receiver.await
+                && let Some(path) = paths.into_iter().next()
+            {
+                let _ = this.update(cx, |this, cx| {
+                    let project_id = match this.state.projects.iter().find(|p| p.path == path) {
+                        Some(existing) => existing.id,
+                        None => {
+                            let project = Project::from_path(path);
+                            let project_id = project.id;
+                            this.state.projects.push(project);
+                            this.analytics.track(crate::analytics::Event::ProjectAdded);
+                            project_id
+                        }
+                    };
+                    // Persist the new project even if the editor has since
+                    // closed; bind it to the form when it is still open.
+                    this.edit_automation_form(cx, |editor| editor.project_id = Some(project_id));
+                    this.save();
+                });
+            }
+        })
+        .detach();
+    }
+
     pub(super) fn create_projectless_session(&mut self, cx: &mut Context<Self>) {
         if let Some(draft_id) = self
             .state
