@@ -6,7 +6,7 @@
 
 use std::collections::HashMap;
 use std::path::Path;
-use std::process::{Command, Output};
+use std::process::Output;
 
 use anyhow::{Context as _, anyhow, bail};
 use uuid::Uuid;
@@ -366,7 +366,7 @@ fn branch_base(cwd: &Path) -> anyhow::Result<String> {
 }
 
 fn index_tree(cwd: &Path) -> anyhow::Result<String> {
-    let output = Command::new("git")
+    let output = crate::command_env::command("git")
         .args(["write-tree"])
         .current_dir(cwd)
         .output()
@@ -386,7 +386,7 @@ fn index_tree(cwd: &Path) -> anyhow::Result<String> {
 }
 
 fn diff_output(cwd: &Path, range: &Range, modes: &[&str]) -> anyhow::Result<String> {
-    let mut command = Command::new("git");
+    let mut command = crate::command_env::command("git");
     command
         .args([
             "-c",
@@ -837,7 +837,7 @@ fn tokenize(language: Option<Lang>, content: &str, carry: Carry) -> (Vec<Token>,
 }
 
 fn ensure_repository(cwd: &Path) -> anyhow::Result<()> {
-    let output = Command::new("git")
+    let output = crate::command_env::command("git")
         .args(["rev-parse", "--is-inside-work-tree"])
         .current_dir(cwd)
         .output()
@@ -850,7 +850,7 @@ fn ensure_repository(cwd: &Path) -> anyhow::Result<()> {
 }
 
 fn resolve(cwd: &Path, revision: &str) -> Option<String> {
-    let output = Command::new("git")
+    let output = crate::command_env::command("git")
         .args(["rev-parse", "--verify", &format!("{revision}^{{commit}}")])
         .current_dir(cwd)
         .output()
@@ -867,7 +867,7 @@ where
     I: IntoIterator<Item = S>,
     S: AsRef<std::ffi::OsStr>,
 {
-    let output = Command::new("git")
+    let output = crate::command_env::command("git")
         .args(args)
         .current_dir(cwd)
         .output()
@@ -895,7 +895,7 @@ mod tests {
     use super::*;
 
     fn git_ok(cwd: &Path, args: &[&str]) {
-        let output = Command::new("git")
+        let output = crate::command_env::command("git")
             .args(args)
             .current_dir(cwd)
             .output()

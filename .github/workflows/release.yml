@@ -124,6 +124,56 @@ jobs:
           path: target/release/waku-*-aarch64-unknown-linux-gnu.tar.gz
           if-no-files-found: error
 
+  windows-x86_64:
+    name: Windows x86_64
+    runs-on: windows-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Check tag matches Cargo.toml
+        shell: pwsh
+        run: |
+          $match = Select-String -Path Cargo.toml -Pattern '^version = "([^"]+)"$' | Select-Object -First 1
+          if ($null -eq $match) {
+            Write-Output "::error::Could not resolve the package version from Cargo.toml"
+            exit 1
+          }
+          $version = $match.Matches[0].Groups[1].Value
+          $tag = $env:GITHUB_REF_NAME -replace '^v', ''
+          if ($tag -ne $version) {
+            Write-Output "::error::Tag $env:GITHUB_REF_NAME does not match Cargo.toml version $version"
+            exit 1
+          }
+
+      - name: Install Rust
+        shell: pwsh
+        run: |
+          rustup toolchain install 1.96.0 --profile minimal
+          rustup default 1.96.0
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-${{ runner.arch }}-rust-1.96.0-release-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ runner.arch }}-rust-1.96.0-release-
+
+      - name: Bundle
+        shell: pwsh
+        run: ./scripts/bundle-windows.ps1
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-x86_64
+          path: |
+            target/release/waku-*-x86_64-pc-windows-msvc.exe
+            target/release/waku-*-x86_64-pc-windows-msvc.zip
+          if-no-files-found: error
+
   macos:
     name: macOS
     runs-on: macos-latest
@@ -206,7 +256,7 @@ jobs:
 
   draft-release:
     name: Draft GitHub release
-    needs: [linux-x86_64, linux-arm64, macos]
+    needs: [linux-x86_64, linux-arm64, windows-x86_64, macos]
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
@@ -245,5 +295,6 @@ jobs:
           files: |
             artifacts/*.tar.gz
             artifacts/*.dmg
+            artifacts/*.exe
             artifacts/*.zip
             artifacts/appcast.xml

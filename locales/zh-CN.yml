@@ -26,7 +26,8 @@ menu.toggle_fps_counter: 显示或隐藏帧率
 menu.close_window: 关闭窗口
 window.minimize: 最小化
 window.maximize: 最大化
-window.restore: 还原
+window.restore: 向下还原
+window.close: 关闭
 updater.update: 更新
 updater.checking: 正在检查更新…
 updater.updating: 正在更新…

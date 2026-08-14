@@ -53,7 +53,9 @@ window.minimize:
 window.maximize:
   en: Maximize
 window.restore:
-  en: Restore
+  en: Restore Down
+window.close:
+  en: Close
 
 updater.update:
   en: Update

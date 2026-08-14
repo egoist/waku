@@ -54,7 +54,7 @@ const CURSOR_BLINK_INTERVAL: Duration = Duration::from_millis(500);
 const CURSOR_BLINK_PAUSE: Duration = Duration::from_millis(300);
 
 pub fn init(cx: &mut App) {
-    cx.bind_keys([
+    let mut keys = vec![
         KeyBinding::new("backspace", Backspace, Some("ComposerInput")),
         KeyBinding::new("delete", Delete, Some("ComposerInput")),
         KeyBinding::new("alt-backspace", DeleteToPreviousWord, Some("ComposerInput")),
@@ -88,10 +88,10 @@ pub fn init(cx: &mut App) {
         // While a turn is running, Enter queues a follow-up; the platform's
         // primary modifier + Enter injects it when the provider supports it.
         KeyBinding::new("secondary-enter", SubmitSteer, Some("ComposerInput")),
-    ]);
+    ];
 
     #[cfg(target_os = "macos")]
-    cx.bind_keys([
+    keys.extend([
         KeyBinding::new("cmd-backspace", DeleteToStart, Some("ComposerInput")),
         KeyBinding::new("cmd-delete", DeleteToEnd, Some("ComposerInput")),
         KeyBinding::new("ctrl-h", Backspace, Some("ComposerInput")),
@@ -114,8 +114,9 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("ctrl-shift-e", SelectToEnd, Some("ComposerInput")),
     ]);
 
-    #[cfg(target_os = "linux")]
-    cx.bind_keys([
+    #[cfg(not(target_os = "macos"))]
+    keys.extend([
+        KeyBinding::new("ctrl-y", Redo, Some("ComposerInput")),
         KeyBinding::new(
             "ctrl-backspace",
             DeleteToPreviousWord,
@@ -131,6 +132,8 @@ pub fn init(cx: &mut App) {
         ),
         KeyBinding::new("ctrl-shift-right", SelectToNextWord, Some("ComposerInput")),
     ]);
+
+    cx.bind_keys(keys);
 }
 
 struct BlinkCursor {

@@ -1,5 +1,10 @@
 use std::collections::HashMap;
+#[cfg(target_os = "macos")]
+use std::ffi::OsString;
 use std::fs;
+#[cfg(target_os = "macos")]
+use std::os::unix::ffi::OsStringExt as _;
+#[cfg(unix)]
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -137,6 +142,7 @@ pub(super) fn create_process_directory() -> anyhow::Result<PathBuf> {
             directory.display()
         )
     })?;
+    #[cfg(unix)]
     fs::set_permissions(&directory, fs::Permissions::from_mode(0o700)).with_context(|| {
         format!(
             "could not secure Computer Use process directory {}",
@@ -151,6 +157,7 @@ pub(super) fn stop_registered_processes(directory: &Path, helper_executable: &Pa
         fs::canonicalize(helper_executable).unwrap_or_else(|_| helper_executable.to_path_buf());
     for (pid, registration) in registered_processes(directory) {
         if process_executable(pid).as_deref() == Some(expected_executable.as_path()) {
+            #[cfg(target_os = "macos")]
             unsafe {
                 libc::kill(pid, libc::SIGTERM);
             }

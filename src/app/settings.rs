@@ -306,7 +306,7 @@ impl Waku {
         // column — no page title, no titlebar strip, no width cap, no card.
         // Window dragging stays with the sidebar's own titlebar region.
         if page == SettingsPage::Skills {
-            return div()
+            let content = div()
                 .flex_1()
                 .h_full()
                 .min_w_0()
@@ -314,20 +314,33 @@ impl Waku {
                 .flex_col()
                 .border_l_1()
                 .border_color(theme.sidebar_border)
-                .bg(theme.surface)
-                .children(right_window_controls.map(|controls| {
-                    self.render_settings_drag_region("settings-skills-titlebar", cx)
-                        .flex()
-                        .items_center()
-                        .justify_end()
-                        .child(controls)
-                }))
-                .child(
-                    div()
-                        .flex_1()
-                        .min_h_0()
-                        .child(self.render_skills_settings(cx)),
-                );
+                .bg(theme.surface);
+            #[cfg(not(target_os = "windows"))]
+            let content = content.children(right_window_controls.map(|controls| {
+                self.render_settings_drag_region("settings-skills-titlebar", cx)
+                    .flex()
+                    .items_center()
+                    .justify_end()
+                    .child(controls)
+            }));
+            #[cfg(target_os = "windows")]
+            let content = content.child(
+                div()
+                    .h(px(48.0))
+                    .flex_none()
+                    .flex()
+                    .child(
+                        self.render_settings_drag_region("settings-skills-titlebar", cx)
+                            .flex_1(),
+                    )
+                    .child(self.render_windows_caption_buttons(window, cx)),
+            );
+            return content.child(
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .child(self.render_skills_settings(cx)),
+            );
         }
         // The Monthly and Projects list views own their own scrolling, so
         // their pages fill the viewport instead of riding the shared scroll
@@ -386,16 +399,23 @@ impl Waku {
             .border_l_1()
             .border_color(theme.sidebar_border)
             .bg(theme.surface)
-            .child(
-                self.render_settings_drag_region("settings-content-titlebar", cx)
+            .child({
+                let titlebar = div()
+                    .h(px(48.0))
+                    .flex_none()
                     .flex()
-                    .items_center()
-                    .justify_end()
-                    .children(right_window_controls)
                     .when(content_scrolled, |element| {
                         element.border_b_1().border_color(theme.border)
-                    }),
-            )
+                    })
+                    .child(
+                        self.render_settings_drag_region("settings-content-titlebar", cx)
+                            .flex_1(),
+                    )
+                    .children(right_window_controls);
+                #[cfg(target_os = "windows")]
+                let titlebar = titlebar.child(self.render_windows_caption_buttons(window, cx));
+                titlebar
+            })
             .child(
                 div()
                     .flex_1()
@@ -1571,10 +1591,15 @@ impl Waku {
             .id(id)
             .h(px(48.0))
             .flex_none()
-            .on_click(|event, window, _| {
-                if event.click_count() == 2 {
-                    crate::platform::titlebar_double_click(window);
-                }
+            .when(cfg!(target_os = "windows"), |region| {
+                region.window_control_area(gpui::WindowControlArea::Drag)
+            })
+            .when(cfg!(not(target_os = "windows")), |region| {
+                region.on_click(|event, window, _| {
+                    if event.click_count() == 2 {
+                        crate::platform::titlebar_double_click(window);
+                    }
+                })
             })
             .on_mouse_down_out(cx.listener(|this, _, _, _| {
                 this.header_drag_armed = false;

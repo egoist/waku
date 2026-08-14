@@ -33,6 +33,18 @@ use parking_lot::Mutex;
 use crate::persistence::DEFAULT_RIGHT_PANEL_WIDTH;
 use crate::theme::Theme;
 
+#[cfg(windows)]
+fn powershell_shell_from(
+    pwsh: Option<PathBuf>,
+    powershell: Option<PathBuf>,
+) -> (String, Vec<String>) {
+    let shell = pwsh
+        .or(powershell)
+        .map(|path| path.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "powershell.exe".into());
+    (shell, vec!["-NoLogo".into()])
+}
+
 const TERMINAL_CELL_WIDTH: f32 = 7.2;
 const TERMINAL_CELL_HEIGHT: f32 = 16.0;
 const TERMINAL_FONT_SIZE: f32 = 11.5;
@@ -206,12 +218,18 @@ impl TerminalSession {
             proxy.clone(),
         )));
 
-        let shell = crate::command_env::default_terminal_shell();
+        #[cfg(windows)]
+        let (shell, shell_args) = powershell_shell_from(
+            crate::command_env::find_executable("pwsh"),
+            crate::command_env::find_executable("powershell"),
+        );
+        #[cfg(not(windows))]
+        let (shell, shell_args) = {
+            let shell = crate::command_env::default_terminal_shell();
+            (shell.to_string_lossy().into_owned(), vec!["-l".into()])
+        };
         let mut options = tty::Options {
-            shell: Some(Shell::new(
-                shell.to_string_lossy().into_owned(),
-                vec!["-l".into()],
-            )),
+            shell: Some(Shell::new(shell, shell_args)),
             working_directory: Some(working_directory.to_path_buf()),
             drain_on_exit: false,
             ..Default::default()
@@ -1683,6 +1701,22 @@ mod tests {
     use alacritty_terminal::event::VoidListener;
     use alacritty_terminal::vte::ansi::Processor;
     use gpui::{Modifiers, point, size};
+
+    #[test]
+    #[cfg(windows)]
+    fn embedded_terminal_prefers_powershell_seven() {
+        let pwsh = PathBuf::from(r"D:\Program Files\PowerShell\7\pwsh.exe");
+        let legacy = PathBuf::from(r"C:\Windows\System32\WindowsPowerShell\powershell.exe");
+
+        assert_eq!(
+            powershell_shell_from(Some(pwsh.clone()), Some(legacy)),
+            (pwsh.to_string_lossy().into_owned(), vec!["-NoLogo".into()])
+        );
+        assert_eq!(
+            powershell_shell_from(None, None),
+            ("powershell.exe".into(), vec!["-NoLogo".into()])
+        );
+    }
 
     fn key(key: &str, key_char: Option<&str>, modifiers: Modifiers) -> Keystroke {
         Keystroke {

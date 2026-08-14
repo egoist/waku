@@ -53,6 +53,7 @@ pub fn provider_color(theme: &Theme, provider: ProviderKind) -> Hsla {
         ProviderKind::DeepSeek => rgb(0x4D6BFE).into(),
         ProviderKind::Codex
         | ProviderKind::Cursor
+        | ProviderKind::DeerFlow
         | ProviderKind::OpenCode
         | ProviderKind::Grok
         | ProviderKind::Pi => {
@@ -76,6 +77,7 @@ pub fn provider_icon(provider: ProviderKind) -> &'static str {
         ProviderKind::OpenCode => "icons/provider-opencode.svg",
         ProviderKind::Grok => "icons/provider-grok.svg",
         ProviderKind::Pi => "icons/provider-pi.svg",
+        ProviderKind::DeerFlow => "icons/cursor-spark.svg",
     }
 }
 
@@ -377,6 +379,9 @@ mod tests {
             "icons/rotate-cw.svg",
             "icons/package.svg",
             "icons/trash.svg",
+            "icons/window-maximize.svg",
+            "icons/window-minimize.svg",
+            "icons/window-restore.svg",
         ];
         for provider in ProviderKind::ALL {
             paths.push(provider_icon(provider));

@@ -4,6 +4,7 @@
 
 use std::fs;
 
+#[cfg(unix)]
 use std::os::unix::fs::{PermissionsExt as _, symlink};
 use std::path::{Path, PathBuf};
 
@@ -181,6 +182,7 @@ fn build_grok_computer_use_config(
             grok_home.display()
         )
     })?;
+    #[cfg(unix)]
     fs::set_permissions(&grok_home, fs::Permissions::from_mode(0o700)).with_context(|| {
         format!(
             "could not secure isolated Grok home {}",
@@ -199,12 +201,15 @@ fn build_grok_computer_use_config(
             ) {
                 continue;
             }
+            #[cfg(unix)]
             symlink(entry.path(), grok_home.join(name)).with_context(|| {
                 format!(
                     "could not mirror Grok runtime resource {}",
                     entry.path().display()
                 )
             })?;
+            #[cfg(not(unix))]
+            anyhow::bail!("Grok Computer Use resource links are only supported on Unix");
         }
     }
     let existing = match fs::read_to_string(source_home.join("config.toml")) {

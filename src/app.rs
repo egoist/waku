@@ -73,7 +73,9 @@ use crate::{
 
 #[cfg(target_os = "macos")]
 const TRAFFIC_LIGHT_CLEARANCE: f32 = 86.0;
-#[cfg(not(target_os = "macos"))]
+#[cfg(target_os = "windows")]
+const TRAFFIC_LIGHT_CLEARANCE: f32 = 10.0;
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
 const TRAFFIC_LIGHT_CLEARANCE: f32 = 8.0;
 const CONTENT_MAX_WIDTH: f32 = 720.0;
 /// Menu-registry id of the composer's model picker, shared by its render site
@@ -815,6 +817,9 @@ pub struct Waku {
     model_search: Entity<ComposerInput>,
     settings_search: Entity<ComposerInput>,
     settings_focus: FocusHandle,
+    windows_minimize_focus: FocusHandle,
+    windows_maximize_focus: FocusHandle,
+    windows_close_focus: FocusHandle,
     onboarding_add_project_focus: FocusHandle,
     onboarding_projectless_focus: FocusHandle,
     /// Mirror of Sparkle's persisted automatic-check setting. Refreshed when
@@ -1789,6 +1794,9 @@ impl Waku {
             .unwrap_or_default();
         let entity = cx.new(|cx| {
             let settings_focus = cx.focus_handle();
+            let windows_minimize_focus = cx.focus_handle();
+            let windows_maximize_focus = cx.focus_handle();
+            let windows_close_focus = cx.focus_handle();
             let onboarding_add_project_focus = cx.focus_handle();
             let onboarding_projectless_focus = cx.focus_handle();
             let updater_button_focus = cx.focus_handle();
@@ -2161,6 +2169,9 @@ impl Waku {
                 branch_create_input,
                 settings_search,
                 settings_focus,
+                windows_minimize_focus,
+                windows_maximize_focus,
+                windows_close_focus,
                 onboarding_add_project_focus,
                 onboarding_projectless_focus,
                 automatic_updates_enabled: cx

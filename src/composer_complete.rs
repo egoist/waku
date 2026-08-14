@@ -329,7 +329,7 @@ pub fn discover_slash_commands(provider: ProviderKind, project_root: &Path) -> V
             }
         }
         // Harness commands are session-scoped and reported live by the Host.
-        ProviderKind::DeepSeek | ProviderKind::Grok => {}
+        ProviderKind::DeepSeek | ProviderKind::Grok | ProviderKind::DeerFlow => {}
     }
     // The cross-tool skill standard, read by Amp and OpenCode among others;
     // Waku lists it for every provider.
@@ -674,7 +674,7 @@ pub fn list_project_files(root: &Path, cap: usize) -> Vec<FileEntry> {
 }
 
 fn git_listed_files(root: &Path, cap: usize) -> Option<Vec<String>> {
-    let output = std::process::Command::new("git")
+    let output = crate::command_env::command("git")
         .arg("-C")
         .arg(root)
         .args([
@@ -1218,6 +1218,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn symlinked_skills_and_command_dirs_are_discovered() {
         let root = std::env::temp_dir().join(format!("waku-symlink-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);

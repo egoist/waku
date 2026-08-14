@@ -1,8 +1,9 @@
 use std::fs;
 use std::io::Write as _;
+#[cfg(unix)]
 use std::os::unix::fs::DirBuilderExt as _;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 
@@ -206,7 +207,7 @@ fn invoke_helper_direct(
         Some("requestPermissions") => Some("request-permissions"),
         _ => None,
     };
-    let mut command = Command::new(helper);
+    let mut command = crate::command_env::command(helper);
     if let Some(mode) = mode {
         command.arg(mode);
     }
@@ -321,9 +322,11 @@ fn install_helper_app(source: &Path) -> anyhow::Result<PathBuf> {
     let application_support =
         dirs::data_dir().ok_or_else(|| anyhow!("Application Support directory is unavailable"))?;
     let install_root = application_support.join("Waku").join("Computer Use");
-    fs::DirBuilder::new()
-        .recursive(true)
-        .mode(0o700)
+    let mut builder = fs::DirBuilder::new();
+    builder.recursive(true);
+    #[cfg(unix)]
+    builder.mode(0o700);
+    builder
         .create(&install_root)
         .with_context(|| format!("could not create {}", install_root.display()))?;
     let bundle_name = source
@@ -379,7 +382,10 @@ fn copy_directory(source: &Path, destination: &Path) -> anyhow::Result<()> {
         if file_type.is_dir() {
             copy_directory(&source_path, &destination_path)?;
         } else if file_type.is_symlink() {
+            #[cfg(unix)]
             std::os::unix::fs::symlink(fs::read_link(&source_path)?, &destination_path)?;
+            #[cfg(not(unix))]
+            bail!("Computer Use helper symlinks are only supported on Unix");
         } else {
             fs::copy(&source_path, &destination_path)?;
             fs::set_permissions(

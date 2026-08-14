@@ -91,6 +91,12 @@ pub fn generate_message(
     include_unstaged: bool,
     invocation: &AgentInvocation,
 ) -> anyhow::Result<String> {
+    if invocation.provider == ProviderKind::DeerFlow {
+        bail!(
+            "{} does not support one-shot commit-message generation",
+            invocation.provider.display_name()
+        );
+    }
     let prompt = commit_prompt(cwd, include_unstaged)?;
     let amp_settings = if invocation.provider == ProviderKind::Amp {
         let path = std::env::temp_dir().join(format!("waku-amp-commit-{}.json", Uuid::new_v4()));
@@ -349,6 +355,9 @@ fn agent_arguments(
                 push(&mut args, "--thinking");
                 push(&mut args, effort);
             }
+        }
+        ProviderKind::DeerFlow => {
+            unreachable!("DeerFlow ACP is rejected before building one-shot CLI arguments")
         }
     }
     push(&mut args, prompt);
@@ -699,7 +708,10 @@ mod tests {
         }
 
         let prompt = "Generate subject";
-        for provider in ProviderKind::ALL {
+        for provider in ProviderKind::ALL
+            .into_iter()
+            .filter(|provider| *provider != ProviderKind::DeerFlow)
+        {
             let args = agent_arguments(
                 provider,
                 Some("model"),
@@ -753,6 +765,7 @@ mod tests {
                     assert!(has(&args, "--no-tools"));
                     assert!(has_pair(&args, "--thinking", "low"));
                 }
+                ProviderKind::DeerFlow => unreachable!(),
             }
         }
     }
