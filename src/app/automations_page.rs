@@ -1243,10 +1243,13 @@ impl Waku {
         let prompt_area = div()
             .id("automation-prompt-area")
             .w_full()
-            // Bounded like the chat composer: a few lines tall, capped so a long
-            // prompt scrolls inside the field instead of growing the pinned
-            // composer until it swallows the whole page.
-            .min_h(px(120.0))
+            // Sized like the chat composer: one line when empty, growing with
+            // the text, capped so a long prompt scrolls inside the field
+            // instead of growing the pinned composer until it swallows the
+            // page. The field itself is `FieldMode::Code` — it inherits its
+            // metrics from here rather than carrying `FieldMode::Composer`'s,
+            // so this floor and the type scale below stand in for them.
+            .min_h(px(24.0))
             .max_h(px(260.0))
             .overflow_y_scroll()
             .px(px(4.0))
@@ -1255,8 +1258,8 @@ impl Waku {
             .line_height(px(22.0))
             .cursor(gpui::CursorStyle::IBeam)
             .child(self.automation_prompt_input.clone())
-            // The textarea is taller than its text, so a click in the empty
-            // region still lands focus in the field.
+            // A click in the padding around the text still lands focus in the
+            // field rather than falling through to the card.
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, _: &MouseDownEvent, window, cx| {
