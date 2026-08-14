@@ -13,18 +13,20 @@ pub enum ProviderKind {
     Codex,
     Cursor,
     DeepSeek,
+    Droid,
     OpenCode,
     Grok,
     Pi,
 }
 
 impl ProviderKind {
-    pub const ALL: [Self; 8] = [
+    pub const ALL: [Self; 9] = [
         Self::Amp,
         Self::Claude,
         Self::Codex,
         Self::Cursor,
         Self::DeepSeek,
+        Self::Droid,
         Self::OpenCode,
         Self::Grok,
         Self::Pi,
@@ -37,6 +39,7 @@ impl ProviderKind {
             Self::Codex => "codex",
             Self::Cursor => "cursor",
             Self::DeepSeek => "deepseek",
+            Self::Droid => "droid",
             Self::OpenCode => "opencode",
             Self::Grok => "grok",
             Self::Pi => "pi",
@@ -50,6 +53,7 @@ impl ProviderKind {
             Self::Codex => "Codex CLI",
             Self::Cursor => "Cursor CLI",
             Self::DeepSeek => "DeepSeek Harness",
+            Self::Droid => "Droid",
             Self::OpenCode => "OpenCode",
             Self::Grok => "Grok Build",
             Self::Pi => "Pi",
@@ -63,6 +67,7 @@ impl ProviderKind {
             Self::Codex => "Codex",
             Self::Cursor => "Cursor",
             Self::DeepSeek => "DeepSeek",
+            Self::Droid => "Droid",
             Self::OpenCode => "OpenCode",
             Self::Grok => "Grok",
             Self::Pi => "Pi",
@@ -78,12 +83,16 @@ impl ProviderKind {
             // shared by other CLIs. The backward-compatible alias is unambiguous.
             Self::Cursor => "cursor-agent",
             Self::DeepSeek => "dsh",
+            Self::Droid => "droid",
             Self::OpenCode => "opencode",
             Self::Grok => "grok",
             Self::Pi => "pi",
         }
     }
 
+    /// Droid is the one provider left out: its ACP daemon exposes neither a
+    /// rollback method nor a fork, and `droid exec --fork` only branches from
+    /// a prompt, so there is nothing to drive an in-place rewind with.
     pub fn supports_conversation_rollback(self) -> bool {
         matches!(
             self,
@@ -115,7 +124,13 @@ impl ProviderKind {
     pub fn supports_model_discovery(self) -> bool {
         matches!(
             self,
-            Self::Codex | Self::Cursor | Self::DeepSeek | Self::OpenCode | Self::Grok | Self::Pi
+            Self::Codex
+                | Self::Cursor
+                | Self::DeepSeek
+                | Self::Droid
+                | Self::OpenCode
+                | Self::Grok
+                | Self::Pi
         )
     }
 }
@@ -151,6 +166,9 @@ pub enum ProviderResumeCursor {
     DeepSeek {
         session_id: String,
     },
+    Droid {
+        session_id: String,
+    },
     Grok {
         session_id: String,
     },
@@ -178,6 +196,7 @@ impl ProviderResumeCursor {
                 fork_context: None,
             },
             ProviderKind::DeepSeek => Self::DeepSeek { session_id: id },
+            ProviderKind::Droid => Self::Droid { session_id: id },
             ProviderKind::OpenCode => Self::OpenCode { session_id: id },
             ProviderKind::Grok => Self::Grok { session_id: id },
             ProviderKind::Pi => Self::Pi {
@@ -194,6 +213,7 @@ impl ProviderResumeCursor {
             Self::Codex { .. } => ProviderKind::Codex,
             Self::Cursor { .. } => ProviderKind::Cursor,
             Self::DeepSeek { .. } => ProviderKind::DeepSeek,
+            Self::Droid { .. } => ProviderKind::Droid,
             Self::OpenCode { .. } => ProviderKind::OpenCode,
             Self::Grok { .. } => ProviderKind::Grok,
             Self::Pi { .. } => ProviderKind::Pi,
@@ -206,6 +226,7 @@ impl ProviderResumeCursor {
             Self::Claude { session_id, .. }
             | Self::Cursor { session_id, .. }
             | Self::DeepSeek { session_id }
+            | Self::Droid { session_id }
             | Self::OpenCode { session_id }
             | Self::Grok { session_id }
             | Self::Pi { session_id, .. } => session_id,
@@ -2813,25 +2834,18 @@ mod tests {
         assert_eq!(ProviderKind::Codex.command(), "codex");
         assert_eq!(ProviderKind::Cursor.command(), "cursor-agent");
         assert_eq!(ProviderKind::DeepSeek.command(), "dsh");
+        assert_eq!(ProviderKind::Droid.command(), "droid");
         assert_eq!(ProviderKind::OpenCode.command(), "opencode");
         assert_eq!(ProviderKind::Grok.command(), "grok");
         assert_eq!(ProviderKind::Pi.command(), "pi");
     }
 
     #[test]
-    fn native_conversation_actions_include_every_provider() {
-        for provider in [
-            ProviderKind::Amp,
-            ProviderKind::Claude,
-            ProviderKind::Codex,
-            ProviderKind::Cursor,
-            ProviderKind::DeepSeek,
-            ProviderKind::OpenCode,
-            ProviderKind::Grok,
-            ProviderKind::Pi,
-        ] {
-            assert!(provider.supports_conversation_fork());
-            assert!(provider.supports_conversation_rollback());
+    fn native_conversation_actions_cover_every_provider_but_droid() {
+        for provider in ProviderKind::ALL {
+            let native = provider != ProviderKind::Droid;
+            assert_eq!(provider.supports_conversation_fork(), native);
+            assert_eq!(provider.supports_conversation_rollback(), native);
         }
     }
 
@@ -2842,6 +2856,7 @@ mod tests {
         assert!(ProviderKind::Codex.supports_model_discovery());
         assert!(ProviderKind::Cursor.supports_model_discovery());
         assert!(ProviderKind::DeepSeek.supports_model_discovery());
+        assert!(ProviderKind::Droid.supports_model_discovery());
         assert!(ProviderKind::OpenCode.supports_model_discovery());
         assert!(ProviderKind::Grok.supports_model_discovery());
         assert!(ProviderKind::Pi.supports_model_discovery());

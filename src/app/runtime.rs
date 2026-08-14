@@ -314,6 +314,12 @@ fn perform_provider_rewind(
             )?;
             Ok((Some(cursor), None, None))
         }
+        // Guarded by `supports_conversation_rollback`, which excludes Droid
+        // because its ACP daemon serves no rollback and no in-place fork.
+        ProviderKind::Droid => anyhow::bail!(tr!(
+            "session.provider_cannot_rewind",
+            provider = provider.display_name()
+        )),
         ProviderKind::Codex | ProviderKind::DeepSeek | ProviderKind::Pi => {
             let mut prepared_driver = None;
             let driver = if let Some(driver) = request.driver.as_ref() {
@@ -482,6 +488,10 @@ fn perform_response_fork(mut request: ResponseForkRequest) -> Result<PreparedRes
                 let (cursor, prepared_driver) = fork_response_with_driver(&mut request)?;
                 Ok((cursor, None, prepared_driver))
             }
+            // Guarded by `supports_conversation_fork`, which excludes Droid:
+            // `droid exec --fork` branches from a prompt, not from a live ACP
+            // session, so there is nothing to fork here.
+            ProviderKind::Droid => anyhow::bail!(tr!("session.response_cannot_fork")),
             ProviderKind::DeepSeek => {
                 if !matches!(
                     request.source.provider_cursor.as_ref(),

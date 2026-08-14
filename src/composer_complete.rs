@@ -223,7 +223,7 @@ fn builtin_claude_commands() -> Vec<SlashCommand> {
 /// a template written once works over any transport. Native files scan
 /// first, so they win a same-scope name collision. Live processes may add
 /// more at runtime ([`merge_reported_commands`]): Claude's init handshake
-/// and ACP's `available_commands_update` for Cursor and Grok.
+/// and ACP's `available_commands_update` for Cursor, Droid and Grok.
 pub fn discover_slash_commands(provider: ProviderKind, project_root: &Path) -> Vec<SlashCommand> {
     let home = dirs::home_dir();
     let claude_config_dir = std::env::var("CLAUDE_CONFIG_DIR")
@@ -303,6 +303,24 @@ pub fn discover_slash_commands(provider: ProviderKind, project_root: &Path) -> V
                     &mut commands,
                 );
                 scan_skill_files(&home.join(".cursor/skills"), &mut commands);
+            }
+        }
+        ProviderKind::Droid => {
+            scan_command_files(
+                &project_root.join(".factory/commands"),
+                CommandScope::Project,
+                true,
+                &mut commands,
+            );
+            scan_skill_files(&project_root.join(".factory/skills"), &mut commands);
+            if let Some(home) = home.as_deref() {
+                scan_command_files(
+                    &home.join(".factory/commands"),
+                    CommandScope::User,
+                    true,
+                    &mut commands,
+                );
+                scan_skill_files(&home.join(".factory/skills"), &mut commands);
             }
         }
         ProviderKind::Pi => {
@@ -1195,6 +1213,7 @@ mod tests {
         for (provider, dir) in [
             (ProviderKind::Codex, ".codex/skills"),
             (ProviderKind::Cursor, ".cursor/skills"),
+            (ProviderKind::Droid, ".factory/skills"),
             (ProviderKind::OpenCode, ".opencode/skills"),
             (ProviderKind::Pi, ".pi/skills"),
         ] {

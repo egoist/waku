@@ -158,7 +158,7 @@ plutil -replace CFBundleName -string "$app_name" "$contents/Info.plist"
 cp -R "$cached_helper_bundle" "$helper_bundle"
 # Finder info and resource forks on copied resources make codesign reject the
 # bundle as "detritus"; strip extended attributes before signing.
-xattr -cr "$bundle"
+find "$bundle" -exec xattr -c {} +
 # Sparkle's nested executables sign first, then the framework, then the app.
 # The app's hardened runtime enforces library validation, so the framework must
 # carry the same identity as the app or dlopen rejects it at launch.

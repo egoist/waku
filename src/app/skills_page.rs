@@ -501,6 +501,7 @@ impl Waku {
             SkillSource::Provider(ProviderKind::Claude),
             SkillSource::Provider(ProviderKind::Codex),
             SkillSource::Provider(ProviderKind::Cursor),
+            SkillSource::Provider(ProviderKind::Droid),
             SkillSource::Provider(ProviderKind::OpenCode),
             SkillSource::Provider(ProviderKind::Pi),
             SkillSource::Provider(ProviderKind::Amp),

@@ -6,13 +6,13 @@ CLI does not offer it.
 
 Every provider is reached through the same driver abstraction in
 [src/driver/mod.rs](../src/driver/mod.rs). There are six transport
-implementations behind seven providers, and **every one of them holds a session
+implementations behind eight providers, and **every one of them holds a session
 that spans the whole conversation**:
 
 | Transport | File | Providers |
 | --- | --- | --- |
 | Codex app-server (JSON-RPC over stdio) | [src/driver/codex.rs](../src/driver/codex.rs) | Codex CLI |
-| Agent Client Protocol (JSON-RPC over stdio) | [src/driver/acp.rs](../src/driver/acp.rs) | Cursor CLI, Grok Build |
+| Agent Client Protocol (JSON-RPC over stdio) | [src/driver/acp.rs](../src/driver/acp.rs) | Cursor CLI, Droid, Grok Build |
 | OpenCode server (HTTP + server-sent events) | [src/driver/opencode.rs](../src/driver/opencode.rs) | OpenCode |
 | Pi RPC mode (NDJSON request/response over stdio) | [src/driver/pi.rs](../src/driver/pi.rs) | Pi |
 | Claude streaming-input session (NDJSON over stdio) | [src/driver/claude.rs](../src/driver/claude.rs) | Claude Code |
@@ -107,7 +107,7 @@ the idle sweep decides otherwise.
 
 Two shapes, depending on the transport.
 
-**The stdio drivers — Codex, Pi, Claude, Amp, and both ACP providers — are never
+**The stdio drivers — Codex, Pi, Claude, Amp, and all three ACP providers — are never
 signalled** (except when Stop ends Amp outright).
 Termination is by **closing stdin**:
 
@@ -141,22 +141,24 @@ OpenCode server itself, whose driver kills it explicitly on drop.
 
 ## At a glance
 
-| | Codex CLI | Pi | Claude Code | Amp | Cursor CLI | OpenCode | Grok Build |
-| --- | --- | --- | --- | --- | --- | --- | --- |
-| Binary | `codex` | `pi` | `claude` | `amp` | `cursor-agent` | `opencode` | `grok` |
-| Wire protocol | JSON-RPC over stdio | NDJSON RPC over stdio | stream-json over stdio | stream-json over stdio | ACP over stdio | HTTP + SSE | ACP over stdio |
-| Process spans the whole session | yes | yes | yes | yes | yes | yes | yes |
-| Process spawned per turn | no | no | no | no | no | no | no |
-| Bidirectional | yes | yes | yes | yes | yes | yes | yes |
-| Reasoning stream | yes | yes | yes | yes | yes | yes | yes |
-| Interactive approvals | yes | no | yes | no | yes | yes | yes |
-| Mid-turn steering | yes | yes | yes | yes | yes | yes | yes |
-| Model discovery | yes | yes | no (fixed) | no (modes) | yes | yes | yes |
-| Computer Use | yes | yes | no | no | no | yes | yes |
-| Restricted to Build + Full access | no | yes | no | yes | no | no | no |
+| | Codex CLI | Pi | Claude Code | Amp | Cursor CLI | Droid | OpenCode | Grok Build |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| Binary | `codex` | `pi` | `claude` | `amp` | `cursor-agent` | `droid` | `opencode` | `grok` |
+| Wire protocol | JSON-RPC over stdio | NDJSON RPC over stdio | stream-json over stdio | stream-json over stdio | ACP over stdio | ACP over stdio | HTTP + SSE | ACP over stdio |
+| Process spans the whole session | yes | yes | yes | yes | yes | yes | yes | yes |
+| Process spawned per turn | no | no | no | no | no | no | no | no |
+| Bidirectional | yes | yes | yes | yes | yes | yes | yes | yes |
+| Reasoning stream | yes | yes | yes | yes | yes | yes | yes | yes |
+| Interactive approvals | yes | no | yes | no | yes | yes | yes | yes |
+| Mid-turn steering | yes | yes | yes | yes | yes | yes | yes | yes |
+| Rewind and branch | native | native | emulated | emulated | emulated | **no** | emulated | emulated |
+| Model discovery | yes | yes | no (fixed) | no (modes) | yes | yes | yes | yes |
+| Computer Use | yes | yes | no | no | no | no | yes | yes |
+| Restricted to Build + Full access | no | yes | no | yes | no | no | no | no |
 
 Every provider now holds a session across turns. That was not true when this
-document was first written: five of the seven spawned a process per prompt, and
+document was first written: five of the seven providers that existed then
+spawned a process per prompt, and
 everything stateful — resume, rewind, branch, approvals — had to be reconstructed
 from a session id, an on-disk transcript, or a side-channel. In each case the CLI
 turned out to already serve a session protocol; nobody had looked.
@@ -502,8 +504,11 @@ received them.
 
 ## Agent Client Protocol
 
-**Launch** — `cursor-agent acp`, `grok agent stdio`
-([src/driver/acp.rs](../src/driver/acp.rs)).
+**Launch** — `cursor-agent acp`, `droid exec --output-format acp-daemon`,
+`grok agent stdio` ([src/driver/acp.rs](../src/driver/acp.rs)). Droid's daemon
+is the only `exec` output format that speaks ACP, and it deliberately ignores
+the `--model`, `--reasoning-effort` and `--auto` flags: in this mode those are
+session settings the client sets over the protocol.
 
 **Protocol** — newline-delimited JSON-RPC over stdio, bidirectional. One agent
 process serves the whole conversation, streams `session/update` notifications,
@@ -511,8 +516,8 @@ and asks the client for tool permission with a real request it expects an answer
 to. Alongside Codex's app-server, this is the only transport where Waku's
 Supervised mode means what it says.
 
-**Lifetime** — long-lived, like Codex and Pi. Both providers previously spawned a
-process per turn.
+**Lifetime** — long-lived, like Codex and Pi. Cursor and Grok previously spawned
+a process per turn; Droid arrived on the daemon.
 
 **Handshake** — `initialize` (advertising **no** `fs` or `terminal` client
 capability, since Waku does not proxy the agent's file or terminal access — an
@@ -573,11 +578,22 @@ reading a file the user has unsaved edits in currently gets the disk copy. That
 is a deliberate future call, not an oversight.
 
 **Modes** — Plan maps to the agent's own `plan` mode via `session/set_mode` when
-it advertises one; Cursor offers `agent`, `plan` and `ask`. Supervised
-deliberately stays in `agent` mode: ACP's read-only `ask` mode *answers
-questions* instead of asking permission, whereas Supervised means the agent still
-acts, it just checks first — which is what `session/request_permission` already
-does.
+it advertises one; Cursor offers `agent`, `plan` and `ask`. Droid names the same
+read-only, write-the-plan-first mode `spec` (its other modes are the autonomy
+ladder `normal` / `auto-low` / `auto-medium` / `auto-high`), so Plan falls back
+to `spec` when no `plan` is advertised. Supervised deliberately stays in the
+agent's default mode: ACP's read-only `ask` mode *answers questions* instead of
+asking permission, whereas Supervised means the agent still acts, it just checks
+first — which is what `session/request_permission` already does. Droid's autonomy
+ladder is left alone for the same reason: Waku answers its permission requests
+itself, so raising `autonomy_level` would only take the decision away from the
+user.
+
+**Reasoning effort** — `session/set_config_option`, whose option id ACP does not
+standardize. Cursor and Grok file it under `mode`; Droid rejects that id and
+uses `reasoning_effort`. The request is deliberately non-fatal, so an id the
+agent does not know fails silently — which is exactly why the mapping is a
+probed table ([src/driver/acp.rs](../src/driver/acp.rs)) rather than one string.
 
 **Cancel** — `session/cancel`, a notification; the open `session/prompt` reports
 the cancellation.
@@ -593,6 +609,11 @@ agents; T3 Code runs the same last-prompt-settles bookkeeping for both.
 **Rewind and branch** — unchanged and still out of band: Grok forks through its
 own ACP server plus on-disk truncation ([src/grok_session.rs](../src/grok_session.rs)),
 Cursor re-seeds a fresh session ([src/cursor_session.rs](../src/cursor_session.rs)).
+**Droid has neither**, and is the one provider whose
+`supports_conversation_rollback` and `supports_conversation_fork` are false: the
+daemon serves no rollback, and `droid exec --fork` branches from a prompt on a
+fresh process rather than from the live session. The transcript hides the edit
+and branch affordances instead of offering an action that would fail.
 
 **Computer Use** — Grok's isolated `GROK_HOME` and `--rules` setup is transport
 independent, so the ACP session reuses the same builder the headless driver used.
@@ -610,13 +631,13 @@ Waku's `InteractionMode` (Build / Plan) and `RuntimeMode` (Supervised /
 Auto-accept edits / Auto / Full access) collapse into each CLI's own vocabulary.
 Plan always wins over the access mode.
 
-| Waku | Codex (`approvalPolicy` / `sandbox` / reviewer) | Claude `--permission-mode` | Cursor | OpenCode | Grok |
-| --- | --- | --- | --- | --- | --- |
-| Plan | `never` / `read-only` / `user` | `plan` | `session/set_mode` → `plan` | `agent: plan` | `session/set_mode` → `plan` |
-| Supervised | `untrusted` / `read-only` / `user` | `default` + `can_use_tool` reaches the user | `session/request_permission` reaches the user | permission requests reach the user | `session/request_permission` reaches the user |
-| Auto-accept edits | `on-request` / `workspace-write` / `user` | `acceptEdits` | auto-answered | auto-answered (`always`) | auto-answered |
-| Auto | `on-request` / `workspace-write` / `auto_review` | `auto` | auto-answered | auto-answered (`always`) | auto-answered |
-| Full access | `never` / `danger-full-access` / `user` | `bypassPermissions` + `--dangerously-skip-permissions` | auto-answered | auto-answered (`always`) | auto-answered |
+| Waku | Codex (`approvalPolicy` / `sandbox` / reviewer) | Claude `--permission-mode` | Cursor | Droid | OpenCode | Grok |
+| --- | --- | --- | --- | --- | --- | --- |
+| Plan | `never` / `read-only` / `user` | `plan` | `session/set_mode` → `plan` | `session/set_mode` → `spec` | `agent: plan` | `session/set_mode` → `plan` |
+| Supervised | `untrusted` / `read-only` / `user` | `default` + `can_use_tool` reaches the user | `session/request_permission` reaches the user | `session/request_permission` reaches the user | permission requests reach the user | `session/request_permission` reaches the user |
+| Auto-accept edits | `on-request` / `workspace-write` / `user` | `acceptEdits` | auto-answered | auto-answered | auto-answered (`always`) | auto-answered |
+| Auto | `on-request` / `workspace-write` / `auto_review` | `auto` | auto-answered | auto-answered | auto-answered (`always`) | auto-answered |
+| Full access | `never` / `danger-full-access` / `user` | `bypassPermissions` + `--dangerously-skip-permissions` | auto-answered | auto-answered | auto-answered (`always`) | auto-answered |
 
 Amp and Pi accept Build + Full access only and always run wide open
 (`--dangerously-allow-all`, `--approve`).
@@ -639,6 +660,7 @@ with the session and is what makes a Waku task outlive its process:
 | Claude | `session_id`, `resume_at` | `resume_at` is the transcript message uuid used for forking |
 | Amp | `thread_id`, `fork_context` | `fork_context` is the seeded history for a branch |
 | Cursor | `session_id`, `fork_context` | id is empty until a seeded branch streams one |
+| Droid | `session_id` | ACP `session/resume`, falling back to `session/load`; there is no fork to carry |
 | OpenCode | `session_id` | `--session` / server fork |
 | Grok | `session_id` | `--resume` / ACP fork |
 
