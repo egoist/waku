@@ -72,12 +72,16 @@ command_palette.suggested:
   en: Suggested
 command_palette.tasks:
   en: Tasks
+command_palette.automations:
+  en: Automations
 command_palette.commands:
   en: Commands
 command_palette.settings:
   en: Settings
 command_palette.new_task:
   en: New task
+command_palette.new_automation:
+  en: New automation…
 command_palette.open_project:
   en: Open project…
 command_palette.choose_model:
@@ -92,6 +96,8 @@ command_palette.hide_right_panel:
   en: Hide right panel
 command_palette.current:
   en: Current
+command_palette.automation_run:
+  en: "Automation: %{name}"
 command_palette.you:
   en: You
 command_palette.agent:

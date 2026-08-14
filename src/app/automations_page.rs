@@ -1792,7 +1792,7 @@ fn weekday_short(weekday: Weekday) -> String {
 }
 
 /// A human-readable one-line summary of a schedule.
-fn schedule_summary(schedule: &Schedule) -> String {
+pub(super) fn schedule_summary(schedule: &Schedule) -> String {
     match schedule {
         Schedule::Manual => tr!("automations.summary_manual"),
         Schedule::Hourly { minute } => {

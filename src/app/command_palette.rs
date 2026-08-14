@@ -64,6 +64,7 @@ pub fn init(cx: &mut App) {
 enum PaletteSection {
     Suggested,
     Tasks,
+    Automations,
     Commands,
     Settings,
 }
@@ -73,14 +74,17 @@ impl PaletteSection {
         crate::i18n::translate(match self {
             Self::Suggested => "command_palette.suggested",
             Self::Tasks => "command_palette.tasks",
+            Self::Automations => "command_palette.automations",
             Self::Commands => "command_palette.commands",
             Self::Settings => "command_palette.settings",
         })
     }
 
     fn query_rank(self) -> usize {
+        // Automation items are scored in their own group and never sorted
+        // against commands, so this rank only needs to be defined, not tuned.
         match self {
-            Self::Tasks => 0,
+            Self::Tasks | Self::Automations => 0,
             Self::Commands | Self::Suggested => 1,
             Self::Settings => 2,
         }
@@ -104,6 +108,9 @@ enum PaletteAction {
     ToggleRightPanel,
     OpenSettings(SettingsPage),
     SelectTask(Uuid),
+    OpenAutomations,
+    NewAutomation,
+    OpenAutomation(Uuid),
 }
 
 #[derive(Clone, Debug)]
@@ -542,6 +549,24 @@ impl Waku {
                 "open add folder project workspace repository repo",
                 next(),
             ),
+            CommandPaletteItem::command(
+                display_section(PaletteSection::Suggested),
+                tr!("automations.title"),
+                "icons/zap.svg",
+                None,
+                PaletteAction::OpenAutomations,
+                "automations scheduled recurring cron jobs schedule",
+                next(),
+            ),
+            CommandPaletteItem::command(
+                display_section(PaletteSection::Suggested),
+                tr!("command_palette.new_automation"),
+                "icons/zap.svg",
+                None,
+                PaletteAction::NewAutomation,
+                "new create automation scheduled recurring cron job schedule",
+                next(),
+            ),
         ];
 
         let can_choose_model = self
@@ -705,7 +730,17 @@ impl Waku {
                         (path.to_string_lossy().into_owned(), Some(branch.as_str()))
                     }
                 };
-                let mut details = vec![project.clone()];
+                // Automation runs are sessions; tag them with the automation's
+                // name so a run is recognizable and searchable by it.
+                let automation_name = session
+                    .originating_automation
+                    .and_then(|id| self.state.automation(id))
+                    .map(|automation| automation.name.clone());
+                let mut details = Vec::new();
+                if let Some(name) = &automation_name {
+                    details.push(tr!("command_palette.automation_run", name = name.clone()));
+                }
+                details.push(project.clone());
                 if let Some(branch) = branch {
                     details.push(format!("#{branch}"));
                 }
@@ -722,11 +757,15 @@ impl Waku {
                 CommandPaletteItem {
                     section: PaletteSection::Tasks,
                     search_text: format!(
-                        "{label} {project} {project_path} {workspace_path} {} {} {} {} task session chat conversation",
+                        "{label} {project} {project_path} {workspace_path} {} {} {} {} {} task session chat conversation",
                         branch.unwrap_or_default(),
                         session.provider.short_name(),
                         session.provider.display_name(),
                         session.model.as_deref().unwrap_or_default(),
+                        automation_name
+                            .as_deref()
+                            .map(|name| format!("{name} automation run scheduled"))
+                            .unwrap_or_default(),
                     ),
                     label,
                     detail: Some(detail),
@@ -736,6 +775,39 @@ impl Waku {
                     content_match,
                     order,
                     recency: session.updated_at,
+                }
+            })
+            .collect()
+    }
+
+    /// One item per saved automation, opening its editor. Runs themselves stay
+    /// in Tasks (they are sessions); this section is the automations themselves.
+    fn command_palette_automation_candidates(&self) -> Vec<CommandPaletteItem> {
+        self.state
+            .automations
+            .iter()
+            .enumerate()
+            .map(|(order, automation)| {
+                let summary = super::automations_page::schedule_summary(&automation.schedule);
+                let detail = if automation.enabled {
+                    summary.clone()
+                } else {
+                    format!("{summary} · {}", tr!("automations.disabled"))
+                };
+                CommandPaletteItem {
+                    section: PaletteSection::Automations,
+                    search_text: format!(
+                        "{} {} automation scheduled recurring cron {summary}",
+                        automation.name, automation.prompt
+                    ),
+                    label: automation.name.clone(),
+                    detail: Some(detail),
+                    icon: PaletteIcon::Asset("icons/zap.svg"),
+                    shortcut: None,
+                    action: PaletteAction::OpenAutomation(automation.id),
+                    content_match: None,
+                    order,
+                    recency: automation.updated_at,
                 }
             })
             .collect()
@@ -797,6 +869,25 @@ impl Waku {
         });
         tasks.truncate(MAX_TASK_RESULTS);
 
+        let mut automations = self
+            .command_palette_automation_candidates()
+            .into_iter()
+            .filter_map(|item| {
+                pattern
+                    .score(
+                        Utf32Str::new(&item.search_text, &mut utf32),
+                        &mut self.command_palette.matcher,
+                    )
+                    .map(|score| ScoredPaletteItem { score, item })
+            })
+            .collect::<Vec<_>>();
+        automations.sort_by(|a, b| {
+            b.score
+                .cmp(&a.score)
+                .then(b.item.recency.cmp(&a.item.recency))
+                .then(a.item.order.cmp(&b.item.order))
+        });
+
         let mut commands = self
             .command_palette_commands(true)
             .into_iter()
@@ -826,6 +917,7 @@ impl Waku {
         });
         let next_results = tasks
             .into_iter()
+            .chain(automations)
             .chain(commands)
             .map(|scored| scored.item)
             .collect::<Vec<_>>();
@@ -920,6 +1012,11 @@ impl Waku {
                 self.select_session(session_id, cx);
                 let focus = self.composer_focus(cx);
                 window.focus(&focus, cx);
+            }
+            PaletteAction::OpenAutomations => self.open_automations(window, cx),
+            PaletteAction::NewAutomation => self.open_automation_editor(None, window, cx),
+            PaletteAction::OpenAutomation(id) => {
+                self.open_automation_editor(Some(id), window, cx)
             }
             PaletteAction::ChooseModel | PaletteAction::ToggleUsage => {
                 // These popovers are rendered by the composer. If the command
