@@ -818,39 +818,49 @@ impl Waku {
                             .child(next_run),
                     ),
             )
+            .child(self.render_automation_enable_toggle(id, enabled, theme, cx))
             .child(
+                // Run Now stacked on top of Delete, sharing a column width.
                 div()
-                    .id(SharedString::from(format!("automation-run-{id}")))
-                    .tab_index(0)
                     .flex_none()
                     .flex()
-                    .items_center()
-                    .gap(px(5.0))
-                    .h(px(28.0))
-                    .px(px(10.0))
-                    .rounded(px(7.0))
-                    .cursor_default()
-                    .text_size(px(12.0))
-                    .text_color(theme.text_secondary)
-                    .border_1()
-                    .border_color(theme.border)
-                    .focus_visible(|style| style.border_color(theme.accent))
-                    .hover(|element| element.bg(theme.sidebar_item_background))
-                    .child(icon("icons/zap.svg", 12.0, theme.text_secondary))
-                    .child(tr!("automations.run_now"))
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.run_automation_now(id, cx);
-                        cx.stop_propagation();
-                    }))
-                    .on_key_down(cx.listener(move |this, event: &KeyDownEvent, _, cx| {
-                        if matches!(event.keystroke.key.as_str(), "enter" | "space") {
-                            this.run_automation_now(id, cx);
-                            cx.stop_propagation();
-                        }
-                    })),
+                    .flex_col()
+                    .gap(px(6.0))
+                    .child(
+                        div()
+                            .id(SharedString::from(format!("automation-run-{id}")))
+                            .tab_index(0)
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .gap(px(5.0))
+                            .h(px(28.0))
+                            .px(px(10.0))
+                            .rounded(px(7.0))
+                            .cursor_default()
+                            .text_size(px(12.0))
+                            .text_color(theme.text_secondary)
+                            .border_1()
+                            .border_color(theme.border)
+                            .focus_visible(|style| style.border_color(theme.accent))
+                            .hover(|element| element.bg(theme.sidebar_item_background))
+                            .child(icon("icons/zap.svg", 12.0, theme.text_secondary))
+                            .child(tr!("automations.run_now"))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.run_automation_now(id, cx);
+                                cx.stop_propagation();
+                            }))
+                            .on_key_down(cx.listener(move |this, event: &KeyDownEvent, _, cx| {
+                                if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                                    this.run_automation_now(id, cx);
+                                    cx.stop_propagation();
+                                }
+                            })),
+                    )
+                    .child(self.render_automation_delete_button(id, theme, cx)),
             )
-            .child(self.render_automation_enable_toggle(id, enabled, theme, cx))
-            .child(self.render_automation_delete_button(id, theme, cx))
+            // A right chevron hints that the card itself opens the editor.
+            .child(icon("icons/chevron-right.svg", 16.0, theme.text_tertiary))
             .into_any_element()
     }
 
@@ -870,7 +880,7 @@ impl Waku {
             .focus_visible(|style| style.border_color(theme.accent))
             .h(px(28.0))
             .px(px(10.0))
-            .rounded(px(6.0))
+            .rounded(px(7.0))
             .border_1()
             .border_color(if armed {
                 theme.danger
@@ -881,6 +891,7 @@ impl Waku {
             .flex()
             .flex_none()
             .items_center()
+            .justify_center()
             .gap(px(5.0))
             .cursor_default()
             .text_size(px(12.0))
