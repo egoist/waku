@@ -1,5 +1,11 @@
 use super::*;
 
+fn should_render_empty_state(session: Option<&AgentSession>) -> bool {
+    session
+        .map(|session| session.detail_loaded && session.messages.is_empty())
+        .unwrap_or(true)
+}
+
 impl Waku {
     pub(super) fn render_panel_resize_handle(
         &self,
@@ -98,10 +104,7 @@ impl Render for Waku {
         self.schedule_time_label_wake(cx);
 
         let theme = Theme::current(cx);
-        let empty = self
-            .selected_session()
-            .map(|session| session.messages.is_empty())
-            .unwrap_or(true);
+        let empty = should_render_empty_state(self.selected_session());
         let permission = self.render_permission(cx);
         let computer_use = self.render_computer_use_overlay(cx);
         let command_palette = self.render_command_palette(window, cx);
@@ -209,6 +212,23 @@ impl Render for Waku {
             .into_any_element();
 
         self.render_window_frame(content, window, cx)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unloaded_history_never_renders_the_new_task_prompt() {
+        let mut stored = AgentSession::new(Uuid::new_v4(), ProviderKind::Codex);
+        stored.detail_loaded = false;
+
+        assert!(!should_render_empty_state(Some(&stored)));
+
+        let draft = AgentSession::new(Uuid::new_v4(), ProviderKind::Codex);
+        assert!(should_render_empty_state(Some(&draft)));
+        assert!(should_render_empty_state(None));
     }
 }
 

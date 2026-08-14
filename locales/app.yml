@@ -846,6 +846,8 @@ terminal.starting:
 
 project.add_project:
   en: Add project
+errors.remote_project_picker:
+  en: Adding a daemon-host project needs a remote path picker, which is not available yet
 
 session.stopped:
   en: Stopped
@@ -867,11 +869,13 @@ session.agent_stopped_reason:
 errors.open_session:
   en: "Could not open that session: %{error}"
 errors.create_projectless_task:
-  en: "Could not create a task beneath ~/.waku: %{error}"
+  en: "Could not create a task beneath ~/.waku/projects: %{error}"
 errors.save_projectless_migration:
   en: "Could not save the projectless task migration: %{error}"
 errors.move_projectless_task:
-  en: "Could not move the old root-level projectless task beneath ~/.waku: %{error}"
+  en: "Could not move the old projectless task beneath ~/.waku/projects: %{error}"
+errors.remote_host_path:
+  en: This path belongs to the daemon host and cannot be opened by the desktop
 errors.change_branch:
   en: "Could not change branch: %{error}"
 errors.capture_pre_turn_checkpoint:

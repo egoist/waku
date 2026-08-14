@@ -5,8 +5,23 @@ edition = "2024"
 description = "A fast, native control plane for local coding agents"
 license = "GPL-3.0-only"
 
+[workspace]
+members = [
+    "crates/waku-client",
+    "crates/waku-core",
+    "crates/waku-daemon",
+    "crates/waku-protocol",
+]
+default-members = [
+    ".",
+    "crates/waku-client",
+    "crates/waku-core",
+    "crates/waku-daemon",
+    "crates/waku-protocol",
+]
+resolver = "2"
+
 [dependencies]
-agent-client-protocol = "2.0.0"
 alacritty_terminal = { version = "0.26", default-features = false }
 anyhow = "1.0"
 base64 = "0.22"
@@ -25,13 +40,13 @@ gpui_platform = { git = "https://github.com/egoist/zed", branch = "waku-webview"
 ] }
 parking_lot = "0.12"
 rquickjs = "0.12.2"
-rusqlite = { version = "0.37", features = ["bundled"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-toml = "0.8"
 unicode-segmentation = "1.12"
 url = "2"
 uuid = { version = "1.18", features = ["v4", "serde"] }
+waku-client = { path = "crates/waku-client" }
+waku-protocol = { path = "crates/waku-protocol" }
 pulldown-cmark = "0.13"
 regex = "1"
 rust-i18n = "4"
@@ -117,8 +132,6 @@ raw-window-handle = "0.6"
 [target.'cfg(target_os = "linux")'.dependencies]
 # Matches the version GPUI exposes through `WindowOptions::icon`.
 image = { version = "0.25", default-features = false, features = ["png"] }
-# Implements the FreeDesktop Trash specification for files and directories.
-trash = "5.2.6"
 
 [profile.release]
 lto = "thin"

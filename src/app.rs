@@ -22,7 +22,8 @@ use uuid::Uuid;
 use crate::checkpoint;
 use crate::composer_complete::{FileEntry, SlashCommand};
 use crate::computer_use::{
-    ComputerPermissions, ComputerUsePhase, ComputerUseState, PendingComputerApproval,
+    ComputerPermissions, ComputerTarget, ComputerUsePhase, ComputerUseState,
+    PendingComputerApproval,
 };
 use crate::driver::{self, DriverHandle, DriverStartOptions, SessionOptions};
 use crate::git_branch::BranchSnapshot;
@@ -270,8 +271,12 @@ fn paused_toast_duration(remaining: Duration, elapsed: Duration) -> Duration {
 /// submission carries it as an `@` mention.
 #[derive(Clone, Debug)]
 struct ComposerAttachment {
-    /// Absolute path as dropped — the thumbnail reads this.
+    /// Materialized path on the daemon host. This is the only path sent to a
+    /// provider or persisted with a task.
     path: PathBuf,
+    /// Ephemeral decoded client image used only for an immediate preview after
+    /// upload. It is never persisted or sent to the daemon.
+    client_preview_image: Option<Arc<gpui::Image>>,
     /// What the submission sends: relative to the project root when the file
     /// is inside it, absolute otherwise, directories with a trailing slash.
     mention: String,
@@ -281,9 +286,15 @@ struct ComposerAttachment {
     /// Whether the chip shows a thumbnail. Decided by extension at drop time
     /// so render never touches the filesystem.
     is_image: bool,
-    /// Present for images copied out of the clipboard into Waku's blob store.
-    /// Sent-message persistence retains the blob by this reference.
+    /// Daemon-issued durable reference retained by task persistence.
     blob_reference: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+enum RemoteImageState {
+    Loading,
+    Ready(Arc<gpui::Image>),
+    Unavailable,
 }
 
 /// One accepted composer submission. `prompt` is the exact provider-facing
@@ -505,9 +516,11 @@ struct PreparedSubmission {
 /// is still on the UI thread. `cwd` is replaced with the materialized
 /// worktree path by the background preparation task.
 struct DriverStartRequest {
+    session_id: Uuid,
     provider: ProviderKind,
     options: DriverStartOptions,
     event_wake: smol::channel::Sender<()>,
+    daemon_client: waku_client::DaemonClient,
 }
 
 /// A provider process that has started off-thread but is not installed into
@@ -738,7 +751,7 @@ struct SessionRuntime {
     pending_permission: Option<PendingPermission>,
     pending_computer_approval: Option<PendingComputerApproval>,
     /// Back-to-front stack of window previews captured during the active turn.
-    computer_use_previews: Vec<ComputerUseState>,
+    computer_use_previews: Vec<ComputerUsePreview>,
     computer_session_grants: HashSet<String>,
     last_driver_error: Option<String>,
     /// When this session last sent or received anything, for idle reaping.
@@ -746,6 +759,13 @@ struct SessionRuntime {
     /// Background-process snapshots are provider IPC. Keep the polling clock
     /// on the runtime so switching tasks never creates duplicate probes.
     last_background_refresh_at: Instant,
+}
+
+struct ComputerUsePreview {
+    target: Option<ComputerTarget>,
+    phase: ComputerUsePhase,
+    visible: bool,
+    screenshot: Option<Arc<gpui::Image>>,
 }
 
 #[derive(Debug, Default)]
@@ -771,10 +791,18 @@ impl SessionNavigation {
         Some(target)
     }
 
+    fn back_target(&self) -> Option<Uuid> {
+        self.back.last().copied()
+    }
+
     fn go_forward(&mut self, current: Uuid) -> Option<Uuid> {
         let target = self.forward.pop()?;
         self.back.push(current);
         Some(target)
+    }
+
+    fn forward_target(&self) -> Option<Uuid> {
+        self.forward.last().copied()
     }
 
     fn remove(&mut self, session_id: Uuid) {
@@ -798,7 +826,30 @@ impl SessionNavigation {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SessionActivationTransition {
+    Visit,
+    Back { from: Uuid },
+    Forward { from: Uuid },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct PendingSessionActivation {
+    session_id: Uuid,
+    transition: SessionActivationTransition,
+}
+
 pub struct Waku {
+    /// Owns the headless provider process for exactly as long as the desktop
+    /// app entity. Debug builds can replace it independently after a rebuild;
+    /// all live driver handles below are lightweight RPC proxies.
+    daemon: waku_client::DaemonSupervisor,
+    /// Session details currently being fetched from the daemon. Sidebar rows
+    /// stay usable while the selected transcript hydrates asynchronously.
+    session_hydrations: HashSet<Uuid>,
+    /// Selection is committed only after this target's transcript arrives, so
+    /// the currently visible task stays intact during daemon latency.
+    pending_session_activation: Option<PendingSessionActivation>,
     analytics: crate::analytics::Analytics,
     state: PersistedState,
     store: StateStore,
@@ -896,14 +947,6 @@ pub struct Waku {
     usage_history_generation: u64,
     /// When the current snapshot landed, for the reopen-staleness check.
     usage_history_scanned_at: Option<Instant>,
-    /// Per-file parsed-record cache, locked only on the background executor.
-    usage_scan_cache: std::sync::Arc<std::sync::Mutex<crate::usage_history::ScanCache>>,
-    /// The LiteLLM rate table plus when it was loaded, shared with scans the
-    /// same way; the TTL re-check happens inside the scan task.
-    usage_rate_table:
-        std::sync::Arc<std::sync::Mutex<Option<(Instant, crate::usage_history::RateTable)>>>,
-    /// Directory holding the rate-table disk cache, beside the app database.
-    usage_rates_dir: PathBuf,
     usage_view: UsageViewMode,
     /// The selected window for the daily and project views; the statement
     /// view fixes its own.
@@ -984,6 +1027,10 @@ pub struct Waku {
     /// cached attachment metadata; render never probes the filesystem.
     image_preview: Option<image_preview::ImagePreviewState>,
     image_preview_generation: u64,
+    /// In-memory GPUI images for daemon-owned bytes. A missing entry schedules
+    /// one background fetch only when a visible row asks to render it; the
+    /// desktop never creates another attachment file.
+    remote_images: RefCell<HashMap<String, RemoteImageState>>,
     /// Coalesced edge trigger for provider and background result queues. The
     /// payloads stay in their typed channels; this channel only wakes the UI.
     event_wake_tx: smol::channel::Sender<()>,
@@ -1301,30 +1348,44 @@ pub(super) fn next_time_label_change(sessions: &[AgentSession], now: u64) -> Opt
     next
 }
 
-fn migrate_legacy_projectless_projects(state: &mut PersistedState) -> std::io::Result<bool> {
+fn migrate_legacy_projectless_projects(
+    state: &mut PersistedState,
+    workspace: &waku_client::WorkspaceClient,
+) -> (bool, Option<anyhow::Error>) {
     let legacy_indices = state
         .projects
         .iter()
         .enumerate()
         .filter_map(|(index, project)| {
-            crate::projectless::is_legacy_root_path(&project.path).then_some(index)
+            crate::projectless::needs_migration(&project.path).then_some(index)
         })
         .collect::<Vec<_>>();
     if legacy_indices.is_empty() {
-        return Ok(false);
+        return (false, None);
     }
 
-    // Allocate everything first so a later failure never leaves only part of
-    // the in-memory project list rewritten.
-    let workspaces = legacy_indices
-        .iter()
-        .map(|_| crate::projectless::create_workspace(None))
-        .collect::<std::io::Result<Vec<_>>>()?;
-    for (index, workspace) in legacy_indices.into_iter().zip(workspaces) {
+    let mut changed = false;
+    for index in legacy_indices {
+        let path = state.projects[index].path.clone();
+        let response = workspace
+            .request(waku_client::WorkspaceOperation::MigrateProjectlessWorkspace { path });
+        let cwd = match response {
+            Ok(waku_client::WorkspaceResult::ProjectlessWorkspace { cwd }) => cwd,
+            Ok(_) => {
+                return (
+                    changed,
+                    Some(anyhow::anyhow!(
+                        "the daemon returned an invalid projectless response"
+                    )),
+                );
+            }
+            Err(error) => return (changed, Some(error)),
+        };
         state.projects[index].name = Project::PROJECTLESS_NAME.to_owned();
-        state.projects[index].path = workspace.cwd;
+        state.projects[index].path = cwd;
+        changed = true;
     }
-    Ok(true)
+    (changed, None)
 }
 
 impl Waku {
@@ -1527,14 +1588,21 @@ impl Waku {
         }
     }
 
-    pub fn new(window: &mut Window, cx: &mut App) -> Entity<Self> {
+    pub fn new(
+        window: &mut Window,
+        cx: &mut App,
+        daemon: waku_client::DaemonSupervisor,
+    ) -> Entity<Self> {
         let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-        let home_directory = dirs::home_dir();
-        let state_path = StateStore::default_path();
-        let store = StateStore::new(state_path.clone());
-        let composer_draft_store = ComposerDraftStore::for_state_path(&state_path);
+        let store = StateStore::remote(daemon.clone());
+        let composer_draft_store = ComposerDraftStore::remote(daemon.clone());
         let composer_drafts = composer_draft_store.load().unwrap_or_default();
         let mut state = store.load_or_fresh(cwd);
+        let home_directory = crate::projectless::home_directory();
+        state.apply_daemon_settings(daemon.settings());
+        if let Err(error) = daemon.update_settings(state.daemon_settings()) {
+            eprintln!("could not normalize daemon settings after migration: {error:#}");
+        }
         crate::i18n::set_language(state.language);
         let analytics = crate::analytics::Analytics::new(
             state.language.locale(),
@@ -1603,14 +1671,18 @@ impl Waku {
                 .placeholder(tr!("diff.filter_files"))
         });
         let navigation_rail = cx.new(|_| ConversationNavigationRail::new());
-        let startup_toast = match migrate_legacy_projectless_projects(&mut state) {
-            Ok(false) => None,
-            Ok(true) => store
-                .save(&mut state)
-                .err()
-                .map(|error| tr!("errors.save_projectless_migration", error = error)),
-            Err(error) => Some(tr!("errors.move_projectless_task", error = error)),
-        };
+        let workspace_client = waku_client::WorkspaceClient::new(daemon.client());
+        let (projectless_migrated, projectless_migration_error) =
+            migrate_legacy_projectless_projects(&mut state, &workspace_client);
+        let projectless_save_error = projectless_migrated
+            .then(|| store.save(&mut state).err())
+            .flatten();
+        let startup_toast = projectless_migration_error
+            .map(|error| tr!("errors.move_projectless_task", error = error))
+            .or_else(|| {
+                projectless_save_error
+                    .map(|error| tr!("errors.save_projectless_migration", error = error))
+            });
         let sidebar_visible = state.sidebar_visible;
         let right_panel_visible = state.right_panel_visible;
         let sidebar_width = sanitize_panel_width(
@@ -1705,12 +1777,13 @@ impl Waku {
             .collect();
         let probes = ProviderKind::ALL
             .into_iter()
-            .map(
-                |provider| match state.provider_binary_overrides.get(&provider) {
-                    Some(binary) => ProviderProbe::with_binary_override(provider, binary),
-                    None => ProviderProbe::pending(provider),
-                },
-            )
+            .map(|provider| ProviderProbe {
+                provider,
+                installed: false,
+                path: None,
+                models: crate::model_catalog::fallback_models(provider),
+                agent_presets: crate::model_catalog::fallback_agent_presets(provider),
+            })
             .collect::<Vec<_>>();
         let (provider_probe_tx, provider_probe_events) = unbounded();
         let (provider_version_tx, provider_version_events) = unbounded();
@@ -1722,11 +1795,21 @@ impl Waku {
         {
             let computer_permission_tx = computer_permission_tx.clone();
             let event_wake = event_wake_tx.clone();
+            let daemon = daemon.client();
             std::thread::Builder::new()
                 .name("waku-computer-permission-probe".into())
                 .spawn(move || {
-                    let result = crate::computer_use::probe_permissions(false)
-                        .map_err(|error| error.to_string());
+                    let result = match daemon.request(
+                        Uuid::nil(),
+                        Uuid::nil(),
+                        waku_client::Command::ProbeComputerPermissions { prompt: false },
+                    ) {
+                        Ok(waku_client::ResponsePayload::ComputerPermissions { permissions }) => {
+                            Ok(permissions)
+                        }
+                        Ok(_) => Err("the daemon returned an invalid permission response".into()),
+                        Err(error) => Err(error.to_string()),
+                    };
                     if computer_permission_tx.send(result).is_ok() {
                         signal_event_pump(&event_wake);
                     }
@@ -2147,6 +2230,9 @@ impl Waku {
             };
 
             Self {
+                daemon,
+                session_hydrations: HashSet::new(),
+                pending_session_activation: None,
                 analytics,
                 state,
                 store,
@@ -2207,12 +2293,6 @@ impl Waku {
                 usage_history_pending_for: None,
                 usage_history_generation: 0,
                 usage_history_scanned_at: None,
-                usage_scan_cache: std::sync::Arc::default(),
-                usage_rate_table: std::sync::Arc::default(),
-                usage_rates_dir: StateStore::default_path()
-                    .parent()
-                    .map(|directory| directory.to_owned())
-                    .unwrap_or_else(std::env::temp_dir),
                 usage_view: UsageViewMode::Daily,
                 usage_window: crate::usage_history::UsageWindow::TrailingDays(30),
                 usage_metric: UsageMetric::Cost,
@@ -2254,6 +2334,7 @@ impl Waku {
                 composer_attachments,
                 image_preview: None,
                 image_preview_generation: 0,
+                remote_images: RefCell::new(HashMap::new()),
                 event_wake_tx,
                 runtimes: HashMap::new(),
                 background_work: HashMap::new(),

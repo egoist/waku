@@ -1503,11 +1503,21 @@ impl Waku {
         self.computer_permission_request_pending = true;
         let tx = self.computer_permission_tx.clone();
         let event_wake = self.event_wake_tx.clone();
+        let daemon = self.daemon.client();
         std::thread::Builder::new()
             .name("waku-computer-permission-request".into())
             .spawn(move || {
-                let result = crate::computer_use::probe_permissions(prompt)
-                    .map_err(|error| error.to_string());
+                let result = match daemon.request(
+                    Uuid::nil(),
+                    Uuid::nil(),
+                    waku_client::Command::ProbeComputerPermissions { prompt },
+                ) {
+                    Ok(waku_client::ResponsePayload::ComputerPermissions { permissions }) => {
+                        Ok(permissions)
+                    }
+                    Ok(_) => Err("the daemon returned an invalid permission response".into()),
+                    Err(error) => Err(error.to_string()),
+                };
                 if tx.send(result).is_ok() {
                     signal_event_pump(&event_wake);
                 }

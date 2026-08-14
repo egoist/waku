@@ -642,12 +642,20 @@ impl Waku {
         true
     }
 
-    fn upsert_computer_use_preview(runtime: &mut SessionRuntime, mut state: ComputerUseState) {
+    fn upsert_computer_use_preview(runtime: &mut SessionRuntime, state: ComputerUseState) {
         if !state.visible {
             return;
         }
         let Some(window_id) = state.target.as_ref().map(|target| target.window_id) else {
             return;
+        };
+        let mut preview = ComputerUsePreview {
+            target: state.target,
+            phase: state.phase,
+            visible: state.visible,
+            screenshot: state.image_url.as_deref().and_then(|image_url| {
+                crate::computer_use::decode_preview_image_url(image_url).ok()
+            }),
         };
         if let Some(index) = runtime.computer_use_previews.iter().position(|preview| {
             preview
@@ -656,11 +664,11 @@ impl Waku {
                 .is_some_and(|target| target.window_id == window_id)
         }) {
             let previous = runtime.computer_use_previews.remove(index);
-            if state.screenshot.is_none() {
-                state.screenshot = previous.screenshot;
+            if preview.screenshot.is_none() {
+                preview.screenshot = previous.screenshot;
             }
         }
-        runtime.computer_use_previews.push(state);
+        runtime.computer_use_previews.push(preview);
     }
 }
 

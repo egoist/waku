@@ -831,10 +831,21 @@ impl Waku {
             .collect::<Vec<_>>();
         self.checkpoint_ref_prefetch
             .set(Some((session_id, generation)));
+        let workspace = waku_client::WorkspaceClient::new(self.daemon.client());
         cx.spawn(async move |this, cx| {
             let existing = cx
                 .background_executor()
-                .spawn(async move { checkpoint::session_turn_refs(&project_path, session_id) })
+                .spawn(async move {
+                    match workspace.request(waku_client::WorkspaceOperation::SessionTurnRefs {
+                        cwd: project_path,
+                        session_id,
+                    }) {
+                        Ok(waku_client::WorkspaceResult::TurnRefs { turn_counts }) => {
+                            turn_counts.into_iter().collect::<HashSet<_>>()
+                        }
+                        Ok(_) | Err(_) => HashSet::new(),
+                    }
+                })
                 .await;
             let _ = this.update(cx, |this, cx| {
                 if this.checkpoint_ref_generation.get() != generation {
@@ -1002,6 +1013,24 @@ impl Waku {
                             )
                         })
                         .collect();
+                    let attachment_images = message
+                        .attachments
+                        .iter()
+                        .map(|attachment| {
+                            if !attachment.is_image {
+                                return None;
+                            }
+                            let Some(reference) = attachment.blob_reference.as_deref() else {
+                                return None;
+                            };
+                            self.image_for_reference(
+                                reference,
+                                Some(&attachment.path),
+                                Some(&attachment.name),
+                                cx,
+                            )
+                        })
+                        .collect();
                     let menu = self.menu_handle(format!("message-{}", message.id), cx);
                     let metrics = if message.role == MessageRole::User {
                         MarkdownMetrics::USER_MESSAGE
@@ -1032,6 +1061,7 @@ impl Waku {
                             user_message_action,
                             message_edit_input,
                             attachment_menus,
+                            attachment_images,
                             markdown: view,
                             ctx: &ctx,
                             menu,
@@ -1823,8 +1853,14 @@ impl Waku {
                     detail_card = detail_card.child(section_view);
                 }
                 for (image_index, image_url) in activity.image_urls.iter().enumerate() {
-                    detail_card =
-                        detail_card.child(render_activity_image(image_url, id, image_index));
+                    let image = self.image_for_reference(image_url, None, None, cx);
+                    detail_card = detail_card.child(render_activity_image(
+                        image_url,
+                        image,
+                        id,
+                        image_index,
+                        theme,
+                    ));
                 }
                 item = item.child(detail_card);
             }
@@ -1851,28 +1887,58 @@ fn reasoning_activity_title(reasoning: &ReasoningBlock, live: bool) -> String {
     }
 }
 
-fn render_activity_image(image_url: &str, activity_id: Uuid, image_index: usize) -> AnyElement {
-    // Stored blobs go through GPUI's asset cache, which reads and decodes the
-    // file once off the UI thread. Only legacy inline data URLs still pay a
+fn render_activity_image(
+    image_url: &str,
+    image: Option<Arc<gpui::Image>>,
+    activity_id: Uuid,
+    image_index: usize,
+    theme: &Theme,
+) -> AnyElement {
+    // Daemon blobs arrive only when a visible row requests them and GPUI keeps
+    // their decoded form in memory. Only legacy inline data URLs still pay a
     // per-render base64 decode.
-    let element = match crate::blob_store::shared_path_for(image_url) {
-        Some(path) => img(path),
-        None => match decode_activity_image(image_url) {
-            Some(image) => img(image),
-            None => img(image_url.to_owned()),
-        },
+    let id = SharedString::from(format!("activity-image-{activity_id}-{image_index}"));
+    if let Some(image) = image {
+        return img(image)
+            .id(id)
+            .w(px(ACTIVITY_IMAGE_WIDTH))
+            .max_w(gpui::relative(1.0))
+            .max_h(px(ACTIVITY_IMAGE_HEIGHT))
+            .mt(px(8.0))
+            .rounded(px(4.0))
+            .object_fit(ObjectFit::Contain)
+            .into_any_element();
+    }
+    if waku_protocol::blob::is_reference(image_url)
+        || image_url.starts_with(waku_protocol::attachments::ATTACHMENT_SCHEME)
+    {
+        return div()
+            .id(id)
+            .w(px(ACTIVITY_IMAGE_WIDTH))
+            .max_w(gpui::relative(1.0))
+            .h(px(80.0))
+            .mt(px(8.0))
+            .rounded(px(4.0))
+            .bg(theme.inset)
+            .flex()
+            .items_center()
+            .justify_center()
+            .child(icon("icons/file-types/image.svg", 18.0, theme.text_ghost))
+            .into_any_element();
     };
-    element
-        .id(SharedString::from(format!(
-            "activity-image-{activity_id}-{image_index}"
-        )))
-        .w(px(ACTIVITY_IMAGE_WIDTH))
-        .max_w(gpui::relative(1.0))
-        .max_h(px(ACTIVITY_IMAGE_HEIGHT))
-        .mt(px(8.0))
-        .rounded(px(4.0))
-        .object_fit(ObjectFit::Contain)
-        .into_any_element()
+
+    match decode_activity_image(image_url) {
+        Some(image) => img(image),
+        None => img(image_url.to_owned()),
+    }
+    .id(id)
+    .w(px(ACTIVITY_IMAGE_WIDTH))
+    .max_w(gpui::relative(1.0))
+    .max_h(px(ACTIVITY_IMAGE_HEIGHT))
+    .mt(px(8.0))
+    .rounded(px(4.0))
+    .object_fit(ObjectFit::Contain)
+    .into_any_element()
 }
 
 fn decode_activity_image(image_url: &str) -> Option<std::sync::Arc<gpui::Image>> {

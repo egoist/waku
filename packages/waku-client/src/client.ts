@@ -1,0 +1,320 @@
+import {
+  PROTOCOL_VERSION,
+  type ClientMessage,
+  type Command,
+  type ReplayCursor,
+  type ResponsePayload,
+  type SequencedEvent,
+  type ServerMessage,
+} from "./generated";
+
+const NIL_UUID = "00000000-0000-0000-0000-000000000000";
+const OPEN = 1;
+
+export type EventListener = (event: SequencedEvent) => void;
+
+export interface WebSocketLike {
+  readonly readyState: number;
+  send(data: string): void;
+  close(code?: number, reason?: string): void;
+  addEventListener(type: "open", listener: () => void): void;
+  addEventListener(type: "message", listener: (event: MessageEvent) => void): void;
+  addEventListener(type: "error", listener: () => void): void;
+  addEventListener(type: "close", listener: (event: CloseEvent) => void): void;
+}
+
+export interface WakuClientOptions {
+  /** A daemon address (`127.0.0.1:34123`) or complete ws(s) URL. */
+  address: string;
+  token: string;
+  clientId?: string;
+  requestTimeoutMs?: number;
+  webSocketFactory?: (url: string) => WebSocketLike;
+  randomUUID?: () => string;
+}
+
+export class WakuRpcError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "WakuRpcError";
+  }
+}
+
+interface PendingRequest {
+  resolve: (payload: ResponsePayload) => void;
+  reject: (error: Error) => void;
+  timeout: ReturnType<typeof setTimeout>;
+}
+
+type ConnectionState = "disconnected" | "connecting" | "connected";
+
+/** Browser-safe client for Waku's versioned JSON-over-WebSocket protocol. */
+export class WakuClient {
+  readonly clientId: string;
+
+  private readonly address: string;
+  private readonly token: string;
+  private readonly requestTimeoutMs: number;
+  private readonly socketFactory: (url: string) => WebSocketLike;
+  private readonly randomUUID: () => string;
+  private socket?: WebSocketLike;
+  private state: ConnectionState = "disconnected";
+  private pending = new Map<string, PendingRequest>();
+  private subscriptions = new Map<string, Set<EventListener>>();
+  private sequences = new Map<string, number>();
+  private connectionGeneration = 0;
+  private rejectConnect?: (error: Error) => void;
+
+  constructor(options: WakuClientOptions) {
+    this.address = options.address;
+    this.token = options.token;
+    this.requestTimeoutMs = options.requestTimeoutMs ?? 120_000;
+    this.socketFactory =
+      options.webSocketFactory ??
+      ((url) => {
+        if (typeof WebSocket === "undefined") {
+          throw new Error("WebSocket is unavailable; provide webSocketFactory");
+        }
+        return new WebSocket(url);
+      });
+    this.randomUUID =
+      options.randomUUID ??
+      (() => {
+        if (typeof crypto === "undefined" || !crypto.randomUUID) {
+          throw new Error("crypto.randomUUID is unavailable; provide randomUUID");
+        }
+        return crypto.randomUUID();
+      });
+    this.clientId = options.clientId ?? this.randomUUID();
+  }
+
+  get connected(): boolean {
+    return this.state === "connected";
+  }
+
+  /** Connects, or reconnects while replaying events after the last seen sequence. */
+  connect(): Promise<void> {
+    if (this.state === "connected") return Promise.resolve();
+    if (this.state === "connecting") {
+      return Promise.reject(new Error("Waku client is already connecting"));
+    }
+
+    this.state = "connecting";
+    const generation = ++this.connectionGeneration;
+    let socket: WebSocketLike;
+    try {
+      socket = this.socketFactory(daemonUrl(this.address));
+    } catch (error) {
+      this.state = "disconnected";
+      return Promise.reject(asError(error));
+    }
+    this.socket = socket;
+
+    return new Promise((resolve, reject) => {
+      let handshakeSettled = false;
+      const failHandshake = (error: Error) => {
+        if (handshakeSettled) return;
+        handshakeSettled = true;
+        if (this.rejectConnect === failHandshake) this.rejectConnect = undefined;
+        this.state = "disconnected";
+        reject(error);
+      };
+      this.rejectConnect = failHandshake;
+
+      socket.addEventListener("open", () => {
+        if (generation !== this.connectionGeneration) return;
+        const hello: ClientMessage = {
+          type: "hello",
+          protocol_version: PROTOCOL_VERSION,
+          token: this.token,
+          client_id: this.clientId,
+          resume_from: this.replayCursors(),
+        };
+        socket.send(JSON.stringify(hello));
+      });
+      socket.addEventListener("message", (event) => {
+        if (generation !== this.connectionGeneration) return;
+        let message: ServerMessage;
+        try {
+          message = JSON.parse(String(event.data)) as ServerMessage;
+        } catch {
+          failHandshake(new Error("Waku daemon sent invalid JSON"));
+          return;
+        }
+
+        if (!handshakeSettled) {
+          if (message.type === "hello") {
+            if (message.protocol_version !== PROTOCOL_VERSION) {
+              failHandshake(
+                new Error(
+                  `daemon protocol ${message.protocol_version} does not match client protocol ${PROTOCOL_VERSION}`,
+                ),
+              );
+              socket.close(1002, "protocol version mismatch");
+              return;
+            }
+            handshakeSettled = true;
+            if (this.rejectConnect === failHandshake) this.rejectConnect = undefined;
+            this.state = "connected";
+            resolve();
+            return;
+          }
+          if (message.type === "rejected") {
+            failHandshake(new Error(`daemon rejected connection: ${message.message}`));
+            socket.close(1008, "authentication rejected");
+            return;
+          }
+          failHandshake(new Error("Waku daemon sent an invalid handshake response"));
+          socket.close(1002, "invalid handshake");
+          return;
+        }
+        this.handleMessage(message);
+      });
+      socket.addEventListener("error", () => {
+        failHandshake(new Error("Waku daemon connection failed"));
+      });
+      socket.addEventListener("close", () => {
+        if (generation !== this.connectionGeneration) return;
+        failHandshake(new Error("Waku daemon disconnected during handshake"));
+        this.markDisconnected(new Error("Waku daemon disconnected"));
+      });
+    });
+  }
+
+  request(
+    command: Command,
+    sessionId = NIL_UUID,
+    runtimeId = NIL_UUID,
+  ): Promise<ResponsePayload> {
+    const socket = this.requireSocket();
+    const requestId = this.randomUUID();
+    const message: ClientMessage = {
+      type: "request",
+      request_id: requestId,
+      session_id: sessionId,
+      runtime_id: runtimeId,
+      command,
+    };
+
+    return new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        this.pending.delete(requestId);
+        reject(new Error("timed out waiting for Waku daemon"));
+      }, this.requestTimeoutMs);
+      this.pending.set(requestId, { resolve, reject, timeout });
+      try {
+        socket.send(JSON.stringify(message));
+      } catch (error) {
+        clearTimeout(timeout);
+        this.pending.delete(requestId);
+        reject(asError(error));
+      }
+    });
+  }
+
+  notify(command: Command, sessionId = NIL_UUID, runtimeId = NIL_UUID): void {
+    const message: ClientMessage = {
+      type: "request",
+      request_id: this.randomUUID(),
+      session_id: sessionId,
+      runtime_id: runtimeId,
+      command,
+    };
+    this.requireSocket().send(JSON.stringify(message));
+  }
+
+  subscribe(sessionId: string, runtimeId: string, listener: EventListener): () => void {
+    const key = subscriptionKey(sessionId, runtimeId);
+    let listeners = this.subscriptions.get(key);
+    if (!listeners) {
+      listeners = new Set();
+      this.subscriptions.set(key, listeners);
+    }
+    listeners.add(listener);
+    return () => {
+      listeners?.delete(listener);
+      if (listeners?.size === 0) this.subscriptions.delete(key);
+    };
+  }
+
+  replayCursors(): ReplayCursor[] {
+    return [...this.sequences].map(([key, sequence]) => {
+      const [sessionId, runtimeId] = key.split(":", 2) as [string, string];
+      return { sessionId, runtimeId, sequence };
+    });
+  }
+
+  /** Closes only this client connection; it never stops a remotely managed daemon. */
+  disconnect(): void {
+    this.rejectConnect?.(new Error("Waku client disconnected"));
+    ++this.connectionGeneration;
+    const socket = this.socket;
+    this.socket = undefined;
+    this.markDisconnected(new Error("Waku client disconnected"));
+    socket?.close(1000, "client disconnected");
+  }
+
+  /** Explicitly requests daemon shutdown, then closes this connection. */
+  shutdownDaemon(): void {
+    const socket = this.requireSocket();
+    socket.send(JSON.stringify({ type: "shutdown" } satisfies ClientMessage));
+    this.disconnect();
+  }
+
+  private requireSocket(): WebSocketLike {
+    if (this.state !== "connected" || !this.socket || this.socket.readyState !== OPEN) {
+      throw new Error("Waku daemon is disconnected");
+    }
+    return this.socket;
+  }
+
+  private handleMessage(message: ServerMessage): void {
+    if (message.type === "response") {
+      const pending = this.pending.get(message.request_id);
+      if (!pending) return;
+      this.pending.delete(message.request_id);
+      clearTimeout(pending.timeout);
+      if (message.outcome.status === "ok") pending.resolve(message.outcome.payload);
+      else pending.reject(new WakuRpcError(message.outcome.error.message));
+      return;
+    }
+    if (message.type === "event") {
+      const key = subscriptionKey(message.sessionId, message.runtimeId);
+      const previous = this.sequences.get(key) ?? 0;
+      if (message.sequence <= previous) return;
+      this.sequences.set(key, message.sequence);
+      for (const listener of this.subscriptions.get(key) ?? []) listener(message);
+      return;
+    }
+    if (message.type === "shuttingDown") {
+      this.socket?.close(1000, "daemon shutting down");
+    }
+  }
+
+  private markDisconnected(error: Error): void {
+    this.state = "disconnected";
+    this.socket = undefined;
+    for (const pending of this.pending.values()) {
+      clearTimeout(pending.timeout);
+      pending.reject(error);
+    }
+    this.pending.clear();
+  }
+}
+
+export function daemonUrl(address: string): string {
+  const normalized = /^(?:ws|wss):\/\//.test(address) ? address : `ws://${address}`;
+  const url = new URL(normalized);
+  url.pathname = "/v1";
+  url.search = "";
+  url.hash = "";
+  return url.toString();
+}
+
+function subscriptionKey(sessionId: string, runtimeId: string): string {
+  return `${sessionId}:${runtimeId}`;
+}
+
+function asError(error: unknown): Error {
+  return error instanceof Error ? error : new Error(String(error));
+}

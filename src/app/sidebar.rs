@@ -990,7 +990,12 @@ impl Waku {
         else {
             return div().into_any_element();
         };
-        let selected = self.state.selected_session == Some(session_id);
+        let selected = sidebar_session_selected(
+            self.state.selected_session,
+            self.pending_session_activation
+                .map(|pending| pending.session_id),
+            session_id,
+        );
         let working = matches!(
             session.status,
             SessionStatus::Connecting | SessionStatus::Working
@@ -1552,6 +1557,16 @@ fn localized_session_title(session: &AgentSession) -> String {
     }
 }
 
+fn sidebar_session_selected(
+    selected_session: Option<Uuid>,
+    pending_session: Option<Uuid>,
+    session_id: Uuid,
+) -> bool {
+    pending_session.map_or(selected_session == Some(session_id), |pending| {
+        pending == session_id
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1629,5 +1644,23 @@ mod tests {
         let mut sessions = [&renamed_old_session, &newer_unanswered_session];
         sessions.sort_by_key(|session| std::cmp::Reverse(sidebar_session_timestamp(session)));
         assert_eq!(sessions[0].id, newer_unanswered_session.id);
+    }
+
+    #[test]
+    fn pending_session_replaces_sidebar_selection_immediately() {
+        let current = Uuid::from_u128(1);
+        let pending = Uuid::from_u128(2);
+
+        assert!(!sidebar_session_selected(
+            Some(current),
+            Some(pending),
+            current
+        ));
+        assert!(sidebar_session_selected(
+            Some(current),
+            Some(pending),
+            pending
+        ));
+        assert!(sidebar_session_selected(Some(current), None, current));
     }
 }

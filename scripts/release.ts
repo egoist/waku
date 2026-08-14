@@ -17,6 +17,7 @@ import { extractReleaseNotes } from "./changelog";
 const appName = "Waku";
 const executableName = "Waku";
 const jsReplExecutableName = "waku_js_repl";
+const daemonExecutableName = "waku-daemon";
 const computerUseHelperName = "Waku Computer Use";
 const packageName = "waku";
 const defaultNotaryProfile = "NOTARY";
@@ -45,7 +46,8 @@ Options:
                                 default derives a monotonic number from the
                                 Cargo version)
   --volume-name <name>          Mounted DMG name (default: Waku)
-  --skip-build                  Reuse target/release/waku and waku_js_repl
+  --skip-build                  Reuse target/release/waku, waku_js_repl, and
+                                waku-daemon
   --skip-notarize               Unnotarized signed DMG (implies --local)
   --adhoc                       Ad-hoc sign, no notarization (implies --local)
   --help                        Show this help
@@ -272,12 +274,18 @@ const releaseJsReplExecutable = join(
   releaseDirectory,
   jsReplExecutableName,
 );
+const releaseDaemonExecutable = join(releaseDirectory, daemonExecutableName);
 const appBundle = join(releaseDirectory, `${appName}.app`);
 const contentsDirectory = join(appBundle, "Contents");
 const bundledJsReplExecutable = join(
   contentsDirectory,
   "Resources",
   jsReplExecutableName,
+);
+const bundledDaemonExecutable = join(
+  contentsDirectory,
+  "MacOS",
+  daemonExecutableName,
 );
 const bundledComputerUseSkill = join(
   contentsDirectory,
@@ -382,7 +390,11 @@ const identity = adhoc ? "-" : configuredSigningIdentity!;
 
 try {
   if (values["skip-build"]) {
-    for (const executable of [releaseExecutable, releaseJsReplExecutable]) {
+    for (const executable of [
+      releaseExecutable,
+      releaseJsReplExecutable,
+      releaseDaemonExecutable,
+    ]) {
       try {
         await access(executable);
       } catch {
@@ -402,6 +414,7 @@ try {
   await $`env WAKU_CODESIGN_IDENTITY=${identity} WAKU_ANALYTICS_ENDPOINT=${analyticsEndpoint ?? ""} WAKU_ANALYTICS_WEBSITE_ID=${analyticsWebsiteId ?? ""} WAKU_SKIP_CARGO_BUILD=${values["skip-build"] ? "1" : "0"} ${join(projectRoot, "scripts", "bundle.sh")} release`;
   for (const artifact of [
     join(contentsDirectory, "MacOS", executableName),
+    bundledDaemonExecutable,
     bundledJsReplExecutable,
     bundledComputerUseSkill,
     bundledPiComputerUseExtension,
@@ -415,6 +428,7 @@ try {
   await $`xattr -cr ${appBundle}`;
 
   await $`codesign --verify --strict --verbose=2 ${bundledJsReplExecutable}`;
+  await $`codesign --verify --strict --verbose=2 ${bundledDaemonExecutable}`;
   await $`codesign --verify --deep --strict --verbose=2 ${bundledComputerUseHelper}`;
   await verifyJavaScriptRepl(bundledJsReplExecutable);
   logStep(
@@ -465,6 +479,11 @@ try {
     "Resources",
     jsReplExecutableName,
   );
+  const mountedDaemon = join(
+    mountedContents,
+    "MacOS",
+    daemonExecutableName,
+  );
   const mountedComputerUseHelper = join(
     mountedContents,
     "Helpers",
@@ -477,6 +496,7 @@ try {
   );
   for (const artifact of [
     join(mountedContents, "MacOS", executableName),
+    mountedDaemon,
     mountedJsRepl,
     join(
       mountedContents,
@@ -506,6 +526,7 @@ try {
     );
   }
   await $`codesign --verify --strict --verbose=2 ${mountedJsRepl}`;
+  await $`codesign --verify --strict --verbose=2 ${mountedDaemon}`;
   await $`codesign --verify --deep --strict --verbose=2 ${mountedComputerUseHelper}`;
   await $`codesign --verify --strict --verbose=2 ${mountedSparkleFramework}`;
   await $`codesign --verify --deep --strict --verbose=2 ${mountedApp}`;

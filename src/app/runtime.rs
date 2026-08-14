@@ -1,9 +1,39 @@
 use super::*;
 
+fn workspace_ack(
+    workspace: &waku_client::WorkspaceClient,
+    operation: waku_client::WorkspaceOperation,
+) -> anyhow::Result<()> {
+    match workspace.request(operation)? {
+        waku_client::WorkspaceResult::Ack => Ok(()),
+        _ => anyhow::bail!("the daemon returned an invalid workspace response"),
+    }
+}
+
+fn workspace_has_ref(
+    workspace: &waku_client::WorkspaceClient,
+    cwd: &Path,
+    git_ref: &str,
+) -> anyhow::Result<bool> {
+    match workspace.request(waku_client::WorkspaceOperation::HasRef {
+        cwd: cwd.to_path_buf(),
+        git_ref: git_ref.to_owned(),
+    })? {
+        waku_client::WorkspaceResult::Bool { value } => Ok(value),
+        _ => anyhow::bail!("the daemon returned an invalid checkpoint response"),
+    }
+}
+
 fn start_driver(mut request: DriverStartRequest, cwd: PathBuf) -> anyhow::Result<PreparedDriver> {
     request.options.cwd = cwd;
     let (event_tx, events) = driver::event_channel(request.event_wake);
-    let handle = driver::start(request.provider, request.options, event_tx)?;
+    let handle = driver::start_remote(
+        request.daemon_client,
+        request.session_id,
+        request.provider,
+        request.options,
+        event_tx,
+    )?;
     Ok(PreparedDriver { handle, events })
 }
 
@@ -11,6 +41,7 @@ fn start_driver(mut request: DriverStartRequest, cwd: PathBuf) -> anyhow::Result
 /// starting its provider. This function is called only from the background
 /// executor; the UI thread owns applying the returned workspace afterward.
 fn prepare_submission(
+    workspace_client: waku_client::WorkspaceClient,
     project: Project,
     workspace: SessionWorkspace,
     driver_start: Option<anyhow::Result<DriverStartRequest>>,
@@ -23,13 +54,17 @@ fn prepare_submission(
             if project.is_projectless() {
                 anyhow::bail!("a projectless task cannot create a Git worktree");
             }
-            let created = crate::worktree::create(
-                &project.path,
-                project.id,
-                session_id,
-                prompt,
-                base_branch.as_deref(),
-            )?;
+            let created =
+                match workspace_client.request(waku_client::WorkspaceOperation::CreateWorktree {
+                    project_path: project.path.clone(),
+                    project_id: project.id,
+                    session_id,
+                    prompt: prompt.to_owned(),
+                    base_branch,
+                })? {
+                    waku_client::WorkspaceResult::WorktreeCreated { worktree } => worktree,
+                    _ => anyhow::bail!("the daemon returned an invalid worktree response"),
+                };
             SessionWorkspace::Worktree {
                 path: created.path,
                 branch: created.branch,
@@ -42,9 +77,16 @@ fn prepare_submission(
     // Every turn gets its own immutable starting snapshot. Reusing the prior
     // response's ending ref would attribute branch switches or terminal edits
     // made between turns to the next response.
-    let checkpoint_warning = checkpoint::capture_turn_start(project_path, session_id, turn_count)
-        .err()
-        .map(|error| tr!("errors.capture_pre_turn_checkpoint", error = error));
+    let checkpoint_warning = workspace_ack(
+        &workspace_client,
+        waku_client::WorkspaceOperation::CaptureTurnStart {
+            cwd: project_path.to_path_buf(),
+            session_id,
+            turn_count,
+        },
+    )
+    .err()
+    .map(|error| tr!("errors.capture_pre_turn_checkpoint", error = error));
 
     // Process startup can synchronously resolve executables, bind sockets,
     // and spawn children. It belongs behind the same animated preparation
@@ -67,6 +109,7 @@ fn prepare_submission(
 /// startup, and native transcript reads all happen in
 /// [`perform_message_rewind`] on the background executor.
 struct MessageRewindRequest {
+    workspace_client: waku_client::WorkspaceClient,
     session_id: Uuid,
     provider: ProviderKind,
     provider_cursor: Option<ProviderResumeCursor>,
@@ -88,7 +131,7 @@ struct MessageRewindRequest {
 
 struct PreparedMessageRewind {
     provider_rewind_cursor: Option<ProviderResumeCursor>,
-    claude_fork: Option<(crate::claude_session::ForkedClaudeSession, String)>,
+    claude_fork: Option<waku_client::provider_session::ProviderSessionFork>,
     prepared_driver: Option<PreparedDriver>,
     reset_native_session: bool,
     cleanup_error: Option<String>,
@@ -101,23 +144,59 @@ fn perform_message_rewind(
     let turn_start_ref =
         checkpoint::turn_start_ref(session_id, request.retained_turn_count.saturating_add(1));
     let retained_ref = checkpoint::checkpoint_ref(session_id, request.retained_turn_count);
-    let restore_ref = if checkpoint::has_ref(&request.project_path, &turn_start_ref) {
+    let restore_ref = if workspace_has_ref(
+        &request.workspace_client,
+        &request.project_path,
+        &turn_start_ref,
+    )
+    .map_err(|error| error.to_string())?
+    {
         turn_start_ref
     } else {
         retained_ref
     };
-    if !checkpoint::has_ref(&request.project_path, &restore_ref) {
+    if !workspace_has_ref(
+        &request.workspace_client,
+        &request.project_path,
+        &restore_ref,
+    )
+    .map_err(|error| error.to_string())?
+    {
         return Err(tr!("session.pre_turn_checkpoint_missing"));
     }
 
     let safety_ref = format!("refs/waku/revert-backup-{session_id}-{}", Uuid::new_v4());
-    checkpoint::capture_ref(&request.project_path, &safety_ref)
-        .map_err(|error| tr!("errors.create_rewind_snapshot", error = error))?;
-    if let Err(error) = checkpoint::restore_ref(&request.project_path, &restore_ref) {
+    workspace_ack(
+        &request.workspace_client,
+        waku_client::WorkspaceOperation::CaptureRef {
+            cwd: request.project_path.clone(),
+            git_ref: safety_ref.clone(),
+        },
+    )
+    .map_err(|error| tr!("errors.create_rewind_snapshot", error = error))?;
+    if let Err(error) = workspace_ack(
+        &request.workspace_client,
+        waku_client::WorkspaceOperation::RestoreRef {
+            cwd: request.project_path.clone(),
+            git_ref: restore_ref.clone(),
+        },
+    ) {
         return Err(
-            match checkpoint::restore_ref(&request.project_path, &safety_ref) {
+            match workspace_ack(
+                &request.workspace_client,
+                waku_client::WorkspaceOperation::RestoreRef {
+                    cwd: request.project_path.clone(),
+                    git_ref: safety_ref.clone(),
+                },
+            ) {
                 Ok(()) => {
-                    let _ = checkpoint::delete_ref(&request.project_path, &safety_ref);
+                    let _ = workspace_ack(
+                        &request.workspace_client,
+                        waku_client::WorkspaceOperation::DeleteRef {
+                            cwd: request.project_path.clone(),
+                            git_ref: safety_ref.clone(),
+                        },
+                    );
                     tr!("errors.restore_checkpoint", error = error)
                 }
                 Err(restore_error) => tr!(
@@ -135,9 +214,21 @@ fn perform_message_rewind(
         Ok(rewind) => rewind,
         Err(error) => {
             return Err(
-                match checkpoint::restore_ref(&request.project_path, &safety_ref) {
+                match workspace_ack(
+                    &request.workspace_client,
+                    waku_client::WorkspaceOperation::RestoreRef {
+                        cwd: request.project_path.clone(),
+                        git_ref: safety_ref.clone(),
+                    },
+                ) {
                     Ok(()) => {
-                        let _ = checkpoint::delete_ref(&request.project_path, &safety_ref);
+                        let _ = workspace_ack(
+                            &request.workspace_client,
+                            waku_client::WorkspaceOperation::DeleteRef {
+                                cwd: request.project_path.clone(),
+                                git_ref: safety_ref.clone(),
+                            },
+                        );
                         tr!("errors.rollback_rejected_workspace_restored", error = error)
                     }
                     Err(restore_error) => tr!(
@@ -151,12 +242,21 @@ fn perform_message_rewind(
         }
     };
 
-    let _ = checkpoint::delete_ref(&request.project_path, &safety_ref);
-    let cleanup_error = checkpoint::delete_turn_refs_after(
-        &request.project_path,
-        session_id,
-        request.retained_turn_count,
-        request.previous_turn_count,
+    let _ = workspace_ack(
+        &request.workspace_client,
+        waku_client::WorkspaceOperation::DeleteRef {
+            cwd: request.project_path.clone(),
+            git_ref: safety_ref,
+        },
+    );
+    let cleanup_error = workspace_ack(
+        &request.workspace_client,
+        waku_client::WorkspaceOperation::DeleteTurnRefsAfter {
+            cwd: request.project_path.clone(),
+            session_id,
+            retained_turn_count: request.retained_turn_count,
+            previous_turn_count: request.previous_turn_count,
+        },
     )
     .err()
     .map(|error| error.to_string());
@@ -177,7 +277,7 @@ fn perform_message_rewind(
 
 type ProviderRewindResult = (
     Option<ProviderResumeCursor>,
-    Option<(crate::claude_session::ForkedClaudeSession, String)>,
+    Option<waku_client::provider_session::ProviderSessionFork>,
     Option<PreparedDriver>,
 );
 
@@ -207,25 +307,18 @@ fn perform_provider_rewind(
                     provider = "Claude"
                 ));
             };
-            let resume_at = request
-                .provider_resume_at
-                .clone()
-                .map(Ok)
-                .unwrap_or_else(|| {
-                    crate::claude_session::message_id_for_turn(
-                        native_session_id,
-                        request.provider_turn_count,
-                    )
-                })?;
-            let fork = crate::claude_session::fork_session_at(
-                native_session_id,
-                &resume_at,
-                &tr!(
-                    "session.rewind_title",
-                    title = request.session_title.as_str()
-                ),
+            let fork = request.workspace_client.fork_provider_session(
+                waku_client::provider_session::ProviderSessionForkRequest::Claude {
+                    session_id: native_session_id.clone(),
+                    resume_at: request.provider_resume_at.clone(),
+                    turn_count: request.provider_turn_count,
+                    title: tr!(
+                        "session.rewind_title",
+                        title = request.session_title.as_str()
+                    ),
+                },
             )?;
-            Ok((None, Some((fork, resume_at)), None))
+            Ok((None, Some(fork), None))
         }
         ProviderKind::OpenCode => {
             let cursor = if let Some(driver) = request.driver.as_ref() {
@@ -245,12 +338,17 @@ fn perform_provider_rewind(
                 let binary = request.binary.as_deref().ok_or_else(|| {
                     anyhow::anyhow!(tr!("errors.provider_not_found", provider = "OpenCode"))
                 })?;
-                crate::opencode_session::fork_session_at_turn(
-                    binary,
-                    &request.project_path,
-                    native_session_id,
-                    request.provider_turn_count,
-                )?
+                request
+                    .workspace_client
+                    .fork_provider_session(
+                        waku_client::provider_session::ProviderSessionForkRequest::OpenCode {
+                            binary: binary.to_owned(),
+                            cwd: request.project_path.clone(),
+                            session_id: native_session_id.clone(),
+                            turn_count: request.provider_turn_count,
+                        },
+                    )?
+                    .cursor
             };
             Ok((Some(cursor), None, None))
         }
@@ -268,13 +366,18 @@ fn perform_provider_rewind(
             let binary = request.binary.as_deref().ok_or_else(|| {
                 anyhow::anyhow!(tr!("errors.provider_not_found", provider = "Amp"))
             })?;
-            let cursor = crate::amp_session::fork_session_at_turn(
-                binary,
-                &request.project_path,
-                native_thread_id,
-                fork_context.as_deref(),
-                request.provider_turn_count,
-            )?;
+            let cursor = request
+                .workspace_client
+                .fork_provider_session(
+                    waku_client::provider_session::ProviderSessionForkRequest::Amp {
+                        binary: binary.to_owned(),
+                        cwd: request.project_path.clone(),
+                        thread_id: native_thread_id.clone(),
+                        fork_context: fork_context.clone(),
+                        turn_count: request.provider_turn_count,
+                    },
+                )?
+                .cursor;
             Ok((Some(cursor), None, None))
         }
         ProviderKind::Cursor => {
@@ -285,10 +388,17 @@ fn perform_provider_rewind(
                 ))
             })?;
             Ok((
-                Some(crate::cursor_session::fork_session_at_turn(
-                    source,
-                    request.retained_turn_count,
-                )?),
+                Some(
+                    request
+                        .workspace_client
+                        .fork_provider_session(
+                            waku_client::provider_session::ProviderSessionForkRequest::Cursor {
+                                source: source.clone(),
+                                turn_count: request.retained_turn_count,
+                            },
+                        )?
+                        .cursor,
+                ),
                 None,
                 None,
             ))
@@ -306,12 +416,17 @@ fn perform_provider_rewind(
             let binary = request.binary.as_deref().ok_or_else(|| {
                 anyhow::anyhow!(tr!("errors.provider_not_found", provider = "Grok Build"))
             })?;
-            let cursor = crate::grok_session::fork_session_at_turn(
-                binary,
-                &request.project_path,
-                native_session_id,
-                request.provider_turn_count,
-            )?;
+            let cursor = request
+                .workspace_client
+                .fork_provider_session(
+                    waku_client::provider_session::ProviderSessionForkRequest::Grok {
+                        binary: binary.to_owned(),
+                        cwd: request.project_path.clone(),
+                        session_id: native_session_id.clone(),
+                        turn_count: request.provider_turn_count,
+                    },
+                )?
+                .cursor;
             Ok((Some(cursor), None, None))
         }
         ProviderKind::Codex | ProviderKind::DeepSeek | ProviderKind::Pi => {
@@ -344,6 +459,7 @@ fn perform_provider_rewind(
 /// native transcript I/O, and Git ref copying are all performed by
 /// [`perform_response_fork`] on the background executor.
 struct ResponseForkRequest {
+    workspace_client: waku_client::WorkspaceClient,
     source: AgentSession,
     source_workspace_path: PathBuf,
     fork_title: String,
@@ -443,31 +559,16 @@ fn perform_response_fork(mut request: ResponseForkRequest) -> Result<PreparedRes
                     .source
                     .turns
                     .get(request.turn_count.saturating_sub(1))
-                    .and_then(|turn| turn.provider_resume_at.clone())
-                    .map(Ok)
-                    .unwrap_or_else(|| {
-                        crate::claude_session::message_id_for_turn(
-                            native_session_id,
-                            request.provider_turn_count,
-                        )
-                    })?;
-                let fork = crate::claude_session::fork_session_at(
-                    native_session_id,
-                    &resume_at,
-                    &request.fork_title,
-                )?;
-                let fork_resume_at =
-                    fork.message_ids.get(&resume_at).cloned().ok_or_else(|| {
-                        anyhow::anyhow!(tr!("errors.claude_fork_checkpoint_missing"))
-                    })?;
-                Ok((
-                    ProviderResumeCursor::Claude {
-                        session_id: fork.session_id,
-                        resume_at: Some(fork_resume_at),
+                    .and_then(|turn| turn.provider_resume_at.clone());
+                let fork = request.workspace_client.fork_provider_session(
+                    waku_client::provider_session::ProviderSessionForkRequest::Claude {
+                        session_id: native_session_id.clone(),
+                        resume_at,
+                        turn_count: request.provider_turn_count,
+                        title: request.fork_title.clone(),
                     },
-                    Some(fork.message_ids),
-                    None,
-                ))
+                )?;
+                Ok((fork.cursor, Some(fork.message_ids), None))
             }
             ProviderKind::Codex => {
                 if !matches!(
@@ -496,7 +597,15 @@ fn perform_response_fork(mut request: ResponseForkRequest) -> Result<PreparedRes
                 Ok((cursor, None, prepared_driver))
             }
             ProviderKind::Cursor => Ok((
-                crate::cursor_session::fork_session_at_turn(&request.source, request.turn_count)?,
+                request
+                    .workspace_client
+                    .fork_provider_session(
+                        waku_client::provider_session::ProviderSessionForkRequest::Cursor {
+                            source: request.source.clone(),
+                            turn_count: request.turn_count,
+                        },
+                    )?
+                    .cursor,
                 None,
                 None,
             )),
@@ -515,13 +624,18 @@ fn perform_response_fork(mut request: ResponseForkRequest) -> Result<PreparedRes
                     anyhow::anyhow!(tr!("errors.provider_not_installed", provider = "Amp"))
                 })?;
                 Ok((
-                    crate::amp_session::fork_session_at_turn(
-                        binary,
-                        &request.source_workspace_path,
-                        native_thread_id,
-                        fork_context.as_deref(),
-                        request.provider_turn_count,
-                    )?,
+                    request
+                        .workspace_client
+                        .fork_provider_session(
+                            waku_client::provider_session::ProviderSessionForkRequest::Amp {
+                                binary: binary.to_owned(),
+                                cwd: request.source_workspace_path.clone(),
+                                thread_id: native_thread_id.clone(),
+                                fork_context: fork_context.clone(),
+                                turn_count: request.provider_turn_count,
+                            },
+                        )?
+                        .cursor,
                     None,
                     None,
                 ))
@@ -540,12 +654,17 @@ fn perform_response_fork(mut request: ResponseForkRequest) -> Result<PreparedRes
                     anyhow::anyhow!(tr!("errors.provider_not_installed", provider = "OpenCode"))
                 })?;
                 Ok((
-                    crate::opencode_session::fork_session_at_turn(
-                        binary,
-                        &request.source_workspace_path,
-                        native_session_id,
-                        request.provider_turn_count,
-                    )?,
+                    request
+                        .workspace_client
+                        .fork_provider_session(
+                            waku_client::provider_session::ProviderSessionForkRequest::OpenCode {
+                                binary: binary.to_owned(),
+                                cwd: request.source_workspace_path.clone(),
+                                session_id: native_session_id.clone(),
+                                turn_count: request.provider_turn_count,
+                            },
+                        )?
+                        .cursor,
                     None,
                     None,
                 ))
@@ -567,12 +686,17 @@ fn perform_response_fork(mut request: ResponseForkRequest) -> Result<PreparedRes
                     ))
                 })?;
                 Ok((
-                    crate::grok_session::fork_session_at_turn(
-                        binary,
-                        &request.source_workspace_path,
-                        native_session_id,
-                        request.provider_turn_count,
-                    )?,
+                    request
+                        .workspace_client
+                        .fork_provider_session(
+                            waku_client::provider_session::ProviderSessionForkRequest::Grok {
+                                binary: binary.to_owned(),
+                                cwd: request.source_workspace_path.clone(),
+                                session_id: native_session_id.clone(),
+                                turn_count: request.provider_turn_count,
+                            },
+                        )?
+                        .cursor,
                     None,
                     None,
                 ))
@@ -618,11 +742,14 @@ fn perform_response_fork(mut request: ResponseForkRequest) -> Result<PreparedRes
             checkpoint.git_ref = checkpoint::checkpoint_ref(fork_id, checkpoint.turn_count);
         }
     }
-    let checkpoint_warning = checkpoint::copy_session_refs(
-        &request.source_workspace_path,
-        request.source.id,
-        fork_id,
-        request.turn_count,
+    let checkpoint_warning = workspace_ack(
+        &request.workspace_client,
+        waku_client::WorkspaceOperation::CopySessionRefs {
+            cwd: request.source_workspace_path.clone(),
+            source_session_id: request.source.id,
+            target_session_id: fork_id,
+            through_turn_count: request.turn_count,
+        },
     )
     .err()
     .map(|error| error.to_string());
@@ -751,20 +878,25 @@ impl Waku {
         self.provider_model_discoveries_pending.insert(provider);
         let provider_probe_tx = self.provider_probe_tx.clone();
         let event_wake = self.event_wake_tx.clone();
+        let daemon = self.daemon.client();
+        let binary_override = self.state.provider_binary_overrides.get(&provider).cloned();
         if std::thread::Builder::new()
             .name(format!("waku-{}-model-discovery", provider.id()))
             .spawn(move || {
-                // Stale-while-revalidate: the catalog cached by the last
-                // successful discovery renders right away, and the CLI's
-                // answer replaces it (and the cache) whenever it lands.
-                if let Some(models) = crate::model_catalog::cached_models(provider) {
-                    let mut cached = probe.clone();
-                    cached.models = models;
-                    if provider_probe_tx.send(cached).is_ok() {
-                        signal_event_pump(&event_wake);
-                    }
-                }
-                if provider_probe_tx.send(probe.discover_models()).is_ok() {
+                let discovered = match daemon.request(
+                    Uuid::nil(),
+                    Uuid::nil(),
+                    waku_client::Command::ProbeProvider {
+                        provider,
+                        binary_override,
+                        discover_models: true,
+                        probe_version: false,
+                    },
+                ) {
+                    Ok(waku_client::ResponsePayload::ProviderProbe { probe, .. }) => probe,
+                    _ => probe,
+                };
+                if provider_probe_tx.send(discovered).is_ok() {
                     signal_event_pump(&event_wake);
                 }
             })
@@ -783,18 +915,32 @@ impl Waku {
             .probes
             .iter()
             .filter(|probe| probe.installed)
-            .filter_map(|probe| probe.path.clone().map(|path| (probe.provider, path)))
+            .map(|probe| probe.provider)
             .collect::<Vec<_>>();
-        for (provider, path) in targets {
+        for provider in targets {
             if !self.provider_version_probes_pending.insert(provider) {
                 continue;
             }
             let provider_version_tx = self.provider_version_tx.clone();
             let event_wake = self.event_wake_tx.clone();
+            let daemon = self.daemon.client();
+            let binary_override = self.state.provider_binary_overrides.get(&provider).cloned();
             if std::thread::Builder::new()
                 .name(format!("waku-{}-version-probe", provider.id()))
                 .spawn(move || {
-                    let version = probe_provider_version(&path);
+                    let version = match daemon.request(
+                        Uuid::nil(),
+                        Uuid::nil(),
+                        waku_client::Command::ProbeProvider {
+                            provider,
+                            binary_override,
+                            discover_models: false,
+                            probe_version: true,
+                        },
+                    ) {
+                        Ok(waku_client::ResponsePayload::ProviderProbe { version, .. }) => version,
+                        _ => None,
+                    };
                     if provider_version_tx.send((provider, version)).is_ok() {
                         signal_event_pump(&event_wake);
                     }
@@ -833,21 +979,29 @@ impl Waku {
         let provider_detection_tx = self.provider_detection_tx.clone();
         let event_wake = self.event_wake_tx.clone();
         let detect_providers = providers.clone();
+        let daemon = self.daemon.client();
         if std::thread::Builder::new()
             .name("waku-provider-detection".into())
             .spawn(move || {
-                // Finder/Dock launches do not inherit the environment
-                // assembled by the user's interactive shell. Resolve it here,
-                // away from the UI thread, before looking for nvm/fnm-managed
-                // CLIs and launching provider probes.
-                crate::command_env::refresh_from_default_shell();
                 for provider in detect_providers {
-                    let path = match overrides.get(&provider) {
-                        Some(binary) => crate::command_env::resolve_binary_override(binary),
-                        None => crate::command_env::find_executable(provider.command()),
+                    let response = daemon.request(
+                        Uuid::nil(),
+                        Uuid::nil(),
+                        waku_client::Command::ProbeProvider {
+                            provider,
+                            binary_override: overrides.get(&provider).cloned(),
+                            discover_models: false,
+                            probe_version: false,
+                        },
+                    );
+                    let (installed, path) = match response {
+                        Ok(waku_client::ResponsePayload::ProviderProbe { probe, .. }) => {
+                            (probe.installed, probe.path)
+                        }
+                        _ => (false, None),
                     };
                     if provider_detection_tx
-                        .send((provider, path.is_some(), path))
+                        .send((provider, installed, path))
                         .is_ok()
                     {
                         signal_event_pump(&event_wake);
@@ -956,7 +1110,17 @@ impl Waku {
 
     pub(super) fn save(&mut self) {
         self.last_stream_save = Instant::now();
-        if let Err(error) = self.store.save(&mut self.state) {
+        let daemon_error = self
+            .daemon
+            .update_settings(self.state.daemon_settings())
+            .err()
+            .map(|error| error.to_string());
+        let app_error = self
+            .store
+            .save(&mut self.state)
+            .err()
+            .map(|error| error.to_string());
+        if let Some(error) = daemon_error.or(app_error) {
             self.show_toast(tr!("errors.save_local_state", error = error));
         } else {
             self.stream_state_dirty = false;
@@ -1049,16 +1213,30 @@ impl Waku {
             {
                 continue;
             }
+            let workspace = waku_client::WorkspaceClient::new(self.daemon.client());
             cx.spawn(async move |waku, cx| {
-                let captured =
-                    cx.background_executor()
-                        .spawn({
-                            let project_path = project_path.clone();
-                            async move {
-                                checkpoint::capture_turn(&project_path, session_id, turn_count)
+                let captured = cx
+                    .background_executor()
+                    .spawn({
+                        let project_path = project_path.clone();
+                        async move {
+                            match workspace.request(
+                                waku_client::WorkspaceOperation::CaptureTurn {
+                                    cwd: project_path,
+                                    session_id,
+                                    turn_count,
+                                },
+                            )? {
+                                waku_client::WorkspaceResult::Checkpoint { checkpoint } => {
+                                    Ok(checkpoint)
+                                }
+                                _ => anyhow::bail!(
+                                    "the daemon returned an invalid checkpoint response"
+                                ),
                             }
-                        })
-                        .await;
+                        }
+                    })
+                    .await;
                 waku.update(cx, |waku, cx| {
                     waku.checkpoint_captures_in_flight
                         .remove(&(session_id, turn_count));
@@ -1234,6 +1412,7 @@ impl Waku {
             None
         };
         let request = ResponseForkRequest {
+            workspace_client: waku_client::WorkspaceClient::new(self.daemon.client()),
             source,
             source_workspace_path,
             fork_title,
@@ -1626,6 +1805,7 @@ impl Waku {
             return;
         };
         let request = MessageRewindRequest {
+            workspace_client: waku_client::WorkspaceClient::new(self.daemon.client()),
             session_id,
             provider,
             provider_cursor,
@@ -1774,7 +1954,7 @@ impl Waku {
             Vec::new()
         };
         if let Some(session) = self.state.session_mut(session_id) {
-            if let Some((fork, source_resume_at)) = &claude_fork {
+            if let Some(fork) = &claude_fork {
                 for turn in session.turns.iter_mut().take(retained_turn_count) {
                     if let Some(remapped) = turn
                         .provider_resume_at
@@ -1785,15 +1965,7 @@ impl Waku {
                         turn.provider_resume_at = Some(remapped);
                     }
                 }
-                let remapped_resume_at = fork
-                    .message_ids
-                    .get(source_resume_at)
-                    .cloned()
-                    .expect("the Claude fork includes its target message");
-                session.provider_cursor = Some(ProviderResumeCursor::Claude {
-                    session_id: fork.session_id.clone(),
-                    resume_at: Some(remapped_resume_at),
-                });
+                session.provider_cursor = Some(fork.cursor.clone());
             } else if reset_native_session {
                 session.provider_cursor = None;
             } else if let Some(cursor) = provider_rewind_cursor.clone() {
@@ -2008,6 +2180,7 @@ impl Waku {
             service_tier,
         } = self.session_options(&session);
         Ok(DriverStartRequest {
+            session_id: session.id,
             provider: session.provider,
             options: DriverStartOptions {
                 binary,
@@ -2022,6 +2195,7 @@ impl Waku {
                 provider_cursor: session.provider_cursor.clone(),
             },
             event_wake: self.event_wake_tx.clone(),
+            daemon_client: self.daemon.client(),
         })
     }
 
@@ -2340,11 +2514,13 @@ impl Waku {
         cx.notify();
 
         let preparation_prompt = human_prompt;
+        let workspace_client = waku_client::WorkspaceClient::new(self.daemon.client());
         cx.spawn(async move |waku, cx| {
             let prepared = cx
                 .background_executor()
                 .spawn(async move {
                     prepare_submission(
+                        workspace_client,
                         project,
                         workspace,
                         driver_start,
@@ -2730,48 +2906,9 @@ mod response_fork_title_tests {
     }
 }
 
-/// Run `<cli> --version` and pull a version number out of whatever it prints.
-/// Blocking; runs on a version-probe thread, never on the UI thread.
-fn probe_provider_version(binary: &std::path::Path) -> Option<String> {
-    let mut command = crate::command_env::command(binary);
-    let command = command.arg("--version").stdin(std::process::Stdio::null());
-    let output = crate::command_env::output(command).ok()?;
-    let combined = format!(
-        "{}\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    parse_cli_version(&combined)
-}
-
-/// The first token that reads as a version number — digits and dots, an
-/// optional leading `v`, optional pre-release tail — from the first non-empty
-/// line. CLIs decorate this differently ("codex-cli 0.45.0", "2.1.24 (Claude
-/// Code)", "v1.3.0-beta"); the number is the part worth showing.
-fn parse_cli_version(output: &str) -> Option<String> {
-    let line = output.lines().find(|line| !line.trim().is_empty())?;
-    line.split_whitespace()
-        .map(|token| {
-            token
-                .trim_start_matches('v')
-                .trim_matches(|c: char| !(c.is_ascii_alphanumeric() || c == '.' || c == '-'))
-        })
-        .find(|token| {
-            let mut parts = token.split('.');
-            let leading_number = parts
-                .next()
-                .is_some_and(|part| !part.is_empty() && part.chars().all(|c| c.is_ascii_digit()));
-            leading_number
-                && parts
-                    .next()
-                    .is_some_and(|part| part.chars().next().is_some_and(|c| c.is_ascii_digit()))
-        })
-        .map(str::to_owned)
-}
-
 #[cfg(test)]
 mod version_tests {
-    use super::parse_cli_version;
+    use crate::model::parse_cli_version;
 
     #[test]
     fn parses_common_cli_version_banners() {

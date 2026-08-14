@@ -1,43 +1,23 @@
 use gpui::{App, Global, Hsla, Window, WindowAppearance, hsla, rgb, transparent_black};
-use serde::{Deserialize, Serialize};
 
-#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ThemePreference {
-    #[default]
-    System,
-    Light,
-    Dark,
+pub use waku_client::theme::ThemePreference;
+
+fn resolves_to_dark(preference: ThemePreference, system_appearance: WindowAppearance) -> bool {
+    match preference {
+        ThemePreference::System => matches!(
+            system_appearance,
+            WindowAppearance::Dark | WindowAppearance::VibrantDark
+        ),
+        ThemePreference::Light => false,
+        ThemePreference::Dark => true,
+    }
 }
 
-impl ThemePreference {
-    pub const ALL: [Self; 3] = [Self::System, Self::Light, Self::Dark];
-
-    pub fn label(self) -> String {
-        match self {
-            Self::System => tr!("settings.theme_system"),
-            Self::Light => tr!("settings.theme_light"),
-            Self::Dark => tr!("settings.theme_dark"),
-        }
-    }
-
-    fn resolves_to_dark(self, system_appearance: WindowAppearance) -> bool {
-        match self {
-            Self::System => matches!(
-                system_appearance,
-                WindowAppearance::Dark | WindowAppearance::VibrantDark
-            ),
-            Self::Light => false,
-            Self::Dark => true,
-        }
-    }
-
-    fn native_override(self) -> Option<bool> {
-        match self {
-            Self::System => None,
-            Self::Light => Some(false),
-            Self::Dark => Some(true),
-        }
+fn native_override(preference: ThemePreference) -> Option<bool> {
+    match preference {
+        ThemePreference::System => None,
+        ThemePreference::Light => Some(false),
+        ThemePreference::Dark => Some(true),
     }
 }
 
@@ -215,7 +195,7 @@ fn set_active_theme(theme: Theme, cx: &mut App) {
 /// Resolve and publish the startup palette, before any window exists.
 pub fn init(cx: &mut App) {
     let system_appearance = cx.window_appearance();
-    let theme = if ThemePreference::System.resolves_to_dark(system_appearance) {
+    let theme = if resolves_to_dark(ThemePreference::System, system_appearance) {
         Theme::dark()
     } else {
         Theme::light()
@@ -224,8 +204,8 @@ pub fn init(cx: &mut App) {
 }
 
 pub fn apply_theme_preference(preference: ThemePreference, window: &mut Window, cx: &mut App) {
-    crate::platform::set_window_appearance(window, preference.native_override());
-    let is_dark = preference.resolves_to_dark(cx.window_appearance());
+    crate::platform::set_window_appearance(window, native_override(preference));
+    let is_dark = resolves_to_dark(preference, cx.window_appearance());
     set_active_theme(
         if is_dark {
             Theme::dark()

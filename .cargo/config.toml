@@ -2,6 +2,9 @@
 # Xcode ships the Metal compiler as an optional toolchain. GPUI's build script
 # invokes `xcrun metal`, so select that toolchain for precompiled shaders.
 TOOLCHAINS = "Metal"
+# JSON has no bigint literal, so generated browser bindings model the wire's
+# integer fields as JavaScript numbers.
+TS_RS_LARGE_INT = "number"
 
 [build]
 jobs = 4

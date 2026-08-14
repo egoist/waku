@@ -1,5 +1,8 @@
 use super::*;
 
+use anyhow::Context as _;
+use base64::Engine as _;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum ComposerSubmitAction {
     Send,
@@ -1478,49 +1481,98 @@ impl Waku {
     }
 
     fn stage_attachment_paths(&mut self, paths: &[PathBuf], cx: &mut Context<Self>) -> bool {
-        let root = self
-            .selected_workspace_path()
-            .map(std::path::Path::to_path_buf);
-        let mut staged = false;
-        for path in paths {
-            staged |= self.stage_attachment_path(root.as_deref(), path.clone(), None, None);
-        }
-        if staged {
-            self.schedule_composer_draft_save(cx);
-            cx.notify();
-        }
-        staged
-    }
-
-    fn stage_attachment_path(
-        &mut self,
-        root: Option<&Path>,
-        path: PathBuf,
-        name_override: Option<String>,
-        blob_reference: Option<String>,
-    ) -> bool {
-        if self
-            .composer_attachments
-            .iter()
-            .any(|attachment| attachment.path == path)
-        {
+        if paths.is_empty() {
             return false;
         }
-        let is_dir = path.is_dir();
-        let mention = dropped_file_mention(root, &path, is_dir);
-        let name = name_override.unwrap_or_else(|| {
-            path.file_name()
-                .map(|name| name.to_string_lossy().into_owned())
-                .unwrap_or_else(|| mention.clone())
-        });
-        let is_image = !is_dir && is_image_attachment_path(&path);
+        let paths = paths.to_vec();
+        let daemon = self.daemon.clone();
+        let draft_owner = self.selected_composer_draft_key();
+        cx.spawn(async move |waku, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move {
+                    let mut stored = Vec::with_capacity(paths.len());
+                    for source_path in paths {
+                        let (name, upload, image_bytes) =
+                            attachment_upload_from_path(&source_path)?;
+                        let is_image = image_bytes.is_some();
+                        let preview_image = image_bytes.and_then(|bytes| {
+                            image_preview::image_format_for_name(&name)
+                                .map(|format| Arc::new(gpui::Image::from_bytes(format, bytes)))
+                        });
+                        let response = daemon.client().request(
+                            Uuid::nil(),
+                            Uuid::nil(),
+                            waku_client::Command::ImportAttachment { name, upload },
+                        )?;
+                        let waku_client::ResponsePayload::AttachmentStored { attachment } =
+                            response
+                        else {
+                            anyhow::bail!("the daemon returned an invalid attachment response");
+                        };
+                        stored.push((attachment, preview_image, is_image));
+                    }
+                    Ok::<_, anyhow::Error>(stored)
+                })
+                .await;
+            let _ = waku.update(cx, |waku, cx| match result {
+                Ok(stored) => {
+                    if waku.selected_composer_draft_key() != draft_owner {
+                        return;
+                    }
+                    let mut changed = false;
+                    for (attachment, preview_image, is_image) in stored {
+                        changed |= waku.stage_daemon_attachment(
+                            attachment.path,
+                            attachment.name,
+                            attachment.is_dir,
+                            is_image,
+                            attachment.reference,
+                            preview_image,
+                        );
+                    }
+                    if changed {
+                        waku.schedule_composer_draft_save(cx);
+                        cx.notify();
+                    }
+                }
+                Err(error) => {
+                    waku.show_toast(error.to_string());
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+        true
+    }
+
+    fn stage_daemon_attachment(
+        &mut self,
+        path: PathBuf,
+        name: String,
+        is_dir: bool,
+        is_image: bool,
+        reference: String,
+        client_preview_image: Option<Arc<gpui::Image>>,
+    ) -> bool {
+        if self.composer_attachments.iter().any(|attachment| {
+            attachment.path == path
+                || attachment.blob_reference.as_deref() == Some(reference.as_str())
+        }) {
+            return false;
+        }
+        let mut mention = path.display().to_string();
+        if is_dir && !mention.ends_with('/') {
+            mention.push('/');
+        }
         self.composer_attachments.push(ComposerAttachment {
             path,
+            client_preview_image,
             mention,
             name: SharedString::from(name),
             is_dir,
             is_image,
-            blob_reference,
+            blob_reference: Some(reference),
         });
         true
     }
@@ -1549,7 +1601,7 @@ impl Waku {
             return;
         }
 
-        let blobs = self.store.blobs();
+        let daemon = self.daemon.clone();
         let draft_owner = self.selected_composer_draft_key();
         cx.spawn(async move |waku, cx| {
             let stored = cx
@@ -1560,12 +1612,24 @@ impl Waku {
                         .into_iter()
                         .enumerate()
                         .map(|(index, image)| {
-                            let reference = blobs
-                                .store_image_bytes(image.format.mime_type(), &image.bytes)
+                            let preview_image = Arc::new(image);
+                            let bytes = preview_image.bytes.clone();
+                            let response = daemon
+                                .client()
+                                .request(
+                                    Uuid::nil(),
+                                    Uuid::nil(),
+                                    waku_client::Command::StoreBlob {
+                                        mime_type: preview_image.format.mime_type().to_owned(),
+                                        bytes,
+                                    },
+                                )
                                 .map_err(|error| error.to_string())?;
-                            let path = blobs.path_for(&reference).ok_or_else(|| {
-                                "stored clipboard image had no local path".to_owned()
-                            })?;
+                            let waku_client::ResponsePayload::BlobStored { reference, path } =
+                                response
+                            else {
+                                return Err("the daemon returned an invalid blob response".into());
+                            };
                             let extension = path
                                 .extension()
                                 .and_then(|extension| extension.to_str())
@@ -1575,7 +1639,7 @@ impl Waku {
                             } else {
                                 format!("image-{}.{extension}", index + 1)
                             };
-                            Ok::<_, String>((path, name, reference))
+                            Ok::<_, String>((path, name, reference, preview_image))
                         })
                         .collect::<Result<Vec<_>, _>>()
                 })
@@ -1585,16 +1649,15 @@ impl Waku {
                     if waku.selected_composer_draft_key() != draft_owner {
                         return;
                     }
-                    let root = waku
-                        .selected_workspace_path()
-                        .map(std::path::Path::to_path_buf);
                     let mut staged = false;
-                    for (path, name, reference) in stored {
-                        staged |= waku.stage_attachment_path(
-                            root.as_deref(),
+                    for (path, name, reference, preview_image) in stored {
+                        staged |= waku.stage_daemon_attachment(
                             path,
-                            Some(name),
-                            Some(reference),
+                            name,
+                            false,
+                            true,
+                            reference,
+                            Some(preview_image),
                         );
                     }
                     if staged {
@@ -1619,6 +1682,16 @@ impl Waku {
         prompt: &str,
         cx: &mut Context<Self>,
     ) -> Option<ComposerSubmission> {
+        for attachment in &self.composer_attachments {
+            if let (Some(reference), Some(image)) = (
+                attachment.blob_reference.as_ref(),
+                attachment.client_preview_image.as_ref(),
+            ) {
+                self.remote_images
+                    .borrow_mut()
+                    .insert(reference.clone(), RemoteImageState::Ready(image.clone()));
+            }
+        }
         let attachments = self
             .composer_attachments
             .drain(..)
@@ -1688,31 +1761,58 @@ impl Waku {
                 .tab_index(0)
                 .focus_visible(|style| style.border_color(theme.accent))
                 .tooltip(Tooltip::text(format!("@{}", attachment.mention)));
-            if attachment.is_image {
-                let preview_path = attachment.path.clone();
-                let preview_name = attachment.name.clone();
-                tile = tile.child(
-                    div()
-                        .id(SharedString::from(format!(
-                            "composer-attachment-{index}-preview"
-                        )))
-                        .size_full()
-                        .cursor_default()
-                        .on_click(cx.listener(move |this, _, window, cx| {
-                            this.open_image_preview(
-                                preview_path.clone(),
-                                preview_name.clone(),
-                                window,
+            let attachment_image = attachment.client_preview_image.clone().or_else(|| {
+                attachment
+                    .is_image
+                    .then(|| {
+                        attachment.blob_reference.as_deref().and_then(|reference| {
+                            self.image_for_reference(
+                                reference,
+                                Some(&attachment.path),
+                                Some(attachment.name.as_ref()),
                                 cx,
-                            );
-                            cx.stop_propagation();
-                        }))
-                        .child(
-                            img(attachment.path.clone())
-                                .size_full()
-                                .object_fit(ObjectFit::Cover),
-                        ),
-                );
+                            )
+                        })
+                    })
+                    .flatten()
+            });
+            let can_reveal = !self.daemon.is_remote();
+            if attachment.is_image {
+                if let Some(attachment_image) = attachment_image.as_ref() {
+                    let preview_image = attachment_image.clone();
+                    let preview_name = attachment.name.clone();
+                    tile = tile.child(
+                        div()
+                            .id(SharedString::from(format!(
+                                "composer-attachment-{index}-preview"
+                            )))
+                            .size_full()
+                            .cursor_default()
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.open_image_preview(
+                                    preview_image.clone(),
+                                    preview_name.clone(),
+                                    window,
+                                    cx,
+                                );
+                                cx.stop_propagation();
+                            }))
+                            .child(
+                                img(attachment_image.clone())
+                                    .size_full()
+                                    .object_fit(ObjectFit::Cover),
+                            ),
+                    );
+                } else {
+                    tile = tile.child(
+                        div()
+                            .size_full()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .child(icon("icons/file-types/image.svg", 16.0, theme.text_ghost)),
+                    );
+                }
             } else {
                 tile = tile.child(
                     div()
@@ -1737,13 +1837,16 @@ impl Waku {
                 );
             }
             let key_menu = menu.clone();
-            let key_path = attachment.path.clone();
+            let key_image = attachment_image.clone();
             let key_name = attachment.name.clone();
             let is_image = attachment.is_image;
             tile = tile.on_key_down(cx.listener(move |this, event: &KeyDownEvent, window, cx| {
                 let key = event.keystroke.key.as_str();
-                if is_image && matches!(key, "enter" | "space") {
-                    this.open_image_preview(key_path.clone(), key_name.clone(), window, cx);
+                if is_image
+                    && matches!(key, "enter" | "space")
+                    && let Some(key_image) = key_image.as_ref()
+                {
+                    this.open_image_preview(key_image.clone(), key_name.clone(), window, cx);
                     cx.stop_propagation();
                 } else if key == "f10" && event.keystroke.modifiers.shift {
                     key_menu.open_context_menu(window, cx);
@@ -1795,7 +1898,7 @@ impl Waku {
                 tile,
                 SharedString::from(format!("composer-attachment-{index}-context-menu")),
                 &menu,
-                move |_| image_preview::attachment_menu_items(reveal_path.clone()),
+                move |_| image_preview::attachment_menu_items(reveal_path.clone(), can_reveal),
             ));
         }
         row
@@ -2788,6 +2891,110 @@ pub(super) fn visible_branch_entries(
 /// file is inside it, absolute otherwise, directories with a trailing slash —
 /// the same form the `@` autocomplete inserts. Dropping the root itself keeps
 /// the absolute path rather than producing an empty mention.
+// Base64 keeps the authenticated JSON transport browser-compatible but adds
+// one third of wire overhead. Stay comfortably below tungstenite's default
+// message limit until uploads move to a streaming content endpoint.
+const MAX_ATTACHMENT_BYTES: u64 = waku_client::attachments::MAX_ATTACHMENT_BYTES as u64;
+
+/// Reads a client-local drop into an upload payload. This is the explicit
+/// client/daemon boundary: none of these source paths are persisted or handed
+/// to a provider.
+fn attachment_upload_from_path(
+    source: &Path,
+) -> anyhow::Result<(
+    String,
+    waku_client::attachments::AttachmentUpload,
+    Option<Vec<u8>>,
+)> {
+    let metadata = std::fs::symlink_metadata(source)
+        .with_context(|| format!("could not read attachment {}", source.display()))?;
+    if metadata.file_type().is_symlink() {
+        anyhow::bail!(
+            "symbolic-link attachments are not supported: {}",
+            source.display()
+        );
+    }
+    let name = source
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty())
+        .ok_or_else(|| anyhow::anyhow!("attachment has no file name: {}", source.display()))?
+        .to_owned();
+    if metadata.is_file() {
+        if metadata.len() > MAX_ATTACHMENT_BYTES {
+            anyhow::bail!("attachment is larger than 32 MB: {}", source.display());
+        }
+        let bytes = std::fs::read(source)
+            .with_context(|| format!("could not read attachment {}", source.display()))?;
+        let is_image = is_image_attachment_path(source);
+        return Ok((
+            name,
+            waku_client::attachments::AttachmentUpload::File {
+                data_base64: base64::engine::general_purpose::STANDARD.encode(&bytes),
+            },
+            is_image.then_some(bytes),
+        ));
+    }
+    if !metadata.is_dir() {
+        anyhow::bail!(
+            "attachment is not a file or directory: {}",
+            source.display()
+        );
+    }
+
+    let mut pending = vec![source.to_path_buf()];
+    let mut entries = Vec::new();
+    let mut total_bytes = 0u64;
+    while let Some(directory) = pending.pop() {
+        for entry in std::fs::read_dir(&directory).with_context(|| {
+            format!(
+                "could not read attachment directory {}",
+                directory.display()
+            )
+        })? {
+            let entry = entry?;
+            let path = entry.path();
+            let metadata = std::fs::symlink_metadata(&path)?;
+            if metadata.file_type().is_symlink() {
+                continue;
+            }
+            if metadata.is_dir() {
+                pending.push(path);
+                continue;
+            }
+            if !metadata.is_file() {
+                continue;
+            }
+            if entries.len() >= waku_client::attachments::MAX_ATTACHMENT_FILES {
+                anyhow::bail!(
+                    "attachment directory contains more than {} files",
+                    waku_client::attachments::MAX_ATTACHMENT_FILES
+                );
+            }
+            total_bytes = total_bytes.saturating_add(metadata.len());
+            if total_bytes > MAX_ATTACHMENT_BYTES {
+                anyhow::bail!("attachment directory is larger than 32 MB");
+            }
+            let relative_path = path
+                .strip_prefix(source)
+                .context("attachment entry escaped its source directory")?
+                .to_path_buf();
+            let bytes = std::fs::read(&path)
+                .with_context(|| format!("could not read attachment {}", path.display()))?;
+            entries.push(waku_client::attachments::AttachmentUploadEntry {
+                relative_path,
+                data_base64: base64::engine::general_purpose::STANDARD.encode(bytes),
+            });
+        }
+    }
+    Ok((
+        name,
+        waku_client::attachments::AttachmentUpload::Directory { entries },
+        None,
+    ))
+}
+
+#[cfg(test)]
 pub(super) fn dropped_file_mention(
     root: Option<&std::path::Path>,
     path: &std::path::Path,

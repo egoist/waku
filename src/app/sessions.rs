@@ -18,6 +18,15 @@ impl Waku {
     }
 
     pub(super) fn select_session(&mut self, session_id: Uuid, cx: &mut Context<Self>) {
+        self.request_session_activation(session_id, SessionActivationTransition::Visit, cx);
+    }
+
+    fn request_session_activation(
+        &mut self,
+        session_id: Uuid,
+        transition: SessionActivationTransition,
+        cx: &mut Context<Self>,
+    ) {
         if !self
             .state
             .sessions
@@ -26,32 +35,131 @@ impl Waku {
         {
             return;
         }
-        self.session_navigation
-            .visit(self.state.selected_session, session_id);
+        let needs_hydration = self
+            .state
+            .sessions
+            .iter()
+            .find(|session| session.id == session_id)
+            .is_some_and(|session| !session.detail_loaded);
+        if needs_hydration {
+            self.pending_session_activation = Some(PendingSessionActivation {
+                session_id,
+                transition,
+            });
+            // Keep the current transcript visible until the daemon returns the
+            // target session, but acknowledge the click immediately in the
+            // sidebar instead of making the UI appear unresponsive.
+            cx.notify();
+            self.ensure_session_loaded(session_id, cx);
+            return;
+        }
+        self.pending_session_activation = None;
+        self.finish_session_activation(session_id, transition, cx);
+    }
+
+    fn finish_session_activation(
+        &mut self,
+        session_id: Uuid,
+        transition: SessionActivationTransition,
+        cx: &mut Context<Self>,
+    ) {
+        match transition {
+            SessionActivationTransition::Visit => self
+                .session_navigation
+                .visit(self.state.selected_session, session_id),
+            SessionActivationTransition::Back { from } => {
+                if self.state.selected_session != Some(from)
+                    || self.session_navigation.back_target() != Some(session_id)
+                {
+                    return;
+                }
+                let _ = self.session_navigation.go_back(from);
+            }
+            SessionActivationTransition::Forward { from } => {
+                if self.state.selected_session != Some(from)
+                    || self.session_navigation.forward_target() != Some(session_id)
+                {
+                    return;
+                }
+                let _ = self.session_navigation.go_forward(from);
+            }
+        }
         self.activate_session(session_id, cx);
     }
 
     /// Loads a session's transcript if startup only fetched its list columns.
     ///
-    /// One row plus that session's messages, so it stays well inside a frame;
-    /// the alternative is paying for all of history at launch.
-    pub(super) fn ensure_session_loaded(&mut self, session_id: Uuid) {
-        let Some(session) = self
+    /// The SQLite query and daemon round trip both stay off the UI thread. The
+    /// current selection stays rendered until the requested session is whole.
+    pub(super) fn ensure_session_loaded(&mut self, session_id: Uuid, cx: &mut Context<Self>) {
+        let needs_hydration = self
             .state
             .sessions
-            .iter_mut()
+            .iter()
             .find(|session| session.id == session_id)
-            .filter(|session| !session.detail_loaded)
-        else {
+            .is_some_and(|session| !session.detail_loaded);
+        if !needs_hydration || !self.session_hydrations.insert(session_id) {
             return;
-        };
-        if let Err(error) = self.store.hydrate(session) {
-            self.show_toast(tr!("errors.open_session", error = error));
         }
+        let daemon = self.daemon.clone();
+        cx.spawn(async move |waku, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move {
+                    match waku_client::persistence::hydrate_session(&daemon, session_id)? {
+                        Some(session) => Ok(session),
+                        None => {
+                            anyhow::bail!("the task no longer exists")
+                        }
+                    }
+                })
+                .await;
+            let _ = waku.update(cx, |waku, cx| {
+                waku.session_hydrations.remove(&session_id);
+                match result {
+                    Ok(session) => {
+                        let replaced = if let Some(existing) = waku
+                            .state
+                            .sessions
+                            .iter_mut()
+                            .find(|existing| existing.id == session_id)
+                        {
+                            *existing = session;
+                            true
+                        } else {
+                            false
+                        };
+                        let pending = waku
+                            .pending_session_activation
+                            .filter(|pending| pending.session_id == session_id);
+                        if pending.is_some() {
+                            waku.pending_session_activation = None;
+                        }
+                        if replaced && let Some(pending) = pending {
+                            waku.finish_session_activation(session_id, pending.transition, cx);
+                        } else if waku.state.selected_session == Some(session_id) {
+                            waku.reset_visible_state();
+                            waku.reset_transcript_rows(waku.transcript_row_count());
+                            waku.refresh_composer_sources(cx);
+                        }
+                    }
+                    Err(error) => {
+                        if waku
+                            .pending_session_activation
+                            .is_some_and(|pending| pending.session_id == session_id)
+                        {
+                            waku.pending_session_activation = None;
+                        }
+                        waku.show_toast(tr!("errors.open_session", error = error));
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     fn activate_session(&mut self, session_id: Uuid, cx: &mut Context<Self>) {
-        self.ensure_session_loaded(session_id);
         let session_changed = self.state.selected_session != Some(session_id);
         if session_changed {
             self.capture_and_save_current_composer_draft(cx);
@@ -158,9 +266,6 @@ impl Waku {
             cx.notify();
             return;
         }
-        // The turn count drives checkpoint cleanup, so the transcript has to be
-        // loaded before it can be trusted.
-        self.ensure_session_loaded(session_id);
         let Some(index) = self
             .state
             .sessions
@@ -178,7 +283,6 @@ impl Waku {
             .iter()
             .find(|project| project.id == project_id)
             .is_some_and(Project::is_projectless);
-        let last_turn_count = self.state.sessions[index].turns.len();
         let project_path = self
             .workspace_path_for_session(&self.state.sessions[index])
             .map(std::path::Path::to_path_buf);
@@ -189,6 +293,12 @@ impl Waku {
         self.remove_right_panel_session_state(session_id);
         self.remove_composer_draft(composer_draft_key, cx);
         self.state.sessions.remove(index);
+        if self
+            .pending_session_activation
+            .is_some_and(|pending| pending.session_id == session_id)
+        {
+            self.pending_session_activation = None;
+        }
         self.session_navigation.remove(session_id);
         let project_still_used = self
             .state
@@ -208,7 +318,15 @@ impl Waku {
             }
         }
         if let Some(project_path) = project_path {
-            let _ = checkpoint::delete_session_refs(&project_path, session_id, last_turn_count);
+            let workspace = waku_client::WorkspaceClient::new(self.daemon.client());
+            cx.background_executor()
+                .spawn(async move {
+                    let _ = workspace.request(waku_client::WorkspaceOperation::DeleteSessionRefs {
+                        cwd: project_path,
+                        session_id,
+                    });
+                })
+                .detach();
         }
         self.invalidate_checkpoint_refs();
 
@@ -482,9 +600,13 @@ impl Waku {
         let Some(current) = self.state.selected_session else {
             return;
         };
-        if let Some(target) = self.session_navigation.go_back(current) {
+        if let Some(target) = self.session_navigation.back_target() {
             self.settings_page = None;
-            self.activate_session(target, cx);
+            self.request_session_activation(
+                target,
+                SessionActivationTransition::Back { from: current },
+                cx,
+            );
         }
     }
 
@@ -501,9 +623,13 @@ impl Waku {
         let Some(current) = self.state.selected_session else {
             return;
         };
-        if let Some(target) = self.session_navigation.go_forward(current) {
+        if let Some(target) = self.session_navigation.forward_target() {
             self.settings_page = None;
-            self.activate_session(target, cx);
+            self.request_session_activation(
+                target,
+                SessionActivationTransition::Forward { from: current },
+                cx,
+            );
         }
     }
 
@@ -1098,6 +1224,11 @@ impl Waku {
     }
 
     pub(super) fn add_project(&mut self, cx: &mut Context<Self>) {
+        if self.daemon.is_remote() {
+            self.show_toast(tr!("errors.remote_project_picker"));
+            cx.notify();
+            return;
+        }
         let receiver = cx.prompt_for_paths(PathPromptOptions {
             files: false,
             directories: true,
@@ -1143,19 +1274,36 @@ impl Waku {
             return;
         }
 
-        let workspace = match crate::projectless::create_workspace(None) {
-            Ok(workspace) => workspace,
-            Err(error) => {
-                self.show_toast(tr!("errors.create_projectless_task", error = error));
-                cx.notify();
-                return;
-            }
-        };
-        let mut project = Project::from_path(workspace.cwd);
-        project.name = Project::PROJECTLESS_NAME.to_owned();
-        let project_id = project.id;
-        self.state.projects.push(project);
-        self.create_session_for(project_id, self.state.last_provider, cx);
+        let workspace = waku_client::WorkspaceClient::new(self.daemon.client());
+        cx.spawn(async move |waku, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move {
+                    match workspace.request(
+                        waku_client::WorkspaceOperation::CreateProjectlessWorkspace {
+                            prompt: None,
+                        },
+                    )? {
+                        waku_client::WorkspaceResult::ProjectlessWorkspace { cwd } => Ok(cwd),
+                        _ => anyhow::bail!("the daemon returned an invalid projectless response"),
+                    }
+                })
+                .await;
+            let _ = waku.update(cx, |waku, cx| match result {
+                Ok(cwd) => {
+                    let mut project = Project::from_path(cwd);
+                    project.name = Project::PROJECTLESS_NAME.to_owned();
+                    let project_id = project.id;
+                    waku.state.projects.push(project);
+                    waku.create_session_for(project_id, waku.state.last_provider, cx);
+                }
+                Err(error) => {
+                    waku.show_toast(tr!("errors.create_projectless_task", error = error));
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
     }
 }
 
