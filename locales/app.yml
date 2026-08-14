@@ -488,12 +488,22 @@ automations.section_prompt:
   en: Prompt
 automations.section_agent:
   en: Agent
+automations.section_details:
+  en: Details
+automations.section_details_description:
+  en: The basics of this automation.
 automations.section_schedule:
   en: Schedule
+automations.section_schedule_description:
+  en: When Waku starts a run on its own.
 automations.section_behavior:
   en: Behavior
+automations.section_behavior_description:
+  en: How runs behave when they overlap or finish.
 automations.field_name:
   en: Name
+automations.field_name_description:
+  en: Shown in the sidebar, in notifications, and in the command palette.
 automations.field_provider:
   en: Provider
 automations.field_model:
@@ -506,16 +516,34 @@ automations.field_project:
   en: Project
 automations.field_schedule_frequency:
   en: Frequency
+automations.field_schedule_frequency_description:
+  en: How often a run starts.
 automations.field_time:
   en: Time
+automations.field_time_description:
+  en: The local time each run starts.
+automations.field_minute_description:
+  en: The minute past every hour each run starts.
 automations.field_days:
   en: Days
+automations.field_weekdays_description:
+  en: The days of the week a run starts.
+automations.field_monthdays_description:
+  en: The days of the month a run starts. Months without a day skip it.
 automations.field_overlap:
   en: If already running
+automations.field_overlap_description:
+  en: What to do when the previous run is still going.
 automations.field_notifications:
   en: Notifications
+automations.field_notifications_description:
+  en: Post a system notification when a run finishes.
 automations.field_notify_when:
   en: Notify
+automations.field_notify_when_description:
+  en: Which outcomes are worth a notification.
+automations.field_enabled_description:
+  en: A disabled automation keeps its schedule but never fires.
 automations.model_default:
   en: Provider default
 automations.effort_default:

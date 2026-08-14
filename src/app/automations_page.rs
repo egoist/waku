@@ -943,11 +943,7 @@ impl Waku {
             .px(px(10.0))
             .rounded(px(7.0))
             .border_1()
-            .border_color(if armed {
-                theme.danger
-            } else {
-                theme.border
-            })
+            .border_color(if armed { theme.danger } else { theme.border })
             .when(armed, |element| element.bg(theme.danger.opacity(0.12)))
             .flex()
             .flex_none()
@@ -965,7 +961,11 @@ impl Waku {
             .child(icon(
                 "icons/trash.svg",
                 12.0,
-                if armed { theme.danger } else { theme.text_tertiary },
+                if armed {
+                    theme.danger
+                } else {
+                    theme.text_tertiary
+                },
             ))
             .child(if armed {
                 tr!("automations.confirm_delete")
@@ -1137,18 +1137,14 @@ impl Waku {
 
         // The header stays fixed at the top so the breadcrumb and Save are
         // always reachable.
-        let header_bar = div()
-            .flex_none()
-            .pt(px(8.0))
-            .pb(px(8.0))
-            .child(
-                div()
-                    .w_full()
-                    .max_w(px(CONTENT_MAX_WIDTH))
-                    .mx_auto()
-                    .px(px(24.0))
-                    .child(header),
-            );
+        let header_bar = div().flex_none().pt(px(8.0)).pb(px(8.0)).child(
+            div()
+                .w_full()
+                .max_w(px(CONTENT_MAX_WIDTH))
+                .mx_auto()
+                .px(px(24.0))
+                .child(header),
+        );
 
         // Everything except the composer scrolls in the middle.
         let settings = div()
@@ -1163,21 +1159,28 @@ impl Waku {
                     .max_w(px(CONTENT_MAX_WIDTH))
                     .mx_auto()
                     .px(px(24.0))
+                    .pt(px(4.0))
                     .pb(px(16.0))
                     .flex()
                     .flex_col()
-                    .gap(px(4.0))
+                    .gap(px(12.0))
                     .child(
-                        self.editor_section(
+                        editor_card(
+                            &theme,
+                            tr!("automations.section_details"),
+                            tr!("automations.section_details_description"),
+                        )
+                        .child(editor_row(
                             &theme,
                             tr!("automations.field_name"),
+                            tr!("automations.field_name_description"),
                             TextField::new(
                                 "automation-name-field",
                                 self.automation_name_input.clone(),
                             )
-                            .w_full()
+                            .w(px(260.0))
                             .into_any_element(),
-                        ),
+                        )),
                     )
                     .child(self.editor_schedule_section(&editor, &theme, cx))
                     .child(self.editor_behavior_section(&editor, &theme, cx)),
@@ -1185,18 +1188,14 @@ impl Waku {
 
         // The composer (prompt + agent controls + project/workspace) is pinned
         // to the bottom, just like the chat composer.
-        let composer = div()
-            .flex_none()
-            .pt(px(8.0))
-            .pb(px(16.0))
-            .child(
-                div()
-                    .w_full()
-                    .max_w(px(CONTENT_MAX_WIDTH))
-                    .mx_auto()
-                    .px(px(24.0))
-                    .child(self.editor_agent_section(id, &theme, cx)),
-            );
+        let composer = div().flex_none().pt(px(8.0)).pb(px(16.0)).child(
+            div()
+                .w_full()
+                .max_w(px(CONTENT_MAX_WIDTH))
+                .mx_auto()
+                .px(px(24.0))
+                .child(self.editor_agent_section(id, &theme, cx)),
+        );
 
         div()
             .flex()
@@ -1207,27 +1206,6 @@ impl Waku {
             .child(settings)
             .child(composer)
             .into_any_element()
-    }
-
-    /// A labeled field row: the label on the left, the control on the right.
-    fn editor_section(&self, theme: &Theme, label: String, control: AnyElement) -> Div {
-        div()
-            .flex()
-            .items_center()
-            .justify_between()
-            .gap(px(16.0))
-            .py(px(8.0))
-            .border_b_1()
-            .border_color(theme.border)
-            .child(
-                div()
-                    .flex_none()
-                    .w(px(180.0))
-                    .text_size(px(13.0))
-                    .text_color(theme.text_secondary)
-                    .child(label),
-            )
-            .child(div().flex_1().min_w_0().flex().justify_end().child(control))
     }
 
     /// A labeled dropdown chip. Collapses the shared `MenuChip` + `dropdown_menu`
@@ -1258,12 +1236,7 @@ impl Waku {
         )
     }
 
-    fn editor_agent_section(
-        &self,
-        id: Option<Uuid>,
-        theme: &Theme,
-        cx: &mut Context<Self>,
-    ) -> Div {
+    fn editor_agent_section(&self, id: Option<Uuid>, theme: &Theme, cx: &mut Context<Self>) -> Div {
         // A composer-style card: the prompt textarea with the model/access
         // controls docked beneath it, mirroring the new-task composer so the
         // editor's core reads like the surface a user already knows.
@@ -1343,7 +1316,9 @@ impl Waku {
                     .children(self.render_model_traits_control(AgentControlTarget::Automation, cx))
                     .children(self.render_agent_preset_control(AgentControlTarget::Automation, cx))
                     .child(self.render_access_control(AgentControlTarget::Automation, cx))
-                    .child(self.render_interaction_mode_control(AgentControlTarget::Automation, cx)),
+                    .child(
+                        self.render_interaction_mode_control(AgentControlTarget::Automation, cx),
+                    ),
             )
             .children(run_now);
 
@@ -1428,29 +1403,25 @@ impl Waku {
                 .into_any_element()
         };
 
-        let mut section = div()
-            .flex()
-            .flex_col()
-            .child(section_heading(theme, tr!("automations.section_schedule")))
-            .child(self.editor_section(
-                theme,
-                tr!("automations.field_schedule_frequency"),
-                preset_picker,
-            ));
+        let mut section = editor_card(
+            theme,
+            tr!("automations.section_schedule"),
+            tr!("automations.section_schedule_description"),
+        )
+        .child(editor_row(
+            theme,
+            tr!("automations.field_schedule_frequency"),
+            // Manual has no follow-up row, so its caption explains itself here.
+            match editor.preset {
+                SchedulePreset::Manual => tr!("automations.hint_manual"),
+                _ => tr!("automations.field_schedule_frequency_description"),
+            },
+            preset_picker,
+        ));
 
         // Each preset shows only the sub-controls it needs.
         match editor.preset {
-            SchedulePreset::Manual => {
-                section = section.child(self.editor_section(
-                    theme,
-                    tr!("automations.field_time"),
-                    div()
-                        .text_size(px(12.0))
-                        .text_color(theme.text_tertiary)
-                        .child(tr!("automations.hint_manual"))
-                        .into_any_element(),
-                ));
-            }
+            SchedulePreset::Manual => {}
             SchedulePreset::Hourly => {
                 // Every hour at a chosen minute past the hour: minute only.
                 let minute_picker = div()
@@ -1470,31 +1441,50 @@ impl Waku {
                         .w(px(52.0)),
                     )
                     .into_any_element();
-                section = section.child(self.editor_section(
+                section = section.child(editor_row(
                     theme,
                     tr!("automations.field_time"),
+                    tr!("automations.field_minute_description"),
                     minute_picker,
                 ));
             }
             SchedulePreset::Daily | SchedulePreset::Weekdays => {
-                section =
-                    section.child(self.editor_section(theme, tr!("automations.field_time"), time_picker()));
+                section = section.child(editor_row(
+                    theme,
+                    tr!("automations.field_time"),
+                    tr!("automations.field_time_description"),
+                    time_picker(),
+                ));
             }
             SchedulePreset::Weekly => {
                 section = section
-                    .child(self.editor_section(theme, tr!("automations.field_time"), time_picker()))
-                    .child(self.editor_section(
+                    .child(editor_row(
+                        theme,
+                        tr!("automations.field_time"),
+                        tr!("automations.field_time_description"),
+                        time_picker(),
+                    ))
+                    // The chip rows are wider than a right-hand control column,
+                    // so they stack under their label at full width.
+                    .child(editor_row_stacked(
                         theme,
                         tr!("automations.field_days"),
+                        tr!("automations.field_weekdays_description"),
                         self.weekday_chips(editor, theme, cx),
                     ));
             }
             SchedulePreset::Monthly => {
                 section = section
-                    .child(self.editor_section(theme, tr!("automations.field_time"), time_picker()))
-                    .child(self.editor_section(
+                    .child(editor_row(
+                        theme,
+                        tr!("automations.field_time"),
+                        tr!("automations.field_time_description"),
+                        time_picker(),
+                    ))
+                    .child(editor_row_stacked(
                         theme,
                         tr!("automations.field_days"),
+                        tr!("automations.field_monthdays_description"),
                         self.monthday_chips(editor, theme, cx),
                     ));
             }
@@ -1502,7 +1492,6 @@ impl Waku {
 
         section
     }
-
 
     fn editor_behavior_section(
         &self,
@@ -1587,22 +1576,35 @@ impl Waku {
                 editor.enabled = !editor.enabled
             });
 
-        div()
-            .flex()
-            .flex_col()
-            .child(section_heading(theme, tr!("automations.section_behavior")))
-            .child(self.editor_section(theme, tr!("automations.field_overlap"), overlap_picker))
-            .child(self.editor_section(
-                theme,
-                tr!("automations.field_notifications"),
-                notify_toggle.into_any_element(),
-            ))
-            .child(self.editor_section(theme, tr!("automations.field_notify_when"), trigger_picker))
-            .child(self.editor_section(
-                theme,
-                tr!("automations.enabled"),
-                enabled_toggle.into_any_element(),
-            ))
+        editor_card(
+            theme,
+            tr!("automations.section_behavior"),
+            tr!("automations.section_behavior_description"),
+        )
+        .child(editor_row(
+            theme,
+            tr!("automations.field_overlap"),
+            tr!("automations.field_overlap_description"),
+            overlap_picker,
+        ))
+        .child(editor_row(
+            theme,
+            tr!("automations.field_notifications"),
+            tr!("automations.field_notifications_description"),
+            notify_toggle.into_any_element(),
+        ))
+        .child(editor_row(
+            theme,
+            tr!("automations.field_notify_when"),
+            tr!("automations.field_notify_when_description"),
+            trigger_picker,
+        ))
+        .child(editor_row(
+            theme,
+            tr!("automations.enabled"),
+            tr!("automations.field_enabled_description"),
+            enabled_toggle.into_any_element(),
+        ))
     }
 
     /// A small toggle bound to a form mutation. `change` flips the field.
@@ -1660,7 +1662,7 @@ impl Waku {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let selected = editor.weekdays.clone();
-        let mut row = div().flex().flex_wrap().gap(px(6.0)).justify_end();
+        let mut row = div().flex().flex_wrap().gap(px(6.0));
         for weekday in Weekday::ALL {
             let is_selected = selected.contains(&weekday);
             row = row.child(self.selection_chip(
@@ -1684,7 +1686,7 @@ impl Waku {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let selected = editor.monthdays.clone();
-        let mut grid = div().flex().flex_wrap().gap(px(4.0)).justify_end();
+        let mut grid = div().flex().flex_wrap().gap(px(4.0));
         for day in 1u8..=31 {
             let is_selected = selected.contains(&day);
             grid = grid.child(self.selection_chip(
@@ -1751,15 +1753,88 @@ impl Waku {
     }
 }
 
-/// A section heading above a group of field rows.
-fn section_heading(theme: &Theme, label: String) -> Div {
+/// A grouped card, matching the cards the settings pages are built from: a
+/// heading and caption on a raised surface, with the group's field rows
+/// appended as children.
+fn editor_card(theme: &Theme, title: String, description: String) -> Div {
     div()
-        .mt(px(16.0))
-        .pb(px(4.0))
-        .text_size(px(12.0))
-        .font_weight(FontWeight::MEDIUM)
-        .text_color(theme.text_tertiary)
-        .child(label)
+        .w_full()
+        .px(px(20.0))
+        .py(px(14.0))
+        .rounded(px(13.0))
+        .bg(theme.raised)
+        .child(
+            div()
+                .text_size(px(13.5))
+                .font_weight(FontWeight::MEDIUM)
+                .text_color(theme.text)
+                .child(title),
+        )
+        .child(
+            div()
+                .mt(px(4.0))
+                .text_size(px(11.5))
+                .line_height(px(16.0))
+                .text_color(theme.text_secondary)
+                .child(description),
+        )
+}
+
+/// One field row inside a card: label and caption on the left, the control
+/// flush right, divided from what precedes it by a hairline.
+fn editor_row(theme: &Theme, label: String, description: String, control: AnyElement) -> Div {
+    editor_row_base(theme)
+        .flex()
+        .items_center()
+        .gap(px(16.0))
+        .child(
+            editor_row_label(theme, label, description)
+                .flex_1()
+                .min_w_0(),
+        )
+        .child(div().flex_none().child(control))
+}
+
+/// A field row whose control is too wide for the right-hand column — the chip
+/// pickers — so it stacks beneath the label at full width.
+fn editor_row_stacked(
+    theme: &Theme,
+    label: String,
+    description: String,
+    control: AnyElement,
+) -> Div {
+    editor_row_base(theme)
+        .flex()
+        .flex_col()
+        .child(editor_row_label(theme, label, description))
+        .child(div().mt(px(9.0)).w_full().child(control))
+}
+
+fn editor_row_base(theme: &Theme) -> Div {
+    div()
+        .mt(px(11.0))
+        .pt(px(11.0))
+        .border_t_1()
+        .border_color(theme.border)
+}
+
+fn editor_row_label(theme: &Theme, label: String, description: String) -> Div {
+    div()
+        .child(
+            div()
+                .text_size(px(12.5))
+                .font_weight(FontWeight::MEDIUM)
+                .text_color(theme.text)
+                .child(label),
+        )
+        .child(
+            div()
+                .mt(px(2.0))
+                .text_size(px(10.5))
+                .line_height(px(15.0))
+                .text_color(theme.text_tertiary)
+                .child(description),
+        )
 }
 
 /// Adds or removes `value`, but never empties the set — the last selected
@@ -1784,7 +1859,6 @@ fn preset_label(preset: SchedulePreset) -> String {
         SchedulePreset::Monthly => tr!("automations.frequency_monthly"),
     }
 }
-
 
 fn overlap_label(overlap: OverlapPolicy) -> String {
     match overlap {
@@ -1819,7 +1893,10 @@ pub(super) fn schedule_summary(schedule: &Schedule) -> String {
     match schedule {
         Schedule::Manual => tr!("automations.summary_manual"),
         Schedule::Hourly { minute } => {
-            tr!("automations.summary_hourly", minute = format!("{minute:02}"))
+            tr!(
+                "automations.summary_hourly",
+                minute = format!("{minute:02}")
+            )
         }
         Schedule::Daily { time } => tr!("automations.summary_daily", time = format_time(*time)),
         Schedule::Weekly { weekdays, time } => {
@@ -1828,7 +1905,11 @@ pub(super) fn schedule_summary(schedule: &Schedule) -> String {
                 .map(|day| weekday_short(*day))
                 .collect::<Vec<_>>()
                 .join(", ");
-            tr!("automations.summary_weekly", days = days, time = format_time(*time))
+            tr!(
+                "automations.summary_weekly",
+                days = days,
+                time = format_time(*time)
+            )
         }
         Schedule::Monthly { days, time } => {
             let days = days
@@ -1836,7 +1917,11 @@ pub(super) fn schedule_summary(schedule: &Schedule) -> String {
                 .map(u8::to_string)
                 .collect::<Vec<_>>()
                 .join(", ");
-            tr!("automations.summary_monthly", days = days, time = format_time(*time))
+            tr!(
+                "automations.summary_monthly",
+                days = days,
+                time = format_time(*time)
+            )
         }
     }
 }
