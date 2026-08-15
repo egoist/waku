@@ -15,6 +15,12 @@ use crate::automation::{
 };
 use crate::model::{ProviderKind, SessionWorkspace};
 
+const AUTOMATIONS_PAGE_GUTTER: f32 = 24.0;
+const AUTOMATIONS_ACTION_HEIGHT: f32 = 30.0;
+const AUTOMATIONS_ACTION_PADDING: f32 = 12.0;
+const AUTOMATIONS_PICKER_WIDTH: f32 = 200.0;
+const AUTOMATIONS_TIME_FIELD_WIDTH: f32 = 52.0;
+
 /// Which view of the Automations page is showing.
 pub(super) enum AutomationsPage {
     List,
@@ -710,6 +716,45 @@ impl Waku {
             .into_any_element()
     }
 
+    fn render_automations_shell(
+        &self,
+        header: impl IntoElement,
+        content: impl IntoElement,
+    ) -> AnyElement {
+        div()
+            .flex()
+            .flex_col()
+            .flex_1()
+            .min_h_0()
+            .child(
+                div().flex_none().pt(px(8.0)).pb(px(8.0)).child(
+                    div()
+                        .w_full()
+                        .max_w(px(CONTENT_MAX_WIDTH))
+                        .mx_auto()
+                        .px(px(AUTOMATIONS_PAGE_GUTTER))
+                        .child(header),
+                ),
+            )
+            .child(
+                div()
+                    .id("automations-scroll")
+                    .track_scroll(&self.automations_scroll)
+                    .overflow_y_scroll()
+                    .flex_1()
+                    .min_h_0()
+                    .child(
+                        div()
+                            .w_full()
+                            .max_w(px(CONTENT_MAX_WIDTH))
+                            .mx_auto()
+                            .px(px(AUTOMATIONS_PAGE_GUTTER))
+                            .child(content),
+                    ),
+            )
+            .into_any_element()
+    }
+
     fn render_automations_list(&self, cx: &mut Context<Self>) -> AnyElement {
         let theme = Theme::current(cx);
 
@@ -732,8 +777,8 @@ impl Waku {
                     .flex()
                     .items_center()
                     .gap(px(6.0))
-                    .h(px(30.0))
-                    .px(px(12.0))
+                    .h(px(AUTOMATIONS_ACTION_HEIGHT))
+                    .px(px(AUTOMATIONS_ACTION_PADDING))
                     .rounded(px(7.0))
                     .bg(theme.inverse)
                     .text_color(theme.on_inverse)
@@ -779,40 +824,7 @@ impl Waku {
             }
         }
 
-        // Fixed header bar mirroring the editor's, so the "Automations" title
-        // sits at identical coordinates when switching between list and editor.
-        let header_bar = div().flex_none().pt(px(8.0)).pb(px(8.0)).child(
-            div()
-                .w_full()
-                .max_w(px(CONTENT_MAX_WIDTH))
-                .mx_auto()
-                .px(px(24.0))
-                .child(header),
-        );
-
-        let scroll = div()
-            .id("automations-scroll")
-            .track_scroll(&self.automations_scroll)
-            .overflow_y_scroll()
-            .flex_1()
-            .min_h_0()
-            .child(
-                div()
-                    .w_full()
-                    .max_w(px(CONTENT_MAX_WIDTH))
-                    .mx_auto()
-                    .px(px(24.0))
-                    .child(list),
-            );
-
-        div()
-            .flex()
-            .flex_col()
-            .flex_1()
-            .min_h_0()
-            .child(header_bar)
-            .child(scroll)
-            .into_any_element()
+        self.render_automations_shell(header, list)
     }
 
     fn render_automation_row(
@@ -930,9 +942,8 @@ impl Waku {
             .id(SharedString::from(format!("automation-delete-{id}")))
             .tab_index(0)
             .focus_visible(|style| style.border_color(theme.accent))
-            // Sized to match Save beside it in the editor header.
-            .h(px(30.0))
-            .px(px(12.0))
+            .h(px(AUTOMATIONS_ACTION_HEIGHT))
+            .px(px(AUTOMATIONS_ACTION_PADDING))
             .rounded(px(7.0))
             .border_1()
             .border_color(if armed { theme.danger } else { theme.border })
@@ -1048,8 +1059,8 @@ impl Waku {
             .track_focus(&self.automation_save_focus)
             .tab_index(0)
             .flex_none()
-            .h(px(30.0))
-            .px(px(12.0))
+            .h(px(AUTOMATIONS_ACTION_HEIGHT))
+            .px(px(AUTOMATIONS_ACTION_PADDING))
             .rounded(px(7.0))
             // A border that is only transparent, not absent: Delete beside it
             // carries one, so this keeps both boxes the same size and stops
@@ -1091,86 +1102,48 @@ impl Waku {
                     .child(save),
             );
 
-        // The header stays fixed at the top so the breadcrumb and Save are
-        // always reachable.
-        let header_bar = div().flex_none().pt(px(8.0)).pb(px(8.0)).child(
-            div()
-                .w_full()
-                .max_w(px(CONTENT_MAX_WIDTH))
-                .mx_auto()
-                .px(px(24.0))
-                .child(header),
-        );
-
         // One scroll flow, top to bottom like a settings page. The composer is
         // the Instructions field of the first card rather than a surface pinned
         // to the bottom, so every part of the automation is one list of fields.
-        let body = div()
-            .id("automations-scroll")
-            .track_scroll(&self.automations_scroll)
-            .overflow_y_scroll()
-            .flex_1()
-            .min_h_0()
-            .child(
-                div()
-                    .w_full()
-                    .max_w(px(CONTENT_MAX_WIDTH))
-                    .mx_auto()
-                    .px(px(24.0))
-                    .pb(px(24.0))
-                    .flex()
-                    .flex_col()
-                    .gap(px(12.0))
-                    .child(editor_card(
-                        &theme,
-                        vec![
-                            editor_row(
-                                &theme,
-                                tr!("automations.field_name"),
-                                tr!("automations.field_name_description"),
-                                TextField::new(
-                                    "automation-name-field",
-                                    self.automation_name_input.clone(),
-                                )
-                                .w(px(260.0))
-                                .into_any_element(),
-                            )
-                            .into_any_element(),
-                            editor_row_stacked(
-                                &theme,
-                                tr!("automations.field_instructions"),
-                                tr!("automations.field_instructions_description"),
-                                self.editor_agent_section(id, &theme, cx).into_any_element(),
-                            )
-                            .into_any_element(),
-                            editor_row(
-                                &theme,
-                                tr!("automations.enabled"),
-                                tr!("automations.field_enabled_description"),
-                                self.editor_toggle(
-                                    "automation-enabled",
-                                    editor.enabled,
-                                    &theme,
-                                    cx,
-                                    |editor| editor.enabled = !editor.enabled,
-                                )
-                                .into_any_element(),
-                            )
-                            .into_any_element(),
-                        ],
-                    ))
-                    .child(self.editor_schedule_section(&editor, &theme, cx))
-                    .child(self.editor_behavior_section(&editor, &theme, cx)),
-            );
-
-        div()
+        let content = div()
+            .pb(px(24.0))
             .flex()
             .flex_col()
-            .flex_1()
-            .min_h_0()
-            .child(header_bar)
-            .child(body)
-            .into_any_element()
+            .gap(px(12.0))
+            .child(editor_card(
+                &theme,
+                vec![
+                    editor_row(
+                        &theme,
+                        tr!("automations.field_name"),
+                        tr!("automations.field_name_description"),
+                        TextField::new("automation-name-field", self.automation_name_input.clone())
+                            .w(px(260.0)),
+                    ),
+                    editor_row_stacked(
+                        &theme,
+                        tr!("automations.field_instructions"),
+                        tr!("automations.field_instructions_description"),
+                        self.editor_agent_section(id, &theme, cx),
+                    ),
+                    editor_row(
+                        &theme,
+                        tr!("automations.enabled"),
+                        tr!("automations.field_enabled_description"),
+                        self.editor_toggle(
+                            "automation-enabled",
+                            editor.enabled,
+                            &theme,
+                            cx,
+                            |editor| editor.enabled = !editor.enabled,
+                        ),
+                    ),
+                ],
+            ))
+            .child(self.editor_schedule_section(&editor, &theme, cx))
+            .child(self.editor_behavior_section(&editor, &theme, cx));
+
+        self.render_automations_shell(header, content)
     }
 
     /// A labeled enum dropdown. The value list, label mapping, and mutation are
@@ -1376,7 +1349,7 @@ impl Waku {
             "automation-frequency",
             editor.preset,
             SchedulePreset::ALL,
-            200.0,
+            AUTOMATIONS_PICKER_WIDTH,
             false,
             cx,
             preset_label,
@@ -1385,7 +1358,6 @@ impl Waku {
 
         // Time-of-day: freeform hour and minute fields the user types by hand.
         // The `on_automation_time_edited` subscription clamps and validates.
-        // Built lazily since only the presets that carry a full time show it.
         let time_picker = || {
             div()
                 .flex()
@@ -1393,7 +1365,7 @@ impl Waku {
                 .gap(px(6.0))
                 .child(
                     TextField::new("automation-hour-field", self.automation_hour_input.clone())
-                        .w(px(52.0)),
+                        .w(px(AUTOMATIONS_TIME_FIELD_WIDTH)),
                 )
                 .child(div().text_color(theme.text_tertiary).child(":"))
                 .child(
@@ -1401,29 +1373,40 @@ impl Waku {
                         "automation-minute-field",
                         self.automation_minute_input.clone(),
                     )
-                    .w(px(52.0)),
+                    .w(px(AUTOMATIONS_TIME_FIELD_WIDTH)),
                 )
-                .into_any_element()
         };
 
-        let mut rows = vec![
-            editor_row(
-                theme,
-                tr!("automations.field_schedule_frequency"),
-                // Manual has no follow-up row, so its caption explains itself
-                // here.
-                match editor.preset {
-                    SchedulePreset::Manual => tr!("automations.hint_manual"),
-                    _ => tr!("automations.field_schedule_frequency_description"),
-                },
-                preset_picker,
-            )
-            .into_any_element(),
-        ];
+        let mut rows = vec![editor_row(
+            theme,
+            tr!("automations.field_schedule_frequency"),
+            // Manual has no follow-up row, so its caption explains itself here.
+            match editor.preset {
+                SchedulePreset::Manual => tr!("automations.hint_manual"),
+                _ => tr!("automations.field_schedule_frequency_description"),
+            },
+            preset_picker,
+        )];
 
-        // Each preset shows only the sub-controls it needs.
+        if matches!(
+            editor.preset,
+            SchedulePreset::Daily
+                | SchedulePreset::Weekdays
+                | SchedulePreset::Weekly
+                | SchedulePreset::Monthly
+        ) {
+            rows.push(editor_row(
+                theme,
+                tr!("automations.field_time"),
+                tr!("automations.field_time_description"),
+                time_picker(),
+            ));
+        }
+
+        // Each preset shows only the controls that differ from the shared time
+        // row above.
         match editor.preset {
-            SchedulePreset::Manual => {}
+            SchedulePreset::Manual | SchedulePreset::Daily | SchedulePreset::Weekdays => {}
             SchedulePreset::Hourly => {
                 // Every hour at a chosen minute past the hour: minute only.
                 let minute_picker = div()
@@ -1440,71 +1423,30 @@ impl Waku {
                             "automation-minute-field",
                             self.automation_minute_input.clone(),
                         )
-                        .w(px(52.0)),
-                    )
-                    .into_any_element();
-                rows.push(
-                    editor_row(
-                        theme,
-                        tr!("automations.field_time"),
-                        tr!("automations.field_minute_description"),
-                        minute_picker,
-                    )
-                    .into_any_element(),
-                );
-            }
-            SchedulePreset::Daily | SchedulePreset::Weekdays => {
-                rows.push(
-                    editor_row(
-                        theme,
-                        tr!("automations.field_time"),
-                        tr!("automations.field_time_description"),
-                        time_picker(),
-                    )
-                    .into_any_element(),
-                );
+                        .w(px(AUTOMATIONS_TIME_FIELD_WIDTH)),
+                    );
+                rows.push(editor_row(
+                    theme,
+                    tr!("automations.field_time"),
+                    tr!("automations.field_minute_description"),
+                    minute_picker,
+                ));
             }
             SchedulePreset::Weekly => {
-                rows.push(
-                    editor_row(
-                        theme,
-                        tr!("automations.field_time"),
-                        tr!("automations.field_time_description"),
-                        time_picker(),
-                    )
-                    .into_any_element(),
-                );
-                // The chip rows are wider than a right-hand control column, so
-                // they stack under their label at full width.
-                rows.push(
-                    editor_row_stacked(
-                        theme,
-                        tr!("automations.field_days"),
-                        tr!("automations.field_weekdays_description"),
-                        self.weekday_chips(editor, theme, cx),
-                    )
-                    .into_any_element(),
-                );
+                rows.push(editor_row_stacked(
+                    theme,
+                    tr!("automations.field_days"),
+                    tr!("automations.field_weekdays_description"),
+                    self.weekday_chips(editor, theme, cx),
+                ));
             }
             SchedulePreset::Monthly => {
-                rows.push(
-                    editor_row(
-                        theme,
-                        tr!("automations.field_time"),
-                        tr!("automations.field_time_description"),
-                        time_picker(),
-                    )
-                    .into_any_element(),
-                );
-                rows.push(
-                    editor_row_stacked(
-                        theme,
-                        tr!("automations.field_days"),
-                        tr!("automations.field_monthdays_description"),
-                        self.monthday_chips(editor, theme, cx),
-                    )
-                    .into_any_element(),
-                );
+                rows.push(editor_row_stacked(
+                    theme,
+                    tr!("automations.field_days"),
+                    tr!("automations.field_monthdays_description"),
+                    self.monthday_chips(editor, theme, cx),
+                ));
             }
         }
 
@@ -1522,7 +1464,7 @@ impl Waku {
             "automation-overlap",
             editor.overlap,
             OverlapPolicy::ALL,
-            200.0,
+            AUTOMATIONS_PICKER_WIDTH,
             false,
             cx,
             overlap_label,
@@ -1542,7 +1484,7 @@ impl Waku {
             "automation-trigger",
             editor.notify_trigger,
             NotificationTrigger::ALL,
-            200.0,
+            AUTOMATIONS_PICKER_WIDTH,
             !editor.notify_enabled,
             cx,
             trigger_label,
@@ -1557,22 +1499,19 @@ impl Waku {
                     tr!("automations.field_overlap"),
                     tr!("automations.field_overlap_description"),
                     overlap_picker,
-                )
-                .into_any_element(),
+                ),
                 editor_row(
                     theme,
                     tr!("automations.field_notifications"),
                     tr!("automations.field_notifications_description"),
-                    notify_toggle.into_any_element(),
-                )
-                .into_any_element(),
+                    notify_toggle,
+                ),
                 editor_row(
                     theme,
                     tr!("automations.field_notify_when"),
                     tr!("automations.field_notify_when_description"),
                     trigger_picker,
-                )
-                .into_any_element(),
+                ),
             ],
         )
     }
@@ -1597,22 +1536,16 @@ impl Waku {
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let selected = editor.weekdays.clone();
-        let mut row = div().flex().flex_wrap().gap(px(6.0));
-        for weekday in Weekday::ALL {
-            let is_selected = selected.contains(&weekday);
-            row = row.child(self.selection_chip(
-                SharedString::from(format!("weekday-{}", weekday_short(weekday))),
-                weekday_short(weekday),
-                is_selected,
-                theme,
-                cx,
-                move |editor| {
-                    toggle_membership_min_one(&mut editor.weekdays, weekday);
-                },
-            ));
-        }
-        row.into_any_element()
+        self.selection_chips(
+            Weekday::ALL,
+            editor.weekdays.clone(),
+            6.0,
+            |weekday| SharedString::from(format!("weekday-{}", weekday_short(weekday))),
+            weekday_short,
+            theme,
+            cx,
+            |editor, weekday| toggle_membership_min_one(&mut editor.weekdays, weekday),
+        )
     }
 
     fn monthday_chips(
@@ -1621,22 +1554,47 @@ impl Waku {
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let selected = editor.monthdays.clone();
-        let mut grid = div().flex().flex_wrap().gap(px(4.0));
-        for day in 1u8..=31 {
-            let is_selected = selected.contains(&day);
-            grid = grid.child(self.selection_chip(
-                SharedString::from(format!("monthday-{day}")),
-                day.to_string(),
+        self.selection_chips(
+            1u8..=31,
+            editor.monthdays.clone(),
+            4.0,
+            |day| SharedString::from(format!("monthday-{day}")),
+            |day| day.to_string(),
+            theme,
+            cx,
+            |editor, day| toggle_membership_min_one(&mut editor.monthdays, day),
+        )
+    }
+
+    fn selection_chips<T>(
+        &self,
+        values: impl IntoIterator<Item = T>,
+        selected: Vec<T>,
+        gap: f32,
+        id: impl Fn(T) -> SharedString,
+        label: impl Fn(T) -> String,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+        apply: impl Fn(&mut AutomationEditor, T) + 'static,
+    ) -> AnyElement
+    where
+        T: Copy + PartialEq + 'static,
+    {
+        let apply = std::rc::Rc::new(apply);
+        let mut row = div().flex().flex_wrap().gap(px(gap));
+        for value in values {
+            let is_selected = selected.contains(&value);
+            let apply = apply.clone();
+            row = row.child(self.selection_chip(
+                id(value),
+                label(value),
                 is_selected,
                 theme,
                 cx,
-                move |editor| {
-                    toggle_membership_min_one(&mut editor.monthdays, day);
-                },
+                move |editor| apply(editor, value),
             ));
         }
-        grid.into_any_element()
+        row.into_any_element()
     }
 
     fn selection_chip(
@@ -1683,7 +1641,11 @@ impl Waku {
 /// A grouped card, matching the cards the settings pages are built from: a
 /// heading and caption on a raised surface, with the group's field rows
 /// appended as children.
-fn editor_card(theme: &Theme, rows: Vec<AnyElement>) -> Div {
+fn editor_card<I, E>(theme: &Theme, rows: I) -> Div
+where
+    I: IntoIterator<Item = E>,
+    E: IntoElement,
+{
     let mut card = div()
         .w_full()
         .flex()
@@ -1702,7 +1664,7 @@ fn editor_card(theme: &Theme, rows: Vec<AnyElement>) -> Div {
 
 /// One field row inside a card: label and caption on the left, the control
 /// flush right.
-fn editor_row(theme: &Theme, label: String, description: String, control: AnyElement) -> Div {
+fn editor_row(theme: &Theme, label: String, description: String, control: impl IntoElement) -> Div {
     editor_row_base()
         .items_center()
         .gap(px(24.0))
@@ -1720,7 +1682,7 @@ fn editor_row_stacked(
     theme: &Theme,
     label: String,
     description: String,
-    control: AnyElement,
+    control: impl IntoElement,
 ) -> Div {
     editor_row_base()
         .flex_col()
