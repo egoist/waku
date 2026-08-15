@@ -128,7 +128,7 @@ impl AutomationEditor {
     }
 
     /// Seeds the form from an existing automation.
-    fn from_automation(automation: &Automation) -> Self {
+    fn from_automation(automation: &Automation, project_exists: bool) -> Self {
         let time = automation.schedule.time().unwrap_or_default();
         // `minute` seeds both the time field (Daily/Weekly/Monthly) and the
         // Hourly minute — only one is shown at a time, so they share the field.
@@ -154,9 +154,9 @@ impl AutomationEditor {
                 (SchedulePreset::Monthly, vec![Weekday::Monday], days.clone())
             }
         };
-        let (fresh_worktree, base_branch) = match &automation.workspace {
-            SessionWorkspace::NewWorktree { base_branch } => (true, base_branch.clone()),
-            SessionWorkspace::Worktree { branch, .. } => (true, Some(branch.clone())),
+        let (fresh_worktree, base_branch) = match automation.workspace_for_project(project_exists) {
+            SessionWorkspace::NewWorktree { base_branch } => (true, base_branch),
+            SessionWorkspace::Worktree { branch, .. } => (true, Some(branch)),
             SessionWorkspace::Local => (false, None),
         };
         Self {
@@ -168,7 +168,7 @@ impl AutomationEditor {
             agent_preset: automation.agent.agent_preset.clone(),
             runtime_mode: automation.agent.runtime_mode,
             interaction_mode: automation.agent.interaction_mode,
-            project_id: automation.project_id,
+            project_id: automation.project_id.filter(|_| project_exists),
             fresh_worktree,
             base_branch,
             preset,
@@ -219,13 +219,19 @@ impl AutomationEditor {
 
     /// The workspace the runs use.
     fn workspace(&self) -> SessionWorkspace {
-        if self.fresh_worktree {
+        if self.project_id.is_some() && self.fresh_worktree {
             SessionWorkspace::NewWorktree {
                 base_branch: self.base_branch.clone(),
             }
         } else {
             SessionWorkspace::Local
         }
+    }
+
+    pub(super) fn clear_project_binding(&mut self) {
+        self.project_id = None;
+        self.fresh_worktree = false;
+        self.base_branch = None;
     }
 
     /// Writes the form onto an automation, preserving its id/created_at/history.
@@ -272,11 +278,19 @@ impl Waku {
     ) {
         self.settings_page = None;
         let (editor, name, prompt) = match id.and_then(|id| self.state.automation(id)) {
-            Some(automation) => (
-                AutomationEditor::from_automation(automation),
-                automation.name.clone(),
-                automation.prompt.clone(),
-            ),
+            Some(automation) => {
+                let project_exists = automation.project_id.is_some_and(|project_id| {
+                    self.state
+                        .projects
+                        .iter()
+                        .any(|project| project.id == project_id)
+                });
+                (
+                    AutomationEditor::from_automation(automation, project_exists),
+                    automation.name.clone(),
+                    automation.prompt.clone(),
+                )
+            }
             None => (
                 AutomationEditor::new(self.state.last_provider),
                 String::new(),
@@ -463,19 +477,17 @@ impl Waku {
             return None;
         }
 
+        let project_exists = automation.project_id.is_some_and(|project_id| {
+            self.state
+                .projects
+                .iter()
+                .any(|project| project.id == project_id)
+        });
         let project_id = match automation.project_id {
-            Some(project_id)
-                if self
-                    .state
-                    .projects
-                    .iter()
-                    .any(|project| project.id == project_id) =>
-            {
-                project_id
-            }
+            Some(project_id) if project_exists => project_id,
             // Unbound (or a project that no longer exists): give this run its own
             // projectless workspace, the way a projectless manual task gets one.
-            _ => self.create_automation_projectless_project(cx)?,
+            _ => self.create_automation_projectless_project()?,
         };
 
         let mut session = self
@@ -487,7 +499,7 @@ impl Waku {
         session.agent_preset = automation.agent.agent_preset.clone();
         session.runtime_mode = automation.agent.runtime_mode;
         session.interaction_mode = automation.agent.interaction_mode;
-        session.workspace = automation.workspace.clone();
+        session.workspace = automation.workspace_for_project(project_exists);
         session.originating_automation = Some(id);
         let session_id = session.id;
         self.state.push_session(session);
@@ -585,16 +597,9 @@ impl Waku {
     }
 
     /// A fresh projectless project for an unbound automation run.
-    fn create_automation_projectless_project(&mut self, cx: &mut Context<Self>) -> Option<Uuid> {
-        let workspace = match crate::projectless::create_workspace(None) {
-            Ok(workspace) => workspace,
-            Err(error) => {
-                self.show_toast(tr!("errors.create_projectless_task", error = error));
-                cx.notify();
-                return None;
-            }
-        };
-        let mut project = Project::from_path(workspace.cwd);
+    fn create_automation_projectless_project(&mut self) -> Option<Uuid> {
+        let root = crate::projectless::workspace_root()?.to_path_buf();
+        let mut project = Project::from_path(root);
         project.name = Project::PROJECTLESS_NAME.to_owned();
         let project_id = project.id;
         self.state.projects.push(project);
@@ -607,10 +612,10 @@ impl Waku {
     /// A no-op for manual sessions and for follow-up turns on a run that already
     /// resolved — only a run still marked `Running` is acted on, so completion
     /// notifications fire exactly once.
-    pub(super) fn complete_automation_run(
+    pub(super) fn settle_automation_run(
         &mut self,
         session_id: Uuid,
-        success: bool,
+        outcome: crate::automation::RunOutcome,
         cx: &mut Context<Self>,
     ) {
         let Some(automation_id) = self
@@ -622,28 +627,14 @@ impl Waku {
         else {
             return;
         };
-        let outcome = if success {
-            crate::automation::RunOutcome::Succeeded
-        } else {
-            crate::automation::RunOutcome::Failed
-        };
         let Some(automation) = self.state.automation_mut(automation_id) else {
             return;
         };
-        let Some(run_id) = automation
-            .history
-            .iter()
-            .find(|run| {
-                run.session_id == Some(session_id)
-                    && run.outcome == crate::automation::RunOutcome::Running
-            })
-            .map(|run| run.id)
-        else {
+        if !automation.settle_session_run(session_id, outcome) {
             return;
-        };
-        automation.resolve_run(run_id, outcome, None);
-        let should_notify =
-            automation.notification.enabled && automation.notification.trigger.matches(success);
+        }
+        let success = outcome == crate::automation::RunOutcome::Succeeded;
+        let should_notify = automation.notification.matches_outcome(outcome);
         let name = automation.name.clone();
         self.save();
 
@@ -654,7 +645,7 @@ impl Waku {
                 tr!("automations.notify_failed")
             };
             crate::platform::show_task_notification(
-                &format!("automation-{automation_id}"),
+                &super::task_notification_tag(session_id),
                 &name,
                 &body,
                 cx,
@@ -867,7 +858,7 @@ impl Waku {
                 this.open_automation_editor(Some(id), window, cx);
             }))
             .on_key_down(cx.listener(move |this, event: &KeyDownEvent, window, cx| {
-                if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                if is_button_activation(&event.keystroke.key) {
                     this.open_automation_editor(Some(id), window, cx);
                     cx.stop_propagation();
                 }
@@ -1119,6 +1110,12 @@ impl Waku {
             .child(tr!("automations.save"))
             .on_click(cx.listener(|this, _, _, cx| {
                 this.save_automation_editor(cx);
+            }))
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
+                if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                    this.save_automation_editor(cx);
+                    cx.stop_propagation();
+                }
             }));
 
         // Delete is only meaningful for an existing automation; Run now now
@@ -1986,6 +1983,53 @@ fn format_time(time: TimeOfDay) -> String {
 
 fn format_next_run(when: NaiveDateTime) -> String {
     when.format("%a %b %-d · %-I:%M %p").to_string()
+}
+
+fn is_button_activation(key: &str) -> bool {
+    matches!(key, "enter" | "space")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn clearing_an_editor_project_also_clears_worktree_state() {
+        let mut editor = AutomationEditor::new(ProviderKind::Codex);
+        editor.project_id = Some(Uuid::new_v4());
+        editor.fresh_worktree = true;
+        editor.base_branch = Some("main".to_owned());
+
+        editor.clear_project_binding();
+
+        assert_eq!(editor.project_id, None);
+        assert!(!editor.fresh_worktree);
+        assert_eq!(editor.base_branch, None);
+        assert_eq!(editor.workspace(), SessionWorkspace::Local);
+    }
+
+    #[test]
+    fn save_button_uses_conventional_keyboard_activation_keys() {
+        assert!(is_button_activation("enter"));
+        assert!(is_button_activation("space"));
+        assert!(!is_button_activation("escape"));
+    }
+
+    #[test]
+    fn missing_saved_project_hydrates_as_a_local_editor() {
+        let mut automation = Automation::new("Nightly", ProviderKind::Codex, 1_000);
+        automation.project_id = Some(Uuid::new_v4());
+        automation.workspace = SessionWorkspace::NewWorktree {
+            base_branch: Some("main".to_owned()),
+        };
+
+        let editor = AutomationEditor::from_automation(&automation, false);
+
+        assert_eq!(editor.project_id, None);
+        assert!(!editor.fresh_worktree);
+        assert_eq!(editor.base_branch, None);
+        assert_eq!(editor.workspace(), SessionWorkspace::Local);
+    }
 }
 
 /// Converts a stored unix timestamp to local wall clock, the representation the

@@ -136,18 +136,39 @@ pub(super) fn merge_remote_session_catalog(
     removed
 }
 
+fn automation_preparation_is_current(
+    version: Option<(Uuid, u64)>,
+    current: Option<&crate::automation::Automation>,
+) -> bool {
+    match version {
+        None => true,
+        Some((id, updated_at)) => current.is_some_and(|automation| {
+            automation.id == id && automation.enabled && automation.updated_at == updated_at
+        }),
+    }
+}
+
 /// Perform every blocking operation between accepting a submission and
 /// starting its provider. This function is called only from the background
 /// executor; the UI thread owns applying the returned workspace afterward.
 fn prepare_submission(
     workspace_client: waku_client::WorkspaceClient,
-    project: Project,
+    mut project: Project,
     workspace: SessionWorkspace,
     driver_start: Option<anyhow::Result<DriverStartRequest>>,
     session_id: Uuid,
     prompt: &str,
     turn_count: usize,
 ) -> anyhow::Result<PreparedSubmission> {
+    let allocated_project_path = if project.is_projectless()
+        && crate::projectless::workspace_root().is_some_and(|root| project.path == root)
+    {
+        let workspace = crate::projectless::create_workspace(Some(prompt))?;
+        project.path = workspace.cwd.clone();
+        Some(workspace.cwd)
+    } else {
+        None
+    };
     let workspace = match workspace {
         SessionWorkspace::NewWorktree { base_branch } => {
             if project.is_projectless() {
@@ -196,6 +217,7 @@ fn prepare_submission(
     });
 
     Ok(PreparedSubmission {
+        project_path: allocated_project_path,
         workspace,
         checkpoint_warning,
         driver,
@@ -2925,6 +2947,11 @@ impl Waku {
                 .unwrap_or_default();
             self.driver_start_request_for_session(session, provisional_cwd)
         });
+        let automation_version = session.originating_automation.and_then(|automation_id| {
+            self.state
+                .automation(automation_id)
+                .map(|automation| (automation_id, automation.updated_at))
+        });
         let Some(project) = self
             .state
             .projects
@@ -3029,7 +3056,13 @@ impl Waku {
                 })
                 .await;
             let _ = waku.update(cx, move |waku, cx| {
-                waku.finish_submission_preparation(session_id, submission, prepared, cx);
+                waku.finish_submission_preparation(
+                    session_id,
+                    automation_version,
+                    submission,
+                    prepared,
+                    cx,
+                );
             });
         })
         .detach();
@@ -3038,6 +3071,7 @@ impl Waku {
     fn finish_submission_preparation(
         &mut self,
         session_id: Uuid,
+        automation_version: Option<(Uuid, u64)>,
         submission: ComposerSubmission,
         prepared: anyhow::Result<PreparedSubmission>,
         cx: &mut Context<Self>,
@@ -3050,10 +3084,18 @@ impl Waku {
             Ok(prepared) => prepared,
             Err(error) => {
                 self.submission_preparations.remove(&session_id);
-                self.track_active_turn_outcome(
-                    session_id,
-                    crate::analytics::TurnOutcome::PreparationFailed,
-                );
+                let is_automation = self
+                    .state
+                    .sessions
+                    .iter()
+                    .find(|session| session.id == session_id)
+                    .is_some_and(|session| session.originating_automation.is_some());
+                if !is_automation {
+                    self.track_active_turn_outcome(
+                        session_id,
+                        crate::analytics::TurnOutcome::PreparationFailed,
+                    );
+                }
                 if selected {
                     self.sync_transcript_rows();
                 }
@@ -3065,13 +3107,32 @@ impl Waku {
                 if let Some(session) = self.state.session_mut(session_id)
                     && session.status == SessionStatus::Connecting
                 {
-                    // The submission never reached a provider and its prompt
-                    // returns to the composer, so the eagerly-begun turn and
-                    // its message leave the transcript with it.
-                    if let Some(turn_id) = session.active_turn_id() {
-                        session.unwind_unstarted_turn(turn_id);
+                    if is_automation {
+                        session.status = SessionStatus::Failed;
+                        session.push_message(
+                            MessageRole::Assistant,
+                            tr!("errors.create_worktree", error = error),
+                        );
+                    } else {
+                        // Manual submissions return to the composer when
+                        // preparation never reaches a provider.
+                        if let Some(turn_id) = session.active_turn_id() {
+                            session.unwind_unstarted_turn(turn_id);
+                        }
+                        session.status = SessionStatus::Idle;
                     }
-                    session.status = SessionStatus::Idle;
+                }
+                if is_automation {
+                    self.finish_active_turn_with_analytics(
+                        session_id,
+                        TurnStatus::Failed,
+                        crate::analytics::TurnOutcome::PreparationFailed,
+                    );
+                    self.settle_automation_run(
+                        session_id,
+                        crate::automation::RunOutcome::Failed,
+                        cx,
+                    );
                 }
                 if selected {
                     if self
@@ -3083,7 +3144,9 @@ impl Waku {
                         self.transcript_anchor_following.set(false);
                     }
                     self.splice_transcript_rows_after_visibility_change(&previous_kinds);
-                    self.restore_composer_submission(submission, cx);
+                    if !is_automation {
+                        self.restore_composer_submission(submission, cx);
+                    }
                     self.show_toast(tr!("errors.create_worktree", error = error));
                 }
                 cx.notify();
@@ -3091,10 +3154,45 @@ impl Waku {
             }
         };
         let PreparedSubmission {
+            project_path,
             workspace,
             checkpoint_warning,
             driver: prepared_driver,
         } = prepared;
+        let current_automation =
+            automation_version.and_then(|(automation_id, _)| self.state.automation(automation_id));
+        let stale_automation =
+            !automation_preparation_is_current(automation_version, current_automation);
+        if stale_automation {
+            self.submission_preparations.remove(&session_id);
+            if let Some(session) = self.state.session_mut(session_id) {
+                session.status = SessionStatus::Idle;
+            }
+            self.finish_active_turn_with_analytics(
+                session_id,
+                TurnStatus::Interrupted,
+                crate::analytics::TurnOutcome::Cancelled,
+            );
+            self.settle_automation_run(session_id, crate::automation::RunOutcome::Cancelled, cx);
+            self.save();
+            cx.notify();
+            return;
+        }
+        if let Some(project_path) = project_path
+            && let Some(project_id) = self
+                .state
+                .sessions
+                .iter()
+                .find(|session| session.id == session_id)
+                .map(|session| session.project_id)
+            && let Some(project) = self
+                .state
+                .projects
+                .iter_mut()
+                .find(|project| project.id == project_id)
+        {
+            project.path = project_path;
+        }
         // The turn began at accept time; it must still be the untouched one
         // this preparation belongs to. Cancellation is blocked while the
         // preparation set holds the session, so a mismatch means the session
@@ -3185,6 +3283,7 @@ impl Waku {
         // show Stop (or Send after failure), never the preparation spinner.
         self.submission_preparations.remove(&session_id);
         if failed_to_start {
+            self.settle_automation_run(session_id, crate::automation::RunOutcome::Failed, cx);
             self.capture_latest_turn_checkpoint_for(session_id);
             self.start_pending_checkpoint_captures(cx);
         }
@@ -3406,6 +3505,37 @@ mod response_fork_title_tests {
             next_response_fork_title("Plan (2026)", ["Plan (2026)"]),
             "Plan (2026) (2)"
         );
+    }
+}
+
+#[cfg(test)]
+mod automation_preparation_tests {
+    use super::automation_preparation_is_current;
+    use crate::automation::Automation;
+    use crate::model::ProviderKind;
+
+    #[test]
+    fn deleted_disabled_and_superseded_automation_preparations_are_stale() {
+        let mut automation = Automation::new("Nightly", ProviderKind::Codex, 1_000);
+        let version = Some((automation.id, automation.updated_at));
+        assert!(automation_preparation_is_current(
+            version,
+            Some(&automation)
+        ));
+        assert!(!automation_preparation_is_current(version, None));
+
+        automation.enabled = false;
+        assert!(!automation_preparation_is_current(
+            version,
+            Some(&automation)
+        ));
+        automation.enabled = true;
+        automation.updated_at += 1;
+        assert!(!automation_preparation_is_current(
+            version,
+            Some(&automation)
+        ));
+        assert!(automation_preparation_is_current(None, None));
     }
 }
 

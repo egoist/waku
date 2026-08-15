@@ -125,9 +125,6 @@ const IDLE_SESSION_SWEEP_INTERVAL: Duration = Duration::from_secs(5 * 60);
 const BACKGROUND_WORK_REFRESH_INTERVAL: Duration = Duration::from_secs(5);
 const BACKGROUND_WORK_TICK_INTERVAL: Duration = Duration::from_secs(1);
 const PLAN_USAGE_MAINTENANCE_INTERVAL: Duration = Duration::from_secs(30);
-/// How often the scheduler asks the planner which automations are due. Coarse
-/// enough to be cheap, fine enough that a slot fires within half a minute.
-const AUTOMATION_TICK_INTERVAL: Duration = Duration::from_secs(30);
 /// An occurrence older than this when the tick sees it was missed while nothing
 /// ran (app closed or asleep), so it fires as a coalesced catch-up rather than
 /// an on-time run. Comfortably larger than the tick interval.
@@ -146,6 +143,23 @@ pub(crate) fn task_notification_tag(session_id: Uuid) -> String {
 
 pub(crate) fn task_id_from_notification_tag(tag: &str) -> Option<Uuid> {
     tag.strip_prefix(TASK_NOTIFICATION_TAG_PREFIX)?.parse().ok()
+}
+
+fn should_show_generic_task_notification(
+    app_is_backgrounded: bool,
+    originating_automation: Option<Uuid>,
+) -> bool {
+    app_is_backgrounded && originating_automation.is_none()
+}
+
+/// Delay from `now` to the next whole wall-clock minute.
+fn automation_boundary_delay(now: std::time::SystemTime) -> Duration {
+    let elapsed = now
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or(Duration::ZERO);
+    let within_minute = Duration::from_secs(elapsed.as_secs() % 60)
+        + Duration::from_nanos(u64::from(elapsed.subsec_nanos()));
+    Duration::from_secs(60) - within_minute
 }
 
 fn signal_event_pump(wake: &smol::channel::Sender<()>) {
@@ -550,6 +564,8 @@ struct PendingCheckpointCapture {
 /// from [`SessionStatus`] lets the composer distinguish that non-cancellable
 /// preparation window from a connecting provider that can already be stopped.
 struct PreparedSubmission {
+    /// A projectless workspace allocated during background preparation.
+    project_path: Option<PathBuf>,
     workspace: SessionWorkspace,
     checkpoint_warning: Option<String>,
     /// `None` reuses an already-live runtime. `Some` contains the result of a
@@ -1263,6 +1279,9 @@ pub struct Waku {
     /// Date groups the user has folded in the sidebar. This is intentionally
     /// runtime-only, like transcript disclosure state.
     sidebar_collapsed_groups: HashSet<SessionDateGroup>,
+    /// Per-automation sidebar data rebuilt with the row snapshot, never in a
+    /// virtualized row builder.
+    sidebar_automation_metadata: RefCell<HashMap<Uuid, sidebar::AutomationSidebarMetadata>>,
     /// Whether the automations section at the top of the sidebar is folded.
     /// Runtime-only, like `sidebar_collapsed_groups`.
     sidebar_automations_collapsed: bool,
@@ -1964,7 +1983,7 @@ impl Waku {
         let projectless_save_error = projectless_migrated
             .then(|| store.save(&mut state).err())
             .flatten();
-        let startup_toast = projectless_migration_error
+        let mut startup_toast = projectless_migration_error
             .map(|error| tr!("errors.move_projectless_task", error = error))
             .or_else(|| {
                 projectless_save_error
@@ -2021,6 +2040,7 @@ impl Waku {
             startup_live_session_ids.push(selected);
         }
         let mut interrupted_turn_checkpoints = Vec::new();
+        let mut interrupted_session_ids = Vec::new();
         for session in &mut state.sessions {
             session.migrate_legacy_state();
             // A provider runtime belongs to the daemon and may still be
@@ -2032,6 +2052,7 @@ impl Waku {
             }
             if session.status != SessionStatus::Idle {
                 session.status = SessionStatus::Idle;
+                interrupted_session_ids.push(session.id);
             }
             let interrupted_turn = if let Some(turn) = session
                 .turns
@@ -2078,6 +2099,31 @@ impl Waku {
             session
                 .transcript_blocks
                 .retain(|block| !block.activities.is_empty());
+        }
+        for session_id in interrupted_session_ids {
+            state.mark_session_dirty(session_id);
+        }
+        let mut recovered_automation_runs = false;
+        for automation in &mut state.automations {
+            for run in &mut automation.history {
+                if run.outcome == crate::automation::RunOutcome::Running
+                    && run.session_id.is_some_and(|session_id| {
+                        state
+                            .sessions
+                            .iter()
+                            .any(|session| session.id == session_id)
+                    })
+                {
+                    run.outcome = crate::automation::RunOutcome::Cancelled;
+                    recovered_automation_runs = true;
+                }
+            }
+        }
+        if recovered_automation_runs
+            && let Err(error) = store.save(&mut state)
+            && startup_toast.is_none()
+        {
+            startup_toast = Some(error.to_string());
         }
         let initial_composer_draft = state
             .selected_session
@@ -2632,9 +2678,8 @@ impl Waku {
                     {
                         break;
                     }
-                    cx.background_executor()
-                        .timer(AUTOMATION_TICK_INTERVAL)
-                        .await;
+                    let delay = automation_boundary_delay(std::time::SystemTime::now());
+                    cx.background_executor().timer(delay).await;
                 }
             })
             .detach();
@@ -2787,6 +2832,7 @@ impl Waku {
                 session_rename: None,
                 session_rename_input,
                 sidebar_collapsed_groups: HashSet::new(),
+                sidebar_automation_metadata: RefCell::new(HashMap::new()),
                 sidebar_automations_collapsed: false,
                 sidebar_expanded_automations: HashSet::new(),
                 sidebar_expanded_automation_runs: HashSet::new(),

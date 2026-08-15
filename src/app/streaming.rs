@@ -502,25 +502,30 @@ impl Waku {
                 {
                     return true;
                 }
-                let task_notification = cx.active_window().is_none().then(|| {
-                    self.state
-                        .sessions
-                        .iter()
-                        .find(|session| session.id == session_id)
-                        .map(|session| {
-                            let title = if session.display_title() == AgentSession::DEFAULT_TITLE {
-                                tr!("session.new_task")
-                            } else {
-                                session.display_title().to_owned()
-                            };
-                            let body = if success {
-                                tr!("session.turn_completed")
-                            } else {
-                                tr!("session.stopped")
-                            };
-                            (title, body)
-                        })
-                });
+                let task_notification = self
+                    .state
+                    .sessions
+                    .iter()
+                    .find(|session| session.id == session_id)
+                    .filter(|session| {
+                        should_show_generic_task_notification(
+                            cx.active_window().is_none(),
+                            session.originating_automation,
+                        )
+                    })
+                    .map(|session| {
+                        let title = if session.display_title() == AgentSession::DEFAULT_TITLE {
+                            tr!("session.new_task")
+                        } else {
+                            session.display_title().to_owned()
+                        };
+                        let body = if success {
+                            tr!("session.turn_completed")
+                        } else {
+                            tr!("session.stopped")
+                        };
+                        (title, body)
+                    });
                 self.finish_streaming_assistant(session_id);
                 self.complete_turn_blocks(session_id);
                 runtime.stream_phase = None;
@@ -578,7 +583,7 @@ impl Waku {
                 if let Some(previous_kinds) = previous_kinds.as_deref() {
                     self.splice_active_transcript_rows_after_visibility_change(previous_kinds);
                 }
-                if let Some(Some((title, body))) = task_notification {
+                if let Some((title, body)) = task_notification {
                     crate::platform::show_task_notification(
                         &task_notification_tag(session_id),
                         &title,
@@ -590,7 +595,15 @@ impl Waku {
                 // automation's config, fire a completion notification. A no-op
                 // for manual sessions and for follow-up turns on an already
                 // resolved run.
-                self.complete_automation_run(session_id, success, cx);
+                self.settle_automation_run(
+                    session_id,
+                    if success {
+                        crate::automation::RunOutcome::Succeeded
+                    } else {
+                        crate::automation::RunOutcome::Failed
+                    },
+                    cx,
+                );
             }
             DriverEvent::Error(error) => {
                 let error = compact_driver_error(&error);
@@ -665,7 +678,11 @@ impl Waku {
                 if finished_turn {
                     self.capture_latest_turn_checkpoint_for(session_id);
                     // A crashed provider is a failed automation run.
-                    self.complete_automation_run(session_id, false, cx);
+                    self.settle_automation_run(
+                        session_id,
+                        crate::automation::RunOutcome::Failed,
+                        cx,
+                    );
                 }
                 if let Some(previous_kinds) = previous_kinds.as_deref() {
                     self.splice_active_transcript_rows_after_visibility_change(previous_kinds);

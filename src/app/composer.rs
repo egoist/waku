@@ -1,4 +1,4 @@
-use super::automations_page::AutomationsPage;
+use super::automations_page::{AutomationEditor, AutomationsPage};
 use super::*;
 
 use anyhow::Context as _;
@@ -1156,7 +1156,7 @@ impl Waku {
                 }
             }
             AgentControlTarget::Automation => {
-                self.edit_automation_form(cx, |editor| editor.project_id = None);
+                self.edit_automation_form(cx, AutomationEditor::clear_project_binding);
             }
         }
     }

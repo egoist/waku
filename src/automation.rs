@@ -97,13 +97,47 @@ impl Automation {
 
     /// Update the outcome (and, if newly known, the spawned-task link) of the
     /// history entry for `run_id`. Called when a spawned run completes.
-    pub fn resolve_run(&mut self, run_id: Uuid, outcome: RunOutcome, session_id: Option<Uuid>) {
-        if let Some(entry) = self.history.iter_mut().find(|entry| entry.id == run_id) {
+    pub fn resolve_run(
+        &mut self,
+        run_id: Uuid,
+        outcome: RunOutcome,
+        session_id: Option<Uuid>,
+    ) -> bool {
+        if let Some(entry) = self
+            .history
+            .iter_mut()
+            .find(|entry| entry.id == run_id && entry.outcome == RunOutcome::Running)
+        {
             entry.outcome = outcome;
             if session_id.is_some() {
                 entry.session_id = session_id;
             }
+            true
+        } else {
+            false
         }
+    }
+
+    /// Workspace safe to use with the currently available project binding.
+    pub fn workspace_for_project(&self, project_exists: bool) -> SessionWorkspace {
+        if self.project_id.is_some() && project_exists {
+            self.workspace.clone()
+        } else {
+            SessionWorkspace::Local
+        }
+    }
+
+    /// Settle the running entry linked to `session_id`, once.
+    pub fn settle_session_run(&mut self, session_id: Uuid, outcome: RunOutcome) -> bool {
+        let Some(run_id) = self
+            .history
+            .iter()
+            .find(|run| run.session_id == Some(session_id) && run.outcome == RunOutcome::Running)
+            .map(|run| run.id)
+        else {
+            return false;
+        };
+        self.resolve_run(run_id, outcome, Some(session_id))
     }
 }
 
@@ -263,6 +297,18 @@ pub struct NotificationConfig {
     pub trigger: NotificationTrigger,
 }
 
+impl NotificationConfig {
+    /// Whether this policy requests a notification for a terminal outcome.
+    pub fn matches_outcome(self, outcome: RunOutcome) -> bool {
+        self.enabled
+            && match outcome {
+                RunOutcome::Succeeded => self.trigger.matches(true),
+                RunOutcome::Failed => self.trigger.matches(false),
+                RunOutcome::Running | RunOutcome::Cancelled | RunOutcome::Skipped => false,
+            }
+    }
+}
+
 impl Default for NotificationConfig {
     /// Enabled, notifying on failure — an unattended run that fails is the case
     /// most worth surfacing.
@@ -344,6 +390,7 @@ pub enum RunOutcome {
     Running,
     Succeeded,
     Failed,
+    Cancelled,
     /// Not run: the overlap policy skipped this occurrence.
     Skipped,
 }
@@ -385,6 +432,44 @@ mod tests {
         assert_eq!(entry.outcome, RunOutcome::Succeeded);
         // Link preserved even when the resolve call omits it.
         assert_eq!(entry.session_id, Some(session));
+        assert!(!automation.resolve_run(run_id, RunOutcome::Failed, None));
+        assert_eq!(
+            automation.history.first().unwrap().outcome,
+            RunOutcome::Succeeded
+        );
+    }
+
+    #[test]
+    fn projectless_or_missing_projects_force_local_workspace() {
+        let mut automation = Automation::new("Nightly", ProviderKind::Codex, 1_000);
+        automation.workspace = SessionWorkspace::NewWorktree {
+            base_branch: Some("main".to_owned()),
+        };
+
+        assert_eq!(
+            automation.workspace_for_project(false),
+            SessionWorkspace::Local
+        );
+        automation.project_id = Some(Uuid::new_v4());
+        assert_eq!(
+            automation.workspace_for_project(false),
+            SessionWorkspace::Local
+        );
+        assert!(matches!(
+            automation.workspace_for_project(true),
+            SessionWorkspace::NewWorktree { .. }
+        ));
+    }
+
+    #[test]
+    fn session_run_settlement_is_exactly_once() {
+        let mut automation = Automation::new("Nightly", ProviderKind::Codex, 1_000);
+        let session_id = Uuid::new_v4();
+        automation.record_run(AutomationRun::spawned(session_id, 1_100, false));
+
+        assert!(automation.settle_session_run(session_id, RunOutcome::Cancelled));
+        assert!(!automation.settle_session_run(session_id, RunOutcome::Failed));
+        assert_eq!(automation.history[0].outcome, RunOutcome::Cancelled);
     }
 
     #[test]
@@ -395,6 +480,32 @@ mod tests {
         assert!(!NotificationTrigger::OnSuccess.matches(false));
         assert!(!NotificationTrigger::OnFailure.matches(true));
         assert!(NotificationTrigger::OnFailure.matches(false));
+    }
+
+    #[test]
+    fn notification_policy_is_authoritative_for_every_terminal_outcome() {
+        for enabled in [false, true] {
+            for trigger in [
+                NotificationTrigger::Always,
+                NotificationTrigger::OnSuccess,
+                NotificationTrigger::OnFailure,
+            ] {
+                let config = NotificationConfig { enabled, trigger };
+                let success = enabled
+                    && matches!(
+                        trigger,
+                        NotificationTrigger::Always | NotificationTrigger::OnSuccess
+                    );
+                let failure = enabled
+                    && matches!(
+                        trigger,
+                        NotificationTrigger::Always | NotificationTrigger::OnFailure
+                    );
+                assert_eq!(config.matches_outcome(RunOutcome::Succeeded), success);
+                assert_eq!(config.matches_outcome(RunOutcome::Failed), failure);
+                assert!(!config.matches_outcome(RunOutcome::Cancelled));
+            }
+        }
     }
 
     #[test]

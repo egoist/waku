@@ -870,6 +870,9 @@ struct Storage {
     /// See [`write_messages`].
     written_messages: HashMap<Uuid, HashMap<Uuid, u64>>,
     saved_projects: u64,
+    /// Automation ids successfully decoded by this binary. Unknown rows are
+    /// deliberately absent so ordinary reconciliation can never delete them.
+    persisted_automations: HashSet<Uuid>,
     saved_automations: u64,
     saved_app_settings: u64,
     saved_app_state: u64,
@@ -1166,17 +1169,29 @@ impl StateStore {
             .collect();
         drop(sessions);
 
-        // Automations are stored whole as a JSON blob; a row that fails to
-        // deserialize is dropped rather than failing the whole load.
+        // Automations are stored whole as a JSON blob. Rows this binary cannot
+        // decode stay in SQLite and are excluded from known-row reconciliation.
         let mut automations = connection
-            .prepare("SELECT data FROM automations")
+            .prepare("SELECT id, data FROM automations")
             .map_err(to_io_error)?;
-        state.automations = automations
-            .query_map([], |row| row.get::<_, String>(0))
+        let mut persisted_automations = HashSet::new();
+        for row in automations
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
             .map_err(to_io_error)?
-            .filter_map(Result::ok)
-            .filter_map(|data| serde_json::from_str::<Automation>(&data).ok())
-            .collect();
+        {
+            let (stored_id, data) = row.map_err(to_io_error)?;
+            match serde_json::from_str::<Automation>(&data) {
+                Ok(automation) => {
+                    persisted_automations.insert(automation.id);
+                    state.automations.push(automation);
+                }
+                Err(error) => {
+                    eprintln!("failed to decode automation row {stored_id}; preserving it: {error}")
+                }
+            }
+        }
         drop(automations);
 
         state.migrate_loaded();
@@ -1202,7 +1217,10 @@ impl StateStore {
             // are skeletons anyway, so the first save of one is a full write.
             written_messages: HashMap::new(),
             saved_projects: 0,
-            saved_automations: 0,
+            persisted_automations,
+            saved_automations: fingerprint(
+                &serde_json::to_string(&state.automations).map_err(to_io_error)?,
+            ),
             saved_app_settings: if app_settings_are_saved {
                 fingerprint(&serde_json::to_string(&app_settings).map_err(to_io_error)?)
             } else {
@@ -1233,6 +1251,7 @@ impl StateStore {
                 persisted_sessions: HashSet::new(),
                 written_messages: HashMap::new(),
                 saved_projects: 0,
+                persisted_automations: HashSet::new(),
                 saved_automations: 0,
                 saved_app_settings: 0,
                 saved_app_state: 0,
@@ -1318,6 +1337,7 @@ impl StateStore {
                 persisted_sessions: HashSet::new(),
                 written_messages: HashMap::new(),
                 saved_projects: 0,
+                persisted_automations: HashSet::new(),
                 saved_automations: 0,
                 saved_app_settings: 0,
                 saved_app_state: 0,
@@ -1375,17 +1395,30 @@ impl StateStore {
         // rewrites the small set rather than tracking per-automation dirtiness.
         let automations = serde_json::to_string(&state.automations).map_err(to_io_error)?;
         let automations_fingerprint = fingerprint(&automations);
+        let mut next_automation_fingerprint = None;
+        let mut next_persisted_automations = None;
         if automations_fingerprint != storage.saved_automations {
-            transaction
-                .execute("DELETE FROM automations", [])
-                .map_err(to_io_error)?;
+            let current_ids = state
+                .automations
+                .iter()
+                .map(|automation| automation.id)
+                .collect::<HashSet<_>>();
+            for removed in storage.persisted_automations.difference(&current_ids) {
+                transaction
+                    .execute(
+                        "DELETE FROM automations WHERE id = ?1",
+                        params![removed.to_string()],
+                    )
+                    .map_err(to_io_error)?;
+            }
             for automation in &state.automations {
                 let data = serde_json::to_string(automation).map_err(to_io_error)?;
                 transaction
                     .execute(UPSERT_AUTOMATION, params![automation.id.to_string(), data])
                     .map_err(to_io_error)?;
             }
-            storage.saved_automations = automations_fingerprint;
+            next_automation_fingerprint = Some(automations_fingerprint);
+            next_persisted_automations = Some(current_ids);
         }
 
         // Only sessions the app reported as changed are written. A draft that
@@ -1468,6 +1501,12 @@ impl StateStore {
         }
 
         transaction.commit().map_err(to_io_error)?;
+        if let Some(fingerprint) = next_automation_fingerprint {
+            storage.saved_automations = fingerprint;
+        }
+        if let Some(ids) = next_persisted_automations {
+            storage.persisted_automations = ids;
+        }
         // Now that the rows are durable, and not before.
         for (session_id, fingerprints) in written_messages {
             storage.written_messages.insert(session_id, fingerprints);
@@ -1970,6 +2009,111 @@ mod tests {
         assert!(restored.automation(drop_id).is_none());
 
         fs::remove_dir_all(directory).ok();
+    }
+
+    #[test]
+    fn undecodable_automation_rows_survive_updates_and_known_deletions() {
+        use crate::automation::Automation;
+
+        let directory = temporary_directory();
+        let store = store_in(&directory);
+        let mut state = PersistedState::fresh(PathBuf::from("/tmp/project"));
+        let automation = Automation::new("Known", ProviderKind::Codex, 1_000);
+        let known_id = automation.id;
+        state.push_automation(automation);
+        store.save(&mut state).unwrap();
+
+        let unknown_id = Uuid::new_v4();
+        store
+            .storage
+            .lock()
+            .as_ref()
+            .unwrap()
+            .connection
+            .execute(
+                "INSERT INTO automations(id, data) VALUES(?1, ?2)",
+                params![unknown_id.to_string(), "{not-json"],
+            )
+            .unwrap();
+
+        let reopened = store_in(&directory);
+        let mut loaded = reopened.load().unwrap();
+        loaded.automation_mut(known_id).unwrap().name = "Updated".to_owned();
+        reopened.save(&mut loaded).unwrap();
+        assert!(loaded.remove_automation(known_id));
+        reopened.save(&mut loaded).unwrap();
+
+        let storage = reopened.storage.lock();
+        let connection = &storage.as_ref().unwrap().connection;
+        let rows = connection
+            .query_row("SELECT COUNT(*) FROM automations", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .unwrap();
+        let unknown = connection
+            .query_row(
+                "SELECT data FROM automations WHERE id = ?1",
+                params![unknown_id.to_string()],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap();
+        assert_eq!(rows, 1);
+        assert_eq!(unknown, "{not-json");
+
+        fs::remove_dir_all(directory).ok();
+    }
+
+    #[test]
+    fn failed_transaction_retries_automation_edit_and_deletion() {
+        use crate::automation::Automation;
+
+        for delete in [false, true] {
+            let directory = temporary_directory();
+            let store = store_in(&directory);
+            let mut state = PersistedState::fresh(PathBuf::from("/tmp/project"));
+            let automation = Automation::new("Before", ProviderKind::Codex, 1_000);
+            let automation_id = automation.id;
+            state.push_automation(automation);
+            let session_id = state.sessions[0].id;
+            state.session_mut(session_id).unwrap().begin_turn("initial");
+            store.save(&mut state).unwrap();
+
+            if delete {
+                assert!(state.remove_automation(automation_id));
+            } else {
+                state.automation_mut(automation_id).unwrap().name = "After".to_owned();
+            }
+            state.session_mut(session_id).unwrap().title = "force session write".to_owned();
+            {
+                let guard = store.storage.lock();
+                guard
+                    .as_ref()
+                    .unwrap()
+                    .connection
+                    .execute_batch(
+                        "CREATE TRIGGER fail_session_update BEFORE UPDATE ON sessions BEGIN SELECT RAISE(FAIL, 'injected'); END;",
+                    )
+                    .unwrap();
+            }
+            assert!(store.save(&mut state).is_err());
+            store
+                .storage
+                .lock()
+                .as_ref()
+                .unwrap()
+                .connection
+                .execute_batch("DROP TRIGGER fail_session_update")
+                .unwrap();
+            store.save(&mut state).unwrap();
+
+            let restored = store_in(&directory).load().unwrap();
+            if delete {
+                assert!(restored.automation(automation_id).is_none());
+            } else {
+                assert_eq!(restored.automation(automation_id).unwrap().name, "After");
+            }
+            fs::remove_dir_all(directory).ok();
+        }
     }
 
     #[test]

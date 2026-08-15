@@ -1171,6 +1171,7 @@ impl Waku {
                 TurnStatus::Interrupted,
                 crate::analytics::TurnOutcome::Cancelled,
             );
+            self.settle_automation_run(session_id, crate::automation::RunOutcome::Cancelled, cx);
         }
         if has_active_turn {
             self.capture_latest_turn_checkpoint_for(session_id);

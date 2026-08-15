@@ -166,6 +166,73 @@ const SIDEBAR_ACTION_ROW_HEIGHT: f32 = 32.0;
 /// How many of an expanded automation's runs show before the rest fold behind a
 /// "Show more" toggle.
 const AUTOMATION_RUN_PREVIEW: usize = 3;
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) struct AutomationSidebarMetadata {
+    name: Option<String>,
+    enabled: bool,
+    latest_run: Option<u64>,
+    running_status: Option<SessionStatus>,
+    running_started_at: Option<u64>,
+    running_last_reply_at: Option<u64>,
+    owns_selection: bool,
+    run_count: usize,
+}
+
+impl Default for AutomationSidebarMetadata {
+    fn default() -> Self {
+        Self {
+            name: None,
+            enabled: true,
+            latest_run: None,
+            running_status: None,
+            running_started_at: None,
+            running_last_reply_at: None,
+            owns_selection: false,
+            run_count: 0,
+        }
+    }
+}
+
+fn automation_sidebar_metadata<'a>(
+    sessions: impl IntoIterator<Item = &'a AgentSession>,
+    automations: impl IntoIterator<Item = &'a crate::automation::Automation>,
+    selected_session: Option<Uuid>,
+) -> HashMap<Uuid, AutomationSidebarMetadata> {
+    let mut metadata: HashMap<Uuid, AutomationSidebarMetadata> = HashMap::new();
+    for session in sessions {
+        let Some(automation_id) = session.originating_automation else {
+            continue;
+        };
+        let entry = metadata.entry(automation_id).or_default();
+        entry.latest_run = Some(entry.latest_run.map_or_else(
+            || sidebar_session_timestamp(session),
+            |latest| latest.max(sidebar_session_timestamp(session)),
+        ));
+        entry.run_count += 1;
+        entry.owns_selection |= selected_session == Some(session.id);
+        if entry.running_status.is_none()
+            && matches!(
+                session.status,
+                SessionStatus::Connecting | SessionStatus::Working
+            )
+        {
+            entry.running_status = Some(session.status);
+            entry.running_started_at = session
+                .turns
+                .last()
+                .filter(|turn| turn.status == TurnStatus::Running)
+                .map(|turn| turn.started_at);
+            entry.running_last_reply_at = session.last_reply_at;
+        }
+    }
+    for automation in automations {
+        let entry = metadata.entry(automation.id).or_default();
+        entry.name = Some(automation.name.clone());
+        entry.enabled = automation.enabled;
+    }
+    metadata
+}
 const SIDEBAR_SEARCH_BOTTOM_GAP: f32 = 10.0;
 
 /// The session row's trailing time: how long the live turn has been working,
@@ -853,6 +920,11 @@ impl Waku {
             .collect::<Vec<_>>();
         sorted_sessions
             .sort_by_key(|session| std::cmp::Reverse(sidebar_session_timestamp(session)));
+        *self.sidebar_automation_metadata.borrow_mut() = automation_sidebar_metadata(
+            sorted_sessions.iter().copied(),
+            self.state.automations.iter(),
+            self.state.selected_session,
+        );
         for session in sorted_sessions {
             if let Some(automation_id) = session.originating_automation {
                 match automation_group_index.get(&automation_id) {
@@ -1138,48 +1210,30 @@ impl Waku {
     ) -> AnyElement {
         let theme = Theme::current(cx);
         let expanded = self.sidebar_expanded_automations.contains(&automation_id);
-        let name = self
-            .state
-            .automation(automation_id)
-            .map(|automation| automation.name.clone())
+        let metadata = self
+            .sidebar_automation_metadata
+            .borrow()
+            .get(&automation_id)
+            .cloned()
+            .unwrap_or_default();
+        let name = metadata
+            .name
+            .clone()
             .unwrap_or_else(|| tr!("sidebar.automation_deleted"));
         // A disabled automation reads muted, paired with a block glyph so the
         // state is not carried by color alone.
-        let enabled = self
-            .state
-            .automation(automation_id)
-            .map_or(true, |automation| automation.enabled);
+        let enabled = metadata.enabled;
         // The group's trailing metadata is how long ago its most recent run
         // started, so a glance shows freshness rather than a raw run tally.
-        let latest_run = self
-            .state
-            .sessions
-            .iter()
-            .filter(|session| {
-                session.has_started() && session.originating_automation == Some(automation_id)
-            })
-            .map(sidebar_session_timestamp)
-            .max();
+        let latest_run = metadata.latest_run;
         let time_ago =
             latest_run.map(|timestamp| format_time_ago(unix_time().saturating_sub(timestamp)));
         // A currently-working run turns the trailing metadata into the same
         // spinner + "Working…" treatment the run rows use.
-        let running_session = self.state.sessions.iter().find(|session| {
-            session.originating_automation == Some(automation_id)
-                && matches!(
-                    session.status,
-                    SessionStatus::Connecting | SessionStatus::Working
-                )
-        });
         // When collapsed, mirror the selected run so the active automation reads
         // as selected without expanding. The Automations page owns the
         // highlight while it is open, so defer to it as session rows do.
-        let owns_selection = self.automations_page.is_none()
-            && self.state.selected_session.is_some_and(|selected| {
-                self.state.sessions.iter().any(|session| {
-                    session.id == selected && session.originating_automation == Some(automation_id)
-                })
-            });
+        let owns_selection = self.automations_page.is_none() && metadata.owns_selection;
         let highlight = owns_selection && !expanded;
 
         // Reveal the chevron only on hover, matching the section headers.
@@ -1195,8 +1249,21 @@ impl Waku {
         // whose first row already carries this, so drop it to avoid a duplicate.
         let trailing = if expanded {
             None
-        } else if let Some(session) = running_session {
-            let label = session_time_label(session, unix_time());
+        } else if let Some(status) = metadata.running_status {
+            let now = unix_time();
+            let label = metadata
+                .running_started_at
+                .map(|started_at| {
+                    tr!(
+                        "sidebar.working",
+                        elapsed = format_working_elapsed(now.saturating_sub(started_at))
+                    )
+                })
+                .or_else(|| {
+                    metadata
+                        .running_last_reply_at
+                        .map(|timestamp| format_time_ago(now.saturating_sub(timestamp)))
+                });
             Some(
                 div()
                     .flex_none()
@@ -1207,7 +1274,7 @@ impl Waku {
                         icon(
                             "icons/loader-circle.svg",
                             12.0,
-                            status_color(&theme, session.status),
+                            status_color(&theme, status),
                         )
                         .with_animation(
                             SharedString::from(format!("automation-group-spinner-{automation_id}")),
@@ -1394,13 +1461,10 @@ impl Waku {
             .sidebar_expanded_automation_runs
             .contains(&automation_id);
         let total = self
-            .state
-            .sessions
-            .iter()
-            .filter(|session| {
-                session.has_started() && session.originating_automation == Some(automation_id)
-            })
-            .count();
+            .sidebar_automation_metadata
+            .borrow()
+            .get(&automation_id)
+            .map_or(0, |metadata| metadata.run_count);
         let label = if expanded {
             tr!("sidebar.show_fewer_runs")
         } else {
@@ -2253,5 +2317,42 @@ mod tests {
             pending
         ));
         assert!(sidebar_session_selected(Some(current), None, current));
+    }
+
+    #[test]
+    fn automation_metadata_is_built_for_all_groups_in_one_session_pass() {
+        let project_id = Uuid::new_v4();
+        let first_automation = Uuid::new_v4();
+        let second_automation = Uuid::new_v4();
+        let mut first = AgentSession::new(project_id, ProviderKind::Codex);
+        first.originating_automation = Some(first_automation);
+        first.created_at = 10;
+        first.status = SessionStatus::Working;
+        let mut second = AgentSession::new(project_id, ProviderKind::Codex);
+        second.originating_automation = Some(first_automation);
+        second.created_at = 20;
+        let mut third = AgentSession::new(project_id, ProviderKind::Codex);
+        third.originating_automation = Some(second_automation);
+        third.created_at = 30;
+
+        let metadata = automation_sidebar_metadata(
+            [&first, &second, &third],
+            std::iter::empty(),
+            Some(second.id),
+        );
+        assert_eq!(
+            metadata[&first_automation],
+            AutomationSidebarMetadata {
+                name: None,
+                enabled: true,
+                latest_run: Some(20),
+                running_status: Some(SessionStatus::Working),
+                running_started_at: None,
+                running_last_reply_at: None,
+                owns_selection: true,
+                run_count: 2,
+            }
+        );
+        assert_eq!(metadata[&second_automation].run_count, 1);
     }
 }
