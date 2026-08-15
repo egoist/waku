@@ -584,6 +584,12 @@ struct DriverStartRequest {
     daemon_client: waku_client::DaemonClient,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct AutomationPreparationVersion {
+    automation_id: Uuid,
+    generation: u64,
+}
+
 /// A provider process that has started off-thread but is not installed into
 /// Waku's runtime map yet. Its event receiver safely buffers early events.
 struct PreparedDriver {
@@ -1056,6 +1062,7 @@ pub struct Waku {
     daemon_token_revealed: bool,
     settings_focus: FocusHandle,
     automations_focus: FocusHandle,
+    automation_save_focus: FocusHandle,
     onboarding_add_project_focus: FocusHandle,
     onboarding_projectless_focus: FocusHandle,
     /// Mirror of Sparkle's persisted automatic-check setting. Refreshed when
@@ -1239,6 +1246,9 @@ pub struct Waku {
     /// session is busy immediately, while the composer draws a spinner until
     /// the non-cancellable preparation is complete.
     submission_preparations: HashSet<Uuid>,
+    /// Configuration generation captured by automation preparation. Editing,
+    /// disabling, or deleting invalidates every result already in flight.
+    automation_preparation_generations: HashMap<Uuid, u64>,
     /// First Escape press for the current turn. A matching second press stops
     /// the response; otherwise this returns to the ordinary Stop icon after a
     /// short timeout.
@@ -1983,7 +1993,7 @@ impl Waku {
         let projectless_save_error = projectless_migrated
             .then(|| store.save(&mut state).err())
             .flatten();
-        let mut startup_toast = projectless_migration_error
+        let startup_toast = projectless_migration_error
             .map(|error| tr!("errors.move_projectless_task", error = error))
             .or_else(|| {
                 projectless_save_error
@@ -2118,12 +2128,6 @@ impl Waku {
                     recovered_automation_runs = true;
                 }
             }
-        }
-        if recovered_automation_runs
-            && let Err(error) = store.save(&mut state)
-            && startup_toast.is_none()
-        {
-            startup_toast = Some(error.to_string());
         }
         let initial_composer_draft = state
             .selected_session
@@ -2721,6 +2725,7 @@ impl Waku {
                 daemon_token_revealed: false,
                 settings_focus,
                 automations_focus,
+                automation_save_focus: cx.focus_handle(),
                 onboarding_add_project_focus,
                 onboarding_projectless_focus,
                 automatic_updates_enabled: cx
@@ -2818,10 +2823,11 @@ impl Waku {
                 background_work: HashMap::new(),
                 last_background_work_tick: Instant::now(),
                 submission_preparations: HashSet::new(),
+                automation_preparation_generations: HashMap::new(),
                 escape_stop_confirmation: EscapeStopConfirmation::default(),
                 response_fork_preparations: HashMap::new(),
                 pending_queue_drains: Vec::new(),
-                stream_state_dirty: false,
+                stream_state_dirty: recovered_automation_runs,
                 last_stream_save: Instant::now(),
                 activities_expanded: HashMap::new(),
                 expanded_activity_items: HashMap::new(),

@@ -259,6 +259,14 @@ impl AutomationEditor {
 }
 
 impl Waku {
+    fn invalidate_automation_preparations(&mut self, id: Uuid) {
+        let generation = self
+            .automation_preparation_generations
+            .entry(id)
+            .or_default();
+        *generation = generation.wrapping_add(1);
+    }
+
     pub(super) fn open_automations(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.settings_page = None;
         self.automations_page = Some(AutomationsPage::List);
@@ -416,6 +424,7 @@ impl Waku {
                 id
             }
         };
+        self.invalidate_automation_preparations(saved_id);
         self.save();
         // Stay on the editor after saving. Promote a freshly created automation
         // to an existing one so a second save updates it (and Run now becomes
@@ -428,6 +437,7 @@ impl Waku {
 
     fn delete_automation(&mut self, id: Uuid, cx: &mut Context<Self>) {
         self.automation_delete_arming = None;
+        self.invalidate_automation_preparations(id);
         if self.state.remove_automation(id) {
             // Deleting the automation whose editor is open returns to the list.
             if matches!(&self.automations_page, Some(AutomationsPage::Editor(editor)) if editor.id == Some(id))
@@ -448,6 +458,7 @@ impl Waku {
     }
 
     pub(super) fn toggle_automation_enabled(&mut self, id: Uuid, cx: &mut Context<Self>) {
+        self.invalidate_automation_preparations(id);
         if let Some(automation) = self.state.automation_mut(id) {
             automation.enabled = !automation.enabled;
             automation.updated_at = crate::model::unix_time();
@@ -469,7 +480,7 @@ impl Waku {
         catch_up: bool,
         cx: &mut Context<Self>,
     ) -> Option<Uuid> {
-        let automation = self.state.automation(id)?.clone();
+        let mut automation = self.state.automation(id)?.clone();
         // The submission path no-ops on empty input, so a prompt-less automation
         // would leave a run entry linked to a session that never starts. Skip it
         // rather than record a run that can never complete.
@@ -483,6 +494,13 @@ impl Waku {
                 .iter()
                 .any(|project| project.id == project_id)
         });
+        if automation.normalize_project_binding(project_exists) {
+            automation.updated_at = crate::model::unix_time();
+            if let Some(saved) = self.state.automation_mut(id) {
+                *saved = automation.clone();
+            }
+            self.invalidate_automation_preparations(id);
+        }
         let project_id = match automation.project_id {
             Some(project_id) if project_exists => project_id,
             // Unbound (or a project that no longer exists): give this run its own
@@ -636,7 +654,6 @@ impl Waku {
         let success = outcome == crate::automation::RunOutcome::Succeeded;
         let should_notify = automation.notification.matches_outcome(outcome);
         let name = automation.name.clone();
-        self.save();
 
         if should_notify {
             let body = if success {
@@ -684,6 +701,8 @@ impl Waku {
         div()
             .key_context("Waku")
             .track_focus(&self.automations_focus)
+            .tab_group()
+            .tab_stop(false)
             .on_action(cx.listener(Self::cancel_turn_action))
             .on_action(cx.listener(Self::new_session_action))
             .on_action(cx.listener(Self::open_settings_action))
@@ -1088,6 +1107,7 @@ impl Waku {
 
         let save = div()
             .id("automation-save")
+            .track_focus(&self.automation_save_focus)
             .tab_index(0)
             .flex_none()
             .h(px(30.0))
@@ -1112,7 +1132,7 @@ impl Waku {
                 this.save_automation_editor(cx);
             }))
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
-                if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                if is_button_activation(&event.keystroke.key) {
                     this.save_automation_editor(cx);
                     cx.stop_propagation();
                 }

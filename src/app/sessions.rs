@@ -1,5 +1,21 @@
 use super::*;
 
+fn cancel_automation_run_for_removed_session(state: &mut PersistedState, session_id: Uuid) -> bool {
+    let Some(automation_id) = state
+        .sessions
+        .iter()
+        .find(|session| session.id == session_id)
+        .and_then(|session| session.originating_automation)
+    else {
+        return false;
+    };
+    state
+        .automation_mut(automation_id)
+        .is_some_and(|automation| {
+            automation.settle_session_run(session_id, crate::automation::RunOutcome::Cancelled)
+        })
+}
+
 fn retain_runtime_after_cancel(provider: ProviderKind) -> bool {
     // Codex's app-server owns the Computer Use process tree, and Amp offers no
     // interrupt on its stream — stopping it means ending the process. Both
@@ -299,6 +315,7 @@ impl Waku {
             .workspace_path_for_session(&self.state.sessions[index])
             .map(std::path::Path::to_path_buf);
         let was_selected = self.state.selected_session == Some(session_id);
+        cancel_automation_run_for_removed_session(&mut self.state, session_id);
         self.submission_preparations.remove(&session_id);
         self.reset_session_runtime(session_id);
         self.background_work.remove(&session_id);
@@ -1680,5 +1697,32 @@ mod tests {
                 assert!(retain_runtime_after_cancel(provider));
             }
         }
+    }
+
+    #[test]
+    fn removing_an_automation_session_settles_its_history_first() {
+        use crate::automation::{Automation, AutomationRun, RunOutcome};
+
+        let mut state = PersistedState::fresh(PathBuf::from("/tmp/project"));
+        let project_id = state.projects[0].id;
+        let mut automation = Automation::new("Nightly", ProviderKind::Codex, 1_000);
+        let automation_id = automation.id;
+        let mut session = state.new_session(project_id, ProviderKind::Codex);
+        session.originating_automation = Some(automation_id);
+        let session_id = session.id;
+        automation.record_run(AutomationRun::spawned(session_id, 1_100, false));
+        state.push_automation(automation);
+        state.push_session(session);
+
+        assert!(cancel_automation_run_for_removed_session(
+            &mut state, session_id
+        ));
+        assert_eq!(
+            state.automation(automation_id).unwrap().history[0].outcome,
+            RunOutcome::Cancelled
+        );
+        assert!(!cancel_automation_run_for_removed_session(
+            &mut state, session_id
+        ));
     }
 }

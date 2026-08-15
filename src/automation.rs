@@ -127,6 +127,17 @@ impl Automation {
         }
     }
 
+    /// Normalize a missing or absent project binding to Local workspace.
+    pub fn normalize_project_binding(&mut self, project_exists: bool) -> bool {
+        if self.project_id.is_some() && project_exists {
+            return false;
+        }
+        let changed = self.project_id.is_some() || !self.workspace.is_local();
+        self.project_id = None;
+        self.workspace = SessionWorkspace::Local;
+        changed
+    }
+
     /// Settle the running entry linked to `session_id`, once.
     pub fn settle_session_run(&mut self, session_id: Uuid, outcome: RunOutcome) -> bool {
         let Some(run_id) = self
@@ -459,6 +470,10 @@ mod tests {
             automation.workspace_for_project(true),
             SessionWorkspace::NewWorktree { .. }
         ));
+        assert!(automation.normalize_project_binding(false));
+        assert_eq!(automation.project_id, None);
+        assert_eq!(automation.workspace, SessionWorkspace::Local);
+        assert!(!automation.normalize_project_binding(false));
     }
 
     #[test]

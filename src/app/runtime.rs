@@ -137,13 +137,16 @@ pub(super) fn merge_remote_session_catalog(
 }
 
 fn automation_preparation_is_current(
-    version: Option<(Uuid, u64)>,
+    version: Option<AutomationPreparationVersion>,
     current: Option<&crate::automation::Automation>,
+    current_generation: Option<u64>,
 ) -> bool {
     match version {
         None => true,
-        Some((id, updated_at)) => current.is_some_and(|automation| {
-            automation.id == id && automation.enabled && automation.updated_at == updated_at
+        Some(version) => current.is_some_and(|automation| {
+            automation.id == version.automation_id
+                && automation.enabled
+                && current_generation == Some(version.generation)
         }),
     }
 }
@@ -1184,6 +1187,14 @@ impl Waku {
         }
         self.save();
         cx.notify();
+    }
+
+    fn save_after_frame(cx: &mut Context<Self>) {
+        cx.spawn(async move |waku, cx| {
+            cx.background_executor().timer(STREAM_FRAME_INTERVAL).await;
+            let _ = waku.update(cx, |waku, _| waku.save());
+        })
+        .detach();
     }
 
     pub fn composer_focus(&self, cx: &App) -> FocusHandle {
@@ -2950,7 +2961,14 @@ impl Waku {
         let automation_version = session.originating_automation.and_then(|automation_id| {
             self.state
                 .automation(automation_id)
-                .map(|automation| (automation_id, automation.updated_at))
+                .map(|_| AutomationPreparationVersion {
+                    automation_id,
+                    generation: self
+                        .automation_preparation_generations
+                        .get(&automation_id)
+                        .copied()
+                        .unwrap_or_default(),
+                })
         });
         let Some(project) = self
             .state
@@ -3071,7 +3089,7 @@ impl Waku {
     fn finish_submission_preparation(
         &mut self,
         session_id: Uuid,
-        automation_version: Option<(Uuid, u64)>,
+        automation_version: Option<AutomationPreparationVersion>,
         submission: ComposerSubmission,
         prepared: anyhow::Result<PreparedSubmission>,
         cx: &mut Context<Self>,
@@ -3080,6 +3098,34 @@ impl Waku {
             return;
         }
         let selected = self.state.selected_session == Some(session_id);
+        let current_automation =
+            automation_version.and_then(|version| self.state.automation(version.automation_id));
+        let current_generation = automation_version.and_then(|version| {
+            self.automation_preparation_generations
+                .get(&version.automation_id)
+                .copied()
+        });
+        let stale_automation = !automation_preparation_is_current(
+            automation_version,
+            current_automation,
+            current_generation,
+        );
+        if stale_automation {
+            self.submission_preparations.remove(&session_id);
+            if let Some(session) = self.state.session_mut(session_id) {
+                session.status = SessionStatus::Idle;
+            }
+            self.finish_active_turn_with_analytics(
+                session_id,
+                TurnStatus::Interrupted,
+                crate::analytics::TurnOutcome::Cancelled,
+            );
+            self.settle_automation_run(session_id, crate::automation::RunOutcome::Cancelled, cx);
+            self.stream_state_dirty = true;
+            Self::save_after_frame(cx);
+            cx.notify();
+            return;
+        }
         let prepared = match prepared {
             Ok(prepared) => prepared,
             Err(error) => {
@@ -3133,6 +3179,8 @@ impl Waku {
                         crate::automation::RunOutcome::Failed,
                         cx,
                     );
+                    self.stream_state_dirty = true;
+                    Self::save_after_frame(cx);
                 }
                 if selected {
                     if self
@@ -3159,25 +3207,6 @@ impl Waku {
             checkpoint_warning,
             driver: prepared_driver,
         } = prepared;
-        let current_automation =
-            automation_version.and_then(|(automation_id, _)| self.state.automation(automation_id));
-        let stale_automation =
-            !automation_preparation_is_current(automation_version, current_automation);
-        if stale_automation {
-            self.submission_preparations.remove(&session_id);
-            if let Some(session) = self.state.session_mut(session_id) {
-                session.status = SessionStatus::Idle;
-            }
-            self.finish_active_turn_with_analytics(
-                session_id,
-                TurnStatus::Interrupted,
-                crate::analytics::TurnOutcome::Cancelled,
-            );
-            self.settle_automation_run(session_id, crate::automation::RunOutcome::Cancelled, cx);
-            self.save();
-            cx.notify();
-            return;
-        }
         if let Some(project_path) = project_path
             && let Some(project_id) = self
                 .state
@@ -3291,11 +3320,7 @@ impl Waku {
         // Persist on the next frame boundary. Saving is intentionally after
         // the spinner-to-Stop paint: SQLite or blob externalization must not
         // hold the final preparation frame motionless.
-        cx.spawn(async move |waku, cx| {
-            cx.background_executor().timer(STREAM_FRAME_INTERVAL).await;
-            let _ = waku.update(cx, |waku, _| waku.save());
-        })
-        .detach();
+        Self::save_after_frame(cx);
     }
 
     pub(super) fn collect_runtime_events(runtime: &mut SessionRuntime) {
@@ -3510,32 +3535,37 @@ mod response_fork_title_tests {
 
 #[cfg(test)]
 mod automation_preparation_tests {
-    use super::automation_preparation_is_current;
+    use super::{AutomationPreparationVersion, automation_preparation_is_current};
     use crate::automation::Automation;
     use crate::model::ProviderKind;
 
     #[test]
     fn deleted_disabled_and_superseded_automation_preparations_are_stale() {
         let mut automation = Automation::new("Nightly", ProviderKind::Codex, 1_000);
-        let version = Some((automation.id, automation.updated_at));
+        let version = Some(AutomationPreparationVersion {
+            automation_id: automation.id,
+            generation: 3,
+        });
         assert!(automation_preparation_is_current(
             version,
-            Some(&automation)
+            Some(&automation),
+            Some(3)
         ));
-        assert!(!automation_preparation_is_current(version, None));
+        assert!(!automation_preparation_is_current(version, None, Some(3)));
 
         automation.enabled = false;
         assert!(!automation_preparation_is_current(
             version,
-            Some(&automation)
+            Some(&automation),
+            Some(3)
         ));
         automation.enabled = true;
-        automation.updated_at += 1;
         assert!(!automation_preparation_is_current(
             version,
-            Some(&automation)
+            Some(&automation),
+            Some(4)
         ));
-        assert!(automation_preparation_is_current(None, None));
+        assert!(automation_preparation_is_current(None, None, None));
     }
 }
 
