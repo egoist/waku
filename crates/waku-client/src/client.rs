@@ -15,13 +15,14 @@ use uuid::Uuid;
 
 use waku_protocol::MAX_WIRE_MESSAGE_BYTES;
 use waku_protocol::{
-    ClientMessage, Command, PROTOCOL_VERSION, ReplayCursor, Request, ResponseOutcome,
-    ResponsePayload, RpcError, SequencedEvent, ServerMessage, WireDriverEvent,
+    AutomationNotification, ClientMessage, Command, PROTOCOL_VERSION, ReplayCursor, Request,
+    ResponseOutcome, ResponsePayload, RpcError, SequencedEvent, ServerMessage, WireDriverEvent,
 };
 
 const READ_POLL_INTERVAL: Duration = Duration::from_millis(25);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
 const MAX_BUFFERED_EVENTS_PER_RUNTIME: usize = 4096;
+const MAX_BUFFERED_AUTOMATION_NOTIFICATIONS: usize = 256;
 
 enum Outgoing {
     Message(ClientMessage),
@@ -34,6 +35,8 @@ struct ClientInner {
     sessions: Mutex<HashMap<(Uuid, Uuid), Sender<SequencedEvent>>>,
     pending_events: Mutex<HashMap<(Uuid, Uuid), VecDeque<SequencedEvent>>>,
     task_state_subscribers: Mutex<Vec<Sender<u64>>>,
+    automation_notification_subscribers: Mutex<Vec<Sender<AutomationNotification>>>,
+    pending_automation_notifications: Mutex<VecDeque<AutomationNotification>>,
     last_sequences: Mutex<HashMap<(Uuid, Uuid), LastSequence>>,
     disconnected: AtomicBool,
 }
@@ -110,6 +113,8 @@ impl DaemonClient {
             sessions: Mutex::new(HashMap::new()),
             pending_events: Mutex::new(HashMap::new()),
             task_state_subscribers: Mutex::new(Vec::new()),
+            automation_notification_subscribers: Mutex::new(Vec::new()),
+            pending_automation_notifications: Mutex::new(VecDeque::new()),
             last_sequences: Mutex::new(last_sequences),
             disconnected: AtomicBool::new(false),
         });
@@ -144,6 +149,17 @@ impl DaemonClient {
     pub fn subscribe_task_state(&self) -> Receiver<u64> {
         let (events, receiver) = unbounded();
         self.inner.task_state_subscribers.lock().push(events);
+        receiver
+    }
+
+    pub fn subscribe_automation_notifications(&self) -> Receiver<AutomationNotification> {
+        let (events, receiver) = unbounded();
+        let mut subscribers = self.inner.automation_notification_subscribers.lock();
+        subscribers.push(events.clone());
+        let mut pending = self.inner.pending_automation_notifications.lock();
+        while let Some(notification) = pending.pop_front() {
+            let _ = events.send(notification);
+        }
         receiver
     }
 
@@ -317,6 +333,18 @@ fn run_client(
                             .lock()
                             .retain(|subscriber| subscriber.send(revision).is_ok());
                     }
+                    ServerMessage::AutomationNotification { notification } => {
+                        let mut subscribers = inner.automation_notification_subscribers.lock();
+                        subscribers
+                            .retain(|subscriber| subscriber.send(notification.clone()).is_ok());
+                        if subscribers.is_empty() {
+                            let mut pending = inner.pending_automation_notifications.lock();
+                            pending.push_back(notification);
+                            while pending.len() > MAX_BUFFERED_AUTOMATION_NOTIFICATIONS {
+                                pending.pop_front();
+                            }
+                        }
+                    }
                     ServerMessage::ShuttingDown => break,
                     ServerMessage::Hello { .. } | ServerMessage::Rejected { .. } => {}
                 }
@@ -359,6 +387,8 @@ fn run_client(
         });
     }
     inner.task_state_subscribers.lock().clear();
+    inner.automation_notification_subscribers.lock().clear();
+    inner.pending_automation_notifications.lock().clear();
 }
 
 fn set_client_read_timeout(

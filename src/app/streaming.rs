@@ -588,10 +588,9 @@ impl Waku {
                         cx,
                     );
                 }
-                // Resolve the run in its automation's history and, per that
-                // automation's config, fire a completion notification. A no-op
-                // for manual sessions and for follow-up turns on an already
-                // resolved run.
+                // Keep the local automation projection aligned with the
+                // daemon's durable run outcome. Notification policy is emitted
+                // by the daemon; this path only settles local state.
                 self.settle_automation_run(
                     session_id,
                     if success {

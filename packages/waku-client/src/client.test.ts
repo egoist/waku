@@ -223,6 +223,45 @@ describe("WakuClient", () => {
     expect(revisions).toEqual([7]);
   });
 
+  test("delivers live automation notification intent to attached apps", async () => {
+    const { client, sockets } = fixture();
+    const socket = await connect(client, sockets);
+    const notifications: string[] = [];
+    socket.receive({
+      type: "automationNotification",
+      notification: {
+        sessionId: "session",
+        name: "Nightly",
+        outcome: "failed",
+      },
+    });
+    client.subscribeAutomationNotifications((notification) =>
+      notifications.push(`${notification.sessionId}:${notification.outcome}`),
+    );
+    expect(notifications).toEqual(["session:failed"]);
+  });
+
+  test("does not deliver buffered notification intent after reconnect", async () => {
+    const { client, sockets } = fixture();
+    const socket = await connect(client, sockets);
+    socket.receive({
+      type: "automationNotification",
+      notification: {
+        sessionId: "old-session",
+        name: "Old run",
+        outcome: "failed",
+      },
+    });
+    client.disconnect();
+    await connect(client, sockets);
+
+    const notifications: string[] = [];
+    client.subscribeAutomationNotifications((notification) =>
+      notifications.push(notification.sessionId),
+    );
+    expect(notifications).toEqual([]);
+  });
+
   test("disconnected requests reject instead of throwing synchronously", async () => {
     const { client } = fixture();
     const request = client.request({ type: "getSettings" });

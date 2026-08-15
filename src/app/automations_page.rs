@@ -1,8 +1,7 @@
 //! The Automations full-page view: a first-class peer of the transcript, not a
 //! settings tab. Lists saved automations with a schedule summary and computed
-//! next-run time, and hosts a form to create, edit, and delete them. Firing is
-//! handled elsewhere (the scheduler tick and Run-now); this page is management
-//! only.
+//! next-run time, and hosts a form to create, edit, and delete them. Scheduled
+//! firing is daemon-owned; this page manages automations and requests Run-now.
 
 use chrono::{NaiveDateTime, NaiveTime};
 use gpui::{App, KeyBinding, actions};
@@ -644,171 +643,17 @@ impl Waku {
         }
     }
 
-    /// Spawns a fresh session from an automation's configuration and records the
-    /// run in its history. Shared by Run-now and the scheduler tick.
-    ///
-    /// Returns the spawned session id. The heavy work — worktree materialization
-    /// and the provider process — runs off the UI thread inside
-    /// [`Self::submit_submission_for_session`]'s background preparation; only the
-    /// in-memory session/history bookkeeping happens here.
-    pub(super) fn spawn_automation_run(
-        &mut self,
-        id: Uuid,
-        catch_up: bool,
-        cx: &mut Context<Self>,
-    ) -> Option<Uuid> {
-        let mut automation = self.state.automation(id)?.clone();
-        // The submission path no-ops on empty input, so a prompt-less automation
-        // would leave a run entry linked to a session that never starts. Skip it
-        // rather than record a run that can never complete.
-        if automation.prompt.trim().is_empty() {
-            return None;
-        }
-
-        let project_exists = automation.project_id.is_some_and(|project_id| {
-            self.state
-                .projects
-                .iter()
-                .any(|project| project.id == project_id)
-        });
-        if automation.normalize_project_binding(project_exists) {
-            automation.updated_at = crate::model::unix_time();
-            if let Some(saved) = self.state.automation_mut(id) {
-                *saved = automation.clone();
-            }
-            self.invalidate_automation_preparations(id);
-        }
-        let project_id = match automation.project_id {
-            Some(project_id) if project_exists => project_id,
-            // Unbound (or a project that no longer exists): give this run its own
-            // projectless workspace, the way a projectless manual task gets one.
-            _ => self.create_automation_projectless_project()?,
-        };
-
-        let mut session = self
-            .state
-            .new_session(project_id, automation.agent.provider);
-        session.model = automation.agent.model.clone();
-        session.reasoning_effort = automation.agent.reasoning_effort.clone();
-        session.service_tier = automation.agent.service_tier.clone();
-        session.agent_preset = automation.agent.agent_preset.clone();
-        session.runtime_mode = automation.agent.runtime_mode;
-        session.interaction_mode = automation.agent.interaction_mode;
-        session.workspace = automation.workspace_for_project(project_exists);
-        session.originating_automation = Some(id);
-        let session_id = session.id;
-        self.state.push_session(session);
-
-        let now = crate::model::unix_time();
-        if let Some(automation) = self.state.automation_mut(id) {
-            automation.record_run(crate::automation::AutomationRun::spawned(
-                session_id, now, catch_up,
-            ));
-            automation.last_run_at = Some(now);
-        }
-
-        self.submit_submission_for_session(
-            session_id,
-            super::ComposerSubmission::plain(automation.prompt.clone()),
-            cx,
-        );
-        Some(session_id)
-    }
-
-    /// The scheduler tick: asks the pure planner which automations are due given
-    /// the real clock and the current active-run state, then fires or skips each
-    /// decision. A thin shell — every schedule and overlap decision is made by
-    /// [`crate::automation::planner::plan`], so the same core can drive a future
-    /// headless worker.
-    pub(super) fn tick_automations(&mut self, cx: &mut Context<Self>) {
-        if self.state.automations.is_empty() {
-            return;
-        }
-
-        // An automation is "active" when one of its spawned sessions is still
-        // busy.
-        let active: std::collections::HashSet<Uuid> = self
-            .state
-            .sessions
-            .iter()
-            .filter(|session| session.is_busy())
-            .filter_map(|session| session.originating_automation)
-            .collect();
-
-        let now = chrono::Local::now().naive_local();
-        let ticks: Vec<crate::automation::planner::AutomationTick> = self
-            .state
-            .automations
-            .iter()
-            .map(|automation| crate::automation::planner::AutomationTick {
-                automation,
-                // Before an automation has ever run, its creation time is the
-                // baseline, so a fresh automation never immediately catch-up
-                // fires.
-                marker: local_naive(automation.last_run_at.unwrap_or(automation.created_at)),
-                active: active.contains(&automation.id),
-            })
-            .collect();
-
-        let decisions = crate::automation::planner::plan(
-            &ticks,
-            now,
-            chrono::Duration::seconds(super::AUTOMATION_CATCH_UP_GRACE_SECS),
-        );
-        if decisions.is_empty() {
-            return;
-        }
-
-        let mut changed = false;
-        for decision in decisions {
-            match decision {
-                crate::automation::planner::PlanDecision::Fire { id, catch_up } => {
-                    if self.spawn_automation_run(id, catch_up, cx).is_some() {
-                        changed = true;
-                    }
-                }
-                crate::automation::planner::PlanDecision::Skip { id, catch_up } => {
-                    // Consume the occurrence: record the skip and advance the
-                    // marker so it is not re-evaluated next tick.
-                    let now_unix = crate::model::unix_time();
-                    if let Some(automation) = self.state.automation_mut(id) {
-                        automation.record_run(crate::automation::AutomationRun::skipped(
-                            now_unix, catch_up,
-                        ));
-                        automation.last_run_at = Some(now_unix);
-                        changed = true;
-                    }
-                }
-            }
-        }
-
-        if changed {
-            self.save();
-            cx.notify();
-        }
-    }
-
-    /// A fresh projectless project for an unbound automation run.
-    fn create_automation_projectless_project(&mut self) -> Option<Uuid> {
-        let root = crate::projectless::workspace_root()?.to_path_buf();
-        let mut project = Project::from_path(root);
-        project.name = Project::PROJECTLESS_NAME.to_owned();
-        let project_id = project.id;
-        self.state.projects.push(project);
-        Some(project_id)
-    }
-
-    /// Resolves a completed automation run's history outcome and, per that
-    /// automation's notification config, raises a system notification.
+    /// Resolves a completed automation run's history outcome. Notification
+    /// policy is owned by the daemon now; the resulting notification event is
+    /// rendered by each attached client.
     ///
     /// A no-op for manual sessions and for follow-up turns on a run that already
-    /// resolved — only a run still marked `Running` is acted on, so completion
-    /// notifications fire exactly once.
+    /// resolved — only a run still marked `Running` is acted on.
     pub(super) fn settle_automation_run(
         &mut self,
         session_id: Uuid,
         outcome: crate::automation::RunOutcome,
-        cx: &mut Context<Self>,
+        _cx: &mut Context<Self>,
     ) {
         let Some(automation_id) = self
             .state
@@ -825,34 +670,77 @@ impl Waku {
         if !automation.settle_session_run(session_id, outcome) {
             return;
         }
-        let success = outcome == crate::automation::RunOutcome::Succeeded;
-        let should_notify = automation.notification.matches_outcome(outcome);
-        let name = automation.name.clone();
-
-        if should_notify {
-            let body = if success {
-                tr!("automations.notify_succeeded")
-            } else {
-                tr!("automations.notify_failed")
-            };
-            crate::platform::show_task_notification(
-                &super::task_notification_tag(session_id),
-                &name,
-                &body,
-                cx,
-            );
-        }
     }
 
-    /// Run-now: spawn the run, then open its transcript so the result is visible.
+    /// Run-now uses the daemon's scheduler/execution path, then opens the
+    /// returned session so the result is visible in the desktop transcript.
     pub(super) fn run_automation_now(&mut self, id: Uuid, cx: &mut Context<Self>) {
-        let Some(session_id) = self.spawn_automation_run(id, false, cx) else {
-            return;
-        };
-        self.save();
-        self.active_page = None;
-        self.select_session(session_id, cx);
-        cx.notify();
+        let daemon = self.daemon.client();
+        let event_wake = self.event_wake_tx.clone();
+        cx.spawn(async move |waku, cx| {
+            let response = cx
+                .background_executor()
+                .spawn(async move {
+                    let response = daemon.request(
+                        Uuid::nil(),
+                        Uuid::nil(),
+                        waku_client::Command::RunAutomation {
+                            automation_id: id,
+                            catch_up: false,
+                        },
+                    )?;
+                    let waku_client::ResponsePayload::AutomationRunStarted {
+                        automation,
+                        session,
+                        runtime_id,
+                        supports_steer,
+                    } = response
+                    else {
+                        anyhow::bail!("the daemon returned an invalid automation response");
+                    };
+                    let (event_tx, events) = driver::event_channel(event_wake);
+                    let handle = driver::attach_remote(
+                        daemon,
+                        session.id,
+                        runtime_id,
+                        supports_steer,
+                        None,
+                        event_tx,
+                    )?;
+                    Ok((automation, session, PreparedDriver { handle, events }))
+                })
+                .await;
+            let _ = waku.update(cx, |waku, cx| match response {
+                Ok((automation, session, prepared)) => {
+                    if let Some(existing) = waku
+                        .state
+                        .automations
+                        .iter_mut()
+                        .find(|existing| existing.id == automation.id)
+                    {
+                        *existing = automation;
+                    } else {
+                        waku.state.automations.push(automation);
+                    }
+                    if let Some(existing) = waku
+                        .state
+                        .sessions
+                        .iter_mut()
+                        .find(|existing| existing.id == session.id)
+                    {
+                        *existing = session.clone();
+                    } else {
+                        waku.state.push_session(session.clone());
+                    }
+                    waku.install_prepared_driver(session.id, prepared);
+                    waku.active_page = None;
+                    waku.select_session(session.id, cx);
+                    cx.notify();
+                }
+                Err(error) => waku.show_toast(tr!("errors.save_local_state", error = error)),
+            });
+        })
+        .detach();
     }
 
     pub(super) fn render_automations(
@@ -2345,13 +2233,4 @@ mod tests {
         assert_eq!(editor.base_branch, None);
         assert_eq!(editor.workspace(), SessionWorkspace::Local);
     }
-}
-
-/// Converts a stored unix timestamp to local wall clock, the representation the
-/// pure schedule core works in. This is the timezone boundary; the core itself
-/// stays timezone-free.
-fn local_naive(unix: u64) -> NaiveDateTime {
-    chrono::DateTime::from_timestamp(unix as i64, 0)
-        .map(|when| when.with_timezone(&chrono::Local).naive_local())
-        .unwrap_or_default()
 }

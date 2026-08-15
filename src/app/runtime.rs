@@ -82,6 +82,7 @@ fn load_remote_task_state(
     let waku_client::ResponsePayload::TaskState {
         projects,
         mut sessions,
+        automations,
         ..
     } = response
     else {
@@ -90,7 +91,11 @@ fn load_remote_task_state(
     for session in &mut sessions {
         session.detail_loaded = false;
     }
-    Ok(RemoteTaskStateSnapshot { projects, sessions })
+    Ok(RemoteTaskStateSnapshot {
+        projects,
+        sessions,
+        automations,
+    })
 }
 
 /// Merge the daemon's list-only session projection into the desktop catalog.
@@ -914,8 +919,9 @@ impl Waku {
                         client = newer;
                     }
                     let revisions = client.subscribe_task_state();
+                    let notifications = client.subscribe_automation_notifications();
                     let result = load_remote_task_state(&client).map_err(|error| error.to_string());
-                    if results.send(result).is_err() {
+                    if results.send(TaskStateSyncEvent::Snapshot(result)).is_err() {
                         return;
                     }
                     signal_event_pump(&event_wake);
@@ -944,7 +950,22 @@ impl Waku {
                                 while revisions.try_recv().is_ok() {}
                                 let result = load_remote_task_state(&client)
                                     .map_err(|error| error.to_string());
-                                if results.send(result).is_err() {
+                                if results.send(TaskStateSyncEvent::Snapshot(result)).is_err() {
+                                    return;
+                                }
+                                signal_event_pump(&event_wake);
+                            }
+                            recv(notifications) -> notification => {
+                                let Ok(notification) = notification else {
+                                    let Ok(replacement) = clients.recv() else {
+                                        return;
+                                    };
+                                    break replacement;
+                                };
+                                if results
+                                    .send(TaskStateSyncEvent::AutomationNotification(notification))
+                                    .is_err()
+                                {
                                     return;
                                 }
                                 signal_event_pump(&event_wake);
@@ -957,22 +978,37 @@ impl Waku {
     }
 
     fn drain_task_state_sync_events(&mut self, cx: &mut Context<Self>) -> bool {
-        let mut latest = None;
-        while let Ok(result) = self.task_state_sync_events.try_recv() {
-            latest = Some(result);
+        let mut latest_snapshot = None;
+        let mut changed = false;
+        while let Ok(event) = self.task_state_sync_events.try_recv() {
+            match event {
+                TaskStateSyncEvent::Snapshot(result) => latest_snapshot = Some(result),
+                TaskStateSyncEvent::AutomationNotification(notification) => {
+                    let body = if notification.outcome == crate::automation::RunOutcome::Succeeded {
+                        tr!("automations.notify_succeeded")
+                    } else {
+                        tr!("automations.notify_failed")
+                    };
+                    crate::platform::show_task_notification(
+                        &task_notification_tag(notification.session_id),
+                        &notification.name,
+                        &body,
+                        cx,
+                    );
+                    changed = true;
+                }
+            }
         }
-        let Some(result) = latest else {
-            return false;
-        };
-        match result {
-            Ok(snapshot) => {
+        match latest_snapshot {
+            Some(Ok(snapshot)) => {
                 self.apply_remote_task_state(snapshot, cx);
                 true
             }
-            Err(error) => {
+            Some(Err(error)) => {
                 eprintln!("could not refresh daemon task state: {error}");
-                false
+                changed
             }
+            None => changed,
         }
     }
 
@@ -995,6 +1031,7 @@ impl Waku {
             self.remove_right_panel_session_state(*session_id);
         }
         self.state.projects = snapshot.projects;
+        self.state.automations = snapshot.automations;
 
         let attach = self
             .state
@@ -2709,7 +2746,7 @@ impl Waku {
         })
     }
 
-    fn install_prepared_driver(
+    pub(super) fn install_prepared_driver(
         &mut self,
         session_id: Uuid,
         prepared: PreparedDriver,

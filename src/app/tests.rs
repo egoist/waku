@@ -9,18 +9,17 @@ use super::{
     NAVIGATION_RAIL_TICK_HEIGHT, NAVIGATION_RAIL_TURN_HEIGHT, PendingUserInput, SessionNavigation,
     StreamDeltaKind, TranscriptRowKind::*, active_navigation_turn_index,
     append_text_delta_to_session, assistant_response_footer, assistant_response_footer_index,
-    assistant_response_footer_time, automation_boundary_delay, changed_files_inline_message_index,
-    compact_driver_error, disclosure_leading_space, fenced_code, fitted_file_tree_width,
-    fitted_panel_widths, folded_transcript_row_kinds, format_worked_duration,
-    format_working_elapsed, maintain_transcript_anchor, message_starts_followup_turn,
-    navigation_preview_snippet, navigation_rail_fade_visibility, navigation_rail_height,
-    navigation_rail_scale, paused_toast_duration, pop_complete_stream_chunk, pop_stream_batch,
-    pop_stream_chunk, push_transcript_activity, session_is_reapable,
-    should_refresh_branch_after_activity, should_show_navigation_rail,
-    should_show_scroll_to_bottom, stream_backlog_should_flush, take_stream_prefix,
-    transcript_anchor_end_space, transcript_navigation_turns, transcript_row_kinds,
-    transcript_row_splice, transcript_rows_fingerprint, widened_panel_width_for_file_editor,
-    widened_panel_width_for_review,
+    assistant_response_footer_time, changed_files_inline_message_index, compact_driver_error,
+    disclosure_leading_space, fenced_code, fitted_file_tree_width, fitted_panel_widths,
+    folded_transcript_row_kinds, format_worked_duration, format_working_elapsed,
+    maintain_transcript_anchor, message_starts_followup_turn, navigation_preview_snippet,
+    navigation_rail_fade_visibility, navigation_rail_height, navigation_rail_scale,
+    paused_toast_duration, pop_complete_stream_chunk, pop_stream_batch, pop_stream_chunk,
+    push_transcript_activity, session_is_reapable, should_refresh_branch_after_activity,
+    should_show_navigation_rail, should_show_scroll_to_bottom, stream_backlog_should_flush,
+    take_stream_prefix, transcript_anchor_end_space, transcript_navigation_turns,
+    transcript_row_kinds, transcript_row_splice, transcript_rows_fingerprint,
+    widened_panel_width_for_file_editor, widened_panel_width_for_review,
 };
 use crate::git_branch::BranchEntry;
 use crate::model::{
@@ -70,7 +69,7 @@ fn structured_user_input_preserves_question_order_and_custom_answer_precedence()
 use gpui::{ListAlignment, ListState, Pixels, px};
 use std::{
     collections::{HashSet, VecDeque},
-    time::{Duration, Instant, UNIX_EPOCH},
+    time::{Duration, Instant},
 };
 use uuid::Uuid;
 
@@ -352,42 +351,6 @@ fn session_navigation_prunes_deleted_tasks() {
     navigation.remove(third);
     assert_eq!(navigation.go_back(second), None);
     assert_eq!(navigation.go_forward(second), None);
-}
-
-#[test]
-fn automation_scheduler_delay_targets_the_next_wall_clock_minute() {
-    let at = |seconds, nanos| UNIX_EPOCH + Duration::new(seconds, nanos);
-    assert_eq!(
-        automation_boundary_delay(at(120, 0)),
-        Duration::from_secs(60)
-    );
-    assert_eq!(
-        automation_boundary_delay(at(120, 1)),
-        Duration::new(59, 999_999_999)
-    );
-    assert_eq!(
-        automation_boundary_delay(at(179, 0)),
-        Duration::from_secs(1)
-    );
-    assert_eq!(
-        automation_boundary_delay(at(3_599, 0)),
-        Duration::from_secs(1)
-    );
-    assert_eq!(
-        automation_boundary_delay(at(86_399, 0)),
-        Duration::from_secs(1)
-    );
-}
-
-#[test]
-fn automation_scheduler_realigns_after_work_and_late_wakes() {
-    let first_tick_finished = UNIX_EPOCH + Duration::new(137, 250_000_000);
-    let first_target = first_tick_finished + automation_boundary_delay(first_tick_finished);
-    assert_eq!(first_target, UNIX_EPOCH + Duration::from_secs(180));
-
-    let late_wake_finished = UNIX_EPOCH + Duration::new(247, 500_000_000);
-    let next_target = late_wake_finished + automation_boundary_delay(late_wake_finished);
-    assert_eq!(next_target, UNIX_EPOCH + Duration::from_secs(300));
 }
 
 #[test]

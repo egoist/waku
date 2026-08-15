@@ -6,7 +6,7 @@ use ts_rs::TS;
 use uuid::Uuid;
 
 use crate::attachments::{AttachmentUpload, StoredAttachment};
-use crate::automation::Automation;
+use crate::automation::{Automation, RunOutcome};
 use crate::computer_use::ComputerPermissions;
 use crate::model::{AgentSession, Project, ProviderKind, ProviderProbe, UserInputAnswer};
 use crate::persistence::{ComposerDraftChange, ComposerDrafts, SessionMessageMatch};
@@ -159,12 +159,18 @@ pub enum Command {
         live_session_ids: Vec<Uuid>,
         sessions: Vec<AgentSession>,
         /// The sender's complete automation set, or `None` when the sender
-        /// does not own automations. Only a client that authors them sends
-        /// `Some`; every other client omits the field so a partial task save
-        /// cannot wipe the daemon's set.
+        /// does not own automations. The daemon preserves execution-owned
+        /// history and schedule markers while applying client-authored fields.
         #[serde(default)]
         #[ts(optional)]
         automations: Option<Vec<Automation>>,
+    },
+    /// Start one automation through the daemon-owned execution path. The same
+    /// command is used by the scheduler and by clients' Run-now actions.
+    RunAutomation {
+        automation_id: Uuid,
+        #[serde(default)]
+        catch_up: bool,
     },
     /// Explicitly remove one daemon-owned task. Ordinary state saves are
     /// merge-only so a stale client snapshot cannot delete tasks another
@@ -312,6 +318,14 @@ pub struct SequencedEvent {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct AutomationNotification {
+    pub session_id: Uuid,
+    pub name: String,
+    pub outcome: RunOutcome,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, TS)]
 #[serde(
     tag = "type",
     rename_all = "camelCase",
@@ -330,6 +344,11 @@ pub enum ServerMessage {
         outcome: ResponseOutcome,
     },
     Event(SequencedEvent),
+    /// Live-only notification intent. The daemon does not retain this event,
+    /// so clients that attach after completion do not raise an old result.
+    AutomationNotification {
+        notification: AutomationNotification,
+    },
     /// The daemon-owned project/task catalog changed through another client.
     /// Clients should invalidate their lightweight task-state snapshot; live
     /// runtime events continue through [`Self::Event`].
@@ -400,6 +419,12 @@ pub enum ResponsePayload {
     },
     TaskStateSaved {
         sessions: Vec<AgentSession>,
+    },
+    AutomationRunStarted {
+        automation: Automation,
+        session: AgentSession,
+        runtime_id: Uuid,
+        supports_steer: bool,
     },
     Session {
         session: Option<AgentSession>,

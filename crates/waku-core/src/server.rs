@@ -20,8 +20,8 @@ use uuid::Uuid;
 use crate::model::{AgentSession, Project, ProviderKind, SessionStatus};
 use crate::protocol::MAX_WIRE_MESSAGE_BYTES;
 use crate::protocol::{
-    ClientMessage, Command, PROTOCOL_VERSION, ReplayCursor, Request, ResponseOutcome,
-    ResponsePayload, RpcError, SequencedEvent, ServerMessage, WireDriverEvent,
+    AutomationNotification, ClientMessage, Command, PROTOCOL_VERSION, ReplayCursor, Request,
+    ResponseOutcome, ResponsePayload, RpcError, SequencedEvent, ServerMessage, WireDriverEvent,
 };
 
 const ACCEPT_POLL_INTERVAL: Duration = Duration::from_millis(25);
@@ -30,6 +30,7 @@ const MAX_HANDSHAKE_MESSAGE_BYTES: usize = 64 * 1024;
 const MAX_CONNECTIONS: usize = 64;
 const MAX_REPLAY_EVENTS_PER_SESSION: usize = 4096;
 const MAX_CACHED_RESPONSES: usize = 2048;
+const AUTOMATION_TICK_INTERVAL: Duration = Duration::from_secs(1);
 
 #[derive(Clone, Debug, Default)]
 pub struct ServerOptions {
@@ -53,6 +54,10 @@ impl Drop for ConnectionPermit {
 pub trait Backend: Send + Sync + 'static {
     fn handle(&self, request: Request, events: EventSink) -> anyhow::Result<ResponsePayload>;
 
+    /// Called by the daemon-owned scheduler on its planning cadence.
+    /// Backends that do not host automations can keep the default no-op.
+    fn tick(&self, _events: EventSink) {}
+
     fn shutdown(&self) {}
 }
 
@@ -64,6 +69,45 @@ pub struct EventSink {
 }
 
 impl EventSink {
+    #[cfg(test)]
+    pub(crate) fn for_test() -> Self {
+        let hub = Arc::new(Hub::default());
+        hub.event_sink(Uuid::nil(), Uuid::nil())
+    }
+
+    /// Begin a daemon-owned runtime and return the sink used to publish its
+    /// events. Client-started runtimes normally get this from the request
+    /// dispatcher; scheduled runs need the same hub lifecycle from the
+    /// daemon's scheduler thread.
+    pub fn for_runtime(&self, session_id: Uuid, runtime_id: Uuid) -> Self {
+        self.hub.begin_runtime(session_id, runtime_id);
+        Self {
+            session_id,
+            runtime_id,
+            hub: self.hub.clone(),
+        }
+    }
+
+    pub fn end_runtime(&self) {
+        self.hub.end_runtime(self.session_id, Some(self.runtime_id));
+    }
+
+    pub fn runtime_id(&self) -> Uuid {
+        self.runtime_id
+    }
+
+    /// Notify every connected client that daemon-owned task state changed.
+    pub fn task_state_changed(&self) {
+        self.hub.broadcast_task_state_changed(None);
+    }
+
+    /// Broadcast live notification intent to the clients attached right now.
+    /// It is deliberately not journaled, so a later client never raises an old
+    /// completion notification.
+    pub fn automation_notification(&self, notification: AutomationNotification) {
+        self.hub.broadcast_automation_notification(notification);
+    }
+
     pub fn send(&self, event: WireDriverEvent) -> anyhow::Result<()> {
         self.hub.emit(self.session_id, self.runtime_id, event, true);
         Ok(())
@@ -265,8 +309,33 @@ impl Hub {
     }
 
     fn task_state_changed(&self, source_subscriber_id: u64) {
+        self.broadcast_task_state_changed(Some(source_subscriber_id));
+    }
+
+    fn broadcast_automation_notification(&self, notification: AutomationNotification) {
+        let message = ServerMessage::AutomationNotification { notification };
+        self.state
+            .lock()
+            .subscribers
+            .retain(|_, subscriber| subscriber.send(message.clone()).is_ok());
+    }
+
+    fn broadcast_task_state_changed(&self, source_subscriber_id: Option<u64>) {
         let mut state = self.state.lock();
-        Self::broadcast_task_state_changed(&mut state, source_subscriber_id);
+        Self::broadcast_task_state_changed_locked(&mut state, source_subscriber_id);
+    }
+
+    fn broadcast_task_state_changed_locked(
+        state: &mut HubState,
+        source_subscriber_id: Option<u64>,
+    ) {
+        state.task_state_revision = state.task_state_revision.saturating_add(1);
+        let message = ServerMessage::TaskStateChanged {
+            revision: state.task_state_revision,
+        };
+        state.subscribers.retain(|subscriber_id, subscriber| {
+            source_subscriber_id == Some(*subscriber_id) || subscriber.send(message.clone()).is_ok()
+        });
     }
 
     fn replace_task_catalog(&self, projects: &[Project], sessions: &[AgentSession]) {
@@ -304,18 +373,8 @@ impl Hub {
                 .is_none_or(|previous| previous != next);
         }
         if changed {
-            Self::broadcast_task_state_changed(&mut state, source_subscriber_id);
+            Self::broadcast_task_state_changed_locked(&mut state, Some(source_subscriber_id));
         }
-    }
-
-    fn broadcast_task_state_changed(state: &mut HubState, source_subscriber_id: u64) {
-        state.task_state_revision = state.task_state_revision.saturating_add(1);
-        let message = ServerMessage::TaskStateChanged {
-            revision: state.task_state_revision,
-        };
-        state.subscribers.retain(|subscriber_id, subscriber| {
-            *subscriber_id == source_subscriber_id || subscriber.send(message.clone()).is_ok()
-        });
     }
 
     fn cached_response(&self, request_id: Uuid) -> Option<ResponseOutcome> {
@@ -472,6 +531,18 @@ pub fn serve(
     let dispatcher = Arc::new(RequestDispatcher::new(backend.clone(), hub.clone()));
     let options = Arc::new(options);
     let active_connections = Arc::new(AtomicUsize::new(0));
+    let scheduler_backend = backend.clone();
+    let scheduler_hub = hub.clone();
+    let scheduler_shutdown = shutdown.clone();
+    let scheduler = std::thread::Builder::new()
+        .name("waku-daemon-automation-scheduler".into())
+        .spawn(move || {
+            while !scheduler_shutdown.load(Ordering::Acquire) {
+                scheduler_backend.tick(scheduler_hub.event_sink(Uuid::nil(), Uuid::nil()));
+                std::thread::sleep(AUTOMATION_TICK_INTERVAL);
+            }
+        })
+        .context("could not start automation scheduler")?;
     while !shutdown.load(Ordering::Acquire) {
         match listener.accept() {
             Ok((stream, _)) => {
@@ -509,6 +580,7 @@ pub fn serve(
         }
     }
     backend.shutdown();
+    let _ = scheduler.join();
     Ok(())
 }
 
@@ -896,7 +968,8 @@ fn task_catalog_action(command: &Command) -> TaskCatalogAction {
         Command::SaveTaskState { projects, .. } => TaskCatalogAction::Save {
             projects: projects.clone(),
         },
-        Command::RemoveSession
+        Command::RunAutomation { .. }
+        | Command::RemoveSession
         | Command::ForkSessionFromResponse { .. }
         | Command::RewindSessionToMessage { .. } => TaskCatalogAction::Changed,
         _ => TaskCatalogAction::None,
@@ -1620,6 +1693,50 @@ mod tests {
         assert_eq!(event.runtime_id, new_runtime_id);
         assert_eq!(event.sequence, 1);
         assert_eq!(event.event.kind, "new");
+        assert!(events.try_recv().is_err());
+    }
+
+    #[test]
+    fn attached_client_receives_live_automation_notification() {
+        let hub = Arc::new(Hub::default());
+        let session_id = Uuid::new_v4();
+        let runtime_id = Uuid::new_v4();
+        hub.begin_runtime(session_id, runtime_id);
+        let (outgoing, events) = unbounded();
+        hub.subscribe(&[], outgoing);
+
+        hub.event_sink(session_id, runtime_id)
+            .automation_notification(AutomationNotification {
+                session_id,
+                name: "Nightly".into(),
+                outcome: crate::automation::RunOutcome::Failed,
+            });
+
+        assert!(matches!(
+            events.recv().unwrap(),
+            ServerMessage::AutomationNotification { notification }
+                if notification.session_id == session_id
+                    && notification.name == "Nightly"
+                    && notification.outcome == crate::automation::RunOutcome::Failed
+        ));
+    }
+
+    #[test]
+    fn ephemeral_automation_notification_is_not_replayed_without_a_client() {
+        let hub = Arc::new(Hub::default());
+        let session_id = Uuid::new_v4();
+        let runtime_id = Uuid::new_v4();
+        hub.begin_runtime(session_id, runtime_id);
+        hub.event_sink(session_id, runtime_id)
+            .automation_notification(AutomationNotification {
+                session_id,
+                name: "Nightly".into(),
+                outcome: crate::automation::RunOutcome::Failed,
+            });
+
+        assert!(hub.state.lock().journal.is_empty());
+        let (outgoing, events) = unbounded();
+        hub.subscribe(&[], outgoing);
         assert!(events.try_recv().is_err());
     }
 

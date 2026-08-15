@@ -126,10 +126,6 @@ const IDLE_SESSION_SWEEP_INTERVAL: Duration = Duration::from_secs(5 * 60);
 const BACKGROUND_WORK_REFRESH_INTERVAL: Duration = Duration::from_secs(5);
 const BACKGROUND_WORK_TICK_INTERVAL: Duration = Duration::from_secs(1);
 const PLAN_USAGE_MAINTENANCE_INTERVAL: Duration = Duration::from_secs(30);
-/// An occurrence older than this when the tick sees it was missed while nothing
-/// ran (app closed or asleep), so it fires as a coalesced catch-up rather than
-/// an on-time run. Comfortably larger than the tick interval.
-const AUTOMATION_CATCH_UP_GRACE_SECS: i64 = 5 * 60;
 const STREAM_SAVE_INTERVAL: Duration = Duration::from_secs(1);
 /// Zed keeps status toasts on screen for ten seconds, pausing the countdown
 /// while the pointer is over the toast so a long message remains readable.
@@ -140,16 +136,6 @@ const TASK_NOTIFICATION_TAG_PREFIX: &str = "waku-task:";
 
 pub(crate) fn task_notification_tag(session_id: Uuid) -> String {
     format!("{TASK_NOTIFICATION_TAG_PREFIX}{session_id}")
-}
-
-/// Delay from `now` to the next whole wall-clock minute.
-fn automation_boundary_delay(now: std::time::SystemTime) -> Duration {
-    let elapsed = now
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or(Duration::ZERO);
-    let within_minute = Duration::from_secs(elapsed.as_secs() % 60)
-        + Duration::from_nanos(u64::from(elapsed.subsec_nanos()));
-    Duration::from_secs(60) - within_minute
 }
 
 fn signal_event_pump(wake: &smol::channel::Sender<()>) {
@@ -595,6 +581,12 @@ struct PreparedDriver {
 struct RemoteTaskStateSnapshot {
     projects: Vec<Project>,
     sessions: Vec<AgentSession>,
+    automations: Vec<crate::automation::Automation>,
+}
+
+enum TaskStateSyncEvent {
+    Snapshot(Result<RemoteTaskStateSnapshot, String>),
+    AutomationNotification(waku_client::AutomationNotification),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -693,7 +685,10 @@ impl WakuPane {
         content: fn(&mut Waku, &mut Window, &mut Context<Waku>) -> AnyElement,
         cx: &mut App,
     ) -> Entity<Self> {
-        cx.new(|_| Self { waku: None, content })
+        cx.new(|_| Self {
+            waku: None,
+            content,
+        })
     }
 
     fn bind(&mut self, waku: &Entity<Waku>, cx: &mut Context<Self>) {
@@ -1228,8 +1223,8 @@ pub struct Waku {
     /// Coalesced edge trigger for provider and background result queues. The
     /// payloads stay in their typed channels; this channel only wakes the UI.
     event_wake_tx: smol::channel::Sender<()>,
-    task_state_sync_tx: Sender<Result<RemoteTaskStateSnapshot, String>>,
-    task_state_sync_events: Receiver<Result<RemoteTaskStateSnapshot, String>>,
+    task_state_sync_tx: Sender<TaskStateSyncEvent>,
+    task_state_sync_events: Receiver<TaskStateSyncEvent>,
     runtimes: HashMap<Uuid, SessionRuntime>,
     runtime_attach_pending: HashSet<Uuid>,
     runtime_attach_misses: HashMap<Uuid, u8>,
@@ -2107,22 +2102,6 @@ impl Waku {
         for session_id in interrupted_session_ids {
             state.mark_session_dirty(session_id);
         }
-        let mut recovered_automation_runs = false;
-        for automation in &mut state.automations {
-            for run in &mut automation.history {
-                if run.outcome == crate::automation::RunOutcome::Running
-                    && run.session_id.is_some_and(|session_id| {
-                        state
-                            .sessions
-                            .iter()
-                            .any(|session| session.id == session_id)
-                    })
-                {
-                    run.outcome = crate::automation::RunOutcome::Cancelled;
-                    recovered_automation_runs = true;
-                }
-            }
-        }
         let initial_composer_draft = state
             .selected_session
             .and_then(|selected| state.sessions.iter().find(|session| session.id == selected))
@@ -2657,23 +2636,6 @@ impl Waku {
             })
             .detach();
 
-            // The automation scheduler. Ticks once at startup so a slot missed
-            // while the app was closed catches up promptly, then on its own
-            // cadence. A thin shell: all schedule math lives in the pure planner.
-            cx.spawn(async move |this, cx| {
-                loop {
-                    if this
-                        .update(cx, |this, cx| this.tick_automations(cx))
-                        .is_err()
-                    {
-                        break;
-                    }
-                    let delay = automation_boundary_delay(std::time::SystemTime::now());
-                    cx.background_executor().timer(delay).await;
-                }
-            })
-            .detach();
-
             let markdown_link_handler: md::render::LinkHandler = {
                 let waku = cx.entity().downgrade();
                 Rc::new(move |target, _, cx| {
@@ -2815,7 +2777,7 @@ impl Waku {
                 escape_stop_confirmation: EscapeStopConfirmation::default(),
                 response_fork_preparations: HashMap::new(),
                 pending_queue_drains: Vec::new(),
-                stream_state_dirty: recovered_automation_runs,
+                stream_state_dirty: false,
                 last_stream_save: Instant::now(),
                 activities_expanded: HashMap::new(),
                 expanded_activity_items: HashMap::new(),
@@ -2975,9 +2937,6 @@ impl Waku {
             this.restart_task_state_sync();
             for session_id in startup_live_session_ids {
                 this.start_runtime_attachment(session_id, cx);
-            }
-            if this.stream_state_dirty {
-                this.schedule_stream_state_save(cx);
             }
             this.start_pending_checkpoint_captures(cx);
             // The autocomplete indexes prefetch alongside, so typing `/` or

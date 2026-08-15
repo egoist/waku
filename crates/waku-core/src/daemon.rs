@@ -9,6 +9,7 @@ use crate::{
     WorkspaceResult,
 };
 use anyhow::{Context as _, anyhow, bail};
+use chrono::Local;
 use parking_lot::Mutex;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -16,27 +17,43 @@ use serde_json::{Value, json};
 use uuid::Uuid;
 
 use crate::attachments::AttachmentStore;
+use crate::automation::{AutomationRun, RunOutcome};
 use crate::computer_use::{ComputerTarget, ComputerUsePhase, ComputerUseState};
 use crate::driver::{self, DriverHandle, DriverStartOptions, SessionOptions};
 use crate::model::{
-    ActivityKind, AgentSession, Checkpoint, CheckpointStatus, DriverEvent, PermissionOption,
-    Project, ProviderKind, ProviderResumeCursor, SessionStatus,
+    ActivityKind, AgentSession, Checkpoint, CheckpointStatus, DriverEvent, MessageRole,
+    PermissionOption, Project, ProviderKind, ProviderResumeCursor, SessionStatus, TurnStatus,
 };
 use crate::persistence::{ComposerDraftStore, PersistedState, StateStore};
 use crate::settings::DaemonSettingsStore;
 use waku_protocol::provider_session::{ProviderSessionFork, ProviderSessionForkRequest};
 
+const AUTOMATION_CATCH_UP_GRACE_SECS: i64 = 5 * 60;
+
+#[derive(Debug)]
+enum AutomationStartResult {
+    Started {
+        automation: waku_protocol::automation::Automation,
+        session: AgentSession,
+        runtime_id: Uuid,
+        supports_steer: bool,
+    },
+    Skipped,
+    Deferred,
+}
+
 pub struct WakuBackend {
-    sessions: Mutex<HashMap<Uuid, (Uuid, DriverHandle)>>,
+    sessions: Arc<Mutex<HashMap<Uuid, (Uuid, DriverHandle)>>>,
     terminals: Mutex<HashMap<Uuid, (Uuid, crate::terminal::DaemonTerminal)>>,
     settings: DaemonSettingsStore,
-    task_store: StateStore,
-    task_state: Mutex<PersistedState>,
-    removed_session_ids: Mutex<HashSet<Uuid>>,
+    task_store: Arc<StateStore>,
+    task_state: Arc<Mutex<PersistedState>>,
+    removed_session_ids: Arc<Mutex<HashSet<Uuid>>>,
     composer_drafts: ComposerDraftStore,
     attachments: AttachmentStore,
     usage_scan_cache: Mutex<crate::usage_history::ScanCache>,
     checkpoint_capture_locks: Mutex<HashMap<(PathBuf, Uuid, usize), Arc<Mutex<()>>>>,
+    automation_locks: Mutex<HashMap<Uuid, Arc<Mutex<()>>>>,
     usage_rates_dir: std::path::PathBuf,
     default_cwd: std::path::PathBuf,
 }
@@ -47,6 +64,11 @@ impl WakuBackend {
             .load()
             .context("could not load Waku task database")?;
         migrate_projectless_state(&task_store, &mut task_state)?;
+        if recover_interrupted_automation_runs(&mut task_state) {
+            task_store
+                .save(&mut task_state)
+                .context("could not persist interrupted automation recovery")?;
+        }
         let composer_drafts = ComposerDraftStore::for_state_path(task_store.path());
         let attachments = AttachmentStore::new(
             task_store
@@ -61,16 +83,17 @@ impl WakuBackend {
             .unwrap_or_else(|| std::path::Path::new("."))
             .to_owned();
         Ok(Self {
-            sessions: Mutex::new(HashMap::new()),
+            sessions: Arc::new(Mutex::new(HashMap::new())),
             terminals: Mutex::new(HashMap::new()),
             settings,
-            task_store,
-            task_state: Mutex::new(task_state),
-            removed_session_ids: Mutex::new(HashSet::new()),
+            task_store: Arc::new(task_store),
+            task_state: Arc::new(Mutex::new(task_state)),
+            removed_session_ids: Arc::new(Mutex::new(HashSet::new())),
             composer_drafts,
             attachments,
             usage_scan_cache: Mutex::new(HashMap::new()),
             checkpoint_capture_locks: Mutex::new(HashMap::new()),
+            automation_locks: Mutex::new(HashMap::new()),
             usage_rates_dir,
             default_cwd: std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
         })
@@ -140,6 +163,23 @@ impl WakuBackend {
         }
         Ok(checkpoint)
     }
+}
+
+/// A daemon restart cannot retain any provider runtime. Resolve the durable
+/// running markers before the scheduler starts so a stale run never blocks
+/// overlap checks forever. The marker remains at its last occurrence, which
+/// lets the normal planner coalesce one catch-up run if the schedule is due.
+fn recover_interrupted_automation_runs(task_state: &mut PersistedState) -> bool {
+    let mut changed = false;
+    for automation in &mut task_state.automations {
+        for run in &mut automation.history {
+            if run.outcome == RunOutcome::Running {
+                run.outcome = RunOutcome::Cancelled;
+                changed = true;
+            }
+        }
+    }
+    changed
 }
 
 /// Storage-layout migrations belong to the daemon because both the database
@@ -304,6 +344,28 @@ impl Backend for WakuBackend {
                     projectless_root: crate::projectless::workspace_root(),
                 })
             }
+            Command::RunAutomation {
+                automation_id,
+                catch_up,
+            } => match self.start_automation_run(automation_id, catch_up, events.clone())? {
+                AutomationStartResult::Started {
+                    automation,
+                    session,
+                    runtime_id,
+                    supports_steer,
+                } => Ok(ResponsePayload::AutomationRunStarted {
+                    automation,
+                    session,
+                    runtime_id,
+                    supports_steer,
+                }),
+                AutomationStartResult::Skipped => {
+                    bail!("automation {automation_id} is already running")
+                }
+                AutomationStartResult::Deferred => {
+                    bail!("automation {automation_id} is queued until its current run finishes")
+                }
+            },
             Command::SaveTaskState {
                 projects,
                 live_session_ids: _,
@@ -318,6 +380,24 @@ impl Backend for WakuBackend {
                     .collect::<HashMap<_, _>>();
                 let mut state = self.task_state.lock();
                 let removed_session_ids = self.removed_session_ids.lock();
+                if let Some(automations) = automations {
+                    let existing_automations = std::mem::take(&mut state.automations);
+                    state.automations = automations
+                        .into_iter()
+                        .map(|incoming| {
+                            if let Some(existing) = existing_automations
+                                .iter()
+                                .find(|existing| existing.id == incoming.id)
+                            {
+                                let mut merged = existing.clone();
+                                merge_automation_update(&mut merged, incoming);
+                                merged
+                            } else {
+                                incoming
+                            }
+                        })
+                        .collect();
+                }
                 for project in projects {
                     if let Some(existing) = state
                         .projects
@@ -369,13 +449,6 @@ impl Backend for WakuBackend {
                 for session_id in &saved_ids {
                     state.mark_session_dirty(*session_id);
                 }
-                // A sender that owns automations sends its complete set, and
-                // replacing wholesale is what makes a deletion stick. A sender
-                // that omits the field (the web client, which saves only the
-                // one session it changed) must leave the set untouched.
-                if let Some(automations) = automations {
-                    state.automations = automations;
-                }
                 self.task_store.save(&mut state)?;
                 let sessions = saved_ids
                     .into_iter()
@@ -390,9 +463,26 @@ impl Backend for WakuBackend {
                 Ok(ResponsePayload::TaskStateSaved { sessions })
             }
             Command::RemoveSession => {
+                let originating_automation = {
+                    let state = self.task_state.lock();
+                    state
+                        .sessions
+                        .iter()
+                        .find(|session| session.id == session_id)
+                        .and_then(|session| session.originating_automation)
+                };
+                let automation_lock =
+                    originating_automation.map(|automation_id| self.automation_lock(automation_id));
+                let automation_guard = automation_lock.as_ref().map(|lock| lock.lock());
+                let automation_cancelled;
                 {
                     let mut state = self.task_state.lock();
                     self.removed_session_ids.lock().insert(session_id);
+                    automation_cancelled = cancel_automation_run_for_removed_session(
+                        &mut state,
+                        session_id,
+                        originating_automation,
+                    );
                     let project_id = state
                         .sessions
                         .iter()
@@ -414,6 +504,11 @@ impl Backend for WakuBackend {
                         }
                     }
                     self.task_store.save(&mut state)?;
+                }
+                drop(automation_guard);
+                drop(automation_lock);
+                if automation_cancelled {
+                    events.task_state_changed();
                 }
                 let removed = self.sessions.lock().remove(&session_id);
                 drop(removed);
@@ -648,12 +743,749 @@ impl Backend for WakuBackend {
         }
     }
 
+    fn tick(&self, events: EventSink) {
+        self.tick_automations(events);
+    }
+
     fn shutdown(&self) {
         let sessions = std::mem::take(&mut *self.sessions.lock());
         drop(sessions);
         let terminals = std::mem::take(&mut *self.terminals.lock());
         drop(terminals);
     }
+}
+
+impl WakuBackend {
+    fn automation_lock(&self, automation_id: Uuid) -> Arc<Mutex<()>> {
+        self.automation_locks
+            .lock()
+            .entry(automation_id)
+            .or_insert_with(|| Arc::new(Mutex::new(())))
+            .clone()
+    }
+
+    fn automation_snapshot(
+        &self,
+        automation_id: Uuid,
+        fallback: waku_protocol::automation::Automation,
+    ) -> waku_protocol::automation::Automation {
+        self.task_state
+            .lock()
+            .automations
+            .iter()
+            .find(|candidate| candidate.id == automation_id)
+            .cloned()
+            .unwrap_or(fallback)
+    }
+
+    fn tick_automations(&self, events: EventSink) {
+        let now = Local::now().naive_local();
+        let decisions = {
+            let state = self.task_state.lock();
+            let ticks = state
+                .automations
+                .iter()
+                .map(|automation| crate::automation::planner::AutomationTick {
+                    automation,
+                    marker: local_naive(automation.last_run_at.unwrap_or(automation.created_at)),
+                    active: automation
+                        .history
+                        .iter()
+                        .any(|run| run.outcome == RunOutcome::Running),
+                })
+                .collect::<Vec<_>>();
+            crate::automation::planner::plan(
+                &ticks,
+                now,
+                chrono::Duration::seconds(AUTOMATION_CATCH_UP_GRACE_SECS),
+            )
+        };
+
+        let mut changed = false;
+        for decision in decisions {
+            match decision {
+                crate::automation::planner::PlanDecision::Fire { id, catch_up } => {
+                    match self.start_automation_run(id, catch_up, events.clone()) {
+                        Ok(AutomationStartResult::Started { .. })
+                        | Ok(AutomationStartResult::Skipped) => changed = true,
+                        Ok(AutomationStartResult::Deferred) => {}
+                        Err(error) => {
+                            eprintln!("could not start scheduled automation {id}: {error:#}")
+                        }
+                    }
+                }
+                crate::automation::planner::PlanDecision::Skip { id, catch_up } => {
+                    if self.record_scheduled_skip(id, catch_up) {
+                        changed = true;
+                    }
+                }
+            }
+        }
+        if changed {
+            events.task_state_changed();
+        }
+    }
+
+    fn record_scheduled_skip(&self, automation_id: Uuid, catch_up: bool) -> bool {
+        let lock = self.automation_lock(automation_id);
+        let _automation_lock = lock.lock();
+        let mut state = self.task_state.lock();
+        let Some(automation) = state
+            .automations
+            .iter_mut()
+            .find(|automation| automation.id == automation_id)
+        else {
+            return false;
+        };
+        // The planner works from a snapshot. Re-check the overlap state at the
+        // mutation boundary so a run that started after planning is not
+        // incorrectly consumed as a skipped occurrence.
+        if !automation.enabled
+            || automation.overlap != waku_protocol::automation::OverlapPolicy::Skip
+            || !automation
+                .history
+                .iter()
+                .any(|run| run.outcome == RunOutcome::Running)
+        {
+            return false;
+        }
+        let now = crate::model::unix_time();
+        automation.record_run(AutomationRun::skipped(now, catch_up));
+        automation.last_run_at = Some(now);
+        if let Err(error) = self.task_store.save(&mut state) {
+            eprintln!("could not persist skipped automation {automation_id}: {error}");
+            return false;
+        }
+        true
+    }
+
+    fn start_automation_run(
+        &self,
+        automation_id: Uuid,
+        catch_up: bool,
+        events: EventSink,
+    ) -> anyhow::Result<AutomationStartResult> {
+        // Planning and on-demand requests race by design. The same lock covers
+        // the active-run check, the history append, and provider startup so a
+        // scheduled occurrence can never double-fire with Run-now or another
+        // scheduler tick.
+        let lock = self.automation_lock(automation_id);
+        let _automation_lock = lock.lock();
+        let (mut automation, project, project_exists) = {
+            let mut state = self.task_state.lock();
+            let Some(automation) = state
+                .automations
+                .iter()
+                .find(|automation| automation.id == automation_id)
+                .cloned()
+            else {
+                bail!("automation {automation_id} was not found");
+            };
+            if automation.prompt.trim().is_empty() {
+                bail!("automation {automation_id} has no prompt");
+            }
+            let project = automation
+                .project_id
+                .and_then(|project_id| {
+                    state
+                        .projects
+                        .iter()
+                        .find(|project| project.id == project_id)
+                })
+                .cloned();
+            let project_exists = project.is_some();
+            let active = automation
+                .history
+                .iter()
+                .any(|run| run.outcome == RunOutcome::Running);
+            if active {
+                match automation.overlap {
+                    waku_protocol::automation::OverlapPolicy::Concurrent => {}
+                    waku_protocol::automation::OverlapPolicy::Skip => {
+                        let now = crate::model::unix_time();
+                        if let Some(current) = state
+                            .automations
+                            .iter_mut()
+                            .find(|current| current.id == automation_id)
+                        {
+                            current.record_run(AutomationRun::skipped(now, catch_up));
+                            current.last_run_at = Some(now);
+                            self.task_store.save(&mut state)?;
+                            return Ok(AutomationStartResult::Skipped);
+                        }
+                        bail!("automation {automation_id} was deleted before it could be skipped");
+                    }
+                    waku_protocol::automation::OverlapPolicy::Queue => {
+                        return Ok(AutomationStartResult::Deferred);
+                    }
+                }
+            }
+            (automation, project, project_exists)
+        };
+
+        if automation.normalize_project_binding(project_exists) {
+            automation.updated_at = crate::model::unix_time();
+        }
+        let project = match project {
+            Some(project) => project,
+            None => {
+                let root = crate::projectless::workspace_root()
+                    .ok_or_else(|| anyhow!("projectless workspace is unavailable"))?;
+                let mut project = Project::from_path(root);
+                project.name = Project::PROJECTLESS_NAME.to_owned();
+                project
+            }
+        };
+        let project_exists = project_exists && automation.project_id == Some(project.id);
+        let mut session = AgentSession::new(project.id, automation.agent.provider);
+        session.model = automation.agent.model.clone();
+        session.reasoning_effort = automation.agent.reasoning_effort.clone();
+        session.service_tier = automation.agent.service_tier.clone();
+        session.agent_preset = automation.agent.agent_preset.clone();
+        session.runtime_mode = automation.agent.runtime_mode;
+        session.interaction_mode = automation.agent.interaction_mode;
+        session.workspace = automation.workspace_for_project(project_exists);
+        session.originating_automation = Some(automation_id);
+        session.begin_turn(automation.prompt.clone());
+        session.status = SessionStatus::Connecting;
+        let runtime_id = Uuid::new_v4();
+        let session_id = session.id;
+
+        // Claim and persist the occurrence before materializing its workspace.
+        // A worktree failure is still a real attempted run: it advances the
+        // schedule marker, settles durably, and cannot retry every scheduler
+        // tick.
+        {
+            let mut state = self.task_state.lock();
+            if let Some(current) = state
+                .automations
+                .iter_mut()
+                .find(|automation| automation.id == automation_id)
+            {
+                // The execution lock makes this snapshot current for
+                // user-authored fields; the merge still protects history if a
+                // terminal event was persisted just before this boundary.
+                merge_automation_update(current, automation.clone());
+                let now = crate::model::unix_time();
+                current.record_run(AutomationRun::spawned(session.id, now, catch_up));
+                current.last_run_at = Some(now);
+            } else {
+                bail!("automation {automation_id} was deleted before it could run");
+            }
+            if !state
+                .projects
+                .iter()
+                .any(|candidate| candidate.id == project.id)
+            {
+                state.projects.push(project.clone());
+            }
+            state.push_session(session.clone());
+            self.task_store
+                .save(&mut state)
+                .context("could not persist automation run start")?;
+        }
+
+        if let crate::model::SessionWorkspace::NewWorktree { base_branch } = &session.workspace {
+            let worktree = match crate::workspace::execute(WorkspaceOperation::CreateWorktree {
+                project_path: project.path.clone(),
+                project_id: project.id,
+                session_id: session.id,
+                prompt: automation.prompt.clone(),
+                base_branch: base_branch.clone(),
+            }) {
+                Ok(WorkspaceResult::WorktreeCreated { worktree }) => worktree,
+                Ok(_) => {
+                    let error = "daemon returned an invalid worktree result".to_owned();
+                    self.finish_automation_start_failure(
+                        &mut session,
+                        automation_id,
+                        error,
+                        events.for_runtime(session_id, runtime_id),
+                    );
+                    return Ok(AutomationStartResult::Started {
+                        automation: self.automation_snapshot(automation_id, automation),
+                        session,
+                        runtime_id,
+                        supports_steer: false,
+                    });
+                }
+                Err(error) => {
+                    self.finish_automation_start_failure(
+                        &mut session,
+                        automation_id,
+                        error.to_string(),
+                        events.for_runtime(session_id, runtime_id),
+                    );
+                    return Ok(AutomationStartResult::Started {
+                        automation: self.automation_snapshot(automation_id, automation),
+                        session,
+                        runtime_id,
+                        supports_steer: false,
+                    });
+                }
+            };
+            session.workspace = crate::model::SessionWorkspace::Worktree {
+                path: worktree.path,
+                branch: worktree.branch,
+            };
+            let mut state = self.task_state.lock();
+            if let Some(stored) = state
+                .sessions
+                .iter_mut()
+                .find(|stored| stored.id == session.id)
+            {
+                stored.workspace = session.workspace.clone();
+                state.mark_session_dirty(session.id);
+                self.task_store
+                    .save(&mut state)
+                    .context("could not persist automation worktree")?;
+            }
+        }
+
+        let cwd = session
+            .workspace
+            .path()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| project.path.clone());
+
+        let runtime_events = events.for_runtime(session.id, runtime_id);
+        let binary = match self.provider_binary(automation.agent.provider) {
+            Ok(binary) => binary,
+            Err(error) => {
+                self.finish_automation_start_failure(
+                    &mut session,
+                    automation_id,
+                    error.to_string(),
+                    runtime_events,
+                );
+                return Ok(AutomationStartResult::Started {
+                    automation: self.automation_snapshot(automation_id, automation),
+                    session,
+                    runtime_id,
+                    supports_steer: false,
+                });
+            }
+        };
+        let (wake, _wake_events) = smol::channel::bounded(1);
+        let (event_sender, event_receiver) = driver::event_channel(wake);
+        let driver = match driver::start_local(
+            automation.agent.provider,
+            DriverStartOptions {
+                binary,
+                cwd,
+                mode: automation.agent.runtime_mode,
+                interaction_mode: automation.agent.interaction_mode,
+                model: automation.agent.model.clone(),
+                reasoning_effort: automation.agent.reasoning_effort.clone(),
+                service_tier: automation.agent.service_tier.clone(),
+                context_window: None,
+                agent_preset: automation.agent.agent_preset.clone(),
+                computer_use_enabled: self.settings.get().computer_use_enabled,
+                provider_cursor: None,
+            },
+            event_sender,
+        ) {
+            Ok(driver) => driver,
+            Err(error) => {
+                self.finish_automation_start_failure(
+                    &mut session,
+                    automation_id,
+                    error.to_string(),
+                    runtime_events,
+                );
+                return Ok(AutomationStartResult::Started {
+                    automation: self.automation_snapshot(automation_id, automation),
+                    session,
+                    runtime_id,
+                    supports_steer: false,
+                });
+            }
+        };
+        let supports_steer = driver.supports_steer();
+        self.sessions
+            .lock()
+            .insert(session.id, (runtime_id, driver.clone()));
+        self.spawn_automation_event_forwarder(
+            session.id,
+            runtime_id,
+            automation_id,
+            driver,
+            event_receiver,
+            runtime_events,
+        );
+        // The event thread is installed before the first prompt so a provider
+        // that answers synchronously cannot race the subscription/replay path.
+        if let Some((_, driver)) = self.sessions.lock().get(&session.id) {
+            driver.prompt(automation.prompt.clone());
+        }
+        let persisted_automation = self
+            .task_state
+            .lock()
+            .automations
+            .iter()
+            .find(|candidate| candidate.id == automation_id)
+            .cloned()
+            .unwrap_or(automation);
+        Ok(AutomationStartResult::Started {
+            automation: persisted_automation,
+            session,
+            runtime_id,
+            supports_steer,
+        })
+    }
+
+    fn finish_automation_start_failure(
+        &self,
+        session: &mut AgentSession,
+        automation_id: Uuid,
+        error: String,
+        events: EventSink,
+    ) {
+        let runtime_events = if events.runtime_id() == Uuid::nil() {
+            events.for_runtime(session.id, Uuid::new_v4())
+        } else {
+            events
+        };
+        let _ = runtime_events.send(
+            event_to_wire(DriverEvent::Error(error.clone()))
+                .unwrap_or_else(|_| WireDriverEvent::new("error", Value::String(error.clone()))),
+        );
+        let _ = runtime_events.send(
+            event_to_wire(DriverEvent::TurnFinished {
+                success: false,
+                summary: Some(error),
+            })
+            .unwrap_or_else(|_| WireDriverEvent::new("turnFinished", Value::Null)),
+        );
+        let mut notification = None;
+        {
+            let mut state = self.task_state.lock();
+            if let Some(stored) = state
+                .sessions
+                .iter_mut()
+                .find(|candidate| candidate.id == session.id)
+            {
+                stored.status = SessionStatus::Failed;
+                stored.push_message(MessageRole::Assistant, "The automation could not start.");
+                stored.finish_active_turn(TurnStatus::Failed);
+                *session = stored.clone();
+                state.mark_session_dirty(session.id);
+            }
+            if let Some(automation) = state
+                .automations
+                .iter_mut()
+                .find(|automation| automation.id == automation_id)
+                && automation.settle_session_run(session.id, RunOutcome::Failed)
+                && automation.notification.matches_outcome(RunOutcome::Failed)
+            {
+                notification = Some(automation.name.clone());
+            }
+            if let Err(save_error) = self.task_store.save(&mut state) {
+                eprintln!("could not persist failed automation start: {save_error}");
+                notification = None;
+            }
+        }
+        // Notification intent is emitted only after the terminal outcome is
+        // durable. If persistence fails, clients still receive the runtime
+        // failure events but must not present an outcome the daemon did not
+        // commit.
+        if let Some(name) = notification {
+            runtime_events.automation_notification(crate::protocol::AutomationNotification {
+                session_id: session.id,
+                name,
+                outcome: RunOutcome::Failed,
+            });
+        }
+        runtime_events.task_state_changed();
+        runtime_events.end_runtime();
+    }
+
+    fn spawn_automation_event_forwarder(
+        &self,
+        session_id: Uuid,
+        runtime_id: Uuid,
+        automation_id: Uuid,
+        _driver: DriverHandle,
+        event_receiver: crossbeam_channel::Receiver<DriverEvent>,
+        events: EventSink,
+    ) {
+        let sessions = self.sessions.clone();
+        let task_store = self.task_store.clone();
+        let task_state = self.task_state.clone();
+        let automation_lock = self.automation_lock(automation_id);
+        std::thread::Builder::new()
+            .name(format!("waku-daemon-automation-{session_id}"))
+            .spawn(move || {
+                while let Ok(event) = event_receiver.recv() {
+                    let terminal = matches!(
+                        event,
+                        DriverEvent::TurnFinished { .. } | DriverEvent::ProcessExited
+                    );
+                    if let Ok(wire) = event_to_wire(event.clone()) {
+                        let _ = events.send(wire);
+                    }
+                    let notification = apply_automation_driver_event(
+                        &task_state,
+                        &task_store,
+                        &automation_lock,
+                        session_id,
+                        automation_id,
+                        &event,
+                    );
+                    if let Some(name) = notification {
+                        events.automation_notification(crate::protocol::AutomationNotification {
+                            session_id,
+                            name,
+                            outcome: match event {
+                                DriverEvent::TurnFinished { success: true, .. } => {
+                                    RunOutcome::Succeeded
+                                }
+                                _ => RunOutcome::Failed,
+                            },
+                        });
+                    }
+                    // The automation history is part of task state, not the
+                    // runtime transcript. Wake catalog subscribers for every
+                    // terminal outcome, even when notification policy is off.
+                    if terminal {
+                        events.task_state_changed();
+                    }
+                    if terminal {
+                        if matches!(event, DriverEvent::ProcessExited) {
+                            let should_remove = sessions.lock().get(&session_id).is_some_and(
+                                |(active_runtime_id, _)| *active_runtime_id == runtime_id,
+                            );
+                            if should_remove {
+                                sessions.lock().remove(&session_id);
+                                events.end_runtime();
+                            }
+                        }
+                    }
+                }
+            })
+            .ok();
+    }
+}
+
+/// Merge client-authored fields without allowing a stale automation snapshot to
+/// erase daemon-owned run history or the marker used by the scheduler.
+fn merge_automation_update(
+    existing: &mut waku_protocol::automation::Automation,
+    incoming: waku_protocol::automation::Automation,
+) {
+    let history = std::mem::take(&mut existing.history);
+    let last_run_at = existing.last_run_at;
+    let created_at = existing.created_at;
+    let updated_at = existing.updated_at.max(incoming.updated_at);
+    *existing = incoming;
+    existing.history = history;
+    existing.last_run_at = last_run_at;
+    existing.created_at = created_at;
+    existing.updated_at = updated_at;
+}
+
+fn cancel_automation_run_for_removed_session(
+    state: &mut PersistedState,
+    session_id: Uuid,
+    automation_id: Option<Uuid>,
+) -> bool {
+    let Some(automation_id) = automation_id else {
+        return false;
+    };
+    state
+        .automations
+        .iter_mut()
+        .find(|automation| automation.id == automation_id)
+        .is_some_and(|automation| automation.settle_session_run(session_id, RunOutcome::Cancelled))
+}
+
+fn local_naive(timestamp: u64) -> chrono::NaiveDateTime {
+    chrono::DateTime::from_timestamp(timestamp as i64, 0)
+        .map(|instant| instant.with_timezone(&Local).naive_local())
+        .unwrap_or_else(|| Local::now().naive_local())
+}
+
+/// Apply the small daemon-owned projection needed when no client is attached.
+/// Attached clients still receive every provider event and persist their richer
+/// transcript projection; the daemon must at least retain the prompt, terminal
+/// status, and automation outcome on its own.
+fn apply_automation_driver_event(
+    task_state: &Arc<Mutex<PersistedState>>,
+    task_store: &Arc<StateStore>,
+    automation_lock: &Arc<Mutex<()>>,
+    session_id: Uuid,
+    automation_id: Uuid,
+    event: &DriverEvent,
+) -> Option<String> {
+    let terminal = matches!(
+        event,
+        DriverEvent::TurnFinished { .. } | DriverEvent::ProcessExited
+    );
+    let _automation_guard = automation_lock.lock();
+    let mut notification = None;
+    let mut changed = false;
+    let mut state = task_state.lock();
+    if let Some(session) = state
+        .sessions
+        .iter_mut()
+        .find(|session| session.id == session_id)
+    {
+        match event {
+            DriverEvent::Connected { provider_cursor } => {
+                session.provider_cursor = provider_cursor.clone();
+                if session.status == SessionStatus::Connecting {
+                    session.status = SessionStatus::Working;
+                }
+                changed = true;
+            }
+            DriverEvent::AgentPresetSelected(preset) => {
+                session.agent_preset = preset.clone();
+                changed = true;
+            }
+            DriverEvent::AutoTitleUpdated(title) => {
+                changed = session.set_auto_title(title.clone()) || changed;
+            }
+            DriverEvent::TurnStarted => {
+                session.mark_active_turn_provider_started();
+                session.status = SessionStatus::Working;
+                changed = true;
+            }
+            DriverEvent::TextDelta(delta) => {
+                if !delta.is_empty() && session.active_turn_id().is_some() {
+                    let turn_id = session.active_turn_id();
+                    let message = session.messages.last_mut().filter(|message| {
+                        message.role == MessageRole::Assistant && message.turn_id == turn_id
+                    });
+                    if let Some(message) = message {
+                        message.content.push_str(delta);
+                        message.streaming = true;
+                    } else {
+                        let id = session.push_message(MessageRole::Assistant, delta.clone());
+                        if let Some(message) =
+                            session.messages.iter_mut().find(|message| message.id == id)
+                        {
+                            message.streaming = true;
+                        }
+                    }
+                    changed = true;
+                }
+            }
+            DriverEvent::Error(error) => {
+                session.status = SessionStatus::Failed;
+                if session.active_turn_id().is_some()
+                    && !session.messages.iter().any(|message| {
+                        message.role == MessageRole::Assistant
+                            && message.turn_id == session.active_turn_id()
+                    })
+                {
+                    session.push_message(MessageRole::Assistant, error.clone());
+                }
+                changed = true;
+            }
+            DriverEvent::TurnFinished { success, summary } => {
+                for message in &mut session.messages {
+                    if message.role == MessageRole::Assistant {
+                        message.streaming = false;
+                    }
+                }
+                if session.active_turn_id().is_some()
+                    && !session.messages.iter().any(|message| {
+                        message.role == MessageRole::Assistant
+                            && message.turn_id == session.active_turn_id()
+                    })
+                {
+                    session.push_message(
+                        MessageRole::Assistant,
+                        summary.clone().unwrap_or_else(|| {
+                            if *success {
+                                "The turn completed without a text response.".to_owned()
+                            } else {
+                                "The turn stopped before a response.".to_owned()
+                            }
+                        }),
+                    );
+                }
+                session.status = if *success {
+                    SessionStatus::Idle
+                } else {
+                    SessionStatus::Failed
+                };
+                session.finish_active_turn(if *success {
+                    TurnStatus::Completed
+                } else {
+                    TurnStatus::Failed
+                });
+                changed = true;
+            }
+            DriverEvent::ProcessExited => {
+                // Providers may exit after a successful turn. Do not turn an
+                // already-settled automation back into a failed session just
+                // because its resident process was released.
+                if session.active_turn_id().is_some() || session.status.is_busy() {
+                    for message in &mut session.messages {
+                        if message.role == MessageRole::Assistant {
+                            message.streaming = false;
+                        }
+                    }
+                    if session.active_turn_id().is_some()
+                        && !session.messages.iter().any(|message| {
+                            message.role == MessageRole::Assistant
+                                && message.turn_id == session.active_turn_id()
+                        })
+                    {
+                        session.push_message(
+                            MessageRole::Assistant,
+                            "The agent exited before responding.",
+                        );
+                    }
+                    session.status = SessionStatus::Failed;
+                    session.finish_active_turn(TurnStatus::Failed);
+                    changed = true;
+                }
+            }
+            DriverEvent::ReasoningDelta(_)
+            | DriverEvent::AvailableCommands(_)
+            | DriverEvent::Activity { .. }
+            | DriverEvent::RichActivity(_)
+            | DriverEvent::BackgroundWork(_)
+            | DriverEvent::Permission { .. }
+            | DriverEvent::ComputerUseUpdated(_)
+            | DriverEvent::SteerAccepted { .. }
+            | DriverEvent::SteerRejected { .. }
+            | DriverEvent::UsageUpdated { .. }
+            | DriverEvent::PlanUsageUpdated(_)
+            | DriverEvent::RuntimeEventCursorAdvanced(_)
+            | DriverEvent::UserInputRequested { .. } => {}
+        }
+        if changed {
+            session.updated_at = crate::model::unix_time();
+            state.mark_session_dirty(session_id);
+        }
+    }
+
+    if terminal {
+        let outcome = match event {
+            DriverEvent::TurnFinished { success: true, .. } => RunOutcome::Succeeded,
+            _ => RunOutcome::Failed,
+        };
+        if let Some(automation) = state
+            .automations
+            .iter_mut()
+            .find(|automation| automation.id == automation_id)
+            && automation.settle_session_run(session_id, outcome)
+        {
+            if automation.notification.matches_outcome(outcome) {
+                notification = Some(automation.name.clone());
+            }
+            changed = true;
+        }
+    }
+    if changed && let Err(error) = task_store.save(&mut state) {
+        eprintln!("could not persist daemon automation event: {error}");
+        // Never emit notification intent ahead of durable settlement.
+        notification = None;
+    }
+    notification
 }
 
 fn session_projection_precedes(
@@ -1532,6 +2364,7 @@ fn handle_driver_command(
         | Command::SetSkillsEnabled { .. }
         | Command::TrashSkills { .. }
         | Command::LoadTaskState
+        | Command::RunAutomation { .. }
         | Command::SaveTaskState { .. }
         | Command::RemoveSession
         | Command::HydrateSession { .. }
@@ -1931,5 +2764,271 @@ mod tests {
             event_from_wire(wire).unwrap(),
             DriverEvent::TextDelta(text) if text == "hello"
         ));
+    }
+
+    #[test]
+    fn removing_an_automation_session_settles_its_run() {
+        let mut state = PersistedState::empty();
+        let mut automation = crate::automation::Automation::new("Nightly", ProviderKind::Codex, 1);
+        let session_id = Uuid::new_v4();
+        automation.record_run(crate::automation::AutomationRun::spawned(
+            session_id, 2, false,
+        ));
+        state.automations.push(automation);
+        let automation_id = state.automations[0].id;
+
+        assert!(cancel_automation_run_for_removed_session(
+            &mut state,
+            session_id,
+            Some(automation_id),
+        ));
+        assert_eq!(
+            state.automations[0].history[0].outcome,
+            RunOutcome::Cancelled
+        );
+        assert!(!cancel_automation_run_for_removed_session(
+            &mut state, session_id, None,
+        ));
+    }
+
+    #[test]
+    fn daemon_restart_resolves_durable_running_automation_markers() {
+        let mut state = PersistedState::empty();
+        let mut automation = crate::automation::Automation::new("Nightly", ProviderKind::Codex, 10);
+        automation.record_run(crate::automation::AutomationRun::spawned(
+            Uuid::new_v4(),
+            20,
+            false,
+        ));
+        state.automations.push(automation);
+
+        assert!(recover_interrupted_automation_runs(&mut state));
+        assert_eq!(
+            state.automations[0].history[0].outcome,
+            RunOutcome::Cancelled
+        );
+        assert!(!recover_interrupted_automation_runs(&mut state));
+    }
+
+    #[test]
+    fn stale_automation_upsert_preserves_daemon_run_history() {
+        let mut existing = crate::automation::Automation::new("Nightly", ProviderKind::Codex, 10);
+        let session_id = Uuid::new_v4();
+        existing.record_run(crate::automation::AutomationRun::spawned(
+            session_id, 20, false,
+        ));
+        existing.last_run_at = Some(20);
+        let run_id = existing.history[0].id;
+
+        let mut stale = existing.clone();
+        stale.name = "Renamed elsewhere".into();
+        stale.history.clear();
+        stale.last_run_at = None;
+        stale.created_at = 1;
+        stale.updated_at = 5;
+        merge_automation_update(&mut existing, stale);
+
+        assert_eq!(existing.name, "Renamed elsewhere");
+        assert_eq!(existing.created_at, 10);
+        assert_eq!(existing.updated_at, 10);
+        assert_eq!(existing.last_run_at, Some(20));
+        assert_eq!(existing.history[0].id, run_id);
+        assert_eq!(existing.history[0].session_id, Some(session_id));
+    }
+
+    #[test]
+    fn execution_path_enforces_skip_and_queue_for_active_runs() {
+        let root = std::env::temp_dir().join(format!("waku-automation-overlap-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let store = StateStore::daemon(root.join("app.db"));
+        let mut state = PersistedState::empty();
+        let mut skip = crate::automation::Automation::new("Skip", ProviderKind::Codex, 10);
+        skip.prompt = "run".into();
+        skip.overlap = crate::automation::OverlapPolicy::Skip;
+        let skip_id = skip.id;
+        let mut queue = crate::automation::Automation::new("Queue", ProviderKind::Codex, 10);
+        queue.prompt = "run".into();
+        queue.overlap = crate::automation::OverlapPolicy::Queue;
+        let queue_id = queue.id;
+        state.automations.extend([skip, queue]);
+        store.save(&mut state).unwrap();
+        drop(store);
+
+        let backend = WakuBackend::new(
+            DaemonSettingsStore::open(root.join("settings.json")).unwrap(),
+            StateStore::daemon(root.join("app.db")),
+        )
+        .unwrap();
+        {
+            let mut state = backend.task_state.lock();
+            state
+                .automations
+                .iter_mut()
+                .find(|item| item.id == skip_id)
+                .unwrap()
+                .record_run(AutomationRun::spawned(Uuid::new_v4(), 20, false));
+            state
+                .automations
+                .iter_mut()
+                .find(|item| item.id == queue_id)
+                .unwrap()
+                .record_run(AutomationRun::spawned(Uuid::new_v4(), 20, false));
+            backend.task_store.save(&mut state).unwrap();
+        }
+        assert!(matches!(
+            backend
+                .start_automation_run(skip_id, false, EventSink::for_test())
+                .unwrap(),
+            AutomationStartResult::Skipped
+        ));
+        assert!(matches!(
+            backend
+                .start_automation_run(queue_id, false, EventSink::for_test())
+                .unwrap(),
+            AutomationStartResult::Deferred
+        ));
+
+        let state = backend.task_state.lock();
+        let skip = state
+            .automations
+            .iter()
+            .find(|item| item.id == skip_id)
+            .unwrap();
+        let queue = state
+            .automations
+            .iter()
+            .find(|item| item.id == queue_id)
+            .unwrap();
+        assert_eq!(skip.history.len(), 2);
+        assert!(
+            skip.history
+                .iter()
+                .any(|run| run.outcome == RunOutcome::Skipped)
+        );
+        assert_eq!(queue.history.len(), 1);
+        drop(state);
+        drop(backend);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn daemon_tick_coalesces_catch_up_and_persists_without_a_client() {
+        use chrono::Timelike as _;
+
+        let root = std::env::temp_dir().join(format!("waku-automation-tick-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let settings = DaemonSettingsStore::open(root.join("settings.json")).unwrap();
+        let mut daemon_settings = crate::settings::DaemonSettings::default();
+        daemon_settings.provider_binary_overrides.insert(
+            ProviderKind::DeepSeek,
+            root.join("missing-provider").display().to_string(),
+        );
+        settings.replace(daemon_settings).unwrap();
+
+        let store = StateStore::daemon(root.join("app.db"));
+        let mut state = PersistedState::empty();
+        let project = Project::from_path(root.join("repo"));
+        std::fs::create_dir_all(&project.path).unwrap();
+        let scheduled = Local::now() - chrono::Duration::hours(1);
+        let mut automation = crate::automation::Automation::new(
+            "Catch up once",
+            ProviderKind::DeepSeek,
+            crate::model::unix_time().saturating_sub(3 * 24 * 60 * 60),
+        );
+        automation.prompt = "run once".into();
+        automation.enabled = true;
+        automation.project_id = Some(project.id);
+        automation.schedule = crate::automation::Schedule::Daily {
+            time: crate::automation::TimeOfDay::new(
+                scheduled.hour() as u8,
+                scheduled.minute() as u8,
+            ),
+        };
+        automation.last_run_at = Some(crate::model::unix_time().saturating_sub(3 * 24 * 60 * 60));
+        let automation_id = automation.id;
+        state.projects.push(project);
+        state.automations.push(automation);
+        store.save(&mut state).unwrap();
+        drop(store);
+
+        let backend = WakuBackend::new(settings, StateStore::daemon(root.join("app.db"))).unwrap();
+        backend.tick_automations(EventSink::for_test());
+        backend.tick_automations(EventSink::for_test());
+        drop(backend);
+
+        let reopened = StateStore::daemon(root.join("app.db"));
+        let reloaded = reopened.load().unwrap();
+        let automation = reloaded
+            .automations
+            .iter()
+            .find(|automation| automation.id == automation_id)
+            .unwrap();
+        assert_eq!(automation.history.len(), 1);
+        assert!(automation.history[0].catch_up);
+        assert_eq!(automation.history[0].outcome, RunOutcome::Failed);
+        drop(reopened);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn process_exit_after_success_does_not_overwrite_automation_outcome() {
+        let root = std::env::temp_dir().join(format!("waku-automation-event-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let store = Arc::new(crate::persistence::StateStore::daemon(root.join("app.db")));
+        let state = Arc::new(Mutex::new(crate::persistence::PersistedState::empty()));
+        let mut automation = crate::automation::Automation::new("Nightly", ProviderKind::Codex, 10);
+        let mut session = AgentSession::new(Uuid::new_v4(), ProviderKind::Codex);
+        session.begin_turn("run");
+        session.status = SessionStatus::Working;
+        let session_id = session.id;
+        automation.record_run(crate::automation::AutomationRun::spawned(
+            session_id, 20, false,
+        ));
+        state.lock().automations.push(automation);
+        state.lock().push_session(session);
+        store.save(&mut state.lock()).unwrap();
+
+        let automation_lock = Arc::new(Mutex::new(()));
+        let finished = DriverEvent::TurnFinished {
+            success: true,
+            summary: Some("done".into()),
+        };
+        let automation_id = state.lock().automations[0].id;
+        apply_automation_driver_event(
+            &state,
+            &store,
+            &automation_lock,
+            session_id,
+            automation_id,
+            &finished,
+        );
+        apply_automation_driver_event(
+            &state,
+            &store,
+            &automation_lock,
+            session_id,
+            automation_id,
+            &DriverEvent::ProcessExited,
+        );
+
+        let state_guard = state.lock();
+        assert_eq!(state_guard.sessions[0].status, SessionStatus::Idle);
+        assert_eq!(
+            state_guard.automations[0].history[0].outcome,
+            RunOutcome::Succeeded
+        );
+        drop(state_guard);
+        drop(state);
+        drop(store);
+
+        let reopened = crate::persistence::StateStore::daemon(root.join("app.db"));
+        let reloaded = reopened.load().unwrap();
+        assert_eq!(reloaded.sessions[0].status, SessionStatus::Idle);
+        assert_eq!(
+            reloaded.automations[0].history[0].outcome,
+            RunOutcome::Succeeded
+        );
+        drop(reopened);
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

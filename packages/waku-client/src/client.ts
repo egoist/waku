@@ -1,5 +1,6 @@
 import {
   PROTOCOL_VERSION,
+  type AutomationNotification,
   type ClientMessage,
   type Command,
   type ReplayCursor,
@@ -11,6 +12,7 @@ import {
 const NIL_UUID = "00000000-0000-0000-0000-000000000000";
 const OPEN = 1;
 const MAX_BUFFERED_EVENTS_PER_RUNTIME = 4096;
+const MAX_BUFFERED_AUTOMATION_NOTIFICATIONS = 256;
 
 export type EventListener = (event: SequencedEvent) => void;
 
@@ -69,6 +71,10 @@ export class WakuClient {
   private subscriptions = new Map<string, Set<EventListener>>();
   private pendingEvents = new Map<string, SequencedEvent[]>();
   private taskStateListeners = new Set<(revision: number) => void>();
+  private automationNotificationListeners = new Set<
+    (notification: AutomationNotification) => void
+  >();
+  private pendingAutomationNotifications: AutomationNotification[] = [];
   private sequences = new Map<string, LastSequence>();
   private connectionGeneration = 0;
   private rejectConnect?: (error: Error) => void;
@@ -267,6 +273,16 @@ export class WakuClient {
     return () => this.taskStateListeners.delete(listener);
   }
 
+  subscribeAutomationNotifications(
+    listener: (notification: AutomationNotification) => void,
+  ): () => void {
+    this.automationNotificationListeners.add(listener);
+    const pending = this.pendingAutomationNotifications;
+    this.pendingAutomationNotifications = [];
+    for (const notification of pending) listener(notification);
+    return () => this.automationNotificationListeners.delete(listener);
+  }
+
   replayCursors(): ReplayCursor[] {
     return [...this.sequences].map(([key, cursor]) => {
       const [sessionId, runtimeId] = key.split(":", 2) as [string, string];
@@ -338,6 +354,21 @@ export class WakuClient {
       for (const listener of this.taskStateListeners) listener(message.revision);
       return;
     }
+    if (message.type === "automationNotification") {
+      if (this.automationNotificationListeners.size === 0) {
+        this.pendingAutomationNotifications.push(message.notification);
+        if (
+          this.pendingAutomationNotifications.length > MAX_BUFFERED_AUTOMATION_NOTIFICATIONS
+        ) {
+          this.pendingAutomationNotifications.shift();
+        }
+      } else {
+        for (const listener of this.automationNotificationListeners) {
+          listener(message.notification);
+        }
+      }
+      return;
+    }
     if (message.type === "shuttingDown") {
       this.socket?.close(1000, "daemon shutting down");
     }
@@ -351,6 +382,7 @@ export class WakuClient {
       pending.reject(error);
     }
     this.pending.clear();
+    this.pendingAutomationNotifications = [];
   }
 }
 
