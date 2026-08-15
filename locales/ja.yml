@@ -1056,15 +1056,13 @@ automations.empty_title: 自動化がまだありません
 automations.empty_body: 保存したプロンプトを毎日・毎週・毎月のスケジュールで実行する自動化を作成します。
 automations.badge: 自動化から
 automations.section_prompt: プロンプト
-automations.section_details: 基本情報
-automations.section_details_description: この自動化の基本的な設定です。
 automations.section_schedule: スケジュール
-automations.section_schedule_description: Waku が自動で実行を開始するタイミングです。
 automations.section_agent: エージェント
 automations.section_behavior: 動作
-automations.section_behavior_description: 実行が重なったとき、また終了したときの挙動です。
 automations.field_name: 名前
 automations.field_name_description: サイドバー・通知・コマンドパレットに表示されます。
+automations.field_instructions: 指示
+automations.field_instructions_description: 実行のたびにエージェントへ依頼する内容です。
 automations.field_project: プロジェクト
 automations.field_provider: プロバイダー
 automations.field_model: モデル

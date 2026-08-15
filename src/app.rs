@@ -1351,6 +1351,9 @@ pub struct Waku {
     automation_minute_input: Entity<ComposerInput>,
     /// Scroll position of the Automations page content.
     automations_scroll: ScrollHandle,
+    /// Scroll position inside the automation editor's prompt field, which
+    /// scrolls within its own height before handing the wheel to the page.
+    automation_prompt_scroll: ScrollHandle,
     /// The Skills page's library snapshot, scanned off-thread. Frames read
     /// only this; `None` means the first scan has not landed yet.
     skills_catalog: Option<Rc<crate::skills::SkillsCatalog>>,
@@ -2835,6 +2838,7 @@ impl Waku {
                 automation_hour_input,
                 automation_minute_input,
                 automations_scroll: ScrollHandle::new(),
+                automation_prompt_scroll: ScrollHandle::new(),
                 skills_catalog: None,
                 skills_scan_generation: 0,
                 skills_scan_pending: false,

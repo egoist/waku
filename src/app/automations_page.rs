@@ -939,8 +939,9 @@ impl Waku {
             .id(SharedString::from(format!("automation-delete-{id}")))
             .tab_index(0)
             .focus_visible(|style| style.border_color(theme.accent))
-            .h(px(28.0))
-            .px(px(10.0))
+            // Sized to match Save beside it in the editor header.
+            .h(px(30.0))
+            .px(px(12.0))
             .rounded(px(7.0))
             .border_1()
             .border_color(if armed { theme.danger } else { theme.border })
@@ -949,9 +950,9 @@ impl Waku {
             .flex_none()
             .items_center()
             .justify_center()
-            .gap(px(5.0))
+            .gap(px(6.0))
             .cursor_default()
-            .text_size(px(12.0))
+            .text_size(px(13.0))
             .text_color(if armed {
                 theme.danger
             } else {
@@ -960,7 +961,7 @@ impl Waku {
             .hover(|element| element.bg(theme.overlay).text_color(theme.danger))
             .child(icon(
                 "icons/trash.svg",
-                12.0,
+                13.0,
                 if armed {
                     theme.danger
                 } else {
@@ -1099,15 +1100,21 @@ impl Waku {
             .tab_index(0)
             .flex_none()
             .h(px(30.0))
-            .px(px(14.0))
+            .px(px(12.0))
             .rounded(px(7.0))
+            // A border that is only transparent, not absent: Delete beside it
+            // carries one, so this keeps both boxes the same size and stops
+            // the button resizing when focus draws its ring.
+            .border_1()
+            .border_color(gpui::transparent_black())
             .flex()
             .items_center()
+            .justify_center()
             .cursor_default()
             .text_size(px(13.0))
             .bg(theme.inverse)
             .text_color(theme.on_inverse)
-            .focus_visible(|style| style.border_1().border_color(theme.accent))
+            .focus_visible(|style| style.border_color(theme.accent))
             .hover(|element| element.opacity(0.9))
             .child(tr!("automations.save"))
             .on_click(cx.listener(|this, _, _, cx| {
@@ -1146,8 +1153,10 @@ impl Waku {
                 .child(header),
         );
 
-        // Everything except the composer scrolls in the middle.
-        let settings = div()
+        // One scroll flow, top to bottom like a settings page. The composer is
+        // the Instructions field of the first card rather than a surface pinned
+        // to the bottom, so every part of the automation is one list of fields.
+        let body = div()
             .id("automations-scroll")
             .track_scroll(&self.automations_scroll)
             .overflow_y_scroll()
@@ -1159,43 +1168,51 @@ impl Waku {
                     .max_w(px(CONTENT_MAX_WIDTH))
                     .mx_auto()
                     .px(px(24.0))
-                    .pt(px(4.0))
-                    .pb(px(16.0))
+                    .pb(px(24.0))
                     .flex()
                     .flex_col()
                     .gap(px(12.0))
-                    .child(
-                        editor_card(
-                            &theme,
-                            tr!("automations.section_details"),
-                            tr!("automations.section_details_description"),
-                        )
-                        .child(editor_row(
-                            &theme,
-                            tr!("automations.field_name"),
-                            tr!("automations.field_name_description"),
-                            TextField::new(
-                                "automation-name-field",
-                                self.automation_name_input.clone(),
+                    .child(editor_card(
+                        &theme,
+                        vec![
+                            editor_row(
+                                &theme,
+                                tr!("automations.field_name"),
+                                tr!("automations.field_name_description"),
+                                TextField::new(
+                                    "automation-name-field",
+                                    self.automation_name_input.clone(),
+                                )
+                                .w(px(260.0))
+                                .into_any_element(),
                             )
-                            .w(px(260.0))
                             .into_any_element(),
-                        )),
-                    )
+                            editor_row_stacked(
+                                &theme,
+                                tr!("automations.field_instructions"),
+                                tr!("automations.field_instructions_description"),
+                                self.editor_agent_section(id, &theme, cx).into_any_element(),
+                            )
+                            .into_any_element(),
+                            editor_row(
+                                &theme,
+                                tr!("automations.enabled"),
+                                tr!("automations.field_enabled_description"),
+                                self.editor_toggle(
+                                    "automation-enabled",
+                                    editor.enabled,
+                                    &theme,
+                                    cx,
+                                    |editor| editor.enabled = !editor.enabled,
+                                )
+                                .into_any_element(),
+                            )
+                            .into_any_element(),
+                        ],
+                    ))
                     .child(self.editor_schedule_section(&editor, &theme, cx))
                     .child(self.editor_behavior_section(&editor, &theme, cx)),
             );
-
-        // The composer (prompt + agent controls + project/workspace) is pinned
-        // to the bottom, just like the chat composer.
-        let composer = div().flex_none().pt(px(8.0)).pb(px(16.0)).child(
-            div()
-                .w_full()
-                .max_w(px(CONTENT_MAX_WIDTH))
-                .mx_auto()
-                .px(px(24.0))
-                .child(self.editor_agent_section(id, &theme, cx)),
-        );
 
         div()
             .flex()
@@ -1203,8 +1220,7 @@ impl Waku {
             .flex_1()
             .min_h_0()
             .child(header_bar)
-            .child(settings)
-            .child(composer)
+            .child(body)
             .into_any_element()
     }
 
@@ -1240,18 +1256,40 @@ impl Waku {
         // A composer-style card: the prompt textarea with the model/access
         // controls docked beneath it, mirroring the new-task composer so the
         // editor's core reads like the surface a user already knows.
+        let prompt_scroll = self.automation_prompt_scroll.clone();
         let prompt_area = div()
             .id("automation-prompt-area")
             .w_full()
             // Sized like the chat composer: one line when empty, growing with
             // the text, capped so a long prompt scrolls inside the field
-            // instead of growing the pinned composer until it swallows the
-            // page. The field itself is `FieldMode::Code` — it inherits its
-            // metrics from here rather than carrying `FieldMode::Composer`'s,
-            // so this floor and the type scale below stand in for them.
+            // rather than pushing the rest of the form off the page. The field
+            // itself is `FieldMode::Code` — it inherits its metrics from here
+            // rather than carrying `FieldMode::Composer`'s, so this floor and
+            // the type scale below stand in for them.
             .min_h(px(24.0))
             .max_h(px(260.0))
             .overflow_y_scroll()
+            .track_scroll(&self.automation_prompt_scroll)
+            // Scroll chaining, which GPUI does not do on its own: every hitbox
+            // under the pointer gets the wheel, so without this both the prompt
+            // and the page move at once. This listener runs after the built-in
+            // one for the same element, so the offset it reads is the one the
+            // wheel just produced. While that offset is still inside the
+            // field's own range the field consumed the scroll and the page must
+            // stay put; once it runs past an edge the field is done, so the
+            // offset snaps back to that edge and the event goes on to the page.
+            // A prompt short enough not to overflow claims nothing.
+            .on_scroll_wheel(move |_, _, cx| {
+                let max = prompt_scroll.max_offset().y;
+                let mut offset = prompt_scroll.offset();
+                let clamped = offset.y.clamp(-max, px(0.0));
+                if max > px(0.5) && clamped == offset.y {
+                    cx.stop_propagation();
+                    return;
+                }
+                offset.y = clamped;
+                prompt_scroll.set_offset(offset);
+            })
             .px(px(4.0))
             .pt(px(2.0))
             .text_size(px(13.5))
@@ -1325,17 +1363,21 @@ impl Waku {
             )
             .children(run_now);
 
+        // An input well, not a composer surface: this field lives inside a
+        // raised card, and `theme.composer` is within two shades of
+        // `theme.raised` in dark mode, so it would read as an invisible box.
+        // `inset` + `border_strong` is what the Name field beside it uses.
         let card = div()
-            .rounded(px(13.0))
+            .rounded(px(8.0))
             .border_1()
-            .border_color(theme.border)
-            .bg(theme.composer)
+            .border_color(theme.border_strong)
+            .bg(theme.inset)
             .p(px(10.0))
             .child(prompt_area)
             .child(toolbar);
 
         // The composer footer's project + workspace chips, docked under the
-        // card exactly as they sit under the new-task composer — same chrome,
+        // field exactly as they sit under the new-task composer — same chrome,
         // editing the open automation form instead of a live session.
         let workspace_footer = div()
             .mt(px(8.0))
@@ -1406,21 +1448,20 @@ impl Waku {
                 .into_any_element()
         };
 
-        let mut section = editor_card(
-            theme,
-            tr!("automations.section_schedule"),
-            tr!("automations.section_schedule_description"),
-        )
-        .child(editor_row(
-            theme,
-            tr!("automations.field_schedule_frequency"),
-            // Manual has no follow-up row, so its caption explains itself here.
-            match editor.preset {
-                SchedulePreset::Manual => tr!("automations.hint_manual"),
-                _ => tr!("automations.field_schedule_frequency_description"),
-            },
-            preset_picker,
-        ));
+        let mut rows = vec![
+            editor_row(
+                theme,
+                tr!("automations.field_schedule_frequency"),
+                // Manual has no follow-up row, so its caption explains itself
+                // here.
+                match editor.preset {
+                    SchedulePreset::Manual => tr!("automations.hint_manual"),
+                    _ => tr!("automations.field_schedule_frequency_description"),
+                },
+                preset_picker,
+            )
+            .into_any_element(),
+        ];
 
         // Each preset shows only the sub-controls it needs.
         match editor.preset {
@@ -1444,56 +1485,72 @@ impl Waku {
                         .w(px(52.0)),
                     )
                     .into_any_element();
-                section = section.child(editor_row(
-                    theme,
-                    tr!("automations.field_time"),
-                    tr!("automations.field_minute_description"),
-                    minute_picker,
-                ));
+                rows.push(
+                    editor_row(
+                        theme,
+                        tr!("automations.field_time"),
+                        tr!("automations.field_minute_description"),
+                        minute_picker,
+                    )
+                    .into_any_element(),
+                );
             }
             SchedulePreset::Daily | SchedulePreset::Weekdays => {
-                section = section.child(editor_row(
-                    theme,
-                    tr!("automations.field_time"),
-                    tr!("automations.field_time_description"),
-                    time_picker(),
-                ));
-            }
-            SchedulePreset::Weekly => {
-                section = section
-                    .child(editor_row(
+                rows.push(
+                    editor_row(
                         theme,
                         tr!("automations.field_time"),
                         tr!("automations.field_time_description"),
                         time_picker(),
-                    ))
-                    // The chip rows are wider than a right-hand control column,
-                    // so they stack under their label at full width.
-                    .child(editor_row_stacked(
+                    )
+                    .into_any_element(),
+                );
+            }
+            SchedulePreset::Weekly => {
+                rows.push(
+                    editor_row(
+                        theme,
+                        tr!("automations.field_time"),
+                        tr!("automations.field_time_description"),
+                        time_picker(),
+                    )
+                    .into_any_element(),
+                );
+                // The chip rows are wider than a right-hand control column, so
+                // they stack under their label at full width.
+                rows.push(
+                    editor_row_stacked(
                         theme,
                         tr!("automations.field_days"),
                         tr!("automations.field_weekdays_description"),
                         self.weekday_chips(editor, theme, cx),
-                    ));
+                    )
+                    .into_any_element(),
+                );
             }
             SchedulePreset::Monthly => {
-                section = section
-                    .child(editor_row(
+                rows.push(
+                    editor_row(
                         theme,
                         tr!("automations.field_time"),
                         tr!("automations.field_time_description"),
                         time_picker(),
-                    ))
-                    .child(editor_row_stacked(
+                    )
+                    .into_any_element(),
+                );
+                rows.push(
+                    editor_row_stacked(
                         theme,
                         tr!("automations.field_days"),
                         tr!("automations.field_monthdays_description"),
                         self.monthday_chips(editor, theme, cx),
-                    ));
+                    )
+                    .into_any_element(),
+                );
             }
         }
 
-        section
+        editor_card(theme, rows)
     }
 
     fn editor_behavior_section(
@@ -1573,41 +1630,32 @@ impl Waku {
             },
         );
 
-        // Enabled flag for the automation itself.
-        let enabled_toggle =
-            self.editor_toggle("automation-enabled", editor.enabled, theme, cx, |editor| {
-                editor.enabled = !editor.enabled
-            });
-
         editor_card(
             theme,
-            tr!("automations.section_behavior"),
-            tr!("automations.section_behavior_description"),
+            vec![
+                editor_row(
+                    theme,
+                    tr!("automations.field_overlap"),
+                    tr!("automations.field_overlap_description"),
+                    overlap_picker,
+                )
+                .into_any_element(),
+                editor_row(
+                    theme,
+                    tr!("automations.field_notifications"),
+                    tr!("automations.field_notifications_description"),
+                    notify_toggle.into_any_element(),
+                )
+                .into_any_element(),
+                editor_row(
+                    theme,
+                    tr!("automations.field_notify_when"),
+                    tr!("automations.field_notify_when_description"),
+                    trigger_picker,
+                )
+                .into_any_element(),
+            ],
         )
-        .child(editor_row(
-            theme,
-            tr!("automations.field_overlap"),
-            tr!("automations.field_overlap_description"),
-            overlap_picker,
-        ))
-        .child(editor_row(
-            theme,
-            tr!("automations.field_notifications"),
-            tr!("automations.field_notifications_description"),
-            notify_toggle.into_any_element(),
-        ))
-        .child(editor_row(
-            theme,
-            tr!("automations.field_notify_when"),
-            tr!("automations.field_notify_when_description"),
-            trigger_picker,
-        ))
-        .child(editor_row(
-            theme,
-            tr!("automations.enabled"),
-            tr!("automations.field_enabled_description"),
-            enabled_toggle.into_any_element(),
-        ))
     }
 
     /// A small toggle bound to a form mutation. `change` flips the field.
@@ -1759,37 +1807,29 @@ impl Waku {
 /// A grouped card, matching the cards the settings pages are built from: a
 /// heading and caption on a raised surface, with the group's field rows
 /// appended as children.
-fn editor_card(theme: &Theme, title: String, description: String) -> Div {
-    div()
+fn editor_card(theme: &Theme, rows: Vec<AnyElement>) -> Div {
+    let mut card = div()
         .w_full()
-        .px(px(20.0))
-        .py(px(14.0))
+        .flex()
+        .flex_col()
         .rounded(px(13.0))
-        .bg(theme.raised)
-        .child(
-            div()
-                .text_size(px(13.5))
-                .font_weight(FontWeight::MEDIUM)
-                .text_color(theme.text)
-                .child(title),
-        )
-        .child(
-            div()
-                .mt(px(4.0))
-                .text_size(px(11.5))
-                .line_height(px(16.0))
-                .text_color(theme.text_secondary)
-                .child(description),
-        )
+        .overflow_hidden()
+        .bg(theme.raised);
+    for (index, row) in rows.into_iter().enumerate() {
+        if index > 0 {
+            card = card.child(div().mx(px(20.0)).h(px(1.0)).bg(theme.border));
+        }
+        card = card.child(row);
+    }
+    card
 }
 
 /// One field row inside a card: label and caption on the left, the control
-/// flush right, divided from what precedes it by a hairline.
+/// flush right.
 fn editor_row(theme: &Theme, label: String, description: String, control: AnyElement) -> Div {
-    editor_row_base(theme)
-        .flex()
+    editor_row_base()
         .items_center()
-        .gap(px(16.0))
+        .gap(px(24.0))
         .child(
             editor_row_label(theme, label, description)
                 .flex_1()
@@ -1806,36 +1846,36 @@ fn editor_row_stacked(
     description: String,
     control: AnyElement,
 ) -> Div {
-    editor_row_base(theme)
-        .flex()
+    editor_row_base()
         .flex_col()
         .child(editor_row_label(theme, label, description))
-        .child(div().mt(px(9.0)).w_full().child(control))
+        .child(div().mt(px(10.0)).w_full().child(control))
 }
 
-fn editor_row_base(theme: &Theme) -> Div {
+fn editor_row_base() -> Div {
     div()
-        .mt(px(11.0))
-        .pt(px(11.0))
-        .border_t_1()
-        .border_color(theme.border)
+        .w_full()
+        .min_h(px(60.0))
+        .px(px(20.0))
+        .py(px(12.0))
+        .flex()
 }
 
 fn editor_row_label(theme: &Theme, label: String, description: String) -> Div {
     div()
         .child(
             div()
-                .text_size(px(12.5))
+                .text_size(px(13.5))
                 .font_weight(FontWeight::MEDIUM)
                 .text_color(theme.text)
                 .child(label),
         )
         .child(
             div()
-                .mt(px(2.0))
-                .text_size(px(10.5))
-                .line_height(px(15.0))
-                .text_color(theme.text_tertiary)
+                .mt(px(5.0))
+                .text_size(px(12.5))
+                .line_height(px(18.0))
+                .text_color(theme.text_secondary)
                 .child(description),
         )
 }

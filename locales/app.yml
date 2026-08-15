@@ -488,22 +488,18 @@ automations.section_prompt:
   en: Prompt
 automations.section_agent:
   en: Agent
-automations.section_details:
-  en: Details
-automations.section_details_description:
-  en: The basics of this automation.
 automations.section_schedule:
   en: Schedule
-automations.section_schedule_description:
-  en: When Waku starts a run on its own.
 automations.section_behavior:
   en: Behavior
-automations.section_behavior_description:
-  en: How runs behave when they overlap or finish.
 automations.field_name:
   en: Name
 automations.field_name_description:
   en: Shown in the sidebar, in notifications, and in the command palette.
+automations.field_instructions:
+  en: Instructions
+automations.field_instructions_description:
+  en: What the agent is asked to do on every run.
 automations.field_provider:
   en: Provider
 automations.field_model:

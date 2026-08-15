@@ -1004,15 +1004,13 @@ automations.empty_title: 暂无自动化
 automations.empty_body: 创建自动化，按每日、每周或每月的计划运行已保存的提示词。
 automations.badge: 来自自动化
 automations.section_prompt: 提示词
-automations.section_details: 基本信息
-automations.section_details_description: 该自动化的基本设置。
 automations.section_schedule: 计划
-automations.section_schedule_description: Waku 自动开始运行的时机。
 automations.section_agent: 智能体
 automations.section_behavior: 行为
-automations.section_behavior_description: 运行重叠或结束时的处理方式。
 automations.field_name: 名称
 automations.field_name_description: 显示在侧边栏、通知和命令面板中。
+automations.field_instructions: 指令
+automations.field_instructions_description: 每次运行时交给智能体的任务内容。
 automations.field_project: 项目
 automations.field_provider: 服务商
 automations.field_model: 模型
