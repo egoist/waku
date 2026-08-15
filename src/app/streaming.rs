@@ -227,16 +227,53 @@ impl Waku {
                 runtime.last_background_refresh_at = Instant::now();
                 runtime.driver.refresh_background_work();
                 if let Some(session) = self.state.session_mut(session_id) {
-                    if let Some(ProviderResumeCursor::Claude {
-                        resume_at: Some(message_id),
-                        ..
-                    }) = &provider_cursor
-                    {
-                        session.mark_active_turn_provider_resume_at(message_id.clone());
+                    if !session.has_started() && session.status == SessionStatus::Idle {
+                        // Model discovery preconnects the real DeerFlow draft,
+                        // but a native cursor must not make the draft look
+                        // submitted or lock its provider/workspace controls.
+                        runtime.pending_provider_cursor = provider_cursor;
+                    } else {
+                        if let Some(ProviderResumeCursor::Claude {
+                            resume_at: Some(message_id),
+                            ..
+                        }) = &provider_cursor
+                        {
+                            session.mark_active_turn_provider_resume_at(message_id.clone());
+                        }
+                        session.provider_cursor = provider_cursor;
                     }
-                    session.provider_cursor = provider_cursor;
                     if session.status == SessionStatus::Connecting {
                         session.status = SessionStatus::Working;
+                    }
+                }
+            }
+            DriverEvent::ModelsUpdated {
+                models,
+                current_model,
+            } => {
+                let provider = self
+                    .state
+                    .sessions
+                    .iter()
+                    .find(|session| session.id == session_id)
+                    .map(|session| session.provider);
+                if let Some(provider) = provider {
+                    if !models.is_empty()
+                        && let Some(probe) = self
+                            .probes
+                            .iter_mut()
+                            .find(|probe| probe.provider == provider)
+                    {
+                        probe.models = models;
+                    }
+                    if let Some(current_model) = current_model {
+                        if let Some(session) = self.state.session_mut(session_id) {
+                            session.model = Some(current_model.clone());
+                        }
+                        if self.state.selected_session == Some(session_id) {
+                            self.state.last_provider = provider;
+                            self.state.last_model = Some(current_model);
+                        }
                     }
                 }
             }
@@ -267,6 +304,18 @@ impl Waku {
                 if let Some(session) = self.state.session_mut(session_id)
                     && session.active_turn_id().is_some()
                 {
+                    if session.provider_cursor.is_none()
+                        && let Some(provider_cursor) = runtime.pending_provider_cursor.take()
+                    {
+                        if let ProviderResumeCursor::Claude {
+                            resume_at: Some(message_id),
+                            ..
+                        } = &provider_cursor
+                        {
+                            session.mark_active_turn_provider_resume_at(message_id.clone());
+                        }
+                        session.provider_cursor = Some(provider_cursor);
+                    }
                     session.mark_active_turn_provider_started();
                     session.status = SessionStatus::Working;
                 }

@@ -574,6 +574,12 @@ impl Waku {
                         this.model_picker_highlight = None;
                         reset_search.update(cx, |search, cx| search.clear(cx));
                         this.reveal_selected_picker_model();
+                        if provider == ProviderKind::DeerFlow
+                            && let Some(session_id) =
+                                this.selected_session().map(|session| session.id)
+                        {
+                            this.ensure_deerflow_runtime(session_id, cx);
+                        }
                     } else {
                         let focus_handle = this.composer.read(cx).focus();
                         window.focus(&focus_handle, cx);

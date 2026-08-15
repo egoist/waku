@@ -1836,9 +1836,14 @@ impl Waku {
             self.runtimes.remove(&session_id);
             self.mark_background_work_lost(session_id);
         } else if let Some(runtime) = self.runtimes.get_mut(&session_id) {
-            runtime
-                .pending_events
-                .retain(|event| matches!(event, DriverEvent::BackgroundWork(_)));
+            runtime.pending_events.retain(|event| {
+                matches!(
+                    event,
+                    DriverEvent::BackgroundWork(_)
+                        | DriverEvent::Connected { .. }
+                        | DriverEvent::ModelsUpdated { .. }
+                )
+            });
             runtime.stream_remeasure_pending = false;
             runtime.stream_phase = None;
             runtime.pending_permission = None;
@@ -1882,11 +1887,21 @@ impl Waku {
     /// and in-session option changes both go through this so they cannot
     /// disagree about what the session is currently set to.
     pub(super) fn session_options(&self, session: &AgentSession) -> SessionOptions {
-        let model = session.model.clone().or_else(|| {
+        let mut model = session.model.clone().or_else(|| {
             self.provider_probe(session.provider)
                 .and_then(ProviderProbe::preferred_model)
                 .map(|model| model.id.clone())
         });
+        if session.provider == ProviderKind::DeerFlow
+            && model.as_deref().is_some_and(|model| {
+                model == crate::model_catalog::DEERFLOW_DEFAULT_MODEL_PLACEHOLDER
+                    || model == "default"
+            })
+        {
+            // Both the new sentinel and the legacy persisted placeholder are
+            // client UI state, not ACP model IDs.
+            model = None;
+        }
         let model_metadata = self.model_metadata_for_session(session);
         let reasoning_effort = session.reasoning_effort.clone().filter(|effort| {
             model_metadata.is_some_and(|model| {
@@ -2045,6 +2060,7 @@ impl Waku {
                 driver: prepared.handle,
                 events: prepared.events,
                 pending_events: VecDeque::new(),
+                pending_provider_cursor: None,
                 pending_steers: VecDeque::new(),
                 stream_phase: None,
                 stream_remeasure_pending: false,
@@ -2064,6 +2080,130 @@ impl Waku {
         // events cannot be stranded behind an already-consumed edge.
         signal_event_pump(&self.event_wake_tx);
         handle
+    }
+
+    /// Starts the real DeerFlow draft session so its session-scoped ACP model
+    /// config can populate the picker before the first prompt. No I/O runs on
+    /// the UI thread, and a draft worktree waits for ordinary submission
+    /// preparation because its final cwd does not exist yet.
+    pub(super) fn ensure_deerflow_runtime(&mut self, session_id: Uuid, cx: &mut Context<Self>) {
+        if self.runtimes.contains_key(&session_id) {
+            return;
+        }
+        let Some(session) = self
+            .state
+            .sessions
+            .iter()
+            .find(|session| session.id == session_id)
+            .filter(|session| {
+                session.provider == ProviderKind::DeerFlow
+                    && !matches!(session.workspace, SessionWorkspace::NewWorktree { .. })
+            })
+            .cloned()
+        else {
+            return;
+        };
+        if self
+            .runtime_preparations
+            .get(&session_id)
+            .is_some_and(|(_, provider, workspace)| {
+                *provider == session.provider && *workspace == session.workspace
+            })
+        {
+            return;
+        }
+        let Some(cwd) = self
+            .workspace_path_for_session(&session)
+            .map(std::path::Path::to_path_buf)
+        else {
+            return;
+        };
+        let request = match self.driver_start_request_for_session(&session, cwd.clone()) {
+            Ok(request) => request,
+            Err(error) => {
+                if self.state.selected_session == Some(session_id) {
+                    self.show_toast(tr!("errors.start_agent", error = error));
+                    cx.notify();
+                }
+                return;
+            }
+        };
+        self.runtime_preparation_generation = self.runtime_preparation_generation.wrapping_add(1);
+        let generation = self.runtime_preparation_generation;
+        let provider = session.provider;
+        let workspace = session.workspace;
+        self.runtime_preparations
+            .insert(session_id, (generation, provider, workspace.clone()));
+
+        cx.spawn(async move |waku, cx| {
+            let prepared = cx
+                .background_executor()
+                .spawn(async move { start_driver(request, cwd) })
+                .await;
+            let _ = waku.update(cx, move |waku, cx| {
+                waku.finish_runtime_preparation(
+                    session_id, generation, provider, workspace, prepared, cx,
+                );
+            });
+        })
+        .detach();
+    }
+
+    fn finish_runtime_preparation(
+        &mut self,
+        session_id: Uuid,
+        generation: u64,
+        provider: ProviderKind,
+        workspace: SessionWorkspace,
+        prepared: anyhow::Result<PreparedDriver>,
+        cx: &mut Context<Self>,
+    ) {
+        if !self
+            .runtime_preparations
+            .get(&session_id)
+            .is_some_and(|(active, _, _)| *active == generation)
+        {
+            return;
+        }
+        self.runtime_preparations.remove(&session_id);
+        let still_current = self
+            .state
+            .sessions
+            .iter()
+            .find(|session| session.id == session_id)
+            .is_some_and(|session| session.provider == provider && session.workspace == workspace);
+        let result = if still_current {
+            prepared.map(|prepared| {
+                if !self.runtimes.contains_key(&session_id) {
+                    self.install_prepared_driver(session_id, prepared);
+                }
+            })
+        } else {
+            Ok(())
+        };
+
+        let deferred = self.runtime_preparation_submissions.remove(&session_id);
+        if deferred.is_some() {
+            self.submission_preparations.remove(&session_id);
+        }
+        match (result, deferred) {
+            (Ok(()), Some(submission)) => {
+                self.submit_submission_for_session(session_id, submission, cx);
+            }
+            (Err(error), Some(submission)) => {
+                if self.state.selected_session == Some(session_id) {
+                    self.restore_composer_submission(submission, cx);
+                    self.show_toast(tr!("errors.start_agent", error = error));
+                }
+            }
+            (Err(error), None) => {
+                if self.state.selected_session == Some(session_id) {
+                    self.show_toast(tr!("errors.start_agent", error = error));
+                }
+            }
+            (Ok(()), None) => {}
+        }
+        cx.notify();
     }
 
     pub(super) fn submit_composer_submission(
@@ -2223,6 +2363,13 @@ impl Waku {
         cx: &mut Context<Self>,
     ) {
         if self.response_fork_preparations.contains_key(&session_id) {
+            return;
+        }
+        if self.runtime_preparations.contains_key(&session_id) {
+            self.runtime_preparation_submissions
+                .insert(session_id, submission);
+            self.submission_preparations.insert(session_id);
+            cx.notify();
             return;
         }
         let selected = self.state.selected_session == Some(session_id);
@@ -2471,9 +2618,14 @@ impl Waku {
         };
         self.invalidate_checkpoint_refs();
         if let Some(runtime) = self.runtimes.get_mut(&session_id) {
-            runtime
-                .pending_events
-                .retain(|event| matches!(event, DriverEvent::BackgroundWork(_)));
+            runtime.pending_events.retain(|event| {
+                matches!(
+                    event,
+                    DriverEvent::BackgroundWork(_)
+                        | DriverEvent::Connected { .. }
+                        | DriverEvent::ModelsUpdated { .. }
+                )
+            });
             runtime.pending_steers.clear();
             runtime.stream_remeasure_pending = false;
             runtime.stream_phase = None;
@@ -2646,6 +2798,7 @@ impl Waku {
                 force_save |= matches!(
                     event,
                     DriverEvent::Connected { .. }
+                        | DriverEvent::ModelsUpdated { .. }
                         | DriverEvent::AgentPresetSelected(_)
                         | DriverEvent::AutoTitleUpdated(_)
                         | DriverEvent::Permission { .. }

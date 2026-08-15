@@ -10,6 +10,9 @@ use std::path::Path;
 use std::{env, fs};
 
 fn main() {
+    #[cfg(target_os = "windows")]
+    embed_windows_resources();
+
     let directory = Path::new(env!("CARGO_MANIFEST_DIR")).join("db/migrations");
     println!("cargo:rerun-if-changed=db/migrations");
     println!("cargo:rerun-if-changed=locales");
@@ -57,4 +60,22 @@ fn main() {
 
     let out = Path::new(&env::var("OUT_DIR").expect("OUT_DIR")).join("migrations.rs");
     fs::write(&out, source).unwrap_or_else(|error| panic!("writing {}: {error}", out.display()));
+}
+
+/// GPUI's Windows backend loads icon resource ID 1 from the executable and
+/// assigns it to the native window class. Embed that exact resource so both
+/// Explorer and the taskbar can resolve Waku's application icon.
+#[cfg(target_os = "windows")]
+fn embed_windows_resources() {
+    let icon = Path::new(env!("CARGO_MANIFEST_DIR")).join("resources/AppIcon.ico");
+    println!("cargo:rerun-if-changed={}", icon.display());
+
+    let icon = icon.to_string_lossy().replace('\\', "\\\\");
+    let out = Path::new(&env::var("OUT_DIR").expect("OUT_DIR")).join("waku_resources.rc");
+    fs::write(&out, format!("1 ICON \"{icon}\"\n"))
+        .unwrap_or_else(|error| panic!("writing {}: {error}", out.display()));
+
+    embed_resource::compile(&out, embed_resource::NONE)
+        .manifest_optional()
+        .unwrap_or_else(|error| panic!("embedding Windows resources: {error}"));
 }

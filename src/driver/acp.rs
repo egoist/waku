@@ -16,9 +16,10 @@ use agent_client_protocol::schema::v1::{
     CancelNotification, ClientCapabilities, ContentBlock, Implementation, InitializeRequest,
     InitializeResponse, LoadSessionRequest, NewSessionRequest, PermissionOptionKind, PromptRequest,
     PromptResponse, RequestId, RequestPermissionOutcome, RequestPermissionRequest,
-    RequestPermissionResponse, ResumeSessionRequest, SelectedPermissionOutcome, SessionId,
-    SessionModeId, SessionModeState, SessionNotification, SetSessionConfigOptionRequest,
-    SetSessionModeRequest, StopReason, TextContent,
+    RequestPermissionResponse, ResumeSessionRequest, SelectedPermissionOutcome, SessionConfigKind,
+    SessionConfigOption, SessionConfigOptionCategory, SessionConfigSelect,
+    SessionConfigSelectOptions, SessionId, SessionModeId, SessionModeState, SessionNotification,
+    SessionUpdate, SetSessionConfigOptionRequest, SetSessionModeRequest, StopReason, TextContent,
 };
 use agent_client_protocol::{
     AcpAgent, AcpAgentConfig, Agent, Client, ConnectionTo, LineDirection, Responder, UntypedMessage,
@@ -32,7 +33,7 @@ use crate::driver::{
     DriverControl, DriverEventSender, DriverEventSink, DriverStartOptions, SessionOptions,
 };
 use crate::model::{
-    ActivityKind, DriverEvent, InteractionMode, PermissionOption, ProviderKind,
+    ActivityKind, DriverEvent, InteractionMode, PermissionOption, ProviderKind, ProviderModel,
     ProviderResumeCursor, RuntimeMode,
 };
 
@@ -61,7 +62,7 @@ struct AcpLaunch {
     env: Vec<(String, String)>,
 }
 
-fn launch_for(provider: ProviderKind, binary: &Path) -> anyhow::Result<AcpLaunch> {
+fn launch_for(provider: ProviderKind) -> anyhow::Result<AcpLaunch> {
     match provider {
         ProviderKind::Cursor => Ok(AcpLaunch {
             args: vec!["acp".into()],
@@ -75,21 +76,10 @@ fn launch_for(provider: ProviderKind, binary: &Path) -> anyhow::Result<AcpLaunch
             args: vec!["acp".into()],
             env: Vec::new(),
         }),
-        ProviderKind::DeerFlow => {
-            let config = binary
-                .parent()
-                .and_then(Path::parent)
-                .and_then(Path::parent)
-                .and_then(Path::parent)
-                .map(|root| root.join("config.yaml"))
-                .filter(|path| path.is_file());
-            Ok(AcpLaunch {
-                args: config
-                    .map(|path| vec!["--config".into(), path.to_string_lossy().into_owned()])
-                    .unwrap_or_default(),
-                env: Vec::new(),
-            })
-        }
+        ProviderKind::DeerFlow => Ok(AcpLaunch {
+            args: Vec::new(),
+            env: Vec::new(),
+        }),
         _ => Err(anyhow!(
             "{} does not speak the Agent Client Protocol",
             provider.display_name()
@@ -134,7 +124,7 @@ impl AcpDriver {
             None => None,
         };
 
-        let launch = launch_for(provider, &binary)?;
+        let launch = launch_for(provider)?;
         let computer_use = (provider == ProviderKind::Grok && computer_use_enabled)
             .then(|| super::support::HeadlessComputerUseRuntime::start(provider, events.clone()))
             .transpose()?;
@@ -361,6 +351,7 @@ async fn run_sdk_connection(
 ) -> agent_client_protocol::Result<()> {
     let suppress_session_updates = Arc::new(AtomicBool::new(false));
     let stream_state = Arc::new(Mutex::new(AcpStreamState::default()));
+    let config_state = Arc::new(Mutex::new(AcpConfigState::default()));
     let pending_permissions: PendingPermissions = Arc::new(Mutex::new(HashMap::new()));
     let prompt_requests = Arc::new(Mutex::new(PendingPrompts::default()));
     let title_refresh = super::title_refresh::NativeTitleRefresh::default();
@@ -374,9 +365,15 @@ async fn run_sdk_connection(
                 let events = events.clone();
                 let suppress_session_updates = suppress_session_updates.clone();
                 let stream_state = stream_state.clone();
+                let config_state = config_state.clone();
                 async move |notification: SessionNotification, _connection| {
                     if !suppress_session_updates.load(Ordering::Acquire) {
-                        handle_session_update(notification, &events, &mut stream_state.lock())?;
+                        handle_session_update(
+                            notification,
+                            &events,
+                            &mut stream_state.lock(),
+                            &config_state,
+                        )?;
                     }
                     Ok(())
                 }
@@ -434,7 +431,7 @@ async fn run_sdk_connection(
                 )
                 .block_task()
                 .await?;
-            let (session_id, modes) = establish_session(
+            let established = establish_session(
                 &connection,
                 &initialize,
                 resume_session_id.as_deref(),
@@ -442,6 +439,13 @@ async fn run_sdk_connection(
                 &suppress_session_updates,
             )
             .await?;
+            let session_id = established.session_id;
+            let modes = established.modes;
+            {
+                let mut state = config_state.lock();
+                state.replace_initial(established.config_options);
+                state.emit_models(&events);
+            }
 
             if let Some(mode_id) = desired_mode(modes.as_ref(), mode, interaction_mode) {
                 // Mode selection is opportunistic: an agent can advertise a
@@ -460,12 +464,13 @@ async fn run_sdk_connection(
                 )),
             });
 
-            let mut current_model = model;
             apply_model(
                 &connection,
                 &session_id,
-                current_model.as_deref(),
+                provider,
+                model.as_deref(),
                 reasoning_effort.as_deref(),
+                &config_state,
                 &events,
             )
             .await;
@@ -550,17 +555,19 @@ async fn run_sdk_connection(
                         }
                     }
                     CommandMessage::Options(options) => {
-                        if options.model != current_model {
-                            current_model = options.model;
-                            apply_model(
-                                &connection,
-                                &session_id,
-                                current_model.as_deref(),
-                                options.reasoning_effort.as_deref(),
-                                &events,
-                            )
-                            .await;
-                        }
+                        // Compare against the latest full ACP config state in
+                        // `apply_model`, not a remembered client request: the
+                        // agent may update the current model independently.
+                        apply_model(
+                            &connection,
+                            &session_id,
+                            provider,
+                            options.model.as_deref(),
+                            options.reasoning_effort.as_deref(),
+                            &config_state,
+                            &events,
+                        )
+                        .await;
                     }
                     CommandMessage::Shutdown => break,
                 }
@@ -571,13 +578,19 @@ async fn run_sdk_connection(
         .await
 }
 
+struct EstablishedSession {
+    session_id: SessionId,
+    modes: Option<SessionModeState>,
+    config_options: Vec<SessionConfigOption>,
+}
+
 async fn establish_session(
     connection: &ConnectionTo<Agent>,
     initialize: &InitializeResponse,
     resume_session_id: Option<&str>,
     cwd: &Path,
     suppress_session_updates: &AtomicBool,
-) -> agent_client_protocol::Result<(SessionId, Option<SessionModeState>)> {
+) -> agent_client_protocol::Result<EstablishedSession> {
     if let Some(existing) = resume_session_id {
         if initialize
             .agent_capabilities
@@ -589,7 +602,11 @@ async fn establish_session(
                 .block_task()
                 .await
         {
-            return Ok((SessionId::new(existing.to_owned()), response.modes));
+            return Ok(EstablishedSession {
+                session_id: SessionId::new(existing.to_owned()),
+                modes: response.modes,
+                config_options: response.config_options.unwrap_or_default(),
+            });
         }
 
         if initialize.agent_capabilities.load_session {
@@ -600,7 +617,11 @@ async fn establish_session(
                 .await;
             suppress_session_updates.store(false, Ordering::Release);
             if let Ok(response) = response {
-                return Ok((SessionId::new(existing.to_owned()), response.modes));
+                return Ok(EstablishedSession {
+                    session_id: SessionId::new(existing.to_owned()),
+                    modes: response.modes,
+                    config_options: response.config_options.unwrap_or_default(),
+                });
             }
         }
     }
@@ -609,7 +630,11 @@ async fn establish_session(
         .send_request(NewSessionRequest::new(cwd))
         .block_task()
         .await?;
-    Ok((response.session_id, response.modes))
+    Ok(EstablishedSession {
+        session_id: response.session_id,
+        modes: response.modes,
+        config_options: response.config_options.unwrap_or_default(),
+    })
 }
 
 fn desired_mode(
@@ -633,44 +658,232 @@ fn desired_mode(
 async fn apply_model(
     connection: &ConnectionTo<Agent>,
     session_id: &SessionId,
+    provider: ProviderKind,
     model: Option<&str>,
     reasoning_effort: Option<&str>,
+    config_state: &Mutex<AcpConfigState>,
     events: &DriverEventSender,
 ) {
-    let Some(model) = model else {
-        return;
-    };
-    let request = match UntypedMessage::new(
-        "session/set_model",
-        json!({"sessionId": session_id, "modelId": model}),
-    ) {
-        Ok(request) => request,
-        Err(error) => {
-            let _ = events.send(DriverEvent::Error(tr!(
-                "errors.select_model",
-                error = error
-            )));
-            return;
+    if let Some(model) = model {
+        let config_id = {
+            let state = config_state.lock();
+            state
+                .model_config()
+                .filter(|(_, select)| {
+                    select.current_value.to_string() != model
+                        && select_contains_value(select, model)
+                })
+                .map(|(config, _)| config.id.clone())
+        };
+        if let Some(config_id) = config_id {
+            match connection
+                .send_request(SetSessionConfigOptionRequest::new(
+                    session_id.clone(),
+                    config_id,
+                    model,
+                ))
+                .block_task()
+                .await
+            {
+                Ok(response) => {
+                    let mut state = config_state.lock();
+                    state.replace(response.config_options);
+                    state.emit_models(events);
+                }
+                Err(error) => {
+                    let _ = events.send(DriverEvent::Error(tr!(
+                        "errors.select_model",
+                        error = error
+                    )));
+                    return;
+                }
+            }
+        } else if !config_state.lock().has_model_config()
+            && matches!(provider, ProviderKind::Cursor | ProviderKind::Grok)
+        {
+            // Cursor and Grok shipped this extension before ACP standardized
+            // model selection as a session config option. Keep the extension
+            // only as their compatibility fallback.
+            let request = match UntypedMessage::new(
+                "session/set_model",
+                json!({"sessionId": session_id, "modelId": model}),
+            ) {
+                Ok(request) => request,
+                Err(error) => {
+                    let _ = events.send(DriverEvent::Error(tr!(
+                        "errors.select_model",
+                        error = error
+                    )));
+                    return;
+                }
+            };
+            if let Err(error) = connection.send_request(request).block_task().await {
+                let _ = events.send(DriverEvent::Error(tr!(
+                    "errors.select_model",
+                    error = error
+                )));
+                return;
+            }
         }
-    };
-    if let Err(error) = connection.send_request(request).block_task().await {
-        let _ = events.send(DriverEvent::Error(tr!(
-            "errors.select_model",
-            error = error
-        )));
-        return;
     }
     if let Some(effort) = reasoning_effort {
-        // Reasoning effort is an optional config extension and is deliberately
-        // non-fatal when an agent does not expose it.
-        let _ = connection
-            .send_request(SetSessionConfigOptionRequest::new(
-                session_id.clone(),
-                "mode",
-                effort,
-            ))
-            .block_task()
-            .await;
+        let config_id = {
+            let state = config_state.lock();
+            state
+                .thought_config()
+                .filter(|(_, select)| {
+                    select.current_value.to_string() != effort
+                        && select_contains_value(select, effort)
+                })
+                .map(|(config, _)| config.id.clone())
+        };
+        if let Some(config_id) = config_id
+            && let Ok(response) = connection
+                .send_request(SetSessionConfigOptionRequest::new(
+                    session_id.clone(),
+                    config_id,
+                    effort,
+                ))
+                .block_task()
+                .await
+        {
+            // Setter responses are complete snapshots, even when the changed
+            // option was not the model selector.
+            let mut state = config_state.lock();
+            state.replace(response.config_options);
+            state.emit_models(events);
+        }
+    }
+}
+
+#[derive(Default)]
+struct AcpConfigState {
+    options: Vec<SessionConfigOption>,
+    /// The first model reported by the agent is its session default. Later
+    /// setter responses report the current model and must not redefine it.
+    default_model: Option<String>,
+}
+
+impl AcpConfigState {
+    fn replace_initial(&mut self, options: Vec<SessionConfigOption>) {
+        self.options = options;
+        self.default_model = self.current_model();
+    }
+
+    fn replace(&mut self, options: Vec<SessionConfigOption>) {
+        self.options = options;
+    }
+
+    fn model_config(&self) -> Option<(&SessionConfigOption, &SessionConfigSelect)> {
+        self.options
+            .iter()
+            .find_map(|config| match (&config.category, &config.kind) {
+                (Some(SessionConfigOptionCategory::Model), SessionConfigKind::Select(select)) => {
+                    Some((config, select))
+                }
+                _ => None,
+            })
+            .or_else(|| {
+                self.options.iter().find_map(|config| match &config.kind {
+                    SessionConfigKind::Select(select)
+                        if config.id.to_string().eq_ignore_ascii_case("model") =>
+                    {
+                        Some((config, select))
+                    }
+                    _ => None,
+                })
+            })
+    }
+
+    fn has_model_config(&self) -> bool {
+        self.model_config().is_some()
+    }
+
+    fn thought_config(&self) -> Option<(&SessionConfigOption, &SessionConfigSelect)> {
+        self.options
+            .iter()
+            .find_map(|config| match (&config.category, &config.kind) {
+                (
+                    Some(SessionConfigOptionCategory::ThoughtLevel),
+                    SessionConfigKind::Select(select),
+                ) => Some((config, select)),
+                _ => None,
+            })
+            .or_else(|| {
+                self.options.iter().find_map(|config| match &config.kind {
+                    SessionConfigKind::Select(select)
+                        if config.id.to_string().eq_ignore_ascii_case("mode") =>
+                    {
+                        Some((config, select))
+                    }
+                    _ => None,
+                })
+            })
+    }
+
+    fn current_model(&self) -> Option<String> {
+        self.model_config()
+            .map(|(_, select)| select.current_value.to_string())
+    }
+
+    fn emit_models(&self, events: &impl DriverEventSink) {
+        let Some((_, select)) = self.model_config() else {
+            return;
+        };
+        let current_model = select.current_value.to_string();
+        let models = models_from_select(select, self.default_model.as_deref());
+        let _ = events.send(DriverEvent::ModelsUpdated {
+            models,
+            current_model: Some(current_model),
+        });
+    }
+}
+
+fn select_contains_value(select: &SessionConfigSelect, value: &str) -> bool {
+    match &select.options {
+        SessionConfigSelectOptions::Ungrouped(options) => options
+            .iter()
+            .any(|option| option.value.to_string() == value),
+        SessionConfigSelectOptions::Grouped(groups) => groups.iter().any(|group| {
+            group
+                .options
+                .iter()
+                .any(|option| option.value.to_string() == value)
+        }),
+        _ => false,
+    }
+}
+
+fn models_from_select(
+    select: &SessionConfigSelect,
+    default_model: Option<&str>,
+) -> Vec<ProviderModel> {
+    let build = |option: &agent_client_protocol::schema::v1::SessionConfigSelectOption,
+                 group: Option<&str>| {
+        let id = option.value.to_string();
+        let mut model = ProviderModel::new(&id, &option.name);
+        if let Some(group) = group {
+            model = model.sub_provider(group);
+        }
+        if default_model == Some(id.as_str()) {
+            model = model.default();
+        }
+        model
+    };
+    match &select.options {
+        SessionConfigSelectOptions::Ungrouped(options) => {
+            options.iter().map(|option| build(option, None)).collect()
+        }
+        SessionConfigSelectOptions::Grouped(groups) => groups
+            .iter()
+            .flat_map(|group| {
+                group
+                    .options
+                    .iter()
+                    .map(|option| build(option, Some(&group.name)))
+            })
+            .collect(),
+        _ => Vec::new(),
     }
 }
 
@@ -909,7 +1122,14 @@ fn handle_session_update(
     notification: SessionNotification,
     events: &impl DriverEventSink,
     state: &mut AcpStreamState,
+    config_state: &Mutex<AcpConfigState>,
 ) -> agent_client_protocol::Result<()> {
+    if let SessionUpdate::ConfigOptionUpdate(update) = &notification.update {
+        let mut config_state = config_state.lock();
+        config_state.replace(update.config_options.clone());
+        config_state.emit_models(events);
+        return Ok(());
+    }
     let update = serde_json::to_value(notification.update)?;
     match update.get("sessionUpdate").and_then(Value::as_str) {
         Some("agent_message_chunk") => {
@@ -1158,31 +1378,10 @@ mod tests {
     };
 
     #[test]
-    fn deerflow_launch_uses_the_checkout_config_without_an_acp_subcommand() {
-        let root =
-            std::env::temp_dir().join(format!("waku-deerflow-launch-{}", std::process::id()));
-        let binary = root
-            .join("bridge")
-            .join("target")
-            .join("release")
-            .join(if cfg!(windows) {
-                "deerflow-acp.exe"
-            } else {
-                "deerflow-acp"
-            });
-        std::fs::create_dir_all(binary.parent().unwrap()).unwrap();
-        std::fs::write(&binary, []).unwrap();
-        let config = root.join("config.yaml");
-        std::fs::write(&config, "local_acp: {}\n").unwrap();
-
-        let launch = launch_for(ProviderKind::DeerFlow, &binary).unwrap();
-        assert_eq!(
-            launch.args,
-            vec!["--config", config.to_string_lossy().as_ref()]
-        );
+    fn deerflow_launch_has_no_arguments_or_environment() {
+        let launch = launch_for(ProviderKind::DeerFlow).unwrap();
+        assert!(launch.args.is_empty());
         assert!(launch.env.is_empty());
-
-        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -1286,6 +1485,7 @@ mod tests {
     fn typed_updates_preserve_text_reasoning_and_correlated_tools() {
         let (events, event_rx) = crossbeam_channel::unbounded();
         let mut state = AcpStreamState::default();
+        let config_state = Mutex::new(AcpConfigState::default());
         let updates = [
             json!({"sessionUpdate":"agent_thought_chunk","content":{"type":"text","text":"thinking"}}),
             json!({"sessionUpdate":"tool_call","toolCallId":"call_1","title":"read","kind":"read","status":"pending","rawInput":{}}),
@@ -1295,8 +1495,13 @@ mod tests {
         ];
         for update in updates {
             let update = serde_json::from_value(update).unwrap();
-            handle_session_update(SessionNotification::new("s", update), &events, &mut state)
-                .unwrap();
+            handle_session_update(
+                SessionNotification::new("s", update),
+                &events,
+                &mut state,
+                &config_state,
+            )
+            .unwrap();
         }
 
         let seen = event_rx.try_iter().collect::<Vec<_>>();
@@ -1318,6 +1523,107 @@ mod tests {
     }
 
     #[test]
+    fn acp_model_config_supports_category_fallback_groups_and_stable_default() {
+        let initial = serde_json::from_value::<Vec<SessionConfigOption>>(json!([
+            {
+                "id": "model",
+                "name": "Model",
+                "type": "select",
+                "currentValue": "sonnet",
+                "options": [
+                    {
+                        "group": "anthropic",
+                        "name": "Anthropic",
+                        "options": [
+                            {"value": "sonnet", "name": "Claude Sonnet"},
+                            {"value": "opus", "name": "Claude Opus"}
+                        ]
+                    },
+                    {
+                        "group": "openai",
+                        "name": "OpenAI",
+                        "options": [
+                            {"value": "gpt", "name": "GPT"}
+                        ]
+                    }
+                ]
+            }
+        ]))
+        .unwrap();
+        let mut state = AcpConfigState::default();
+        state.replace_initial(initial);
+        let (_, select) = state.model_config().expect("id=model is the ACP fallback");
+        let models = models_from_select(select, state.default_model.as_deref());
+        assert_eq!(state.current_model().as_deref(), Some("sonnet"));
+        assert_eq!(models.len(), 3);
+        assert!(models[0].is_default);
+        assert_eq!(models[0].sub_provider.as_deref(), Some("Anthropic"));
+        assert_eq!(models[2].sub_provider.as_deref(), Some("OpenAI"));
+
+        let changed = serde_json::from_value::<Vec<SessionConfigOption>>(json!([
+            {
+                "id": "runtime-model",
+                "name": "Model",
+                "category": "model",
+                "type": "select",
+                "currentValue": "opus",
+                "options": [
+                    {"value": "sonnet", "name": "Claude Sonnet"},
+                    {"value": "opus", "name": "Claude Opus"}
+                ]
+            }
+        ]))
+        .unwrap();
+        state.replace(changed);
+        let (_, select) = state
+            .model_config()
+            .expect("the standard category takes precedence");
+        let models = models_from_select(select, state.default_model.as_deref());
+        assert_eq!(state.current_model().as_deref(), Some("opus"));
+        assert!(models[0].is_default);
+        assert!(!models[1].is_default);
+    }
+
+    #[test]
+    fn config_option_update_replaces_the_complete_model_state() {
+        let (events, event_rx) = crossbeam_channel::unbounded();
+        let mut stream_state = AcpStreamState::default();
+        let config_state = Mutex::new(AcpConfigState::default());
+        let update = serde_json::from_value(json!({
+            "sessionUpdate": "config_option_update",
+            "configOptions": [{
+                "id": "model",
+                "name": "Model",
+                "category": "model",
+                "type": "select",
+                "currentValue": "m2",
+                "options": [
+                    {"value": "m1", "name": "Model One"},
+                    {"value": "m2", "name": "Model Two"}
+                ]
+            }]
+        }))
+        .unwrap();
+        handle_session_update(
+            SessionNotification::new("s", update),
+            &events,
+            &mut stream_state,
+            &config_state,
+        )
+        .unwrap();
+
+        let event = event_rx.try_recv().unwrap();
+        assert!(matches!(
+            event,
+            DriverEvent::ModelsUpdated {
+                models,
+                current_model: Some(current)
+            } if models.len() == 2 && current == "m2"
+        ));
+        assert_eq!(config_state.lock().options.len(), 1);
+    }
+
+    #[test]
     fn permission_reason_preserves_the_agents_explanation() {
         let tool_call = ToolCallUpdate::new(
             "tool-1",
@@ -1336,6 +1642,82 @@ mod tests {
             permission_reason(&params).as_deref(),
             Some("Not in allowlist: rm")
         );
+    }
+
+    /// Exercises the session-scoped ACP catalog and standard model setter
+    /// against a real DeerFlow binary. Ignored by default because it depends
+    /// on the user's configured DeerFlow installation.
+    #[test]
+    #[ignore = "requires WAKU_TEST_DEERFLOW_ACP"]
+    fn deerflow_reports_and_switches_models_through_config_options() {
+        let binary = std::env::var_os("WAKU_TEST_DEERFLOW_ACP")
+            .map(std::path::PathBuf::from)
+            .expect("set WAKU_TEST_DEERFLOW_ACP to deerflow-acp");
+        let (events, event_rx) = crate::driver::test_event_channel();
+        let driver = AcpDriver::start(
+            ProviderKind::DeerFlow,
+            DriverStartOptions {
+                binary,
+                cwd: std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")),
+                mode: RuntimeMode::FullAccess,
+                interaction_mode: InteractionMode::Build,
+                model: None,
+                reasoning_effort: None,
+                service_tier: None,
+                agent_preset: None,
+                computer_use_enabled: false,
+                provider_cursor: None,
+            },
+            events,
+        )
+        .expect("the DeerFlow ACP session should open");
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        let (models, current) = loop {
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            let event = event_rx
+                .recv_timeout(remaining)
+                .expect("DeerFlow should advertise its model configOption");
+            match event {
+                DriverEvent::ModelsUpdated {
+                    models,
+                    current_model: Some(current),
+                } => break (models, current),
+                DriverEvent::Error(error) => panic!("DeerFlow reported: {error}"),
+                DriverEvent::ProcessExited => panic!("DeerFlow exited before model discovery"),
+                _ => {}
+            }
+        };
+        let target = models
+            .iter()
+            .find(|model| model.id != current)
+            .expect("the integration test needs at least two DeerFlow models")
+            .id
+            .clone();
+        assert!(driver.apply_options(SessionOptions {
+            mode: RuntimeMode::FullAccess,
+            interaction_mode: InteractionMode::Build,
+            model: Some(target.clone()),
+            reasoning_effort: None,
+            service_tier: None,
+        }));
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        loop {
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            let event = event_rx
+                .recv_timeout(remaining)
+                .expect("DeerFlow should confirm the selected ACP model config");
+            match event {
+                DriverEvent::ModelsUpdated {
+                    current_model: Some(current),
+                    ..
+                } if current == target => break,
+                DriverEvent::Error(error) => panic!("DeerFlow reported: {error}"),
+                DriverEvent::ProcessExited => panic!("DeerFlow exited during model selection"),
+                _ => {}
+            }
+        }
     }
 
     /// Drives a real agent through the SDK-backed driver. Ignored by default:

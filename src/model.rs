@@ -1501,6 +1501,13 @@ pub enum DriverEvent {
     Connected {
         provider_cursor: Option<ProviderResumeCursor>,
     },
+    /// The model selector advertised by a live ACP session. ACP model
+    /// catalogs are session-scoped `configOptions`, so this event carries
+    /// both the available values and the agent's authoritative current value.
+    ModelsUpdated {
+        models: Vec<ProviderModel>,
+        current_model: Option<String>,
+    },
     /// The provider-owned agent composition this session actually runs. A
     /// fresh Harness session may resolve its deployment default when Waku did
     /// not name one explicitly, so the driver reports the resolved value.

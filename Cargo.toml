@@ -124,6 +124,9 @@ trash = "5.2.6"
 raw-window-handle = "0.6"
 windows = { version = "0.61", features = ["Win32_Foundation", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_WindowsAndMessaging"] }
 
+[target.'cfg(target_os = "windows")'.build-dependencies]
+embed-resource = "3.0"
+
 [profile.release]
 lto = "thin"
 codegen-units = 1

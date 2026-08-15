@@ -141,13 +141,19 @@ impl Waku {
     }
 
     pub(super) fn select_workspace(&mut self, workspace: SessionWorkspace, cx: &mut Context<Self>) {
-        let Some(session) = self.selected_session_mut() else {
+        let Some(session) = self.selected_session() else {
             return;
         };
         if session.has_started() || session.is_busy() || session.workspace == workspace {
             return;
         }
-        session.workspace = workspace;
+        let session_id = session.id;
+        if let Some(session) = self.selected_session_mut() {
+            session.workspace = workspace;
+        }
+        self.runtime_preparations.remove(&session_id);
+        self.reset_session_runtime(session_id);
+        self.ensure_deerflow_runtime(session_id, cx);
         self.save();
         cx.notify();
     }
@@ -184,6 +190,8 @@ impl Waku {
             .map(std::path::Path::to_path_buf);
         let was_selected = self.state.selected_session == Some(session_id);
         self.submission_preparations.remove(&session_id);
+        self.runtime_preparations.remove(&session_id);
+        self.runtime_preparation_submissions.remove(&session_id);
         self.reset_session_runtime(session_id);
         self.background_work.remove(&session_id);
         self.remove_right_panel_session_state(session_id);
@@ -678,6 +686,7 @@ impl Waku {
             // A different provider is a different binary and protocol; only a
             // model change within one provider can be applied in session.
             if provider_changed {
+                self.runtime_preparations.remove(&session_id);
                 self.reset_session_runtime(session_id);
                 // A different provider is also a different command registry.
                 self.refresh_composer_sources(cx);
@@ -686,6 +695,9 @@ impl Waku {
             }
             self.save();
             cx.notify();
+        }
+        if provider == ProviderKind::DeerFlow {
+            self.ensure_deerflow_runtime(session_id, cx);
         }
     }
 

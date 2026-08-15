@@ -732,6 +732,10 @@ struct SessionRuntime {
     driver: DriverHandle,
     events: Receiver<DriverEvent>,
     pending_events: VecDeque<DriverEvent>,
+    /// A draft preconnection already owns a native ACP session, but exposing
+    /// its cursor on the draft would incorrectly lock provider/workspace UI.
+    /// Promote it when the first prompt actually starts.
+    pending_provider_cursor: Option<ProviderResumeCursor>,
     /// Presentation metadata for steering messages awaiting the provider's
     /// accepted/rejected acknowledgement, in transport order.
     pending_steers: VecDeque<ComposerSubmission>,
@@ -1003,6 +1007,14 @@ pub struct Waku {
     /// session is busy immediately, while the composer draws a spinner until
     /// the non-cancellable preparation is complete.
     submission_preparations: HashSet<Uuid>,
+    /// DeerFlow exposes models only after `session/new`. Draft preconnection
+    /// starts that actual session off-thread; the generation prevents an old
+    /// provider/workspace result from replacing a newer preparation.
+    runtime_preparations: HashMap<Uuid, (u64, ProviderKind, SessionWorkspace)>,
+    runtime_preparation_generation: u64,
+    /// A prompt accepted while draft preconnection is finishing. The normal
+    /// submission pipeline resumes it after the prepared runtime is installed.
+    runtime_preparation_submissions: HashMap<Uuid, ComposerSubmission>,
     /// First Escape press for the current turn. A matching second press stops
     /// the response; otherwise this returns to the ordinary Stop icon after a
     /// short timeout.
@@ -2270,6 +2282,9 @@ impl Waku {
                 background_work: HashMap::new(),
                 last_background_work_tick: Instant::now(),
                 submission_preparations: HashSet::new(),
+                runtime_preparations: HashMap::new(),
+                runtime_preparation_generation: 0,
+                runtime_preparation_submissions: HashMap::new(),
                 escape_stop_confirmation: EscapeStopConfirmation::default(),
                 response_fork_preparations: HashMap::new(),
                 pending_queue_drains: Vec::new(),

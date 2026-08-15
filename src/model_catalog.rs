@@ -11,6 +11,10 @@ use crate::model::{ProviderAgentPreset, ProviderKind, ProviderModel, ProviderMod
 const CODEX_RPC_TIMEOUT: Duration = Duration::from_secs(5);
 const PI_RPC_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// UI-only row used until a DeerFlow session reports its ACP `model`
+/// configOption. It is never sent to the agent as a model ID.
+pub const DEERFLOW_DEFAULT_MODEL_PLACEHOLDER: &str = "__waku_deerflow_default__";
+
 pub fn fallback_models(provider: ProviderKind) -> Vec<ProviderModel> {
     match provider {
         ProviderKind::Amp => [
@@ -76,11 +80,14 @@ pub fn fallback_models(provider: ProviderKind) -> Vec<ProviderModel> {
         // Pi's catalog depends on the user's configured LLM providers. A
         // fabricated fallback would make unavailable models look selectable.
         ProviderKind::Pi => Vec::new(),
-        // DeerFlow owns model selection server-side and does not implement
-        // ACP's model setter. This single provider-default row makes the
-        // provider selectable without pretending a concrete model is known.
+        // DeerFlow's catalog is session-scoped ACP configuration. Keep one
+        // UI-only row so a draft can select the provider and start the real
+        // session which will replace this row with the advertised models.
         ProviderKind::DeerFlow => {
-            vec![ProviderModel::new("default", tr!("model_option.auto")).default()]
+            vec![
+                ProviderModel::new(DEERFLOW_DEFAULT_MODEL_PLACEHOLDER, tr!("model_option.auto"))
+                    .default(),
+            ]
         }
     }
 }
