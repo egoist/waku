@@ -1409,11 +1409,16 @@ impl Waku {
                 count = total.saturating_sub(AUTOMATION_RUN_PREVIEW)
             )
         };
+        let hovered = self.sidebar_hovered_automation_run_toggle == Some(automation_id);
+        let foreground = if hovered {
+            theme.text_secondary
+        } else {
+            theme.text_ghost
+        };
         // Down chevron reads as "reveal more"; flip it up once expanded.
-        let chevron = icon("icons/chevron-down.svg", 11.0, theme.text_ghost)
-            .when(expanded, |icon| {
-                icon.with_transformation(gpui::Transformation::rotate(gpui::percentage(0.5)))
-            });
+        let chevron = icon("icons/chevron-down.svg", 11.0, foreground).when(expanded, |icon| {
+            icon.with_transformation(gpui::Transformation::rotate(gpui::percentage(0.5)))
+        });
 
         div()
             .id(SharedString::from(format!(
@@ -1430,13 +1435,15 @@ impl Waku {
             .py(px(5.0))
             .rounded(px(7.0))
             .cursor_default()
+            .text_color(foreground)
             .focus_visible(|style| style.border_1().border_color(theme.accent))
-            .hover(|element| element.bg(theme.sidebar_item_background))
+            .on_hover(cx.listener(move |this, hovering: &bool, _, cx| {
+                this.set_sidebar_automation_runs_toggle_hovered(automation_id, *hovering, cx);
+            }))
             .child(
                 div()
                     .flex_none()
                     .text_size(px(11.5))
-                    .text_color(theme.text_ghost)
                     .child(SharedString::from(label)),
             )
             .child(chevron)
@@ -1452,7 +1459,27 @@ impl Waku {
             .into_any_element()
     }
 
+    fn set_sidebar_automation_runs_toggle_hovered(
+        &mut self,
+        automation_id: Uuid,
+        hovered: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let next = if hovered {
+            Some(automation_id)
+        } else if self.sidebar_hovered_automation_run_toggle == Some(automation_id) {
+            None
+        } else {
+            return;
+        };
+        if self.sidebar_hovered_automation_run_toggle != next {
+            self.sidebar_hovered_automation_run_toggle = next;
+            cx.notify();
+        }
+    }
+
     fn toggle_sidebar_automation_runs(&mut self, automation_id: Uuid, cx: &mut Context<Self>) {
+        self.sidebar_hovered_automation_run_toggle = None;
         if !self.sidebar_expanded_automation_runs.remove(&automation_id) {
             self.sidebar_expanded_automation_runs.insert(automation_id);
         }
