@@ -3101,6 +3101,48 @@ impl Waku {
         .detach();
     }
 
+    fn finish_manual_preparation_failure(&mut self, session_id: Uuid) {
+        self.track_active_turn_outcome(
+            session_id,
+            crate::analytics::TurnOutcome::PreparationFailed,
+        );
+        if let Some(session) = self.state.session_mut(session_id)
+            && session.status == SessionStatus::Connecting
+        {
+            // Manual submissions return to the composer when preparation never
+            // reaches a provider.
+            if let Some(turn_id) = session.active_turn_id() {
+                session.unwind_unstarted_turn(turn_id);
+            }
+            session.status = SessionStatus::Idle;
+        }
+    }
+
+    fn finish_automation_preparation_failure(
+        &mut self,
+        session_id: Uuid,
+        error: &anyhow::Error,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(session) = self.state.session_mut(session_id)
+            && session.status == SessionStatus::Connecting
+        {
+            session.status = SessionStatus::Failed;
+            session.push_message(
+                MessageRole::Assistant,
+                tr!("errors.create_worktree", error = error),
+            );
+        }
+        self.finish_active_turn_with_analytics(
+            session_id,
+            TurnStatus::Failed,
+            crate::analytics::TurnOutcome::PreparationFailed,
+        );
+        self.settle_automation_run(session_id, crate::automation::RunOutcome::Failed, cx);
+        self.stream_state_dirty = true;
+        self.schedule_stream_state_save(cx);
+    }
+
     fn finish_submission_preparation(
         &mut self,
         session_id: Uuid,
@@ -3151,12 +3193,6 @@ impl Waku {
                     .iter()
                     .find(|session| session.id == session_id)
                     .is_some_and(|session| session.originating_automation.is_some());
-                if !is_automation {
-                    self.track_active_turn_outcome(
-                        session_id,
-                        crate::analytics::TurnOutcome::PreparationFailed,
-                    );
-                }
                 if selected {
                     self.sync_transcript_rows();
                 }
@@ -3165,38 +3201,13 @@ impl Waku {
                 } else {
                     Vec::new()
                 };
-                if let Some(session) = self.state.session_mut(session_id)
-                    && session.status == SessionStatus::Connecting
-                {
-                    if is_automation {
-                        session.status = SessionStatus::Failed;
-                        session.push_message(
-                            MessageRole::Assistant,
-                            tr!("errors.create_worktree", error = error),
-                        );
-                    } else {
-                        // Manual submissions return to the composer when
-                        // preparation never reaches a provider.
-                        if let Some(turn_id) = session.active_turn_id() {
-                            session.unwind_unstarted_turn(turn_id);
-                        }
-                        session.status = SessionStatus::Idle;
-                    }
-                }
-                if is_automation {
-                    self.finish_active_turn_with_analytics(
-                        session_id,
-                        TurnStatus::Failed,
-                        crate::analytics::TurnOutcome::PreparationFailed,
-                    );
-                    self.settle_automation_run(
-                        session_id,
-                        crate::automation::RunOutcome::Failed,
-                        cx,
-                    );
-                    self.stream_state_dirty = true;
-                    self.schedule_stream_state_save(cx);
-                }
+                let restore_submission = if is_automation {
+                    self.finish_automation_preparation_failure(session_id, &error, cx);
+                    false
+                } else {
+                    self.finish_manual_preparation_failure(session_id);
+                    true
+                };
                 if selected {
                     if self
                         .transcript_anchor
@@ -3207,7 +3218,7 @@ impl Waku {
                         self.transcript_anchor_following.set(false);
                     }
                     self.splice_transcript_rows_after_visibility_change(&previous_kinds);
-                    if !is_automation {
+                    if restore_submission {
                         self.restore_composer_submission(submission, cx);
                     }
                     self.show_toast(tr!("errors.create_worktree", error = error));
