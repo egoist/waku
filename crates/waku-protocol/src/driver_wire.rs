@@ -21,6 +21,9 @@ pub fn encode_enum<T: Serialize>(value: T) -> anyhow::Result<String> {
 
 pub fn event_to_wire(event: DriverEvent) -> anyhow::Result<WireDriverEvent> {
     let (kind, payload) = match event {
+        DriverEvent::RuntimeEventCursorAdvanced(_) => {
+            bail!("client-only runtime cursors cannot be sent by the daemon")
+        }
         DriverEvent::Connected { provider_cursor } => {
             ("connected", serde_json::to_value(provider_cursor)?)
         }

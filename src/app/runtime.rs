@@ -37,6 +37,105 @@ fn start_driver(mut request: DriverStartRequest, cwd: PathBuf) -> anyhow::Result
     Ok(PreparedDriver { handle, events })
 }
 
+fn attach_driver(
+    daemon: waku_client::DaemonSupervisor,
+    session_id: Uuid,
+    event_wake: smol::channel::Sender<()>,
+) -> anyhow::Result<Option<(AgentSession, PreparedDriver)>> {
+    let Some(session) = waku_client::persistence::hydrate_session(&daemon, session_id)? else {
+        return Ok(None);
+    };
+    let response =
+        daemon
+            .client()
+            .request(session_id, Uuid::nil(), waku_client::Command::AttachSession)?;
+    let waku_client::ResponsePayload::SessionRuntime {
+        runtime_id,
+        supports_steer,
+    } = response
+    else {
+        anyhow::bail!("Waku daemon returned an invalid runtime attachment response");
+    };
+    let Some(runtime_id) = runtime_id else {
+        return Ok(None);
+    };
+    let (event_tx, events) = driver::event_channel(event_wake);
+    let handle = driver::attach_remote(
+        daemon.client(),
+        session_id,
+        runtime_id,
+        supports_steer,
+        session.runtime_event_cursor,
+        event_tx,
+    )?;
+    Ok(Some((session, PreparedDriver { handle, events })))
+}
+
+fn load_remote_task_state(
+    client: &waku_client::DaemonClient,
+) -> anyhow::Result<RemoteTaskStateSnapshot> {
+    let response = client.request(
+        Uuid::nil(),
+        Uuid::nil(),
+        waku_client::Command::LoadTaskState,
+    )?;
+    let waku_client::ResponsePayload::TaskState {
+        projects,
+        mut sessions,
+        ..
+    } = response
+    else {
+        anyhow::bail!("Waku daemon returned an invalid task-state response");
+    };
+    for session in &mut sessions {
+        session.detail_loaded = false;
+    }
+    Ok(RemoteTaskStateSnapshot { projects, sessions })
+}
+
+/// Merge the daemon's list-only session projection into the desktop catalog.
+///
+/// Existing rows may already contain a hydrated transcript, so only list
+/// metadata is copied from the projection. A locally attached runtime remains
+/// authoritative for transient status and timestamps until its own events are
+/// drained.
+pub(super) fn merge_remote_session_catalog(
+    local: &mut Vec<AgentSession>,
+    remote: Vec<AgentSession>,
+    has_local_runtime: impl Fn(Uuid) -> bool,
+) -> Vec<Uuid> {
+    let remote_ids = remote
+        .iter()
+        .map(|session| session.id)
+        .collect::<HashSet<_>>();
+    let removed = local
+        .iter()
+        .filter(|session| session.has_started() && !remote_ids.contains(&session.id))
+        .map(|session| session.id)
+        .collect::<Vec<_>>();
+    local.retain(|session| !session.has_started() || remote_ids.contains(&session.id));
+
+    for remote in remote {
+        if let Some(local) = local.iter_mut().find(|session| session.id == remote.id) {
+            local.title = remote.title;
+            local.auto_title = remote.auto_title;
+            local.project_id = remote.project_id;
+            local.provider = remote.provider;
+            local.model = remote.model;
+            local.created_at = remote.created_at;
+            local.last_reply_at = remote.last_reply_at;
+            if !has_local_runtime(local.id) {
+                local.status = remote.status;
+                local.updated_at = remote.updated_at;
+            }
+        } else {
+            local.push(remote);
+        }
+    }
+
+    removed
+}
+
 /// Perform every blocking operation between accepting a submission and
 /// starting its provider. This function is called only from the background
 /// executor; the UI thread owns applying the returned workspace afterward.
@@ -762,6 +861,309 @@ fn perform_response_fork(mut request: ResponseForkRequest) -> Result<PreparedRes
 }
 
 impl Waku {
+    pub(super) fn restart_task_state_sync(&self) {
+        let clients = self.daemon.subscribe_clients();
+        let results = self.task_state_sync_tx.clone();
+        let event_wake = self.event_wake_tx.clone();
+        std::thread::Builder::new()
+            .name("waku-task-state-sync".into())
+            .spawn(move || {
+                let Ok(mut client) = clients.recv() else {
+                    return;
+                };
+                loop {
+                    while let Ok(newer) = clients.try_recv() {
+                        client = newer;
+                    }
+                    let revisions = client.subscribe_task_state();
+                    let result = load_remote_task_state(&client).map_err(|error| error.to_string());
+                    if results.send(result).is_err() {
+                        return;
+                    }
+                    signal_event_pump(&event_wake);
+                    client = loop {
+                        crossbeam_channel::select! {
+                            recv(clients) -> replacement => {
+                                let Ok(mut replacement) = replacement else {
+                                    return;
+                                };
+                                while let Ok(newer) = clients.try_recv() {
+                                    replacement = newer;
+                                }
+                                break replacement;
+                            }
+                            recv(revisions) -> revision => {
+                                if revision.is_err() {
+                                    // Managed replacement publishes the new
+                                    // client after the old socket closes. Wait
+                                    // for that publication instead of exiting
+                                    // the task-state sync worker permanently.
+                                    let Ok(replacement) = clients.recv() else {
+                                        return;
+                                    };
+                                    break replacement;
+                                }
+                                while revisions.try_recv().is_ok() {}
+                                let result = load_remote_task_state(&client)
+                                    .map_err(|error| error.to_string());
+                                if results.send(result).is_err() {
+                                    return;
+                                }
+                                signal_event_pump(&event_wake);
+                            }
+                        }
+                    };
+                }
+            })
+            .ok();
+    }
+
+    fn drain_task_state_sync_events(&mut self, cx: &mut Context<Self>) -> bool {
+        let mut latest = None;
+        while let Ok(result) = self.task_state_sync_events.try_recv() {
+            latest = Some(result);
+        }
+        let Some(result) = latest else {
+            return false;
+        };
+        match result {
+            Ok(snapshot) => {
+                self.apply_remote_task_state(snapshot, cx);
+                true
+            }
+            Err(error) => {
+                eprintln!("could not refresh daemon task state: {error}");
+                false
+            }
+        }
+    }
+
+    fn apply_remote_task_state(
+        &mut self,
+        snapshot: RemoteTaskStateSnapshot,
+        cx: &mut Context<Self>,
+    ) {
+        let runtime_ids = self.runtimes.keys().copied().collect::<HashSet<_>>();
+        let removed = merge_remote_session_catalog(
+            &mut self.state.sessions,
+            snapshot.sessions,
+            |session_id| runtime_ids.contains(&session_id),
+        );
+        for session_id in &removed {
+            self.runtime_attach_pending.remove(session_id);
+            self.runtime_attach_misses.remove(session_id);
+            self.runtimes.remove(session_id);
+            self.background_work.remove(session_id);
+            self.remove_right_panel_session_state(*session_id);
+        }
+        self.state.projects = snapshot.projects;
+
+        let attach = self
+            .state
+            .sessions
+            .iter()
+            .filter(|session| {
+                session.status.is_busy()
+                    || (self.state.selected_session == Some(session.id) && session.has_started())
+            })
+            .map(|session| session.id)
+            .collect::<Vec<_>>();
+        for session_id in attach {
+            self.start_runtime_attachment(session_id, cx);
+        }
+
+        if self.state.selected_session.is_some_and(|selected| {
+            !self
+                .state
+                .sessions
+                .iter()
+                .any(|session| session.id == selected)
+        }) {
+            let previous_project = self.state.selected_project;
+            self.state.selected_session = None;
+            let next = self
+                .state
+                .sessions
+                .iter()
+                .filter(|session| {
+                    previous_project.is_none_or(|project| session.project_id == project)
+                })
+                .max_by_key(|session| session.updated_at)
+                .map(|session| session.id)
+                .or_else(|| {
+                    self.state
+                        .sessions
+                        .iter()
+                        .max_by_key(|session| session.updated_at)
+                        .map(|session| session.id)
+                });
+            if let Some(next) = next {
+                self.select_session(next, cx);
+            } else if let Some(project_id) = self
+                .state
+                .selected_project
+                .filter(|project_id| {
+                    self.state
+                        .projects
+                        .iter()
+                        .any(|project| project.id == *project_id)
+                })
+                .or_else(|| self.state.projects.first().map(|project| project.id))
+            {
+                self.state.selected_project = Some(project_id);
+                self.create_session_for(project_id, self.state.last_provider, cx);
+            }
+        }
+    }
+
+    pub(super) fn start_runtime_attachment(&mut self, session_id: Uuid, cx: &mut Context<Self>) {
+        if self.runtimes.contains_key(&session_id)
+            || !self.runtime_attach_pending.insert(session_id)
+        {
+            return;
+        }
+        let daemon = self.daemon.clone();
+        let event_wake = self.event_wake_tx.clone();
+        cx.spawn(async move |waku, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move { attach_driver(daemon, session_id, event_wake) })
+                .await;
+            let _ = waku.update(cx, move |waku, cx| {
+                waku.finish_runtime_attachment(session_id, result, cx);
+            });
+        })
+        .detach();
+    }
+
+    fn finish_runtime_attachment(
+        &mut self,
+        session_id: Uuid,
+        result: anyhow::Result<Option<(AgentSession, PreparedDriver)>>,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.runtime_attach_pending.remove(&session_id) {
+            return;
+        }
+        match result {
+            Ok(Some((session, prepared))) => {
+                self.runtime_attach_misses.remove(&session_id);
+                let Some(index) = self
+                    .state
+                    .sessions
+                    .iter()
+                    .position(|candidate| candidate.id == session_id)
+                else {
+                    return;
+                };
+                if !self.runtimes.contains_key(&session_id) {
+                    self.state.sessions[index] = session;
+                    self.install_prepared_driver(session_id, prepared);
+                    if self.state.selected_session == Some(session_id) {
+                        self.reset_visible_state();
+                        self.reset_transcript_rows(self.transcript_row_count());
+                    }
+                    cx.notify();
+                }
+            }
+            Ok(None) => {
+                let busy = self
+                    .state
+                    .sessions
+                    .iter()
+                    .find(|session| session.id == session_id)
+                    .is_some_and(|session| session.status.is_busy());
+                if !busy {
+                    self.runtime_attach_misses.remove(&session_id);
+                    return;
+                }
+                let misses = self.runtime_attach_misses.entry(session_id).or_default();
+                *misses = misses.saturating_add(1);
+                if *misses < 4 {
+                    cx.spawn(async move |waku, cx| {
+                        cx.background_executor()
+                            .timer(Duration::from_millis(250))
+                            .await;
+                        let _ = waku.update(cx, |waku, cx| {
+                            waku.start_runtime_attachment(session_id, cx);
+                        });
+                    })
+                    .detach();
+                } else {
+                    self.runtime_attach_misses.remove(&session_id);
+                    self.interrupt_orphaned_runtime(session_id, cx);
+                }
+            }
+            Err(error) => {
+                eprintln!("could not attach desktop to daemon session {session_id}: {error:#}");
+            }
+        }
+    }
+
+    fn interrupt_orphaned_runtime(&mut self, session_id: Uuid, cx: &mut Context<Self>) {
+        let project_paths = self
+            .state
+            .projects
+            .iter()
+            .map(|project| (project.id, project.path.clone()))
+            .collect::<HashMap<_, _>>();
+        let mut checkpoint = None;
+        if let Some(session) = self.state.session_mut(session_id) {
+            if !session.status.is_busy() {
+                return;
+            }
+            session.status = SessionStatus::Idle;
+            let interrupted_turn_count = session
+                .turns
+                .last_mut()
+                .filter(|turn| turn.status == TurnStatus::Running)
+                .map(|turn| {
+                    turn.status = TurnStatus::Interrupted;
+                    turn.completed_at = Some(unix_time());
+                    turn.turn_count
+                });
+            if let Some(turn_count) = interrupted_turn_count {
+                let project_path = session
+                    .workspace
+                    .path()
+                    .map(Path::to_path_buf)
+                    .or_else(|| project_paths.get(&session.project_id).cloned());
+                checkpoint = project_path.map(|project_path| PendingCheckpointCapture {
+                    session_id,
+                    turn_count,
+                    project_path,
+                });
+            }
+            for message in &mut session.messages {
+                message.streaming = false;
+            }
+            for block in &mut session.transcript_blocks {
+                block.activities.retain(|activity| {
+                    activity
+                        .reasoning
+                        .as_ref()
+                        .is_none_or(|reasoning| !reasoning.content.trim().is_empty())
+                });
+                for activity in &mut block.activities {
+                    activity.complete = true;
+                }
+            }
+            session
+                .transcript_blocks
+                .retain(|block| !block.activities.is_empty());
+        }
+        if let Some(checkpoint) = checkpoint {
+            self.pending_checkpoint_captures.push(checkpoint);
+            self.start_pending_checkpoint_captures(cx);
+        }
+        if self.state.selected_session == Some(session_id) {
+            self.reset_visible_state();
+            self.reset_transcript_rows(self.transcript_row_count());
+        }
+        self.save();
+        cx.notify();
+    }
+
     pub fn composer_focus(&self, cx: &App) -> FocusHandle {
         self.composer.read(cx).focus()
     }
@@ -1465,7 +1867,9 @@ impl Waku {
                     // A failed restore after Pi creates a fork can leave the
                     // resident RPC process on that fork. Recreate it lazily
                     // from the source cursor on its next prompt.
-                    self.runtimes.remove(&session_id);
+                    if let Some(runtime) = self.runtimes.remove(&session_id) {
+                        runtime.driver.close();
+                    }
                 }
                 self.drain_queued_message(session_id, cx);
                 self.show_toast(error);
@@ -1997,7 +2401,9 @@ impl Waku {
         {
             // Headless drivers retain their original native session ID. Recreate
             // them lazily so the next prompt resumes the fork instead.
-            self.runtimes.remove(&session_id);
+            if let Some(runtime) = self.runtimes.remove(&session_id) {
+                runtime.driver.close();
+            }
             self.mark_background_work_lost(session_id);
         } else if let Some(runtime) = self.runtimes.get_mut(&session_id) {
             runtime
@@ -2126,10 +2532,12 @@ impl Waku {
             .map(|(session_id, _)| *session_id)
             .collect::<Vec<_>>();
         for session_id in idle {
-            // Dropping the runtime is the release: it closes the transport, and
-            // the driver's own `Drop` takes the process tree with it. No cancel,
-            // because there is no turn to cancel.
-            self.runtimes.remove(&session_id);
+            // Idle reaping is an explicit daemon-runtime release. Merely
+            // dropping a client attachment must not stop work observed by a
+            // second desktop or browser client.
+            if let Some(runtime) = self.runtimes.remove(&session_id) {
+                runtime.driver.close();
+            }
         }
     }
 
@@ -2732,6 +3140,7 @@ impl Waku {
             | self.drain_provider_detection_events()
             | self.drain_computer_permission_events()
             | self.drain_plan_usage_events()
+            | self.drain_task_state_sync_events(cx)
         {
             cx.notify();
         }
@@ -2803,6 +3212,7 @@ impl Waku {
             };
             let follow_up_remeasure = std::mem::take(&mut runtime.stream_remeasure_pending);
             Self::collect_runtime_events(&mut runtime);
+            let flush_stream_backlog = stream_backlog_should_flush(&runtime.pending_events);
             let mut runtime_changed = false;
             let mut background_changed = false;
             let mut markdown_changed = false;
@@ -2810,13 +3220,17 @@ impl Waku {
             let mut keep_runtime = true;
             while let Some(event) = runtime.pending_events.front() {
                 let kind = stream_delta_kind(event);
-                if kind.is_some() && revealed_stream_chunk {
+                if kind.is_some() && revealed_stream_chunk && !flush_stream_backlog {
                     break;
                 }
 
                 let event = if let Some(kind) = kind {
                     revealed_stream_chunk = true;
-                    pop_stream_chunk(&mut runtime.pending_events, kind)
+                    if flush_stream_backlog {
+                        pop_complete_stream_chunk(&mut runtime.pending_events, kind)
+                    } else {
+                        pop_stream_chunk(&mut runtime.pending_events, kind)
+                    }
                 } else {
                     runtime.pending_events.pop_front()
                 };

@@ -52,8 +52,8 @@ impl BackgroundWorkRegistry {
         match event {
             BackgroundWorkEvent::Upsert(item) => self.upsert(item),
             BackgroundWorkEvent::OutputDelta { key, delta } => self.append_output(&key, &delta),
-            BackgroundWorkEvent::ReconcileProcesses(items) => self.reconcile_processes(items),
-            BackgroundWorkEvent::ReconcileLive(items) => self.reconcile_live(items),
+            BackgroundWorkEvent::ReconcileProcesses { items } => self.reconcile_processes(items),
+            BackgroundWorkEvent::ReconcileLive { items } => self.reconcile_live(items),
             BackgroundWorkEvent::StopRequested(key) => {
                 if let Some(item) = self.items.get_mut(&key) {
                     item.status = BackgroundWorkStatus::Stopping;

@@ -34,7 +34,8 @@ use crate::model::{
 };
 use crate::theme::ThemePreference;
 pub use waku_protocol::persistence::{
-    ComposerDraft, ComposerDraftAttachment, ComposerDraftKey, ComposerDrafts, SessionMessageMatch,
+    ComposerDraft, ComposerDraftAttachment, ComposerDraftChange, ComposerDraftKey,
+    ComposerDraftTarget, ComposerDrafts, SessionMessageMatch,
 };
 
 const STATE_VERSION: u32 = 5;
@@ -139,6 +140,37 @@ impl ComposerDraftStore {
         fs::write(&temporary, data)?;
         fs::rename(temporary, &self.path)?;
         *latest_write = generation;
+        Ok(())
+    }
+
+    /// Apply only the drafts a client actually changed. The mutation and
+    /// atomic file replacement share the same lock as legacy snapshot writes,
+    /// so concurrent clients cannot clobber unrelated draft keys.
+    pub fn apply_changes(&self, changes: Vec<ComposerDraftChange>) -> io::Result<()> {
+        if changes.is_empty() {
+            return Ok(());
+        }
+        let mut latest_write = self.latest_write.lock();
+        let mut drafts = self.load()?;
+        let mut changed = false;
+        for change in changes {
+            let key = ComposerDraftKey::from(change.target);
+            changed |= match change.draft {
+                Some(draft) => drafts.set(key, draft),
+                None => drafts.remove(key),
+            };
+        }
+        if !changed {
+            return Ok(());
+        }
+        let data = serde_json::to_vec_pretty(&drafts).map_err(to_io_error)?;
+        if let Some(parent) = self.path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        let temporary = self.path.with_extension("json.tmp");
+        fs::write(&temporary, data)?;
+        fs::rename(temporary, &self.path)?;
+        *latest_write = latest_write.saturating_add(1);
         Ok(())
     }
 }
@@ -1157,6 +1189,7 @@ impl StateStore {
         session.reasoning_effort = stored.reasoning_effort;
         session.service_tier = stored.service_tier;
         session.context_usage = stored.context_usage;
+        session.runtime_event_cursor = stored.runtime_event_cursor;
 
         let mut statement = connection
             .prepare(
@@ -1446,6 +1479,7 @@ fn session_skeleton(row: SessionColumns) -> Option<AgentSession> {
         provider_cursor: None,
         available_commands: Vec::new(),
         context_usage: None,
+        runtime_event_cursor: None,
         provider_session_id: None,
         messages: Vec::new(),
         transcript_blocks: Vec::new(),
@@ -1957,6 +1991,41 @@ mod tests {
         assert_eq!(
             restored.get(ComposerDraftKey::NewSession(project_id)),
             Some(&draft)
+        );
+    }
+
+    #[test]
+    fn composer_draft_changes_preserve_unrelated_client_keys() {
+        let directory = temporary_directory();
+        let store = ComposerDraftStore::for_state_path(&directory.join("app.db"));
+        let desktop_session_id = Uuid::new_v4();
+        let web_project_id = Uuid::new_v4();
+        let desktop_draft = text_draft("desktop follow-up");
+        let web_draft = text_draft("web new task");
+        let mut initial = ComposerDrafts::default();
+        initial.set(
+            ComposerDraftKey::Session(desktop_session_id),
+            desktop_draft.clone(),
+        );
+        store.save(initial, 1).unwrap();
+
+        store
+            .apply_changes(vec![ComposerDraftChange {
+                target: ComposerDraftTarget::NewSession {
+                    project_id: web_project_id,
+                },
+                draft: Some(web_draft.clone()),
+            }])
+            .unwrap();
+
+        let restored = store.load().unwrap();
+        assert_eq!(
+            restored.get(ComposerDraftKey::Session(desktop_session_id)),
+            Some(&desktop_draft)
+        );
+        assert_eq!(
+            restored.get(ComposerDraftKey::NewSession(web_project_id)),
+            Some(&web_draft)
         );
     }
 

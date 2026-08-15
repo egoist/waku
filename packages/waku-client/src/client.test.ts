@@ -186,6 +186,42 @@ describe("WakuClient", () => {
     ]);
   });
 
+  test("buffers replayed events until a refreshed app attaches to the runtime", async () => {
+    const { client, sockets } = fixture();
+    const socket = await connect(client, sockets);
+
+    socket.receive({
+      type: "event",
+      sessionId: "session",
+      runtimeId: "runtime",
+      epoch: "epoch",
+      sequence: 1,
+      event: { kind: "textDelta", payload: "before attach" },
+    });
+    socket.receive({
+      type: "event",
+      sessionId: "session",
+      runtimeId: "runtime",
+      epoch: "epoch",
+      sequence: 2,
+      event: { kind: "textDelta", payload: "still before attach" },
+    });
+
+    const received: number[] = [];
+    client.subscribe("session", "runtime", (event) => received.push(event.sequence));
+    expect(received).toEqual([1, 2]);
+  });
+
+  test("notifies connected apps when another client changes task state", async () => {
+    const { client, sockets } = fixture();
+    const socket = await connect(client, sockets);
+    const revisions: number[] = [];
+    client.subscribeTaskState((revision) => revisions.push(revision));
+
+    socket.receive({ type: "taskStateChanged", revision: 7 });
+    expect(revisions).toEqual([7]);
+  });
+
   test("disconnected requests reject instead of throwing synchronously", async () => {
     const { client } = fixture();
     const request = client.request({ type: "getSettings" });
@@ -196,6 +232,25 @@ describe("WakuClient", () => {
     const { client } = fixture();
     const notification = client.notify({ type: "refreshBackgroundWork" });
     await expect(notification).rejects.toThrow("Waku daemon is disconnected");
+  });
+
+  test("notifications use the response-free nil request id", async () => {
+    const { client, sockets } = fixture();
+    const socket = await connect(client, sockets);
+
+    await client.notify(
+      { type: "writeTerminal", data: "bHM=" },
+      "terminal",
+      "terminal",
+    );
+
+    expect(JSON.parse(socket.sent[1]!)).toEqual({
+      type: "request",
+      requestId: "00000000-0000-0000-0000-000000000000",
+      sessionId: "terminal",
+      runtimeId: "terminal",
+      command: { type: "writeTerminal", data: "bHM=" },
+    });
   });
 });
 

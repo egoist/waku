@@ -1045,7 +1045,7 @@ fn emit_jobs(payload: &Value, events: &impl DriverEventSink) {
         })
         .collect();
     let _ = events.send(DriverEvent::BackgroundWork(
-        BackgroundWorkEvent::ReconcileLive(items),
+        BackgroundWorkEvent::ReconcileLive { items },
     ));
 }
 

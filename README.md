@@ -42,11 +42,11 @@ forks, and all workspace filesystem and Git operations; paths returned by it
 always refer to the daemon host. The desktop retains only presentation state
 and a disposable preview cache.
 
-The future browser-facing package lives at
-[`packages/waku-client`](packages/waku-client). Its checked-in types are
-generated directly from the Rust protocol, while its browser WebSocket client
-implements the same handshake, request IDs, subscriptions, sequence
-deduplication, and replay cursors as the Rust client. Run
+The browser client lives at [`apps/web`](apps/web) and uses the generated
+browser transport in [`packages/waku-client`](packages/waku-client). Its
+checked-in types are generated directly from the Rust protocol, while its
+WebSocket client implements the same handshake, request IDs, subscriptions,
+sequence deduplication, and replay cursors as the Rust client. Run
 `bun run protocol:generate` after changing a wire type and
 `bun run protocol:check` to verify that generated files are current.
 
@@ -56,7 +56,9 @@ older `~/.waku/<date>/<slug>` layout on first load.
 
 Configuration ownership is separate too: the desktop writes
 `~/.waku/app.json`, while daemon provider and Computer Use settings live in
-`~/.waku/settings.json`.
+`~/.waku/settings.json`. The desktop's Settings → Daemon page can explicitly
+expose the child daemon on a fixed port, configure exact browser origins, and
+copy its stable authentication token. It remains loopback-only by default.
 
 When connected to a daemon managed outside the desktop process, Waku never
 interprets daemon paths on the client machine. The local folder picker and PTY

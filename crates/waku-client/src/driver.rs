@@ -91,6 +91,10 @@ impl DriverHandle {
     pub fn fork(&self, turns_to_remove: usize) -> anyhow::Result<ProviderResumeCursor> {
         self.inner.fork(turns_to_remove)
     }
+
+    pub fn close(&self) {
+        self.inner.close();
+    }
 }
 
 pub trait DriverControl: Send + Sync {
@@ -113,6 +117,7 @@ pub trait DriverControl: Send + Sync {
     fn fork(&self, _turns_to_remove: usize) -> anyhow::Result<ProviderResumeCursor> {
         anyhow::bail!("conversation forking is not supported by this provider transport")
     }
+    fn close(&self) {}
 }
 
 pub struct DriverStartOptions {

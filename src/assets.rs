@@ -174,6 +174,7 @@ const ICONS: &[(&str, &[u8])] = icons![
     "rewind",
     "rotate-cw",
     "search",
+    "server",
     "settings",
     "slash",
     "sparkle",

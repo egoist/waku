@@ -17,6 +17,7 @@ use tungstenite::protocol::WebSocketConfig;
 use tungstenite::{Message, WebSocket, accept_hdr_with_config};
 use uuid::Uuid;
 
+use crate::model::{AgentSession, Project, ProviderKind, SessionStatus};
 use crate::protocol::MAX_WIRE_MESSAGE_BYTES;
 use crate::protocol::{
     ClientMessage, Command, PROTOCOL_VERSION, ReplayCursor, Request, ResponseOutcome,
@@ -64,7 +65,17 @@ pub struct EventSink {
 
 impl EventSink {
     pub fn send(&self, event: WireDriverEvent) -> anyhow::Result<()> {
-        self.hub.emit(self.session_id, self.runtime_id, event);
+        self.hub.emit(self.session_id, self.runtime_id, event, true);
+        Ok(())
+    }
+
+    /// Broadcast a live-only event without retaining it in the replay journal.
+    /// High-volume PTY output is meaningful only to a terminal emulator that
+    /// is currently attached; replaying raw chunks into a fresh emulator would
+    /// also retain an unbounded terminal transcript in daemon memory.
+    pub fn send_ephemeral(&self, event: WireDriverEvent) -> anyhow::Result<()> {
+        self.hub
+            .emit(self.session_id, self.runtime_id, event, false);
         Ok(())
     }
 }
@@ -72,11 +83,58 @@ impl EventSink {
 #[derive(Default)]
 struct HubState {
     next_subscriber_id: u64,
+    task_state_revision: u64,
     subscribers: HashMap<u64, Sender<ServerMessage>>,
     active_runtimes: HashMap<Uuid, Uuid>,
     next_sequences: HashMap<(Uuid, Uuid), u64>,
     journal: HashMap<(Uuid, Uuid), VecDeque<SequencedEvent>>,
     responses: VecDeque<(Uuid, ResponseOutcome)>,
+    catalog_projects: HashMap<Uuid, ProjectCatalogEntry>,
+    catalog_sessions: HashMap<Uuid, SessionCatalogEntry>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ProjectCatalogEntry {
+    name: String,
+    path: std::path::PathBuf,
+    created_at: u64,
+}
+
+impl From<&Project> for ProjectCatalogEntry {
+    fn from(project: &Project) -> Self {
+        Self {
+            name: project.name.clone(),
+            path: project.path.clone(),
+            created_at: project.created_at,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct SessionCatalogEntry {
+    title: String,
+    auto_title: Option<String>,
+    project_id: Uuid,
+    provider: ProviderKind,
+    model: Option<String>,
+    status: SessionStatus,
+    created_at: u64,
+    last_reply_at: Option<u64>,
+}
+
+impl From<&AgentSession> for SessionCatalogEntry {
+    fn from(session: &AgentSession) -> Self {
+        Self {
+            title: session.title.clone(),
+            auto_title: session.auto_title.clone(),
+            project_id: session.project_id,
+            provider: session.provider,
+            model: session.model.clone(),
+            status: session.status,
+            created_at: session.created_at,
+            last_reply_at: session.last_reply_at,
+        }
+    }
 }
 
 struct Hub {
@@ -96,6 +154,7 @@ impl Default for Hub {
 struct DispatchedRequest {
     request: Request,
     outgoing: Sender<ServerMessage>,
+    source_subscriber_id: u64,
 }
 
 struct RuntimeMailbox {
@@ -133,7 +192,23 @@ impl Hub {
             .retain(|(candidate, _), _| *candidate != session_id);
     }
 
-    fn emit(&self, session_id: Uuid, runtime_id: Uuid, event: WireDriverEvent) {
+    fn end_runtime(&self, session_id: Uuid, runtime_id: Option<Uuid>) {
+        let mut state = self.state.lock();
+        let matches_active = runtime_id
+            .is_none_or(|runtime_id| state.active_runtimes.get(&session_id) == Some(&runtime_id));
+        if !matches_active {
+            return;
+        }
+        state.active_runtimes.remove(&session_id);
+        state
+            .next_sequences
+            .retain(|(candidate, _), _| *candidate != session_id);
+        state
+            .journal
+            .retain(|(candidate, _), _| *candidate != session_id);
+    }
+
+    fn emit(&self, session_id: Uuid, runtime_id: Uuid, event: WireDriverEvent, replayable: bool) {
         let mut state = self.state.lock();
         if state.active_runtimes.get(&session_id) != Some(&runtime_id) {
             return;
@@ -150,10 +225,12 @@ impl Hub {
             sequence: *sequence,
             event,
         };
-        let journal = state.journal.entry((session_id, runtime_id)).or_default();
-        journal.push_back(event.clone());
-        while journal.len() > MAX_REPLAY_EVENTS_PER_SESSION {
-            journal.pop_front();
+        if replayable {
+            let journal = state.journal.entry((session_id, runtime_id)).or_default();
+            journal.push_back(event.clone());
+            while journal.len() > MAX_REPLAY_EVENTS_PER_SESSION {
+                journal.pop_front();
+            }
         }
         let message = ServerMessage::Event(event);
         state
@@ -187,6 +264,60 @@ impl Hub {
         self.state.lock().subscribers.remove(&subscriber_id);
     }
 
+    fn task_state_changed(&self, source_subscriber_id: u64) {
+        let mut state = self.state.lock();
+        Self::broadcast_task_state_changed(&mut state, source_subscriber_id);
+    }
+
+    fn replace_task_catalog(&self, projects: &[Project], sessions: &[AgentSession]) {
+        let mut state = self.state.lock();
+        state.catalog_projects = projects
+            .iter()
+            .map(|project| (project.id, ProjectCatalogEntry::from(project)))
+            .collect();
+        state.catalog_sessions = sessions
+            .iter()
+            .map(|session| (session.id, SessionCatalogEntry::from(session)))
+            .collect();
+    }
+
+    fn task_state_saved(
+        &self,
+        source_subscriber_id: u64,
+        projects: &[Project],
+        sessions: &[AgentSession],
+    ) {
+        let mut state = self.state.lock();
+        let mut changed = false;
+        for project in projects {
+            let next = ProjectCatalogEntry::from(project);
+            changed |= state
+                .catalog_projects
+                .insert(project.id, next.clone())
+                .is_none_or(|previous| previous != next);
+        }
+        for session in sessions {
+            let next = SessionCatalogEntry::from(session);
+            changed |= state
+                .catalog_sessions
+                .insert(session.id, next.clone())
+                .is_none_or(|previous| previous != next);
+        }
+        if changed {
+            Self::broadcast_task_state_changed(&mut state, source_subscriber_id);
+        }
+    }
+
+    fn broadcast_task_state_changed(state: &mut HubState, source_subscriber_id: u64) {
+        state.task_state_revision = state.task_state_revision.saturating_add(1);
+        let message = ServerMessage::TaskStateChanged {
+            revision: state.task_state_revision,
+        };
+        state.subscribers.retain(|subscriber_id, subscriber| {
+            *subscriber_id == source_subscriber_id || subscriber.send(message.clone()).is_ok()
+        });
+    }
+
     fn cached_response(&self, request_id: Uuid) -> Option<ResponseOutcome> {
         self.state
             .lock()
@@ -214,15 +345,25 @@ impl RequestDispatcher {
         }
     }
 
-    fn dispatch(&self, request: Request, outgoing: Sender<ServerMessage>) {
+    fn dispatch(
+        &self,
+        request: Request,
+        outgoing: Sender<ServerMessage>,
+        source_subscriber_id: u64,
+    ) {
         if command_targets_runtime(&request.command) {
-            self.dispatch_runtime(request, outgoing);
+            self.dispatch_runtime(request, outgoing, source_subscriber_id);
         } else {
-            self.dispatch_independent(request, outgoing);
+            self.dispatch_independent(request, outgoing, source_subscriber_id);
         }
     }
 
-    fn dispatch_independent(&self, request: Request, outgoing: Sender<ServerMessage>) {
+    fn dispatch_independent(
+        &self,
+        request: Request,
+        outgoing: Sender<ServerMessage>,
+        source_subscriber_id: u64,
+    ) {
         let backend = self.backend.clone();
         let hub = self.hub.clone();
         let failed_request_id = request.request_id;
@@ -230,7 +371,7 @@ impl RequestDispatcher {
         if let Err(error) = std::thread::Builder::new()
             .name("waku-daemon-request".into())
             .spawn(move || {
-                handle_request(request, outgoing, backend, hub);
+                handle_request(request, outgoing, source_subscriber_id, backend, hub);
             })
         {
             send_dispatch_error(
@@ -242,11 +383,20 @@ impl RequestDispatcher {
         }
     }
 
-    fn dispatch_runtime(&self, request: Request, outgoing: Sender<ServerMessage>) {
+    fn dispatch_runtime(
+        &self,
+        request: Request,
+        outgoing: Sender<ServerMessage>,
+        source_subscriber_id: u64,
+    ) {
         let session_id = request.session_id;
         let failed_request_id = request.request_id;
         let failed_outgoing = outgoing.clone();
-        let mut dispatched = DispatchedRequest { request, outgoing };
+        let mut dispatched = DispatchedRequest {
+            request,
+            outgoing,
+            source_subscriber_id,
+        };
         loop {
             let mut mailboxes = self.runtime_mailboxes.lock();
             if let Some(mailbox) = mailboxes.get(&session_id) {
@@ -448,7 +598,7 @@ fn handle_connection(
         match socket.read() {
             Ok(Message::Text(text)) => match serde_json::from_str(text.as_ref()) {
                 Ok(ClientMessage::Request(request)) => {
-                    dispatcher.dispatch(request, outgoing.clone());
+                    dispatcher.dispatch(request, outgoing.clone(), subscriber_id);
                 }
                 Ok(ClientMessage::Shutdown) => {
                     if options.allow_shutdown {
@@ -522,7 +672,8 @@ fn token_matches(expected: &str, candidate: &str) -> bool {
 fn command_targets_runtime(command: &Command) -> bool {
     matches!(
         command,
-        Command::Start { .. }
+        Command::AttachSession
+            | Command::Start { .. }
             | Command::Prompt { .. }
             | Command::Steer { .. }
             | Command::Cancel
@@ -535,7 +686,14 @@ fn command_targets_runtime(command: &Command) -> bool {
             | Command::ApplyOptions { .. }
             | Command::Rollback { .. }
             | Command::Fork { .. }
+            | Command::ForkSessionFromResponse { .. }
+            | Command::RewindSessionToMessage { .. }
+            | Command::OpenTerminal { .. }
+            | Command::WriteTerminal { .. }
+            | Command::ResizeTerminal { .. }
+            | Command::CloseTerminal
             | Command::CloseSession
+            | Command::RemoveSession
     )
 }
 
@@ -558,31 +716,52 @@ fn run_runtime_mailbox(
             },
         };
         let runtime_id = dispatched.request.runtime_id;
-        let starts_runtime = matches!(&dispatched.request.command, Command::Start { .. });
-        let closes_runtime = matches!(&dispatched.request.command, Command::CloseSession);
+        let starts_runtime = matches!(
+            &dispatched.request.command,
+            Command::Start { .. } | Command::OpenTerminal { .. }
+        );
+        let closes_runtime = matches!(
+            &dispatched.request.command,
+            Command::CloseSession | Command::CloseTerminal | Command::RemoveSession
+        );
+        let removes_session = matches!(&dispatched.request.command, Command::RemoveSession);
         let handled = handle_request(
             dispatched.request,
             dispatched.outgoing,
+            dispatched.source_subscriber_id,
             backend.clone(),
             hub.clone(),
         );
 
         if handled.executed {
             if starts_runtime {
-                active_runtime_id = matches!(
-                    &handled.outcome,
-                    ResponseOutcome::Ok {
-                        payload: ResponsePayload::Started { .. }
-                    }
-                )
-                .then_some(runtime_id);
+                active_runtime_id =
+                    matches!(&handled.outcome, ResponseOutcome::Ok { .. }).then_some(runtime_id);
+            } else if let ResponseOutcome::Ok {
+                payload:
+                    ResponsePayload::SessionRuntime {
+                        runtime_id: Some(attached_runtime_id),
+                        ..
+                    },
+            } = &handled.outcome
+            {
+                // A replacement mailbox can rediscover a provider runtime
+                // that survived its previous actor worker.
+                active_runtime_id = Some(*attached_runtime_id);
             } else if closes_runtime {
-                if active_runtime_id == Some(runtime_id)
+                if (removes_session || active_runtime_id == Some(runtime_id))
                     && matches!(&handled.outcome, ResponseOutcome::Ok { .. })
                 {
+                    hub.end_runtime(session_id, (!removes_session).then_some(runtime_id));
                     active_runtime_id = None;
                 }
             } else if active_runtime_id.is_none()
+                && !matches!(
+                    &handled.outcome,
+                    ResponseOutcome::Ok {
+                        payload: ResponsePayload::SessionRuntime { .. }
+                    }
+                )
                 && matches!(&handled.outcome, ResponseOutcome::Ok { .. })
             {
                 // Recover the supervisor state if a previous mailbox worker
@@ -634,19 +813,34 @@ struct HandledRequest {
     executed: bool,
 }
 
+enum TaskCatalogAction {
+    None,
+    Load,
+    Save { projects: Vec<Project> },
+    Changed,
+}
+
 fn handle_request(
     request: Request,
     outgoing: Sender<ServerMessage>,
+    source_subscriber_id: u64,
     backend: Arc<dyn Backend>,
     hub: Arc<Hub>,
 ) -> HandledRequest {
     let request_id = request.request_id;
+    let notification = request_id.is_nil();
     let session_id = request.session_id;
     let runtime_id = request.runtime_id;
-    let (outcome, executed) = if let Some(cached) = hub.cached_response(request_id) {
+    let task_catalog_action = task_catalog_action(&request.command);
+    let starts_runtime = matches!(
+        &request.command,
+        Command::Start { .. } | Command::OpenTerminal { .. }
+    );
+    let (outcome, executed) = if !notification && let Some(cached) = hub.cached_response(request_id)
+    {
         (cached, false)
     } else {
-        if matches!(&request.command, Command::Start { .. }) {
+        if starts_runtime {
             hub.begin_runtime(session_id, runtime_id);
         }
         let outcome = match backend.handle(request, hub.event_sink(session_id, runtime_id)) {
@@ -655,14 +849,57 @@ fn handle_request(
                 error: RpcError::from(error),
             },
         };
-        hub.cache_response(request_id, outcome.clone());
+        if !notification {
+            hub.cache_response(request_id, outcome.clone());
+        }
         (outcome, true)
     };
-    let _ = outgoing.send(ServerMessage::Response {
-        request_id,
-        outcome: outcome.clone(),
-    });
+    if executed && starts_runtime && matches!(&outcome, ResponseOutcome::Error { .. }) {
+        hub.end_runtime(session_id, Some(runtime_id));
+    }
+    if executed {
+        match (&task_catalog_action, &outcome) {
+            (
+                TaskCatalogAction::Load,
+                ResponseOutcome::Ok {
+                    payload:
+                        ResponsePayload::TaskState {
+                            projects, sessions, ..
+                        },
+                },
+            ) => hub.replace_task_catalog(projects, sessions),
+            (
+                TaskCatalogAction::Save { projects },
+                ResponseOutcome::Ok {
+                    payload: ResponsePayload::TaskStateSaved { sessions },
+                },
+            ) => hub.task_state_saved(source_subscriber_id, projects, sessions),
+            (TaskCatalogAction::Changed, ResponseOutcome::Ok { .. }) => {
+                hub.task_state_changed(source_subscriber_id);
+            }
+            _ => {}
+        }
+    }
+    if !notification {
+        let _ = outgoing.send(ServerMessage::Response {
+            request_id,
+            outcome: outcome.clone(),
+        });
+    }
     HandledRequest { outcome, executed }
+}
+
+fn task_catalog_action(command: &Command) -> TaskCatalogAction {
+    match command {
+        Command::LoadTaskState => TaskCatalogAction::Load,
+        Command::SaveTaskState { projects, .. } => TaskCatalogAction::Save {
+            projects: projects.clone(),
+        },
+        Command::RemoveSession
+        | Command::ForkSessionFromResponse { .. }
+        | Command::RewindSessionToMessage { .. } => TaskCatalogAction::Changed,
+        _ => TaskCatalogAction::None,
+    }
 }
 
 fn send_dispatch_error(
@@ -671,6 +908,9 @@ fn send_dispatch_error(
     hub: &Arc<Hub>,
     message: String,
 ) {
+    if request_id.is_nil() {
+        return;
+    }
     let outcome = hub
         .cached_response(request_id)
         .unwrap_or_else(|| ResponseOutcome::Error {
@@ -728,26 +968,288 @@ fn write_json<S: io::Read + io::Write, T: serde::Serialize>(
 mod tests {
     use super::*;
     use crate::WireDriverStartOptions;
+    #[cfg(unix)]
+    use crate::daemon::WakuBackend;
+    #[cfg(unix)]
+    use crate::model::Project;
+    use crate::model::{AgentSession, ProviderKind};
+    #[cfg(unix)]
+    use crate::persistence::StateStore;
+    #[cfg(unix)]
+    use crate::settings::DaemonSettingsStore;
+    #[cfg(unix)]
+    use base64::Engine as _;
     use crossbeam_channel::bounded;
     use serde_json::json;
     use std::path::PathBuf;
     use waku_client::DaemonClient;
 
     #[derive(Default)]
-    struct TestBackend;
+    struct TestBackend {
+        runtimes: Mutex<HashMap<Uuid, Uuid>>,
+    }
 
     impl Backend for TestBackend {
         fn handle(&self, request: Request, events: EventSink) -> anyhow::Result<ResponsePayload> {
+            let session_id = request.session_id;
+            let runtime_id = request.runtime_id;
             match request.command {
                 Command::Start { .. } => {
+                    self.runtimes.lock().insert(session_id, runtime_id);
                     events.send(WireDriverEvent::new("connected", json!({})))?;
                     Ok(ResponsePayload::Started {
                         supports_steer: true,
                     })
                 }
+                Command::AttachSession => Ok(ResponsePayload::SessionRuntime {
+                    runtime_id: self.runtimes.lock().get(&session_id).copied(),
+                    supports_steer: true,
+                }),
+                Command::Prompt { prompt } => {
+                    events.send(WireDriverEvent::new("textDelta", json!(prompt)))?;
+                    Ok(ResponsePayload::Ack)
+                }
+                Command::CloseSession => {
+                    self.runtimes.lock().remove(&session_id);
+                    Ok(ResponsePayload::Ack)
+                }
                 _ => Ok(ResponsePayload::Ack),
             }
         }
+    }
+
+    #[derive(Default)]
+    struct TaskStateBackend {
+        sessions: Mutex<Vec<AgentSession>>,
+    }
+
+    impl Backend for TaskStateBackend {
+        fn handle(&self, request: Request, _events: EventSink) -> anyhow::Result<ResponsePayload> {
+            match request.command {
+                Command::SaveTaskState { sessions, .. } => {
+                    let mut stored = self.sessions.lock();
+                    for session in sessions {
+                        if let Some(existing) =
+                            stored.iter_mut().find(|existing| existing.id == session.id)
+                        {
+                            *existing = session;
+                        } else {
+                            stored.push(session);
+                        }
+                    }
+                    Ok(ResponsePayload::TaskStateSaved {
+                        sessions: stored.clone(),
+                    })
+                }
+                Command::LoadTaskState => Ok(ResponsePayload::TaskState {
+                    projects: Vec::new(),
+                    sessions: self.sessions.lock().clone(),
+                    default_cwd: PathBuf::from("/tmp"),
+                    projectless_root: Some(PathBuf::from("/tmp/.waku/projects")),
+                }),
+                _ => Ok(ResponsePayload::Ack),
+            }
+        }
+    }
+
+    #[test]
+    fn task_state_revisions_notify_other_clients_only() {
+        let hub = Hub::default();
+        let (source_tx, source_rx) = unbounded();
+        let source_id = hub.subscribe(&[], source_tx);
+        let (observer_tx, observer_rx) = unbounded();
+        hub.subscribe(&[], observer_tx);
+
+        hub.task_state_changed(source_id);
+
+        assert!(source_rx.try_recv().is_err());
+        assert!(matches!(
+            observer_rx.recv_timeout(Duration::from_secs(1)),
+            Ok(ServerMessage::TaskStateChanged { revision: 1 })
+        ));
+    }
+
+    #[test]
+    fn websocket_task_state_changes_reach_another_client() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let server_shutdown = shutdown.clone();
+        let server = std::thread::spawn(move || {
+            serve(
+                listener,
+                "secret".into(),
+                Arc::new(TaskStateBackend::default()),
+                server_shutdown,
+                ServerOptions {
+                    allow_shutdown: true,
+                    ..ServerOptions::default()
+                },
+            )
+            .unwrap()
+        });
+
+        let source = DaemonClient::connect(&address.to_string(), "secret".into()).unwrap();
+        let observer = DaemonClient::connect(&address.to_string(), "secret".into()).unwrap();
+        let source_revisions = source.subscribe_task_state();
+        let observer_revisions = observer.subscribe_task_state();
+        let session = AgentSession::new(Uuid::new_v4(), ProviderKind::Codex);
+        let session_id = session.id;
+
+        assert!(matches!(
+            source
+                .request(
+                    Uuid::nil(),
+                    Uuid::nil(),
+                    Command::SaveTaskState {
+                        projects: Vec::new(),
+                        live_session_ids: vec![session_id],
+                        sessions: vec![session],
+                    },
+                )
+                .unwrap(),
+            ResponsePayload::TaskStateSaved { .. }
+        ));
+        assert_eq!(
+            observer_revisions.recv_timeout(Duration::from_secs(1)),
+            Ok(1)
+        );
+        assert!(source_revisions.try_recv().is_err());
+        let ResponsePayload::TaskState { sessions, .. } = observer
+            .request(Uuid::nil(), Uuid::nil(), Command::LoadTaskState)
+            .unwrap()
+        else {
+            panic!("expected daemon task state");
+        };
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].id, session_id);
+
+        // Streaming checkpoints update transcript detail and `updated_at`,
+        // but do not change anything rendered in another client's task
+        // catalog. They must not trigger a list reload for every stream save.
+        let mut checkpoint = sessions[0].clone();
+        checkpoint.updated_at = checkpoint.updated_at.saturating_add(1);
+        source
+            .request(
+                Uuid::nil(),
+                Uuid::nil(),
+                Command::SaveTaskState {
+                    projects: Vec::new(),
+                    live_session_ids: vec![session_id],
+                    sessions: vec![checkpoint],
+                },
+            )
+            .unwrap();
+        assert!(
+            observer_revisions
+                .recv_timeout(Duration::from_millis(100))
+                .is_err()
+        );
+
+        // Desktop persistence uses fire-and-forget notifications, while Web
+        // uses requests. Both directions must wake the other application's
+        // catalog without echoing back to the source connection.
+        let second = AgentSession::new(Uuid::new_v4(), ProviderKind::Claude);
+        let second_id = second.id;
+        observer
+            .notify(
+                Uuid::nil(),
+                Uuid::nil(),
+                Command::SaveTaskState {
+                    projects: Vec::new(),
+                    live_session_ids: vec![session_id, second_id],
+                    sessions: vec![second],
+                },
+            )
+            .unwrap();
+        assert_eq!(source_revisions.recv_timeout(Duration::from_secs(1)), Ok(2));
+        assert!(observer_revisions.try_recv().is_err());
+        let ResponsePayload::TaskState { sessions, .. } = source
+            .request(Uuid::nil(), Uuid::nil(), Command::LoadTaskState)
+            .unwrap()
+        else {
+            panic!("expected daemon task state");
+        };
+        assert_eq!(sessions.len(), 2);
+        assert!(sessions.iter().any(|session| session.id == second_id));
+
+        source.shutdown();
+        server.join().unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn stale_projection_cannot_resurrect_a_removed_session() {
+        let root = std::env::temp_dir().join(format!("waku-remove-race-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let backend = WakuBackend::new(
+            DaemonSettingsStore::open(root.join("settings.json")).unwrap(),
+            StateStore::daemon(root.join("app.db")),
+        )
+        .unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let server_shutdown = shutdown.clone();
+        let server = std::thread::spawn(move || {
+            serve(
+                listener,
+                "secret".into(),
+                Arc::new(backend),
+                server_shutdown,
+                ServerOptions {
+                    allow_shutdown: true,
+                    ..ServerOptions::default()
+                },
+            )
+            .unwrap()
+        });
+
+        let stale_client = DaemonClient::connect(&address.to_string(), "secret".into()).unwrap();
+        let remover = DaemonClient::connect(&address.to_string(), "secret".into()).unwrap();
+        let project = Project::from_path(root.join("repo"));
+        let mut session = AgentSession::new(project.id, ProviderKind::Codex);
+        session.begin_turn("persist me");
+        stale_client
+            .request(
+                Uuid::nil(),
+                Uuid::nil(),
+                Command::SaveTaskState {
+                    projects: vec![project.clone()],
+                    live_session_ids: vec![session.id],
+                    sessions: vec![session.clone()],
+                },
+            )
+            .unwrap();
+        remover
+            .request(session.id, Uuid::nil(), Command::RemoveSession)
+            .unwrap();
+        let ResponsePayload::TaskStateSaved { sessions } = stale_client
+            .request(
+                Uuid::nil(),
+                Uuid::nil(),
+                Command::SaveTaskState {
+                    projects: vec![project],
+                    live_session_ids: vec![session.id],
+                    sessions: vec![session],
+                },
+            )
+            .unwrap()
+        else {
+            panic!("expected task-state save response");
+        };
+        assert!(sessions.is_empty());
+        let ResponsePayload::TaskState { sessions, .. } = stale_client
+            .request(Uuid::nil(), Uuid::nil(), Command::LoadTaskState)
+            .unwrap()
+        else {
+            panic!("expected task state");
+        };
+        assert!(sessions.is_empty());
+
+        stale_client.shutdown();
+        server.join().unwrap();
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -760,7 +1262,7 @@ mod tests {
             serve(
                 listener,
                 "secret".into(),
-                Arc::new(TestBackend),
+                Arc::new(TestBackend::default()),
                 server_shutdown,
                 ServerOptions {
                     allow_shutdown: true,
@@ -777,7 +1279,6 @@ mod tests {
         let client = DaemonClient::connect(&address.to_string(), "secret".into()).unwrap();
         let session_id = Uuid::new_v4();
         let runtime_id = Uuid::new_v4();
-        let events = client.subscribe(session_id, runtime_id);
         let response = client
             .request(
                 session_id,
@@ -805,6 +1306,9 @@ mod tests {
                 supports_steer: true
             }
         ));
+        // Start can emit before a refreshed app discovers and subscribes to
+        // the daemon-owned runtime. The client must retain that replay.
+        let events = client.subscribe(session_id, runtime_id);
         let event = events.recv_timeout(Duration::from_secs(1)).unwrap();
         assert_eq!(event.runtime_id, runtime_id);
         assert_eq!(event.sequence, 1);
@@ -815,6 +1319,235 @@ mod tests {
         assert_eq!(exited.runtime_id, runtime_id);
         assert_eq!(exited.event.kind, "processExited");
         server.join().unwrap();
+    }
+
+    #[test]
+    fn late_client_attaches_to_replay_and_live_runtime_events() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let server_shutdown = shutdown.clone();
+        let server = std::thread::spawn(move || {
+            serve(
+                listener,
+                "secret".into(),
+                Arc::new(TestBackend::default()),
+                server_shutdown,
+                ServerOptions {
+                    allow_shutdown: true,
+                    ..ServerOptions::default()
+                },
+            )
+            .unwrap()
+        });
+
+        let source = DaemonClient::connect(&address.to_string(), "secret".into()).unwrap();
+        let session_id = Uuid::new_v4();
+        let runtime_id = Uuid::new_v4();
+        let source_events = source.subscribe(session_id, runtime_id);
+        source
+            .request(
+                session_id,
+                runtime_id,
+                Command::Start {
+                    options: WireDriverStartOptions {
+                        provider: "codex".into(),
+                        binary: PathBuf::from("codex"),
+                        cwd: PathBuf::from("."),
+                        mode: "fullAccess".into(),
+                        interaction_mode: "build".into(),
+                        model: None,
+                        reasoning_effort: None,
+                        service_tier: None,
+                        agent_preset: None,
+                        computer_use_enabled: false,
+                        provider_cursor: None,
+                    },
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            source_events
+                .recv_timeout(Duration::from_secs(1))
+                .unwrap()
+                .event
+                .kind,
+            "connected"
+        );
+
+        let late = DaemonClient::connect(&address.to_string(), "secret".into()).unwrap();
+        assert!(matches!(
+            late.request(session_id, Uuid::nil(), Command::AttachSession)
+                .unwrap(),
+            ResponsePayload::SessionRuntime {
+                runtime_id: Some(attached),
+                supports_steer: true,
+            } if attached == runtime_id
+        ));
+        let late_events = late.subscribe(session_id, runtime_id);
+        let replayed = late_events.recv_timeout(Duration::from_secs(1)).unwrap();
+        assert_eq!(replayed.sequence, 1);
+        assert_eq!(replayed.event.kind, "connected");
+
+        source
+            .request(
+                session_id,
+                runtime_id,
+                Command::Prompt {
+                    prompt: "streamed from the first client".into(),
+                },
+            )
+            .unwrap();
+        for events in [&source_events, &late_events] {
+            let live = events.recv_timeout(Duration::from_secs(1)).unwrap();
+            assert_eq!(live.sequence, 2);
+            assert_eq!(live.event.kind, "textDelta");
+            assert_eq!(live.event.payload, json!("streamed from the first client"));
+        }
+
+        source
+            .request(session_id, runtime_id, Command::CloseSession)
+            .unwrap();
+        let after_close = DaemonClient::connect(&address.to_string(), "secret".into()).unwrap();
+        assert!(matches!(
+            after_close
+                .request(session_id, Uuid::nil(), Command::AttachSession)
+                .unwrap(),
+            ResponsePayload::SessionRuntime {
+                runtime_id: None,
+                supports_steer: true,
+            }
+        ));
+        let stale_events = after_close.subscribe(session_id, runtime_id);
+        assert!(
+            stale_events
+                .recv_timeout(Duration::from_millis(100))
+                .is_err(),
+            "an explicitly closed runtime must not replay into future clients"
+        );
+
+        source.shutdown();
+        server.join().unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn websocket_terminal_round_trip_streams_input_and_output() {
+        let root = std::env::temp_dir().join(format!("waku-terminal-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let backend = WakuBackend::new(
+            DaemonSettingsStore::open(root.join("settings.json")).unwrap(),
+            StateStore::daemon(root.join("app.db")),
+        )
+        .unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let server_shutdown = shutdown.clone();
+        let server = std::thread::spawn(move || {
+            serve(
+                listener,
+                "secret".into(),
+                Arc::new(backend),
+                server_shutdown,
+                ServerOptions {
+                    allow_shutdown: true,
+                    ..ServerOptions::default()
+                },
+            )
+            .unwrap()
+        });
+
+        let client = DaemonClient::connect(&address.to_string(), "secret".into()).unwrap();
+        let terminal_id = Uuid::new_v4();
+        let events = client.subscribe(terminal_id, terminal_id);
+        assert!(matches!(
+            client
+                .request(
+                    terminal_id,
+                    terminal_id,
+                    Command::OpenTerminal {
+                        cwd: root.clone(),
+                        cols: 80,
+                        rows: 24,
+                    },
+                )
+                .unwrap(),
+            ResponsePayload::Ack
+        ));
+        client
+            .request(
+                terminal_id,
+                terminal_id,
+                Command::WriteTerminal {
+                    data: b"waku-terminal-round-trip\r".to_vec(),
+                },
+            )
+            .unwrap();
+
+        // The raw test client intentionally does not emulate wterm's replies
+        // to terminal capability queries. The PTY's local echo is enough to
+        // prove that daemon-side input and output both crossed the WebSocket.
+        let marker = b"waku-terminal-round-trip";
+        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        let mut output = Vec::new();
+        let mut seen_events = Vec::new();
+        while std::time::Instant::now() < deadline
+            && !output.windows(marker.len()).any(|window| window == marker)
+        {
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            let Ok(event) = events.recv_timeout(remaining) else {
+                break;
+            };
+            seen_events.push(event.event.kind.clone());
+            if event.event.kind != "terminalOutput" {
+                continue;
+            }
+            let data = event.event.payload["data"].as_str().unwrap();
+            output.extend(
+                base64::engine::general_purpose::STANDARD
+                    .decode(data)
+                    .unwrap(),
+            );
+        }
+        assert!(
+            output.windows(marker.len()).any(|window| window == marker),
+            "daemon terminal did not return the shell marker; events={seen_events:?}, output={}",
+            String::from_utf8_lossy(&output)
+        );
+        assert!(matches!(
+            client
+                .request(terminal_id, terminal_id, Command::CloseTerminal)
+                .unwrap(),
+            ResponsePayload::Ack
+        ));
+
+        client.shutdown();
+        server.join().unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn nil_request_ids_execute_without_responses_or_cache_entries() {
+        let (outgoing, responses) = unbounded();
+        let hub = Arc::new(Hub::default());
+        let handled = handle_request(
+            Request {
+                request_id: Uuid::nil(),
+                session_id: Uuid::nil(),
+                runtime_id: Uuid::nil(),
+                command: Command::GetSettings,
+            },
+            outgoing,
+            0,
+            Arc::new(TestBackend::default()),
+            hub.clone(),
+        );
+
+        assert!(handled.executed);
+        assert!(matches!(handled.outcome, ResponseOutcome::Ok { .. }));
+        assert!(responses.try_recv().is_err());
+        assert!(hub.cached_response(Uuid::nil()).is_none());
     }
 
     #[test]
@@ -950,6 +1683,7 @@ mod tests {
                 },
             },
             outgoing.clone(),
+            0,
         );
         probe_started_rx
             .recv_timeout(Duration::from_secs(1))
@@ -966,6 +1700,7 @@ mod tests {
                 },
             },
             outgoing,
+            0,
         );
         assert!(matches!(
             response_rx.recv_timeout(Duration::from_secs(1)).unwrap(),
@@ -1037,6 +1772,7 @@ mod tests {
                 },
             },
             start_outgoing,
+            0,
         );
         assert_eq!(
             handled_rx.recv_timeout(Duration::from_secs(1)).unwrap(),
@@ -1054,6 +1790,7 @@ mod tests {
                 },
             },
             second_client_outgoing,
+            0,
         );
 
         let other_start_id = Uuid::new_v4();
@@ -1067,6 +1804,7 @@ mod tests {
                 },
             },
             other_outgoing.clone(),
+            0,
         );
         assert_eq!(
             handled_rx.recv_timeout(Duration::from_secs(1)).unwrap(),
@@ -1107,6 +1845,7 @@ mod tests {
                 command: Command::CloseSession,
             },
             other_outgoing.clone(),
+            0,
         );
         let other_close_id = Uuid::new_v4();
         dispatcher.dispatch(
@@ -1117,6 +1856,7 @@ mod tests {
                 command: Command::CloseSession,
             },
             other_outgoing,
+            0,
         );
         let mut close_responses = [false; 2];
         for _ in 0..2 {

@@ -506,47 +506,18 @@ pub(super) fn navigation_rail_scale(
     })
 }
 
-/// How many ticks the rail draws: one per turn while they fit, otherwise as
-/// many whole ticks as the rail's height budget holds. Ticks never squeeze
-/// below their full pitch — a hundreds-of-turns session would compress the
-/// gaps to nothing and turn the rail into a solid bar, and the element count
-/// per hover re-render would grow with the session instead of the viewport.
-pub(super) fn navigation_rail_tick_count(turn_count: usize, viewport_height: f32) -> usize {
-    let budget = viewport_height * NAVIGATION_RAIL_VIEWPORT_HEIGHT_RATIO;
-    let max_ticks = ((budget / NAVIGATION_RAIL_TURN_HEIGHT) as usize).max(1);
-    turn_count.min(max_ticks)
-}
-
-/// The first turn of the bucket tick `tick_index` stands for — its
-/// representative for previews, clicks, and focus. The identity map while
-/// every turn has its own tick.
-pub(super) fn navigation_rail_tick_turn(
-    tick_index: usize,
-    tick_count: usize,
-    turn_count: usize,
-) -> usize {
-    if tick_count == 0 {
-        return 0;
-    }
-    (tick_index * turn_count).div_ceil(tick_count)
-}
-
-/// The tick whose bucket holds `turn_index` — the inverse of
-/// [`navigation_rail_tick_turn`], so an active turn always lights up exactly
-/// one tick.
-pub(super) fn navigation_rail_turn_tick(
-    turn_index: usize,
-    tick_count: usize,
-    turn_count: usize,
-) -> usize {
-    if turn_count == 0 {
-        return 0;
-    }
-    turn_index * tick_count / turn_count
-}
-
 pub(super) fn navigation_rail_height(turn_count: usize, viewport_height: f32) -> f32 {
-    navigation_rail_tick_count(turn_count, viewport_height) as f32 * NAVIGATION_RAIL_TURN_HEIGHT
+    (turn_count as f32 * NAVIGATION_RAIL_TURN_HEIGHT)
+        .min(viewport_height * NAVIGATION_RAIL_VIEWPORT_HEIGHT_RATIO)
+}
+
+pub(super) fn navigation_rail_fade_visibility(
+    offset_y: Pixels,
+    max_offset: Pixels,
+) -> (bool, bool) {
+    let scrolled = -offset_y;
+    let threshold = px(0.5);
+    (scrolled > threshold, max_offset - scrolled > threshold)
 }
 
 pub(super) fn should_show_navigation_rail(

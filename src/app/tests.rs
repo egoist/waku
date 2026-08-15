@@ -2,6 +2,7 @@ use super::composer::{
     ComposerSubmitAction, composer_submit_action, dropped_file_mention, merged_submission,
     next_picker_highlight, visible_branch_entries,
 };
+use super::runtime::merge_remote_session_catalog;
 use super::settings::visible_settings_pages;
 use super::{
     ESCAPE_STOP_CONFIRMATION_TIMEOUT, EscapeStopConfirmation, EscapeStopPress, EscapeStopTarget,
@@ -11,14 +12,15 @@ use super::{
     changed_files_inline_message_index, compact_driver_error, disclosure_leading_space,
     fenced_code, fitted_file_tree_width, fitted_panel_widths, folded_transcript_row_kinds,
     format_worked_duration, format_working_elapsed, maintain_transcript_anchor,
-    message_starts_followup_turn, navigation_preview_snippet, navigation_rail_height,
-    navigation_rail_scale, navigation_rail_tick_count, navigation_rail_tick_turn,
-    navigation_rail_turn_tick, paused_toast_duration, pop_stream_chunk, push_transcript_activity,
-    session_is_reapable, should_refresh_branch_after_activity, should_show_navigation_rail,
-    should_show_scroll_to_bottom, take_stream_prefix, task_id_from_notification_tag,
-    task_notification_tag, transcript_anchor_end_space, transcript_navigation_turns,
-    transcript_row_kinds, transcript_row_splice, transcript_rows_fingerprint,
-    widened_panel_width_for_file_editor, widened_panel_width_for_review,
+    message_starts_followup_turn, navigation_preview_snippet, navigation_rail_fade_visibility,
+    navigation_rail_height, navigation_rail_scale, paused_toast_duration,
+    pop_complete_stream_chunk, pop_stream_chunk, push_transcript_activity, session_is_reapable,
+    should_refresh_branch_after_activity, should_show_navigation_rail,
+    should_show_scroll_to_bottom, stream_backlog_should_flush, take_stream_prefix,
+    task_id_from_notification_tag, task_notification_tag, transcript_anchor_end_space,
+    transcript_navigation_turns, transcript_row_kinds, transcript_row_splice,
+    transcript_rows_fingerprint, widened_panel_width_for_file_editor,
+    widened_panel_width_for_review,
 };
 use crate::git_branch::BranchEntry;
 use crate::model::{
@@ -48,6 +50,42 @@ fn attach_changed_files(session: &mut AgentSession, files: Vec<CheckpointFile>) 
         .as_mut()
         .expect("checkpoint was just attached")
         .refresh_totals();
+}
+
+#[test]
+fn remote_task_catalog_adds_web_tasks_without_replacing_hydrated_detail() {
+    let project_id = Uuid::new_v4();
+    let mut local = AgentSession::new(project_id, ProviderKind::Codex);
+    local.title = "Local title".into();
+    local
+        .messages
+        .push(Message::new(MessageRole::User, "keep this transcript"));
+    let local_id = local.id;
+
+    let mut local_projection = local.list_projection();
+    local_projection.title = "Renamed elsewhere".into();
+    local_projection.status = SessionStatus::Waiting;
+    local_projection.updated_at += 10;
+
+    let mut web_task = AgentSession::new(project_id, ProviderKind::Claude).list_projection();
+    web_task.title = "Created in Web".into();
+    let web_task_id = web_task.id;
+
+    let mut catalog = vec![local];
+    let removed =
+        merge_remote_session_catalog(&mut catalog, vec![local_projection, web_task], |_| false);
+
+    assert!(removed.is_empty());
+    assert_eq!(catalog.len(), 2);
+    let merged_local = catalog
+        .iter()
+        .find(|session| session.id == local_id)
+        .unwrap();
+    assert_eq!(merged_local.title, "Renamed elsewhere");
+    assert_eq!(merged_local.status, SessionStatus::Waiting);
+    assert_eq!(merged_local.messages.len(), 1);
+    assert_eq!(merged_local.messages[0].content, "keep this transcript");
+    assert!(catalog.iter().any(|session| session.id == web_task_id));
 }
 
 #[test]
@@ -298,8 +336,8 @@ fn conversation_navigation_rail_visibility_uses_all_three_gates() {
 #[test]
 fn conversation_navigation_rail_height_caps_at_eighty_percent() {
     assert_eq!(navigation_rail_height(10, 600.0), 120.0);
-    // 80% of 600px holds 40 whole ticks; the rail quantizes to them instead
-    // of squeezing one hundred sub-pixel rows into the 480px budget.
+    // Every turn keeps its full 12px scroll position; only the viewport is
+    // capped, so the remaining turns are reached by scrolling the rail.
     assert_eq!(navigation_rail_height(100, 600.0), 480.0);
     assert!(navigation_rail_height(100, 600.0) <= 600.0 * 0.80);
     assert_eq!(
@@ -309,40 +347,23 @@ fn conversation_navigation_rail_height_caps_at_eighty_percent() {
 }
 
 #[test]
-fn conversation_navigation_rail_samples_ticks_when_turns_cannot_fit() {
-    // While every turn fits, each keeps its own tick and the maps are the
-    // identity.
-    assert_eq!(navigation_rail_tick_count(10, 600.0), 10);
-    assert_eq!(navigation_rail_tick_turn(3, 10, 10), 3);
-    assert_eq!(navigation_rail_turn_tick(3, 10, 10), 3);
-
-    // A thousand turns sample down to the 40 full-pitch ticks a 600px
-    // viewport can hold, spanning the whole conversation.
-    let tick_count = navigation_rail_tick_count(1000, 600.0);
-    assert_eq!(tick_count, 40);
-    assert_eq!(navigation_rail_tick_turn(0, tick_count, 1000), 0);
+fn conversation_navigation_rail_fades_point_toward_hidden_turns() {
     assert_eq!(
-        navigation_rail_tick_turn(tick_count - 1, tick_count, 1000),
-        975
+        navigation_rail_fade_visibility(px(0.0), px(120.0)),
+        (false, true)
     );
-
-    // Every turn resolves to exactly the tick whose bucket holds it, and each
-    // tick's representative turn maps back to that tick.
-    for turn_index in 0..1000 {
-        let tick = navigation_rail_turn_tick(turn_index, tick_count, 1000);
-        assert!(tick < tick_count);
-        assert!(navigation_rail_tick_turn(tick, tick_count, 1000) <= turn_index);
-        if tick + 1 < tick_count {
-            assert!(turn_index < navigation_rail_tick_turn(tick + 1, tick_count, 1000));
-        }
-    }
-    for tick_index in 0..tick_count {
-        let representative = navigation_rail_tick_turn(tick_index, tick_count, 1000);
-        assert_eq!(
-            navigation_rail_turn_tick(representative, tick_count, 1000),
-            tick_index
-        );
-    }
+    assert_eq!(
+        navigation_rail_fade_visibility(px(-40.0), px(120.0)),
+        (true, true)
+    );
+    assert_eq!(
+        navigation_rail_fade_visibility(px(-120.0), px(120.0)),
+        (true, false)
+    );
+    assert_eq!(
+        navigation_rail_fade_visibility(px(0.0), px(0.0)),
+        (false, false)
+    );
 }
 
 #[test]
@@ -642,7 +663,7 @@ fn stream_prefix_stops_at_lines_without_splitting_graphemes() {
 }
 
 #[test]
-fn stream_chunks_coalesce_deltas_and_preserve_event_order() {
+fn stream_chunks_use_the_frame_budget_across_short_lines_and_preserve_event_order() {
     let mut events = VecDeque::from([
         DriverEvent::TextDelta("first ".into()),
         DriverEvent::TextDelta("line\nsecond line".into()),
@@ -658,18 +679,40 @@ fn stream_chunks_coalesce_deltas_and_preserve_event_order() {
 
     assert!(matches!(
         pop_stream_chunk(&mut events, StreamDeltaKind::Text),
-        Some(DriverEvent::TextDelta(text)) if text == "first line\n"
+        Some(DriverEvent::TextDelta(text)) if text == "first line\ns"
     ));
     assert!(matches!(
         events.front(),
-        Some(DriverEvent::TextDelta(text)) if text == "second line"
+        Some(DriverEvent::TextDelta(text)) if text == "econd line"
     ));
 
     assert!(matches!(
         pop_stream_chunk(&mut events, StreamDeltaKind::Text),
-        Some(DriverEvent::TextDelta(text)) if text == "second line"
+        Some(DriverEvent::TextDelta(text)) if text == "econd line"
     ));
     assert!(matches!(events.front(), Some(DriverEvent::Activity { .. })));
+}
+
+#[test]
+fn settled_stream_backlog_flushes_before_the_terminal_event() {
+    let mut events = VecDeque::from([
+        DriverEvent::TextDelta("first line\nsecond ".into()),
+        DriverEvent::TextDelta("line".into()),
+        DriverEvent::TurnFinished {
+            success: true,
+            summary: None,
+        },
+    ]);
+
+    assert!(stream_backlog_should_flush(&events));
+    assert!(matches!(
+        pop_complete_stream_chunk(&mut events, StreamDeltaKind::Text),
+        Some(DriverEvent::TextDelta(text)) if text == "first line\nsecond line"
+    ));
+    assert!(matches!(
+        events.front(),
+        Some(DriverEvent::TurnFinished { success: true, .. })
+    ));
 }
 
 #[test]
@@ -1664,6 +1707,7 @@ fn settings_search_filters_pages_for_arrow_cycling() {
         SettingsPage::Providers,
         SettingsPage::Skills,
         SettingsPage::Usage,
+        SettingsPage::Daemon,
     ];
     if cfg!(all(debug_assertions, target_os = "macos")) {
         all_pages.push(SettingsPage::ComputerUse);

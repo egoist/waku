@@ -1,16 +1,20 @@
 //! Desktop-owned preferences and RPC proxies for daemon-owned task state.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::fs;
-use std::io;
+use std::fs::{self, OpenOptions};
+use std::io::{self, Write as _};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+
+#[cfg(unix)]
+use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
 
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::{Command, DaemonSettings, DaemonSupervisor, ResponsePayload};
+use crate::{Command, DaemonExposureSettings, DaemonSettings, DaemonSupervisor, ResponsePayload};
 use waku_protocol::computer_use::ComputerAppGrant;
 use waku_protocol::i18n::AppLanguage;
 use waku_protocol::identity::DATA_DIRECTORY_NAME;
@@ -18,7 +22,8 @@ use waku_protocol::model::{AgentSession, FavoriteModel, Project, ProviderKind};
 use waku_protocol::theme::ThemePreference;
 
 pub use waku_protocol::persistence::{
-    ComposerDraft, ComposerDraftAttachment, ComposerDraftKey, ComposerDrafts, SessionMessageMatch,
+    ComposerDraft, ComposerDraftAttachment, ComposerDraftChange, ComposerDraftKey,
+    ComposerDraftTarget, ComposerDrafts, SessionMessageMatch,
 };
 
 const STATE_VERSION: u32 = 5;
@@ -70,11 +75,21 @@ pub struct RememberedModelTraits {
 #[derive(Clone)]
 pub struct ComposerDraftStore {
     daemon: DaemonSupervisor,
+    save_state: Arc<Mutex<ComposerDraftSaveState>>,
+}
+
+#[derive(Default)]
+struct ComposerDraftSaveState {
+    snapshot: ComposerDrafts,
+    latest_generation: u64,
 }
 
 impl ComposerDraftStore {
     pub fn remote(daemon: DaemonSupervisor) -> Self {
-        Self { daemon }
+        Self {
+            daemon,
+            save_state: Arc::new(Mutex::new(ComposerDraftSaveState::default())),
+        }
     }
 
     pub fn load(&self) -> io::Result<ComposerDrafts> {
@@ -84,7 +99,10 @@ impl ComposerDraftStore {
             .request(Uuid::nil(), Uuid::nil(), Command::LoadComposerDrafts)
             .map_err(to_io_error)?
         {
-            ResponsePayload::ComposerDrafts { drafts } => Ok(drafts),
+            ResponsePayload::ComposerDrafts { drafts } => {
+                self.save_state.lock().snapshot = drafts.clone();
+                Ok(drafts)
+            }
             _ => Err(io::Error::other(
                 "Waku daemon returned an invalid composer-drafts response",
             )),
@@ -92,20 +110,80 @@ impl ComposerDraftStore {
     }
 
     pub fn save(&self, drafts: ComposerDrafts, generation: u64) -> io::Result<()> {
+        // Serialize this client's detached background saves and compare only
+        // against its last local snapshot. A second client may add or remove
+        // other keys without those changes being interpreted as ours.
+        let mut state = self.save_state.lock();
+        if generation < state.latest_generation {
+            return Ok(());
+        }
+        let changes = composer_draft_changes(&state.snapshot, &drafts);
+        if changes.is_empty() {
+            state.latest_generation = generation;
+            return Ok(());
+        }
         match self
             .daemon
             .client()
             .request(
                 Uuid::nil(),
                 Uuid::nil(),
-                Command::SaveComposerDrafts { drafts, generation },
+                Command::ApplyComposerDraftChanges { changes },
             )
             .map_err(to_io_error)?
         {
-            ResponsePayload::Ack => Ok(()),
+            ResponsePayload::Ack => {
+                state.snapshot = drafts;
+                state.latest_generation = generation;
+                Ok(())
+            }
             _ => Err(io::Error::other(
                 "Waku daemon returned an invalid composer-drafts save response",
             )),
+        }
+    }
+}
+
+fn composer_draft_changes(
+    previous: &ComposerDrafts,
+    next: &ComposerDrafts,
+) -> Vec<ComposerDraftChange> {
+    let mut changes = Vec::new();
+    collect_composer_draft_changes(
+        &previous.new_sessions,
+        &next.new_sessions,
+        |project_id| ComposerDraftTarget::NewSession { project_id },
+        &mut changes,
+    );
+    collect_composer_draft_changes(
+        &previous.sessions,
+        &next.sessions,
+        |session_id| ComposerDraftTarget::Session { session_id },
+        &mut changes,
+    );
+    changes
+}
+
+fn collect_composer_draft_changes(
+    previous: &HashMap<Uuid, ComposerDraft>,
+    next: &HashMap<Uuid, ComposerDraft>,
+    target: impl Fn(Uuid) -> ComposerDraftTarget,
+    changes: &mut Vec<ComposerDraftChange>,
+) {
+    for (id, draft) in next {
+        if previous.get(id) != Some(draft) {
+            changes.push(ComposerDraftChange {
+                target: target(*id),
+                draft: Some(draft.clone()),
+            });
+        }
+    }
+    for id in previous.keys() {
+        if !next.contains_key(id) {
+            changes.push(ComposerDraftChange {
+                target: target(*id),
+                draft: None,
+            });
         }
     }
 }
@@ -117,6 +195,7 @@ pub struct AppSettings {
     pub favorite_models: Vec<FavoriteModel>,
     pub theme: ThemePreference,
     pub language: AppLanguage,
+    pub daemon_exposure: DaemonExposureSettings,
 }
 
 impl Default for AppSettings {
@@ -126,6 +205,7 @@ impl Default for AppSettings {
             favorite_models: Vec::new(),
             theme: ThemePreference::System,
             language: AppLanguage::default(),
+            daemon_exposure: DaemonExposureSettings::default(),
         }
     }
 }
@@ -185,6 +265,8 @@ pub struct PersistedState {
     pub theme: ThemePreference,
     #[serde(default)]
     pub language: AppLanguage,
+    #[serde(default)]
+    pub daemon_exposure: DaemonExposureSettings,
     #[serde(default = "default_sidebar_visibility")]
     pub sidebar_visible: bool,
     #[serde(default = "default_right_panel_visibility")]
@@ -240,6 +322,7 @@ impl PersistedState {
             favorite_models: Vec::new(),
             theme: ThemePreference::System,
             language: AppLanguage::default(),
+            daemon_exposure: DaemonExposureSettings::default(),
             sidebar_visible: true,
             right_panel_visible: false,
             sidebar_width: DEFAULT_SIDEBAR_WIDTH,
@@ -344,6 +427,7 @@ impl PersistedState {
             favorite_models: self.favorite_models.clone(),
             theme: self.theme,
             language: self.language,
+            daemon_exposure: self.daemon_exposure.clone(),
         }
     }
 
@@ -370,6 +454,7 @@ impl PersistedState {
         self.favorite_models = settings.favorite_models;
         self.theme = settings.theme;
         self.language = settings.language;
+        self.daemon_exposure = settings.daemon_exposure;
     }
 
     fn apply_app_state(&mut self, app_state: AppState) {
@@ -464,6 +549,79 @@ impl PersistedState {
     }
 }
 
+fn configuration_directory() -> PathBuf {
+    dirs::home_dir()
+        .unwrap_or_else(std::env::temp_dir)
+        .join(".waku")
+}
+
+fn default_app_settings_path() -> PathBuf {
+    configuration_directory().join("app.json")
+}
+
+fn default_legacy_settings_paths() -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+    if cfg!(debug_assertions) {
+        let state_path = StateStore::default_path();
+        paths.push(
+            state_path
+                .parent()
+                .unwrap_or_else(|| Path::new("."))
+                .join("settings.json"),
+        );
+    }
+    paths.push(configuration_directory().join("settings.json"));
+    paths
+}
+
+fn read_app_settings_source(
+    app_settings_path: &Path,
+    legacy_settings_paths: &[PathBuf],
+) -> io::Result<Option<(Vec<u8>, bool)>> {
+    match fs::read(app_settings_path) {
+        Ok(bytes) => return Ok(Some((bytes, true))),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
+    }
+    for path in legacy_settings_paths {
+        match fs::read(path) {
+            Ok(bytes) => return Ok(Some((bytes, false))),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(None)
+}
+
+/// Load the app-owned launch settings before the managed daemon starts.
+/// Missing settings are initialized immediately so its bearer token remains
+/// stable between this process launch and the later UI state load.
+pub fn load_or_create_app_settings() -> io::Result<AppSettings> {
+    let path = default_app_settings_path();
+    let source = read_app_settings_source(&path, &default_legacy_settings_paths())?;
+    let loaded_from_primary = source.as_ref().is_some_and(|(_, primary)| *primary);
+    let token_was_persisted = source
+        .as_ref()
+        .and_then(|(bytes, _)| serde_json::from_slice::<serde_json::Value>(bytes).ok())
+        .and_then(|value| {
+            value
+                .get("daemon_exposure")
+                .and_then(|daemon| daemon.get("token"))
+                .and_then(serde_json::Value::as_str)
+                .map(|token| !token.trim().is_empty())
+        })
+        .unwrap_or(false);
+    let mut settings: AppSettings = source
+        .map(|(bytes, _)| serde_json::from_slice::<AppSettings>(&bytes).map_err(to_io_error))
+        .transpose()?
+        .unwrap_or_default();
+    let generated_token = settings.daemon_exposure.ensure_token();
+    if !loaded_from_primary || !token_was_persisted || generated_token {
+        write_json_atomically(&path, &settings)?;
+    }
+    Ok(settings)
+}
+
 /// Desktop state store: app files stay local, task data crosses RPC.
 pub struct StateStore {
     path: PathBuf,
@@ -499,18 +657,10 @@ impl StateStore {
     pub fn remote(daemon: DaemonSupervisor) -> Self {
         let path = Self::default_path();
         let directory = path.parent().unwrap_or_else(|| Path::new(".")).to_owned();
-        let configuration_directory = dirs::home_dir()
-            .unwrap_or_else(std::env::temp_dir)
-            .join(".waku");
-        let mut legacy_settings_paths = Vec::new();
-        if cfg!(debug_assertions) {
-            legacy_settings_paths.push(directory.join("settings.json"));
-        }
-        legacy_settings_paths.push(configuration_directory.join("settings.json"));
         Self {
             app_state_path: directory.join("state.json"),
-            app_settings_path: configuration_directory.join("app.json"),
-            legacy_settings_paths,
+            app_settings_path: default_app_settings_path(),
+            legacy_settings_paths: default_legacy_settings_paths(),
             path,
             daemon,
             remote_default_cwd: Mutex::new(None),
@@ -667,6 +817,13 @@ impl StateStore {
         Ok(())
     }
 
+    pub fn remove_session(&self, session_id: Uuid) -> io::Result<()> {
+        self.daemon
+            .client()
+            .notify(session_id, Uuid::nil(), Command::RemoveSession)
+            .map_err(to_io_error)
+    }
+
     pub fn blob_sweep(&self) -> impl FnOnce() + Send + 'static {
         let daemon = self.daemon.clone();
         move || {
@@ -681,26 +838,10 @@ impl StateStore {
     }
 
     fn read_app_settings(&self) -> io::Result<Option<AppSettings>> {
-        let source = match fs::read(&self.app_settings_path) {
-            Ok(bytes) => Some(bytes),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                let mut migrated = None;
-                for path in &self.legacy_settings_paths {
-                    match fs::read(path) {
-                        Ok(bytes) => {
-                            migrated = Some(bytes);
-                            break;
-                        }
-                        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-                        Err(error) => return Err(error),
-                    }
-                }
-                migrated
-            }
-            Err(error) => return Err(error),
-        };
+        let source =
+            read_app_settings_source(&self.app_settings_path, &self.legacy_settings_paths)?;
         source
-            .map(|bytes| serde_json::from_slice(&bytes).map_err(to_io_error))
+            .map(|(bytes, _)| serde_json::from_slice(&bytes).map_err(to_io_error))
             .transpose()
     }
 
@@ -755,8 +896,17 @@ fn write_json_atomically(path: &Path, value: &impl Serialize) -> io::Result<()> 
     }
     let data = serde_json::to_vec_pretty(value).map_err(to_io_error)?;
     let temporary = path.with_extension("json.tmp");
-    fs::write(&temporary, data)?;
-    fs::rename(temporary, path)
+    let mut options = OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    options.mode(0o600);
+    let mut file = options.open(&temporary)?;
+    file.write_all(&data)?;
+    file.sync_all()?;
+    fs::rename(&temporary, path)?;
+    #[cfg(unix)]
+    fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
+    Ok(())
 }
 
 fn restore_task_state_skeletons(sessions: &mut [AgentSession]) {

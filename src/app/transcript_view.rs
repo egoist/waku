@@ -7,7 +7,7 @@ const CHANGED_FILES_PREVIEW_LIMIT: usize = 3;
 /// right panel.
 const CHANGED_FILES_EXPANDED_LIMIT: usize = 12;
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug)]
 struct ConversationNavigationRailSnapshot {
     visible: bool,
     /// Shared with the `Waku` cache: the turns only change when the row-kinds
@@ -18,6 +18,17 @@ struct ConversationNavigationRailSnapshot {
     active_turn: Option<Uuid>,
     reset_generation: u64,
     theme_is_dark: bool,
+}
+
+impl PartialEq for ConversationNavigationRailSnapshot {
+    fn eq(&self, other: &Self) -> bool {
+        self.visible == other.visible
+            && Rc::ptr_eq(&self.turns, &other.turns)
+            && self.viewport_height == other.viewport_height
+            && self.active_turn == other.active_turn
+            && self.reset_generation == other.reset_generation
+            && self.theme_is_dark == other.theme_is_dark
+    }
 }
 
 impl Default for ConversationNavigationRailSnapshot {
@@ -36,7 +47,10 @@ impl Default for ConversationNavigationRailSnapshot {
 pub(super) struct ConversationNavigationRail {
     waku: Option<WeakEntity<Waku>>,
     snapshot: ConversationNavigationRailSnapshot,
+    turn_list_state: ListState,
+    turn_indexes: HashMap<Uuid, usize>,
     hovered_turn: Option<Uuid>,
+    focused_turn: Option<Uuid>,
     focus_handles: HashMap<Uuid, FocusHandle>,
     visual_state: NavigationRailVisualState,
     transition_from: NavigationRailVisualState,
@@ -45,10 +59,16 @@ pub(super) struct ConversationNavigationRail {
 
 impl ConversationNavigationRail {
     pub(super) fn new() -> Self {
+        let turn_list_state = ListState::new(0, ListAlignment::Top, px(48.0))
+            .with_uniform_item_height(px(NAVIGATION_RAIL_TURN_HEIGHT));
+        turn_list_state.set_scroll_handler(|_, window, _| window.refresh());
         Self {
             waku: None,
             snapshot: ConversationNavigationRailSnapshot::default(),
+            turn_list_state,
+            turn_indexes: HashMap::new(),
             hovered_turn: None,
+            focused_turn: None,
             focus_handles: HashMap::new(),
             visual_state: NavigationRailVisualState::default(),
             transition_from: NavigationRailVisualState::default(),
@@ -68,21 +88,57 @@ impl ConversationNavigationRail {
         if self.snapshot == snapshot {
             return;
         }
-        if self.snapshot.reset_generation != snapshot.reset_generation {
+        let reset = self.snapshot.reset_generation != snapshot.reset_generation;
+        let turn_identity_changed = self.snapshot.turns.len() != snapshot.turns.len()
+            || self
+                .snapshot
+                .turns
+                .iter()
+                .zip(snapshot.turns.iter())
+                .any(|(previous, next)| previous.message_id != next.message_id);
+        let active_turn_changed = self.snapshot.active_turn != snapshot.active_turn;
+        if reset {
             self.hovered_turn = None;
+            self.focused_turn = None;
             self.focus_handles.clear();
             self.visual_state = NavigationRailVisualState::default();
             self.transition_from = NavigationRailVisualState::default();
             self.animation_generation = self.animation_generation.wrapping_add(1);
-        } else {
+        } else if turn_identity_changed {
             self.focus_handles.retain(|message_id, _| {
                 snapshot
                     .turns
                     .iter()
                     .any(|turn| turn.message_id == *message_id)
             });
+            if self
+                .focused_turn
+                .is_some_and(|message_id| !self.focus_handles.contains_key(&message_id))
+            {
+                self.focused_turn = None;
+            }
+        }
+        if reset || turn_identity_changed {
+            self.turn_list_state
+                .reset_with_uniform_height(snapshot.turns.len(), px(NAVIGATION_RAIL_TURN_HEIGHT));
+            self.turn_indexes.clear();
+            self.turn_indexes.extend(
+                snapshot
+                    .turns
+                    .iter()
+                    .enumerate()
+                    .map(|(index, turn)| (turn.message_id, index)),
+            );
         }
         self.snapshot = snapshot;
+        if (reset || turn_identity_changed || active_turn_changed)
+            && let Some(active_index) = self
+                .snapshot
+                .active_turn
+                .and_then(|message_id| self.turn_indexes.get(&message_id).copied())
+        {
+            self.turn_list_state.scroll_to_reveal_item(active_index);
+        }
         cx.notify();
     }
 }
@@ -347,53 +403,31 @@ impl Render for ConversationNavigationRail {
         let turns = self.snapshot.turns.clone();
         let turn_count = turns.len();
         let viewport_height = self.snapshot.viewport_height;
-        // Hundreds of turns cannot each keep a legible tick, so ticks sample
-        // the turns: every tick keeps the rail's full pitch and stands for a
-        // contiguous bucket of turns, represented by the bucket's first. While
-        // everything fits this is the identity and each turn has its own tick.
-        // Bounding the tick count also bounds what a hover re-render builds —
-        // per-frame work stays proportional to the viewport, not the session.
-        let tick_count = navigation_rail_tick_count(turn_count, viewport_height);
-        if tick_count == 0 {
+        if turn_count == 0 {
             return div().into_any_element();
         }
         let rail_height = navigation_rail_height(turn_count, viewport_height);
+        if rail_height <= 0.0 {
+            return div().into_any_element();
+        }
         let rail_top = (viewport_height - rail_height).max(0.0) / 2.0;
-        let tick_turn_indexes = (0..tick_count)
-            .map(|tick_index| navigation_rail_tick_turn(tick_index, tick_count, turn_count))
-            .collect::<Vec<_>>();
-        let tick_message_ids = tick_turn_indexes
-            .iter()
-            .map(|&turn_index| turns[turn_index].message_id)
-            .collect::<Vec<_>>();
-        let focus_handles = tick_message_ids
-            .iter()
-            .map(|&message_id| self.navigation_rail_focus_handle(message_id, window, cx))
-            .collect::<Vec<_>>();
-        // Focus emphasizes a tick only while focus is keyboard-driven, matching
-        // the `focus_visible` ring: a click also focuses the tick it hit, and
-        // ungated focus would pin the preview card open after the cursor left.
-        let focused_tick_index = window
-            .last_input_was_keyboard()
-            .then(|| {
-                focus_handles
-                    .iter()
-                    .position(|focus_handle| focus_handle.is_focused(window))
-            })
-            .flatten();
-        let hovered_tick_index = self
-            .hovered_turn
-            .and_then(|message_id| tick_message_ids.iter().position(|&id| id == message_id));
-        let emphasized_tick_index = hovered_tick_index.or(focused_tick_index);
-        let active_tick_index = self.snapshot.active_turn.and_then(|message_id| {
-            turns
-                .iter()
-                .position(|turn| turn.message_id == message_id)
-                .map(|turn_index| navigation_rail_turn_tick(turn_index, tick_count, turn_count))
+        // The rail keeps a true one-to-one scroll position for every turn. Its
+        // `ListState` only asks the builder for visible ticks plus overdraw, so
+        // hover and scroll work remain bounded by the viewport even for a very
+        // long conversation.
+        let emphasized_turn = self.hovered_turn.or_else(|| {
+            window
+                .last_input_was_keyboard()
+                .then_some(self.focused_turn)
+                .flatten()
         });
-        let visual_state = NavigationRailVisualState {
-            emphasized_turn: emphasized_tick_index.map(|index| tick_message_ids[index]),
-        };
+        let emphasized_turn_index =
+            emphasized_turn.and_then(|message_id| self.turn_indexes.get(&message_id).copied());
+        let active_turn_index = self
+            .snapshot
+            .active_turn
+            .and_then(|message_id| self.turn_indexes.get(&message_id).copied());
+        let visual_state = NavigationRailVisualState { emphasized_turn };
         let previous_visual_state = self.visual_state;
         if previous_visual_state != visual_state {
             self.transition_from = previous_visual_state;
@@ -401,94 +435,37 @@ impl Render for ConversationNavigationRail {
             self.animation_generation = self.animation_generation.wrapping_add(1);
         }
         let transition_from = self.transition_from;
-        let tick_for_message = |message_id: Option<Uuid>| {
-            message_id
-                .and_then(|message_id| tick_message_ids.iter().position(|&id| id == message_id))
-        };
-        let from_emphasized_tick_index = tick_for_message(transition_from.emphasized_turn);
+        let from_emphasized_turn_index = transition_from
+            .emphasized_turn
+            .and_then(|message_id| self.turn_indexes.get(&message_id).copied());
         let animation_generation = self.animation_generation;
+        let entity = cx.entity().downgrade();
+        let turn_list_state = self.turn_list_state.clone();
+        let tick_list = list(turn_list_state.clone(), move |turn_index, window, cx| {
+            entity
+                .upgrade()
+                .map(|entity| {
+                    entity.update(cx, |this, cx| {
+                        this.render_navigation_rail_tick(
+                            turn_index,
+                            from_emphasized_turn_index,
+                            emphasized_turn_index,
+                            active_turn_index,
+                            animation_generation,
+                            window,
+                            cx,
+                        )
+                    })
+                })
+                .unwrap_or_else(|| div().into_any_element())
+        })
+        .size_full();
 
-        let tick_rows = tick_message_ids
-            .iter()
-            .zip(focus_handles)
-            .enumerate()
-            .map(|(tick_index, (&message_id, focus_handle))| {
-                let from_width = NAVIGATION_RAIL_TICK_WIDTH
-                    * navigation_rail_scale(tick_index, from_emphasized_tick_index);
-                let to_width = NAVIGATION_RAIL_TICK_WIDTH
-                    * navigation_rail_scale(tick_index, emphasized_tick_index);
-                let prominent = active_tick_index == Some(tick_index)
-                    || emphasized_tick_index == Some(tick_index);
-                let tick_color = if prominent {
-                    if theme.is_dark {
-                        rgb(0xFFFFFF).into()
-                    } else {
-                        theme.text
-                    }
-                } else {
-                    theme.text_ghost.opacity(NAVIGATION_RAIL_INACTIVE_OPACITY)
-                };
-                let click_focus = focus_handle.clone();
-                let animation_id = SharedString::from(format!(
-                    "conversation-navigation-tick-animation-{message_id}-{animation_generation}"
-                ));
-                let tick = div()
-                    .h(px(NAVIGATION_RAIL_TICK_HEIGHT))
-                    .rounded_full()
-                    .bg(tick_color)
-                    .with_animation(
-                        animation_id,
-                        Animation::new(NAVIGATION_RAIL_ANIMATION_DURATION)
-                            .with_easing(ease_out_quint()),
-                        move |element, delta| {
-                            element.w(px(from_width + (to_width - from_width) * delta))
-                        },
-                    );
-
-                div()
-                    .id(SharedString::from(format!(
-                        "conversation-navigation-turn-hit-{message_id}"
-                    )))
-                    .w(px(NAVIGATION_RAIL_WIDTH))
-                    .flex_1()
-                    .min_h_0()
-                    .flex()
-                    .items_center()
-                    .cursor_default()
-                    .on_hover(cx.listener(move |this, hovering: &bool, _, cx| {
-                        if *hovering {
-                            this.hovered_turn = Some(message_id);
-                        } else if this.hovered_turn == Some(message_id) {
-                            this.hovered_turn = None;
-                        }
-                        cx.notify();
-                    }))
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        click_focus.focus(window, cx);
-                        this.activate_turn(message_id, cx);
-                    }))
-                    .child(
-                        div()
-                            .id(SharedString::from(format!(
-                                "conversation-navigation-turn-focus-{message_id}"
-                            )))
-                            .w(px(NAVIGATION_RAIL_TICK_WIDTH + 4.0))
-                            .h(px(8.0))
-                            .ml(px(-2.0))
-                            .pl(px(2.0))
-                            .flex()
-                            .items_center()
-                            .rounded(px(4.0))
-                            .track_focus(&focus_handle)
-                            .tab_index(tick_index as isize)
-                            .focus_visible(|style| style.border_1().border_color(theme.accent))
-                            .on_key_down(cx.listener(move |this, event, window, cx| {
-                                this.navigation_rail_key_down(message_id, event, window, cx);
-                            }))
-                            .child(tick),
-                    )
-            })
-            .collect::<Vec<_>>();
+        let (show_top_fade, show_bottom_fade) = navigation_rail_fade_visibility(
+            self.turn_list_state.scroll_px_offset_for_scrollbar().y,
+            self.turn_list_state.max_offset_for_scrollbar().y,
+        );
+        let transparent_surface = theme.surface.opacity(0.0);
 
         let rail = div()
             .id("conversation-navigation-rail")
@@ -497,19 +474,51 @@ impl Render for ConversationNavigationRail {
             .top(px(rail_top))
             .w(px(NAVIGATION_RAIL_WIDTH))
             .h(px(rail_height))
-            .flex()
-            .flex_col()
+            .relative()
+            .overflow_hidden()
             .tab_index(0)
             .tab_group()
             .tab_stop(false)
-            .children(tick_rows);
+            .child(tick_list)
+            .when(show_top_fade, |rail| {
+                rail.child(
+                    div()
+                        .absolute()
+                        .top_0()
+                        .left_0()
+                        .w_full()
+                        .h(px(NAVIGATION_RAIL_FADE_HEIGHT))
+                        .bg(linear_gradient(
+                            180.0,
+                            linear_color_stop(theme.surface, 0.0),
+                            linear_color_stop(transparent_surface, 1.0),
+                        )),
+                )
+            })
+            .when(show_bottom_fade, |rail| {
+                rail.child(
+                    div()
+                        .absolute()
+                        .bottom_0()
+                        .left_0()
+                        .w_full()
+                        .h(px(NAVIGATION_RAIL_FADE_HEIGHT))
+                        .bg(linear_gradient(
+                            180.0,
+                            linear_color_stop(transparent_surface, 0.0),
+                            linear_color_stop(theme.surface, 1.0),
+                        )),
+                )
+            });
 
-        let preview = emphasized_tick_index.map(|tick_index| {
-            let turn = &turns[tick_turn_indexes[tick_index]];
-            let hit_height = rail_height / tick_count as f32;
+        let preview = emphasized_turn_index.map(|turn_index| {
+            let turn = &turns[turn_index];
+            let scroll_top = -self.turn_list_state.scroll_px_offset_for_scrollbar().y;
             let preview_height = 126.0;
             let max_preview_top = (viewport_height - preview_height - 12.0).max(12.0);
-            let preview_top = (rail_top + (tick_index as f32 + 0.5) * hit_height
+            let preview_top = (rail_top + turn_index as f32 * NAVIGATION_RAIL_TURN_HEIGHT
+                - f32::from(scroll_top)
+                + NAVIGATION_RAIL_TURN_HEIGHT / 2.0
                 - preview_height / 2.0)
                 .clamp(12.0, max_preview_top);
             div()
@@ -568,6 +577,97 @@ impl Render for ConversationNavigationRail {
 }
 
 impl ConversationNavigationRail {
+    #[allow(clippy::too_many_arguments)]
+    fn render_navigation_rail_tick(
+        &mut self,
+        turn_index: usize,
+        from_emphasized_turn_index: Option<usize>,
+        emphasized_turn_index: Option<usize>,
+        active_turn_index: Option<usize>,
+        animation_generation: u64,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let Some(turn) = self.snapshot.turns.get(turn_index) else {
+            return div().into_any_element();
+        };
+        let message_id = turn.message_id;
+        let theme = Theme::current(cx);
+        let focus_handle = self.navigation_rail_focus_handle(message_id, window, cx);
+        let from_width = NAVIGATION_RAIL_TICK_WIDTH
+            * navigation_rail_scale(turn_index, from_emphasized_turn_index);
+        let to_width =
+            NAVIGATION_RAIL_TICK_WIDTH * navigation_rail_scale(turn_index, emphasized_turn_index);
+        let prominent =
+            active_turn_index == Some(turn_index) || emphasized_turn_index == Some(turn_index);
+        let tick_color = if prominent {
+            if theme.is_dark {
+                rgb(0xFFFFFF).into()
+            } else {
+                theme.text
+            }
+        } else {
+            theme.text_ghost.opacity(NAVIGATION_RAIL_INACTIVE_OPACITY)
+        };
+        let click_focus = focus_handle.clone();
+        let animation_id = SharedString::from(format!(
+            "conversation-navigation-tick-animation-{message_id}-{animation_generation}"
+        ));
+        let tick = div()
+            .h(px(NAVIGATION_RAIL_TICK_HEIGHT))
+            .rounded_full()
+            .bg(tick_color)
+            .with_animation(
+                animation_id,
+                Animation::new(NAVIGATION_RAIL_ANIMATION_DURATION).with_easing(ease_out_quint()),
+                move |element, delta| element.w(px(from_width + (to_width - from_width) * delta)),
+            );
+
+        div()
+            .id(SharedString::from(format!(
+                "conversation-navigation-turn-hit-{message_id}"
+            )))
+            .w(px(NAVIGATION_RAIL_WIDTH))
+            .h(px(NAVIGATION_RAIL_TURN_HEIGHT))
+            .flex_none()
+            .flex()
+            .items_center()
+            .cursor_default()
+            .on_hover(cx.listener(move |this, hovering: &bool, _, cx| {
+                if *hovering {
+                    this.hovered_turn = Some(message_id);
+                } else if this.hovered_turn == Some(message_id) {
+                    this.hovered_turn = None;
+                }
+                cx.notify();
+            }))
+            .on_click(cx.listener(move |this, _, window, cx| {
+                click_focus.focus(window, cx);
+                this.activate_turn(message_id, cx);
+            }))
+            .child(
+                div()
+                    .id(SharedString::from(format!(
+                        "conversation-navigation-turn-focus-{message_id}"
+                    )))
+                    .w(px(NAVIGATION_RAIL_TICK_WIDTH + 4.0))
+                    .h(px(8.0))
+                    .ml(px(-2.0))
+                    .pl(px(2.0))
+                    .flex()
+                    .items_center()
+                    .rounded(px(4.0))
+                    .track_focus(&focus_handle)
+                    .tab_index(turn_index as isize)
+                    .focus_visible(|style| style.border_1().border_color(theme.accent))
+                    .on_key_down(cx.listener(move |this, event, window, cx| {
+                        this.navigation_rail_key_down(message_id, event, window, cx);
+                    }))
+                    .child(tick),
+            )
+            .into_any_element()
+    }
+
     fn navigation_rail_focus_handle(
         &mut self,
         message_id: Uuid,
@@ -579,11 +679,15 @@ impl ConversationNavigationRail {
         }
 
         let focus_handle = cx.focus_handle();
-        cx.on_focus(&focus_handle, window, |_: &mut Self, _, cx| {
+        cx.on_focus(&focus_handle, window, move |this: &mut Self, _, cx| {
+            this.focused_turn = Some(message_id);
             cx.notify();
         })
         .detach();
-        cx.on_blur(&focus_handle, window, |_: &mut Self, _, cx| {
+        cx.on_blur(&focus_handle, window, move |this: &mut Self, _, cx| {
+            if this.focused_turn == Some(message_id) {
+                this.focused_turn = None;
+            }
             cx.notify();
         })
         .detach();
@@ -598,27 +702,20 @@ impl ConversationNavigationRail {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        // Arrows walk the rendered ticks, not the underlying turns: on a
-        // sampled rail only tick representatives have focus handles.
         let turns = &self.snapshot.turns;
         let turn_count = turns.len();
-        let tick_count = navigation_rail_tick_count(turn_count, self.snapshot.viewport_height);
-        if tick_count == 0 {
+        if turn_count == 0 {
             return;
         }
-        let tick_turn =
-            |tick_index: usize| navigation_rail_tick_turn(tick_index, tick_count, turn_count);
-        let Some(tick_index) =
-            (0..tick_count).position(|tick| turns[tick_turn(tick)].message_id == message_id)
-        else {
+        let Some(turn_index) = self.turn_indexes.get(&message_id).copied() else {
             return;
         };
 
-        let target_tick = match event.keystroke.key.as_str() {
-            "up" => Some(tick_index.saturating_sub(1)),
-            "down" => Some((tick_index + 1).min(tick_count - 1)),
+        let target_turn = match event.keystroke.key.as_str() {
+            "up" => Some(turn_index.saturating_sub(1)),
+            "down" => Some((turn_index + 1).min(turn_count - 1)),
             "home" => Some(0),
-            "end" => Some(tick_count - 1),
+            "end" => Some(turn_count - 1),
             "enter" | "space" => {
                 self.activate_turn(message_id, cx);
                 cx.stop_propagation();
@@ -626,17 +723,15 @@ impl ConversationNavigationRail {
             }
             _ => None,
         };
-        let Some(target_tick) = target_tick else {
+        let Some(target_turn) = target_turn else {
             return;
         };
-        if let Some(focus_handle) = self
-            .focus_handles
-            .get(&turns[tick_turn(target_tick)].message_id)
-            .cloned()
-        {
-            focus_handle.focus(window, cx);
-            cx.stop_propagation();
-        }
+        self.turn_list_state.scroll_to_reveal_item(target_turn);
+        let target_message_id = turns[target_turn].message_id;
+        let focus_handle = self.navigation_rail_focus_handle(target_message_id, window, cx);
+        focus_handle.focus(window, cx);
+        cx.notify();
+        cx.stop_propagation();
     }
 
     fn activate_turn(&self, message_id: Uuid, cx: &mut Context<Self>) {

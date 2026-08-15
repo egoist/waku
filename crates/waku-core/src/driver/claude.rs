@@ -777,7 +777,7 @@ fn handle_claude_system(
             })
             .collect();
         let _ = events.send(DriverEvent::BackgroundWork(
-            BackgroundWorkEvent::ReconcileLive(items),
+            BackgroundWorkEvent::ReconcileLive { items },
         ));
         return;
     }

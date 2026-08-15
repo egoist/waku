@@ -1,7 +1,7 @@
 # waku-daemon
 
 `waku-daemon` is the standalone process that hosts Waku's provider sessions.
-It enforces a loopback-only listener, authenticates clients with
+It defaults to a loopback-only listener, authenticates clients with
 `WAKU_DAEMON_TOKEN`, and
 prints one JSON readiness record to stdout containing its address, protocol
 version, and process ID.
@@ -17,7 +17,9 @@ provider code replaces only the daemon. Release distributions place the signed
 
 The token is a full-control capability for a trusted Waku client, not a user or
 workspace-scoped credential. Browser handshakes are rejected unless their exact
-Origin was supplied with `--allow-origin`; native clients send no Origin. The
-daemon does not terminate TLS itself. For another machine, keep the listener on
-loopback and connect through an authenticated TLS proxy or SSH tunnel. Do not
-give the daemon token to untrusted page JavaScript.
+Origin was supplied with `--allow-origin`; native clients send no Origin. A
+non-loopback bind is refused unless `--allow-non-loopback` is also present.
+Waku Desktop adds that flag only after the user enables exposure in Settings →
+Daemon. The daemon does not terminate TLS itself. For access outside a private
+network, put a trusted TLS proxy or tunnel in front of it and use `wss://`. Do
+not give the daemon token to untrusted page JavaScript.

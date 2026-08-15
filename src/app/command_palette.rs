@@ -642,6 +642,12 @@ impl Waku {
                 "settings preferences usage tokens cost history",
             ),
             (
+                SettingsPage::Daemon,
+                "settings.daemon",
+                "icons/server.svg",
+                "settings preferences daemon server remote web network origin token port",
+            ),
+            (
                 SettingsPage::ComputerUse,
                 "settings.computer_use",
                 "icons/cursor-spark.svg",

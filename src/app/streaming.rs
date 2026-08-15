@@ -222,6 +222,11 @@ impl Waku {
     ) -> bool {
         runtime.last_active_at = Instant::now();
         match event {
+            DriverEvent::RuntimeEventCursorAdvanced(cursor) => {
+                if let Some(session) = self.state.session_mut(session_id) {
+                    session.runtime_event_cursor = Some(cursor);
+                }
+            }
             DriverEvent::Connected { provider_cursor } => {
                 runtime.last_driver_error = None;
                 runtime.last_background_refresh_at = Instant::now();
@@ -724,6 +729,20 @@ pub(super) fn stream_delta_text(event: &DriverEvent, kind: StreamDeltaKind) -> O
     }
 }
 
+/// Once the daemon has already settled or lost the runtime, presentation
+/// pacing must not delay that fact behind an old text backlog. A second client
+/// receives the same sequenced events directly, so retaining a typewriter
+/// queue here would make Desktop visibly trail Web even though both are caught
+/// up to the same daemon sequence.
+pub(super) fn stream_backlog_should_flush(events: &VecDeque<DriverEvent>) -> bool {
+    events.iter().any(|event| {
+        matches!(
+            event,
+            DriverEvent::TurnFinished { .. } | DriverEvent::ProcessExited
+        )
+    })
+}
+
 pub(super) fn compact_driver_error(error: &str) -> String {
     const MAX_LINES: usize = 6;
     const MAX_CHARS: usize = 800;
@@ -758,8 +777,10 @@ pub(super) fn stream_frame_budget(backlog: usize) -> usize {
 /// Pop one display-sized chunk while retaining the provider's event order.
 ///
 /// Adjacent deltas of the same kind are coalesced. Large deltas are split on
-/// grapheme and line boundaries, so a provider that emits its whole answer in
-/// one event still gets the same progressive presentation as token streams.
+/// grapheme boundaries, so a provider that emits its whole answer in one event
+/// still gets the same progressive presentation as token streams. Newlines are
+/// safe split points, but short lines share a frame budget instead of turning
+/// a multiline response into one 24 ms delay per line.
 pub(super) fn pop_stream_chunk(
     events: &mut VecDeque<DriverEvent>,
     kind: StreamDeltaKind,
@@ -785,17 +806,41 @@ pub(super) fn pop_stream_chunk(
         };
 
         let (prefix, graphemes) = take_stream_prefix(text, remaining_budget);
-        let reached_line_boundary = prefix.ends_with('\n');
         chunk.push_str(&prefix);
         remaining_budget = remaining_budget.saturating_sub(graphemes);
         if text.is_empty() {
             events.pop_front();
         }
-        if reached_line_boundary {
-            break;
-        }
     }
 
+    match kind {
+        StreamDeltaKind::Text => Some(DriverEvent::TextDelta(chunk)),
+        StreamDeltaKind::Reasoning => Some(DriverEvent::ReasoningDelta(chunk)),
+    }
+}
+
+/// Coalesce all adjacent deltas of one kind after a terminal runtime event has
+/// reached the queue. This preserves event order while making settlement land
+/// in the same UI pass instead of waiting for presentation-only animation.
+pub(super) fn pop_complete_stream_chunk(
+    events: &mut VecDeque<DriverEvent>,
+    kind: StreamDeltaKind,
+) -> Option<DriverEvent> {
+    let mut chunk = String::new();
+    while events
+        .front()
+        .and_then(|event| stream_delta_text(event, kind))
+        .is_some()
+    {
+        let event = events.pop_front()?;
+        match (kind, event) {
+            (StreamDeltaKind::Text, DriverEvent::TextDelta(text))
+            | (StreamDeltaKind::Reasoning, DriverEvent::ReasoningDelta(text)) => {
+                chunk.push_str(&text);
+            }
+            _ => unreachable!("the stream kind was checked before removing the event"),
+        }
+    }
     match kind {
         StreamDeltaKind::Text => Some(DriverEvent::TextDelta(chunk)),
         StreamDeltaKind::Reasoning => Some(DriverEvent::ReasoningDelta(chunk)),

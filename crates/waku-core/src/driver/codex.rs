@@ -1472,7 +1472,7 @@ fn handle_codex_message(
                         .filter_map(codex_background_terminal)
                         .collect();
                     let _ = events.send(DriverEvent::BackgroundWork(
-                        BackgroundWorkEvent::ReconcileProcesses(items),
+                        BackgroundWorkEvent::ReconcileProcesses { items },
                     ));
                 }
             }
@@ -2723,7 +2723,7 @@ mod tests {
             &mut stream_state,
         );
 
-        let DriverEvent::BackgroundWork(BackgroundWorkEvent::ReconcileProcesses(items)) =
+        let DriverEvent::BackgroundWork(BackgroundWorkEvent::ReconcileProcesses { items }) =
             event_rx.try_recv().unwrap()
         else {
             panic!("the terminal snapshot should be reconciled");

@@ -47,6 +47,52 @@ pub enum ComposerDraftKey {
     Session(Uuid),
 }
 
+/// Wire-safe identity for one independently persisted composer draft.
+///
+/// Draft updates are keyed so multiple connected clients cannot overwrite
+/// unrelated drafts by sending stale whole-file snapshots.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[serde(
+    tag = "type",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+pub enum ComposerDraftTarget {
+    NewSession {
+        #[ts(type = "string")]
+        project_id: Uuid,
+    },
+    Session {
+        #[ts(type = "string")]
+        session_id: Uuid,
+    },
+}
+
+impl From<ComposerDraftKey> for ComposerDraftTarget {
+    fn from(key: ComposerDraftKey) -> Self {
+        match key {
+            ComposerDraftKey::NewSession(project_id) => Self::NewSession { project_id },
+            ComposerDraftKey::Session(session_id) => Self::Session { session_id },
+        }
+    }
+}
+
+impl From<ComposerDraftTarget> for ComposerDraftKey {
+    fn from(target: ComposerDraftTarget) -> Self {
+        match target {
+            ComposerDraftTarget::NewSession { project_id } => Self::NewSession(project_id),
+            ComposerDraftTarget::Session { session_id } => Self::Session(session_id),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+pub struct ComposerDraftChange {
+    pub target: ComposerDraftTarget,
+    /// `None` removes the target. Empty drafts are normalized to removal too.
+    pub draft: Option<ComposerDraft>,
+}
+
 impl ComposerDraftKey {
     pub fn for_session(session: &AgentSession) -> Self {
         if session.has_started() {

@@ -25,6 +25,30 @@ pub fn execute(operation: WorkspaceOperation) -> anyhow::Result<WorkspaceResult>
         } => WorkspaceResult::WorkingTree {
             entries: list_tree(&root, &expanded_paths.into_iter().collect()),
         },
+        WorkspaceOperation::BrowseDirectory { path } => {
+            let home = dirs::home_dir().ok_or_else(|| anyhow!("home directory is unavailable"))?;
+            let path = fs::canonicalize(path.as_deref().unwrap_or(&home)).with_context(|| {
+                format!(
+                    "could not open directory {}",
+                    path.as_deref().unwrap_or(&home).display()
+                )
+            })?;
+            if !fs::metadata(&path)?.is_dir() {
+                bail!("not a directory: {}", path.display());
+            }
+            let filesystem_root = path
+                .ancestors()
+                .last()
+                .map(Path::to_owned)
+                .unwrap_or_else(|| path.clone());
+            WorkspaceResult::Directory {
+                parent: path.parent().map(Path::to_owned),
+                entries: list_directory(&path)?,
+                path,
+                home,
+                filesystem_root,
+            }
+        }
         WorkspaceOperation::ReadTextFile {
             root,
             relative_path,
@@ -248,6 +272,27 @@ fn list_tree(root: &Path, expanded_paths: &HashSet<PathBuf>) -> Vec<WorkingTreeE
     let mut output = Vec::new();
     visit(root, Path::new(""), 0, expanded_paths, &mut output);
     output
+}
+
+fn list_directory(directory: &Path) -> anyhow::Result<Vec<WorkingTreeEntry>> {
+    let mut entries = fs::read_dir(directory)
+        .with_context(|| format!("could not read directory {}", directory.display()))?
+        .filter_map(Result::ok)
+        .filter_map(|entry| {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            let is_dir = fs::metadata(entry.path()).ok()?.is_dir();
+            Some(WorkingTreeEntry {
+                relative_path: name.clone(),
+                absolute_path: entry.path(),
+                name,
+                is_dir,
+                expanded: false,
+                depth: 0,
+            })
+        })
+        .collect::<Vec<_>>();
+    entries.sort_by_key(|entry| (!entry.is_dir, entry.name.to_lowercase()));
+    Ok(entries)
 }
 
 #[derive(Clone, Debug)]
@@ -519,6 +564,40 @@ mod tests {
             files += 1;
         }
         (files, additions, deletions)
+    }
+
+    #[test]
+    fn directory_browser_lists_an_arbitrary_daemon_directory() {
+        let directory =
+            std::env::temp_dir().join(format!("waku-directory-browser-{}", Uuid::new_v4()));
+        fs::create_dir_all(directory.join("folder")).unwrap();
+        fs::create_dir_all(directory.join(".git")).unwrap();
+        fs::write(directory.join("notes.txt"), "notes").unwrap();
+
+        let WorkspaceResult::Directory {
+            path,
+            parent,
+            entries,
+            ..
+        } = execute(WorkspaceOperation::BrowseDirectory {
+            path: Some(directory.clone()),
+        })
+        .unwrap()
+        else {
+            panic!("unexpected workspace response")
+        };
+
+        assert_eq!(path, fs::canonicalize(&directory).unwrap());
+        assert_eq!(parent, path.parent().map(Path::to_owned));
+        assert_eq!(
+            entries
+                .iter()
+                .map(|entry| (&*entry.name, entry.is_dir))
+                .collect::<Vec<_>>(),
+            [(".git", true), ("folder", true), ("notes.txt", false)]
+        );
+
+        fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]

@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::io;
 use std::net::TcpStream;
 use std::sync::Arc;
@@ -21,6 +21,7 @@ use waku_protocol::{
 
 const READ_POLL_INTERVAL: Duration = Duration::from_millis(25);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
+const MAX_BUFFERED_EVENTS_PER_RUNTIME: usize = 4096;
 
 enum Outgoing {
     Message(ClientMessage),
@@ -31,6 +32,8 @@ struct ClientInner {
     outgoing: Sender<Outgoing>,
     pending: Mutex<HashMap<Uuid, Sender<Result<ResponsePayload, RpcError>>>>,
     sessions: Mutex<HashMap<(Uuid, Uuid), Sender<SequencedEvent>>>,
+    pending_events: Mutex<HashMap<(Uuid, Uuid), VecDeque<SequencedEvent>>>,
+    task_state_subscribers: Mutex<Vec<Sender<u64>>>,
     last_sequences: Mutex<HashMap<(Uuid, Uuid), LastSequence>>,
     disconnected: AtomicBool,
 }
@@ -105,6 +108,8 @@ impl DaemonClient {
             outgoing,
             pending: Mutex::new(HashMap::new()),
             sessions: Mutex::new(HashMap::new()),
+            pending_events: Mutex::new(HashMap::new()),
+            task_state_subscribers: Mutex::new(Vec::new()),
             last_sequences: Mutex::new(last_sequences),
             disconnected: AtomicBool::new(false),
         });
@@ -118,15 +123,28 @@ impl DaemonClient {
 
     pub fn subscribe(&self, session_id: Uuid, runtime_id: Uuid) -> Receiver<SequencedEvent> {
         let (events, receiver) = unbounded();
-        self.inner
-            .sessions
-            .lock()
-            .insert((session_id, runtime_id), events);
+        let key = (session_id, runtime_id);
+        let mut sessions = self.inner.sessions.lock();
+        sessions.insert(key, events.clone());
+        // Keep the subscription lock while draining the pre-subscription
+        // replay queue. The socket thread takes these locks in the same order,
+        // so a new live event cannot overtake older replayed events here.
+        if let Some(buffered) = self.inner.pending_events.lock().remove(&key) {
+            for event in buffered {
+                let _ = events.send(event);
+            }
+        }
         receiver
     }
 
     pub fn unsubscribe(&self, session_id: Uuid, runtime_id: Uuid) {
         self.inner.sessions.lock().remove(&(session_id, runtime_id));
+    }
+
+    pub fn subscribe_task_state(&self) -> Receiver<u64> {
+        let (events, receiver) = unbounded();
+        self.inner.task_state_subscribers.lock().push(events);
+        receiver
     }
 
     pub fn request(
@@ -178,7 +196,10 @@ impl DaemonClient {
         self.inner
             .outgoing
             .send(Outgoing::Message(ClientMessage::Request(Request {
-                request_id: Uuid::new_v4(),
+                // The nil request id is reserved for fire-and-forget controls;
+                // the daemon executes them in the runtime mailbox but does
+                // not allocate or send a response.
+                request_id: Uuid::nil(),
                 session_id,
                 runtime_id,
                 command,
@@ -275,14 +296,26 @@ fn run_client(
                                 true
                             }
                         };
-                        if should_deliver
-                            && let Some(events) = inner
-                                .sessions
-                                .lock()
-                                .get(&(event.session_id, event.runtime_id))
-                        {
-                            let _ = events.send(event);
+                        if should_deliver {
+                            let key = (event.session_id, event.runtime_id);
+                            let sessions = inner.sessions.lock();
+                            if let Some(events) = sessions.get(&key) {
+                                let _ = events.send(event);
+                            } else {
+                                let mut pending = inner.pending_events.lock();
+                                let buffered = pending.entry(key).or_default();
+                                buffered.push_back(event);
+                                while buffered.len() > MAX_BUFFERED_EVENTS_PER_RUNTIME {
+                                    buffered.pop_front();
+                                }
+                            }
                         }
+                    }
+                    ServerMessage::TaskStateChanged { revision } => {
+                        inner
+                            .task_state_subscribers
+                            .lock()
+                            .retain(|subscriber| subscriber.send(revision).is_ok());
                     }
                     ServerMessage::ShuttingDown => break,
                     ServerMessage::Hello { .. } | ServerMessage::Rejected { .. } => {}
@@ -325,6 +358,7 @@ fn run_client(
             event: WireDriverEvent::new("processExited", serde_json::Value::Null),
         });
     }
+    inner.task_state_subscribers.lock().clear();
 }
 
 fn set_client_read_timeout(

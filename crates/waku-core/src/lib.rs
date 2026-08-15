@@ -43,6 +43,7 @@ pub mod persistence;
 pub mod projectless;
 pub mod settings;
 pub mod skills;
+pub mod terminal;
 pub mod theme;
 pub mod usage;
 pub mod usage_history;

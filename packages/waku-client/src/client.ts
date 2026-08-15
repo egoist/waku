@@ -10,6 +10,7 @@ import {
 
 const NIL_UUID = "00000000-0000-0000-0000-000000000000";
 const OPEN = 1;
+const MAX_BUFFERED_EVENTS_PER_RUNTIME = 4096;
 
 export type EventListener = (event: SequencedEvent) => void;
 
@@ -66,6 +67,8 @@ export class WakuClient {
   private state: ConnectionState = "disconnected";
   private pending = new Map<string, PendingRequest>();
   private subscriptions = new Map<string, Set<EventListener>>();
+  private pendingEvents = new Map<string, SequencedEvent[]>();
+  private taskStateListeners = new Set<(revision: number) => void>();
   private sequences = new Map<string, LastSequence>();
   private connectionGeneration = 0;
   private rejectConnect?: (error: Error) => void;
@@ -229,7 +232,10 @@ export class WakuClient {
   ): Promise<void> {
     const message: ClientMessage = {
       type: "request",
-      requestId: this.randomUUID(),
+      // The nil request id is the protocol's fire-and-forget marker. Runtime
+      // ordering is preserved, but high-frequency controls such as terminal
+      // input do not create response traffic or response-cache entries.
+      requestId: NIL_UUID,
       sessionId,
       runtimeId,
       command,
@@ -245,10 +251,20 @@ export class WakuClient {
       this.subscriptions.set(key, listeners);
     }
     listeners.add(listener);
+    const buffered = this.pendingEvents.get(key);
+    if (buffered) {
+      this.pendingEvents.delete(key);
+      for (const event of buffered) listener(event);
+    }
     return () => {
       listeners?.delete(listener);
       if (listeners?.size === 0) this.subscriptions.delete(key);
     };
+  }
+
+  subscribeTaskState(listener: (revision: number) => void): () => void {
+    this.taskStateListeners.add(listener);
+    return () => this.taskStateListeners.delete(listener);
   }
 
   replayCursors(): ReplayCursor[] {
@@ -305,7 +321,21 @@ export class WakuClient {
         epoch: message.epoch,
         sequence: message.sequence,
       });
-      for (const listener of this.subscriptions.get(key) ?? []) listener(message);
+      const listeners = this.subscriptions.get(key);
+      if (listeners?.size) {
+        for (const listener of listeners) listener(message);
+      } else {
+        const buffered = this.pendingEvents.get(key) ?? [];
+        buffered.push(message);
+        if (buffered.length > MAX_BUFFERED_EVENTS_PER_RUNTIME) {
+          buffered.splice(0, buffered.length - MAX_BUFFERED_EVENTS_PER_RUNTIME);
+        }
+        this.pendingEvents.set(key, buffered);
+      }
+      return;
+    }
+    if (message.type === "taskStateChanged") {
+      for (const listener of this.taskStateListeners) listener(message.revision);
       return;
     }
     if (message.type === "shuttingDown") {

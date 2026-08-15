@@ -105,6 +105,7 @@ const NAVIGATION_RAIL_TICK_HEIGHT: f32 = 2.0;
 const NAVIGATION_RAIL_TICK_GAP: f32 = 10.0;
 const NAVIGATION_RAIL_INACTIVE_OPACITY: f32 = 0.45;
 const NAVIGATION_RAIL_TURN_HEIGHT: f32 = NAVIGATION_RAIL_TICK_HEIGHT + NAVIGATION_RAIL_TICK_GAP;
+const NAVIGATION_RAIL_FADE_HEIGHT: f32 = 20.0;
 const NAVIGATION_RAIL_ANIMATION_DURATION: Duration = Duration::from_millis(300);
 const ESCAPE_STOP_CONFIRMATION_TIMEOUT: Duration = Duration::from_secs(3);
 /// Presentation pacing only. The app sleeps until a provider or background
@@ -194,6 +195,7 @@ enum SettingsPage {
     Providers,
     Skills,
     Usage,
+    Daemon,
     ComputerUse,
     Appearance,
 }
@@ -530,6 +532,11 @@ struct PreparedDriver {
     events: Receiver<DriverEvent>,
 }
 
+struct RemoteTaskStateSnapshot {
+    projects: Vec<Project>,
+    sessions: Vec<AgentSession>,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct EscapeStopTarget {
     session_id: Uuid,
@@ -847,6 +854,9 @@ pub struct Waku {
     /// app entity. Debug builds can replace it independently after a rebuild;
     /// all live driver handles below are lightweight RPC proxies.
     daemon: waku_client::DaemonSupervisor,
+    /// Cached once at construction for the Daemon settings connection URL;
+    /// rendering must not query account or network configuration.
+    daemon_hostname: String,
     /// Session details currently being fetched from the daemon. Sidebar rows
     /// stay usable while the selected transcript hydrates asynchronously.
     session_hydrations: HashSet<Uuid>,
@@ -868,6 +878,9 @@ pub struct Waku {
     command_palette: command_palette::CommandPaletteUi,
     model_search: Entity<ComposerInput>,
     settings_search: Entity<ComposerInput>,
+    daemon_port_input: Entity<ComposerInput>,
+    daemon_origins_input: Entity<ComposerInput>,
+    daemon_reconfigure_pending: bool,
     settings_focus: FocusHandle,
     onboarding_add_project_focus: FocusHandle,
     onboarding_projectless_focus: FocusHandle,
@@ -1037,7 +1050,11 @@ pub struct Waku {
     /// Coalesced edge trigger for provider and background result queues. The
     /// payloads stay in their typed channels; this channel only wakes the UI.
     event_wake_tx: smol::channel::Sender<()>,
+    task_state_sync_tx: Sender<Result<RemoteTaskStateSnapshot, String>>,
+    task_state_sync_events: Receiver<Result<RemoteTaskStateSnapshot, String>>,
     runtimes: HashMap<Uuid, SessionRuntime>,
+    runtime_attach_pending: HashSet<Uuid>,
+    runtime_attach_misses: HashMap<Uuid, u8>,
     /// Provider-neutral session work which may remain live after a turn ends.
     /// Runtime-only by design: providers reconcile their authoritative state
     /// when the resident transport reconnects.
@@ -1598,6 +1615,7 @@ impl Waku {
     ) -> Entity<Self> {
         let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
         let store = StateStore::remote(daemon.clone());
+        let daemon_hostname = crate::daemon::local_hostname().unwrap_or_else(|| "this-mac".into());
         let composer_draft_store = ComposerDraftStore::remote(daemon.clone());
         let composer_drafts = composer_draft_store.load().unwrap_or_default();
         let mut state = store.load_or_fresh(cwd);
@@ -1650,6 +1668,24 @@ impl Waku {
             ComposerInput::new(window, cx)
                 .search_field()
                 .placeholder(tr!("settings.search"))
+        });
+        let daemon_port = state.daemon_exposure.port.to_string();
+        let daemon_origins = state.daemon_exposure.allowed_origins_text();
+        let daemon_port_input = cx.new(|cx| {
+            let mut input = ComposerInput::new(window, cx)
+                .search_field()
+                .select_all_on_focus_click()
+                .placeholder(tr!("daemon.port_placeholder"));
+            input.set_content(daemon_port, cx);
+            input
+        });
+        let daemon_origins_input = cx.new(|cx| {
+            let mut input = ComposerInput::new(window, cx)
+                .search_field()
+                .select_all_on_focus_click()
+                .placeholder(tr!("daemon.allowed_origins_placeholder"));
+            input.set_content(daemon_origins, cx);
+            input
         });
         let skills_search = cx.new(|cx| {
             ComposerInput::new(window, cx)
@@ -1709,9 +1745,32 @@ impl Waku {
             .iter()
             .map(|project| (project.id, project.path.clone()))
             .collect::<HashMap<_, _>>();
+        let mut startup_live_session_ids = state
+            .sessions
+            .iter()
+            .filter(|session| session.status.is_busy())
+            .map(|session| session.id)
+            .collect::<Vec<_>>();
+        if let Some(selected) = state.selected_session
+            && state
+                .sessions
+                .iter()
+                .find(|session| session.id == selected)
+                .is_some_and(AgentSession::has_started)
+            && !startup_live_session_ids.contains(&selected)
+        {
+            startup_live_session_ids.push(selected);
+        }
         let mut interrupted_turn_checkpoints = Vec::new();
         for session in &mut state.sessions {
             session.migrate_legacy_state();
+            // A provider runtime belongs to the daemon and may still be
+            // streaming after this desktop process restarted. Leave its
+            // persisted projection intact until the background attachment
+            // check proves there is no live runtime to resume.
+            if session.status.is_busy() {
+                continue;
+            }
             if session.status != SessionStatus::Idle {
                 session.status = SessionStatus::Idle;
             }
@@ -1794,6 +1853,7 @@ impl Waku {
         let (computer_permission_tx, computer_permission_events) = unbounded();
         let (plan_usage_tx, plan_usage_events) = unbounded();
         let (event_wake_tx, event_wake_events) = smol::channel::bounded(1);
+        let (task_state_sync_tx, task_state_sync_events) = unbounded();
         #[cfg(target_os = "macos")]
         {
             let computer_permission_tx = computer_permission_tx.clone();
@@ -2087,6 +2147,17 @@ impl Waku {
                 },
             )
             .detach();
+            for input in [&daemon_port_input, &daemon_origins_input] {
+                cx.subscribe(
+                    input,
+                    |this: &mut Self, _, event: &ComposerEvent, cx| match event {
+                        ComposerEvent::Submit(_) => this.apply_daemon_exposure_fields(cx),
+                        ComposerEvent::Edited => cx.notify(),
+                        _ => {}
+                    },
+                )
+                .detach();
+            }
             cx.subscribe(
                 &skills_search,
                 |_: &mut Self, _, event: &ComposerEvent, cx| {
@@ -2234,6 +2305,7 @@ impl Waku {
 
             Self {
                 daemon,
+                daemon_hostname,
                 session_hydrations: HashSet::new(),
                 pending_session_activation: None,
                 analytics,
@@ -2249,6 +2321,9 @@ impl Waku {
                 branch_search,
                 branch_create_input,
                 settings_search,
+                daemon_port_input,
+                daemon_origins_input,
+                daemon_reconfigure_pending: false,
                 settings_focus,
                 onboarding_add_project_focus,
                 onboarding_projectless_focus,
@@ -2339,7 +2414,11 @@ impl Waku {
                 image_preview_generation: 0,
                 remote_images: RefCell::new(HashMap::new()),
                 event_wake_tx,
+                task_state_sync_tx,
+                task_state_sync_events,
                 runtimes: HashMap::new(),
+                runtime_attach_pending: HashSet::new(),
+                runtime_attach_misses: HashMap::new(),
                 background_work: HashMap::new(),
                 last_background_work_tick: Instant::now(),
                 submission_preparations: HashSet::new(),
@@ -2478,6 +2557,10 @@ impl Waku {
         // that there is an entity to notify and deliberately not before the
         // first frame.
         entity.update(cx, |this, cx| {
+            this.restart_task_state_sync();
+            for session_id in startup_live_session_ids {
+                this.start_runtime_attachment(session_id, cx);
+            }
             this.start_pending_checkpoint_captures(cx);
             // The autocomplete indexes prefetch alongside, so typing `/` or
             // `@` into the very first prompt already has data to draw.

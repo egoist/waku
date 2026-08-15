@@ -24,6 +24,67 @@ impl AttachmentStore {
     }
 
     pub fn import(&self, name: &str, upload: AttachmentUpload) -> io::Result<StoredAttachment> {
+        self.materialize(name, |target| match upload {
+            AttachmentUpload::File { data_base64 } => {
+                let bytes = decode(&data_base64)?;
+                ensure_size(bytes.len())?;
+                fs::write(target, bytes)?;
+                Ok(false)
+            }
+            AttachmentUpload::Directory { entries } => {
+                if entries.len() > MAX_ATTACHMENT_FILES {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "attachment directory contains too many files",
+                    ));
+                }
+                fs::create_dir_all(target)?;
+                let mut total_bytes = 0usize;
+                for entry in entries {
+                    let relative = safe_relative_path(&entry.relative_path)?;
+                    let bytes = decode(&entry.data_base64)?;
+                    total_bytes = total_bytes.checked_add(bytes.len()).ok_or_else(|| {
+                        io::Error::new(
+                            io::ErrorKind::InvalidInput,
+                            "attachment directory is too large",
+                        )
+                    })?;
+                    ensure_size(total_bytes)?;
+                    let path = target.join(relative);
+                    if let Some(parent) = path.parent() {
+                        fs::create_dir_all(parent)?;
+                    }
+                    fs::write(path, bytes)?;
+                }
+                Ok(true)
+            }
+        })
+    }
+
+    /// Copies an absolute path on the daemon host into the managed attachment
+    /// store. The client sends only the path; file bytes never cross the RPC.
+    pub fn import_path(&self, path: &Path) -> io::Result<StoredAttachment> {
+        if !path.is_absolute() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "daemon attachment path must be absolute",
+            ));
+        }
+        let source = fs::canonicalize(path)?;
+        let name = source
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidInput, "invalid attachment name")
+            })?;
+        self.materialize(name, |target| copy_source(&source, target))
+    }
+
+    fn materialize(
+        &self,
+        name: &str,
+        populate: impl FnOnce(&Path) -> io::Result<bool>,
+    ) -> io::Result<StoredAttachment> {
         let name = safe_name(name)?;
         let id = Uuid::new_v4();
         let reference = format!("{ATTACHMENT_SCHEME}{id}");
@@ -31,43 +92,7 @@ impl AttachmentStore {
         let destination = self.root.join(id.to_string());
         fs::create_dir_all(&staging)?;
         let target = staging.join(&name);
-        let materialized = (|| -> io::Result<bool> {
-            match upload {
-                AttachmentUpload::File { data_base64 } => {
-                    let bytes = decode(&data_base64)?;
-                    ensure_size(bytes.len())?;
-                    fs::write(&target, bytes)?;
-                    Ok(false)
-                }
-                AttachmentUpload::Directory { entries } => {
-                    if entries.len() > MAX_ATTACHMENT_FILES {
-                        return Err(io::Error::new(
-                            io::ErrorKind::InvalidInput,
-                            "attachment directory contains too many files",
-                        ));
-                    }
-                    fs::create_dir_all(&target)?;
-                    let mut total_bytes = 0usize;
-                    for entry in entries {
-                        let relative = safe_relative_path(&entry.relative_path)?;
-                        let bytes = decode(&entry.data_base64)?;
-                        total_bytes = total_bytes.checked_add(bytes.len()).ok_or_else(|| {
-                            io::Error::new(
-                                io::ErrorKind::InvalidInput,
-                                "attachment directory is too large",
-                            )
-                        })?;
-                        ensure_size(total_bytes)?;
-                        let path = target.join(relative);
-                        if let Some(parent) = path.parent() {
-                            fs::create_dir_all(parent)?;
-                        }
-                        fs::write(path, bytes)?;
-                    }
-                    Ok(true)
-                }
-            }
-        })();
+        let materialized = populate(&target);
         let is_dir = match materialized {
             Ok(is_dir) => is_dir,
             Err(error) => {
@@ -161,6 +186,99 @@ impl AttachmentStore {
     }
 }
 
+fn copy_source(source: &Path, target: &Path) -> io::Result<bool> {
+    let metadata = fs::symlink_metadata(source)?;
+    if metadata.file_type().is_symlink() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "symbolic-link attachments are not supported",
+        ));
+    }
+    if metadata.is_file() {
+        if metadata.len() > MAX_ATTACHMENT_BYTES as u64 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "attachment is larger than 32 MB",
+            ));
+        }
+        let copied = fs::copy(source, target)?;
+        if copied > MAX_ATTACHMENT_BYTES as u64 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "attachment is larger than 32 MB",
+            ));
+        }
+        return Ok(false);
+    }
+    if !metadata.is_dir() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "attachment is not a file or directory",
+        ));
+    }
+
+    fs::create_dir_all(target)?;
+    let mut pending = vec![(source.to_owned(), target.to_owned())];
+    let mut file_count = 0usize;
+    let mut total_bytes = 0u64;
+    while let Some((source_directory, target_directory)) = pending.pop() {
+        for entry in fs::read_dir(source_directory)? {
+            let entry = entry?;
+            let source_path = entry.path();
+            let target_path = target_directory.join(entry.file_name());
+            let metadata = fs::symlink_metadata(&source_path)?;
+            if metadata.file_type().is_symlink() {
+                continue;
+            }
+            if metadata.is_dir() {
+                fs::create_dir_all(&target_path)?;
+                pending.push((source_path, target_path));
+                continue;
+            }
+            if !metadata.is_file() {
+                continue;
+            }
+            file_count += 1;
+            if file_count > MAX_ATTACHMENT_FILES {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "attachment directory contains too many files",
+                ));
+            }
+            total_bytes = total_bytes.checked_add(metadata.len()).ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "attachment directory is too large",
+                )
+            })?;
+            if total_bytes > MAX_ATTACHMENT_BYTES as u64 {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "attachment directory is too large",
+                ));
+            }
+            let copied = fs::copy(source_path, target_path)?;
+            if copied > metadata.len() {
+                total_bytes = total_bytes
+                    .checked_add(copied - metadata.len())
+                    .ok_or_else(|| {
+                        io::Error::new(
+                            io::ErrorKind::InvalidInput,
+                            "attachment directory is too large",
+                        )
+                    })?;
+                if total_bytes > MAX_ATTACHMENT_BYTES as u64 {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "attachment directory is too large",
+                    ));
+                }
+            }
+        }
+    }
+    Ok(true)
+}
+
 fn directory_size(root: &Path) -> io::Result<u64> {
     let mut bytes = 0u64;
     let mut pending = vec![root.to_owned()];
@@ -236,6 +354,50 @@ mod tests {
         assert_eq!(safe_name("secret.txt").unwrap(), "secret.txt");
         assert!(ensure_size(MAX_ATTACHMENT_BYTES).is_ok());
         assert!(ensure_size(MAX_ATTACHMENT_BYTES + 1).is_err());
+    }
+
+    #[test]
+    fn imports_any_daemon_file_without_routing_bytes_through_the_client() {
+        let source_directory =
+            std::env::temp_dir().join(format!("waku-file-source-{}", Uuid::new_v4()));
+        let root = std::env::temp_dir().join(format!("waku-attachments-{}", Uuid::new_v4()));
+        fs::create_dir_all(&source_directory).unwrap();
+        let source = source_directory.join("design.md");
+        fs::write(&source, "daemon-owned").unwrap();
+        let store = AttachmentStore::new(root.clone());
+
+        let stored = store.import_path(&source).unwrap();
+
+        assert_eq!(stored.name, "design.md");
+        assert!(!stored.is_dir);
+        assert_eq!(fs::read_to_string(&stored.path).unwrap(), "daemon-owned");
+        assert!(store.import_path(Path::new("relative.txt")).is_err());
+
+        fs::remove_dir_all(source_directory).unwrap();
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn daemon_path_import_follows_symbolic_links() {
+        use std::os::unix::fs::symlink;
+
+        let outside = std::env::temp_dir().join(format!("waku-outside-{}", Uuid::new_v4()));
+        let root = std::env::temp_dir().join(format!("waku-attachments-{}", Uuid::new_v4()));
+        fs::create_dir_all(&outside).unwrap();
+        fs::write(outside.join("secret.txt"), "secret").unwrap();
+        let linked = outside.join("linked.txt");
+        symlink(outside.join("secret.txt"), &linked).unwrap();
+        let store = AttachmentStore::new(root.clone());
+
+        let stored = store.import_path(&linked).unwrap();
+
+        assert_eq!(stored.name, "secret.txt");
+        assert_eq!(fs::read_to_string(stored.path).unwrap(), "secret");
+        fs::remove_dir_all(outside).unwrap();
+        if root.exists() {
+            fs::remove_dir_all(root).unwrap();
+        }
     }
 
     #[test]

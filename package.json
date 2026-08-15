@@ -17,5 +17,5 @@
     "drizzle-orm": "^0.45.2",
     "typescript": "^7.0.2"
   },
-  "workspaces": ["website", "packages/*"]
+  "workspaces": ["website", "apps/*", "packages/*"]
 }

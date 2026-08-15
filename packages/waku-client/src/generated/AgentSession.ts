@@ -7,6 +7,7 @@ import type { ProviderKind } from "./ProviderKind";
 import type { ProviderResumeCursor } from "./ProviderResumeCursor";
 import type { QueuedMessage } from "./QueuedMessage";
 import type { ReportedCommand } from "./ReportedCommand";
+import type { RuntimeEventCursor } from "./RuntimeEventCursor";
 import type { RuntimeMode } from "./RuntimeMode";
 import type { SessionStatus } from "./SessionStatus";
 import type { SessionWorkspace } from "./SessionWorkspace";
@@ -53,7 +54,7 @@ available_commands?: Array<ReportedCommand>,
  * Context-window occupancy from the live stream, kept so a resumed
  * session's meter starts where the conversation left off.
  */
-context_usage?: ContextUsage | null,
+context_usage?: ContextUsage | null, runtime_event_cursor?: RuntimeEventCursor | null,
 /**
  * Read-only compatibility field for v1 state files. New saves omit it.
  */

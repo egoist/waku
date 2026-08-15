@@ -18,7 +18,7 @@ fn main() -> anyhow::Result<()> {
     let listener = TcpListener::bind(&arguments.bind)
         .with_context(|| format!("could not bind Waku daemon to {}", arguments.bind))?;
     let address = listener.local_addr()?;
-    ensure_loopback(address)?;
+    ensure_bind_allowed(address, arguments.allow_non_loopback)?;
     let ready = DaemonReady {
         address: address.to_string(),
         protocol_version: PROTOCOL_VERSION,
@@ -62,12 +62,12 @@ fn main() -> anyhow::Result<()> {
     )
 }
 
-fn ensure_loopback(address: SocketAddr) -> anyhow::Result<()> {
-    if address.ip().is_loopback() {
+fn ensure_bind_allowed(address: SocketAddr, allow_non_loopback: bool) -> anyhow::Result<()> {
+    if address.ip().is_loopback() || allow_non_loopback {
         return Ok(());
     }
     bail!(
-        "refusing non-loopback daemon bind {address}; expose a loopback daemon through an authenticated TLS proxy or SSH tunnel"
+        "refusing non-loopback daemon bind {address}; pass --allow-non-loopback only after configuring authentication and exact browser origins"
     )
 }
 
@@ -75,6 +75,7 @@ struct Arguments {
     bind: String,
     parent_pid: Option<u32>,
     allowed_origins: Vec<String>,
+    allow_non_loopback: bool,
 }
 
 impl Arguments {
@@ -82,6 +83,7 @@ impl Arguments {
         let mut bind = "127.0.0.1:0".to_owned();
         let mut parent_pid = None;
         let mut allowed_origins = Vec::new();
+        let mut allow_non_loopback = false;
         let mut arguments = arguments.into_iter();
         while let Some(argument) = arguments.next() {
             match argument.as_str() {
@@ -106,9 +108,12 @@ impl Arguments {
                         .ok_or_else(|| anyhow!("--allow-origin requires an origin"))?;
                     allowed_origins.push(origin);
                 }
+                "--allow-non-loopback" => {
+                    allow_non_loopback = true;
+                }
                 "--help" | "-h" => {
                     println!(
-                        "usage: {} [--bind LOOPBACK_ADDRESS] [--parent-pid PID] [--allow-origin ORIGIN]...",
+                        "usage: {} [--bind ADDRESS] [--allow-non-loopback] [--parent-pid PID] [--allow-origin ORIGIN]...",
                         env!("CARGO_BIN_NAME")
                     );
                     std::process::exit(0);
@@ -120,6 +125,7 @@ impl Arguments {
             bind,
             parent_pid,
             allowed_origins,
+            allow_non_loopback,
         })
     }
 }
@@ -140,11 +146,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn accepts_only_loopback_listener_addresses() {
-        assert!(ensure_loopback("127.0.0.1:3000".parse().unwrap()).is_ok());
-        assert!(ensure_loopback("[::1]:3000".parse().unwrap()).is_ok());
-        assert!(ensure_loopback("0.0.0.0:3000".parse().unwrap()).is_err());
-        assert!(ensure_loopback("[::]:3000".parse().unwrap()).is_err());
+    fn non_loopback_listener_requires_an_explicit_flag() {
+        assert!(ensure_bind_allowed("127.0.0.1:3000".parse().unwrap(), false).is_ok());
+        assert!(ensure_bind_allowed("[::1]:3000".parse().unwrap(), false).is_ok());
+        assert!(ensure_bind_allowed("0.0.0.0:3000".parse().unwrap(), false).is_err());
+        assert!(ensure_bind_allowed("[::]:3000".parse().unwrap(), false).is_err());
+        assert!(ensure_bind_allowed("0.0.0.0:3000".parse().unwrap(), true).is_ok());
     }
 
     #[test]
@@ -161,5 +168,12 @@ mod tests {
             arguments.allowed_origins,
             ["https://app.waku.test", "http://localhost:3000"]
         );
+        assert!(!arguments.allow_non_loopback);
+    }
+
+    #[test]
+    fn parses_explicit_non_loopback_opt_in() {
+        let arguments = Arguments::parse(["--allow-non-loopback".into()]).unwrap();
+        assert!(arguments.allow_non_loopback);
     }
 }

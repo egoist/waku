@@ -722,6 +722,19 @@ pub struct ContextUsage {
     pub window: Option<u64>,
 }
 
+/// Last daemon event incorporated into a session's persisted projection.
+///
+/// The daemon runtime and its replay journal can outlive any particular
+/// desktop or browser connection. Persisting this cursor with the transcript
+/// lets a newly attached client replay only the events the stored projection
+/// has not already applied.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+pub struct RuntimeEventCursor {
+    pub runtime_id: Uuid,
+    pub epoch: Uuid,
+    pub sequence: u64,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize, TS)]
 pub struct AgentSession {
     pub id: Uuid,
@@ -771,6 +784,8 @@ pub struct AgentSession {
     /// session's meter starts where the conversation left off.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_usage: Option<ContextUsage>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_event_cursor: Option<RuntimeEventCursor>,
     /// Read-only compatibility field for v1 state files. New saves omit it.
     #[serde(default, skip_serializing)]
     pub provider_session_id: Option<String>,
@@ -826,11 +841,48 @@ impl AgentSession {
             provider_cursor: None,
             available_commands: Vec::new(),
             context_usage: None,
+            runtime_event_cursor: None,
             provider_session_id: None,
             messages: Vec::new(),
             transcript_blocks: Vec::new(),
             turns: Vec::new(),
             queued_messages: Vec::new(),
+        }
+    }
+
+    /// Returns the lightweight projection used by task lists.
+    ///
+    /// A daemon can hold hydrated sessions in memory, but catalog refreshes
+    /// must never clone or transmit their transcripts. Clients hydrate one
+    /// selected session explicitly when they need its detail.
+    pub fn list_projection(&self) -> Self {
+        Self {
+            id: self.id,
+            title: self.title.clone(),
+            auto_title: self.auto_title.clone(),
+            project_id: self.project_id,
+            workspace: SessionWorkspace::Local,
+            provider: self.provider,
+            model: self.model.clone(),
+            runtime_mode: RuntimeMode::default(),
+            interaction_mode: InteractionMode::default(),
+            reasoning_effort: None,
+            service_tier: None,
+            agent_preset: None,
+            status: self.status,
+            created_at: self.created_at,
+            updated_at: self.updated_at,
+            last_reply_at: self.last_reply_at,
+            provider_cursor: None,
+            available_commands: Vec::new(),
+            context_usage: None,
+            runtime_event_cursor: None,
+            provider_session_id: None,
+            messages: Vec::new(),
+            transcript_blocks: Vec::new(),
+            turns: Vec::new(),
+            queued_messages: Vec::new(),
+            detail_loaded: false,
         }
     }
 
@@ -1464,6 +1516,10 @@ impl ActivityKind {
 
 #[derive(Clone, Debug)]
 pub enum DriverEvent {
+    /// Client-only acknowledgement that every daemon event through this
+    /// sequence has been incorporated into the local session projection.
+    /// Providers never emit this and the daemon never serializes it.
+    RuntimeEventCursorAdvanced(RuntimeEventCursor),
     Connected {
         provider_cursor: Option<ProviderResumeCursor>,
     },
@@ -1649,10 +1705,14 @@ pub enum BackgroundWorkEvent {
         delta: String,
     },
     /// Authoritative snapshot of the provider's detached terminal registry.
-    ReconcileProcesses(Vec<BackgroundWorkItem>),
+    ReconcileProcesses {
+        items: Vec<BackgroundWorkItem>,
+    },
     /// Authoritative snapshot of all provider work still live. Used by
     /// transports which publish a level signal in addition to edge events.
-    ReconcileLive(Vec<BackgroundWorkItem>),
+    ReconcileLive {
+        items: Vec<BackgroundWorkItem>,
+    },
     StopRequested(BackgroundWorkKey),
     StopFailed {
         key: BackgroundWorkKey,
@@ -2496,6 +2556,28 @@ pub fn compact_path(path: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn background_work_snapshots_have_serializable_named_items() {
+        let item = BackgroundWorkItem::new(
+            BackgroundWorkKind::Process,
+            "process-1",
+            "server",
+            BackgroundWorkStatus::Running,
+        );
+        let json =
+            serde_json::to_value(BackgroundWorkEvent::ReconcileProcesses { items: vec![item] })
+                .unwrap();
+
+        assert_eq!(json["type"], "reconcileProcesses");
+        assert_eq!(json["items"][0]["key"]["providerId"], "process-1");
+        let BackgroundWorkEvent::ReconcileProcesses { items } =
+            serde_json::from_value(json).unwrap()
+        else {
+            panic!("unexpected background-work event");
+        };
+        assert_eq!(items.len(), 1);
+    }
 
     #[test]
     fn attachment_messages_keep_transport_and_visible_content_separate() {
@@ -3365,5 +3447,45 @@ mod tests {
         let checkpoint = session.turns[0].checkpoint.as_ref().unwrap();
         assert_eq!((checkpoint.additions, checkpoint.deletions), (10, 7));
         assert!(checkpoint.totals_are_current());
+    }
+
+    #[test]
+    fn list_projection_never_copies_session_detail() {
+        let project = Project::from_path(PathBuf::from("/tmp/waku"));
+        let mut session = AgentSession::new(project.id, ProviderKind::Codex);
+        session.title = "Visible title".into();
+        session.model = Some("gpt-5".into());
+        session.status = SessionStatus::Working;
+        session.begin_turn("A large prompt");
+        session.messages.push(Message::new(
+            MessageRole::Assistant,
+            "A large streamed response",
+        ));
+        session.transcript_blocks.push(TranscriptBlock {
+            after_message: 1,
+            turn_id: None,
+            activities: vec![ActivityItem::new(
+                None,
+                ActivityKind::Tool,
+                "Inspect files",
+                None,
+                false,
+            )],
+        });
+        session
+            .queued_messages
+            .push(QueuedMessage::new("Follow up"));
+
+        let projection = session.list_projection();
+
+        assert_eq!(projection.id, session.id);
+        assert_eq!(projection.title, "Visible title");
+        assert_eq!(projection.model.as_deref(), Some("gpt-5"));
+        assert_eq!(projection.status, SessionStatus::Working);
+        assert!(!projection.detail_loaded);
+        assert!(projection.messages.is_empty());
+        assert!(projection.transcript_blocks.is_empty());
+        assert!(projection.turns.is_empty());
+        assert!(projection.queued_messages.is_empty());
     }
 }

@@ -205,6 +205,12 @@ impl Waku {
         self.refresh_composer_sources(cx);
         self.reset_transcript_rows(self.transcript_row_count());
         self.save();
+        if self
+            .selected_session()
+            .is_some_and(AgentSession::has_started)
+        {
+            self.start_runtime_attachment(session_id, cx);
+        }
         cx.notify();
     }
 
@@ -293,6 +299,9 @@ impl Waku {
         self.remove_right_panel_session_state(session_id);
         self.remove_composer_draft(composer_draft_key, cx);
         self.state.sessions.remove(index);
+        if let Err(error) = self.store.remove_session(session_id) {
+            self.show_toast(tr!("errors.save_local_state", error = error));
+        }
         if self
             .pending_session_activation
             .is_some_and(|pending| pending.session_id == session_id)
@@ -747,6 +756,7 @@ impl Waku {
     pub(super) fn reset_session_runtime(&mut self, session_id: Uuid) {
         if let Some(runtime) = self.runtimes.remove(&session_id) {
             runtime.driver.cancel();
+            runtime.driver.close();
             self.mark_background_work_lost(session_id);
         }
     }
@@ -1064,11 +1074,12 @@ impl Waku {
         // prompt resumes the same provider thread with a fresh runtime. A
         // detached process or subagent is the exception: its provider must
         // remain resident so Waku can keep observing and stopping it.
-        if retain_runtime
-            && keep_runtime
-            && let Some(runtime) = runtime
-        {
-            self.runtimes.insert(session_id, runtime);
+        if retain_runtime && keep_runtime {
+            if let Some(runtime) = runtime.take() {
+                self.runtimes.insert(session_id, runtime);
+            }
+        } else if let Some(runtime) = runtime {
+            runtime.driver.close();
         }
         self.remeasure_transcript_tail();
         self.save();

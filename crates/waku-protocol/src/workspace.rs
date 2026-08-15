@@ -53,6 +53,10 @@ pub enum WorkspaceOperation {
         #[ts(type = "string[]")]
         expanded_paths: Vec<PathBuf>,
     },
+    BrowseDirectory {
+        #[ts(type = "string | null")]
+        path: Option<PathBuf>,
+    },
     ReadTextFile {
         #[ts(type = "string")]
         root: PathBuf,
@@ -190,6 +194,17 @@ pub enum WorkspaceOperation {
 pub enum WorkspaceResult {
     Ack,
     WorkingTree {
+        entries: Vec<WorkingTreeEntry>,
+    },
+    Directory {
+        #[ts(type = "string")]
+        path: PathBuf,
+        #[ts(type = "string | null")]
+        parent: Option<PathBuf>,
+        #[ts(type = "string")]
+        home: PathBuf,
+        #[ts(type = "string")]
+        filesystem_root: PathBuf,
         entries: Vec<WorkingTreeEntry>,
     },
     TextFile {

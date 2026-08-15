@@ -8,7 +8,7 @@ use uuid::Uuid;
 use crate::attachments::{AttachmentUpload, StoredAttachment};
 use crate::computer_use::ComputerPermissions;
 use crate::model::{AgentSession, Project, ProviderKind, ProviderProbe};
-use crate::persistence::{ComposerDrafts, SessionMessageMatch};
+use crate::persistence::{ComposerDraftChange, ComposerDrafts, SessionMessageMatch};
 use crate::provider_session::{ProviderSessionFork, ProviderSessionForkRequest};
 use crate::settings::DaemonSettings;
 use crate::skills::SkillsCatalog;
@@ -74,6 +74,12 @@ pub struct ReplayCursor {
     rename_all_fields = "camelCase"
 )]
 pub enum Command {
+    /// Resolve the daemon-owned provider runtime for an existing task.
+    ///
+    /// Clients use this after reconnecting or opening the same daemon from a
+    /// second app. It observes the session actor without starting, replacing,
+    /// or otherwise mutating the provider process.
+    AttachSession,
     Start {
         options: WireDriverStartOptions,
     },
@@ -148,6 +154,10 @@ pub enum Command {
         live_session_ids: Vec<Uuid>,
         sessions: Vec<AgentSession>,
     },
+    /// Explicitly remove one daemon-owned task. Ordinary state saves are
+    /// merge-only so a stale client snapshot cannot delete tasks another
+    /// client just created.
+    RemoveSession,
     HydrateSession {
         session_id: Uuid,
     },
@@ -160,6 +170,9 @@ pub enum Command {
         drafts: ComposerDrafts,
         generation: u64,
     },
+    ApplyComposerDraftChanges {
+        changes: Vec<ComposerDraftChange>,
+    },
     StoreBlob {
         mime_type: String,
         #[serde(with = "base64_bytes")]
@@ -170,6 +183,10 @@ pub enum Command {
         name: String,
         upload: AttachmentUpload,
     },
+    ImportPathAttachment {
+        #[ts(type = "string")]
+        path: PathBuf,
+    },
     ReadBlob {
         reference: String,
     },
@@ -178,12 +195,42 @@ pub enum Command {
         path: PathBuf,
     },
     SweepBlobs,
+    /// Fork a persisted task through one completed provider turn.
+    ///
+    /// This is intentionally a daemon-owned operation: provider-native
+    /// conversation state, Git checkpoint refs, and SQLite all live on the
+    /// daemon host and must move together for remote clients.
+    ForkSessionFromResponse {
+        turn_count: usize,
+    },
+    /// Restore a task and its provider conversation to immediately before a
+    /// prior user message. The client can then submit the edited replacement
+    /// as an ordinary new turn.
+    RewindSessionToMessage {
+        turn_count: usize,
+    },
     ForkProviderSession {
         request: ProviderSessionForkRequest,
     },
     Workspace {
         operation: WorkspaceOperation,
     },
+    OpenTerminal {
+        #[ts(type = "string")]
+        cwd: PathBuf,
+        cols: u16,
+        rows: u16,
+    },
+    WriteTerminal {
+        #[serde(with = "base64_bytes")]
+        #[ts(type = "string")]
+        data: Vec<u8>,
+    },
+    ResizeTerminal {
+        cols: u16,
+        rows: u16,
+    },
+    CloseTerminal,
     CloseSession,
 }
 
@@ -269,6 +316,12 @@ pub enum ServerMessage {
         outcome: ResponseOutcome,
     },
     Event(SequencedEvent),
+    /// The daemon-owned project/task catalog changed through another client.
+    /// Clients should invalidate their lightweight task-state snapshot; live
+    /// runtime events continue through [`Self::Event`].
+    TaskStateChanged {
+        revision: u64,
+    },
     ShuttingDown,
 }
 
@@ -291,6 +344,10 @@ pub enum ResponseOutcome {
 )]
 pub enum ResponsePayload {
     Ack,
+    SessionRuntime {
+        runtime_id: Option<Uuid>,
+        supports_steer: bool,
+    },
     Started {
         supports_steer: bool,
     },
@@ -352,6 +409,14 @@ pub enum ResponsePayload {
     ProviderSessionForked {
         result: ProviderSessionFork,
     },
+    SessionForked {
+        session: AgentSession,
+        checkpoint_warning: Option<String>,
+    },
+    SessionRewound {
+        session: AgentSession,
+        cleanup_warning: Option<String>,
+    },
     Workspace {
         result: WorkspaceResult,
     },
@@ -408,6 +473,36 @@ mod tests {
             panic!("unexpected payload variant");
         };
         assert_eq!(bytes, vec![0, 1, 2, 255]);
+
+        let command = Command::WriteTerminal {
+            data: vec![0, 1, 2, 255],
+        };
+        let json = serde_json::to_value(&command).unwrap();
+        assert_eq!(json["type"], "writeTerminal");
+        assert_eq!(json["data"], "AAEC/w==");
+        let Command::WriteTerminal { data } = serde_json::from_value(json).unwrap() else {
+            panic!("unexpected command variant");
+        };
+        assert_eq!(data, vec![0, 1, 2, 255]);
+    }
+
+    #[test]
+    fn response_fork_command_uses_stable_camel_case_fields() {
+        let json =
+            serde_json::to_value(Command::ForkSessionFromResponse { turn_count: 7 }).unwrap();
+
+        assert_eq!(json["type"], "forkSessionFromResponse");
+        assert_eq!(json["turnCount"], 7);
+        assert_eq!(PROTOCOL_VERSION, 2);
+    }
+
+    #[test]
+    fn message_rewind_command_uses_stable_camel_case_fields() {
+        let json = serde_json::to_value(Command::RewindSessionToMessage { turn_count: 4 }).unwrap();
+
+        assert_eq!(json["type"], "rewindSessionToMessage");
+        assert_eq!(json["turnCount"], 4);
+        assert_eq!(PROTOCOL_VERSION, 2);
     }
 
     #[test]
@@ -436,5 +531,28 @@ mod tests {
             Uuid::from_u128(3).to_string()
         );
         assert!(json.get("protocol_version").is_none());
+    }
+
+    #[test]
+    fn composer_draft_changes_have_stable_wire_keys() {
+        let project_id = Uuid::from_u128(7);
+        let command = Command::ApplyComposerDraftChanges {
+            changes: vec![ComposerDraftChange {
+                target: crate::persistence::ComposerDraftTarget::NewSession { project_id },
+                draft: Some(crate::persistence::ComposerDraft {
+                    text: "unfinished".into(),
+                    attachments: Vec::new(),
+                }),
+            }],
+        };
+        let json = serde_json::to_value(command).unwrap();
+
+        assert_eq!(json["type"], "applyComposerDraftChanges");
+        assert_eq!(json["changes"][0]["target"]["type"], "newSession");
+        assert_eq!(
+            json["changes"][0]["target"]["projectId"],
+            project_id.to_string()
+        );
+        assert_eq!(json["changes"][0]["draft"]["text"], "unfinished");
     }
 }
