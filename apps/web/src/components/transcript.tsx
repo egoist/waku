@@ -499,7 +499,7 @@ function ConversationNavigationRail({
       />
       {emphasizedIndex !== null && (
         <div
-          className="pointer-events-none absolute left-[60px] z-20 flex max-h-[126px] w-80 flex-col gap-1.5 overflow-hidden rounded-[14px] border bg-popover px-[15px] py-3 text-popover-foreground shadow-lg"
+          className="waku-popover-surface pointer-events-none absolute left-[60px] z-20 flex max-h-[126px] w-80 flex-col gap-1.5 overflow-hidden rounded-[14px] px-[15px] py-3 text-popover-foreground"
           style={{ top: previewTop }}
         >
           <div className="truncate text-sm font-semibold leading-5">
@@ -1282,49 +1282,49 @@ function MessageContextMenu({
       <ContextMenu.Portal>
         <ContextMenu.Positioner className="z-[100] outline-none">
           <ContextMenu.Popup
-            className="min-w-40 rounded-lg border bg-popover p-1 text-xs text-popover-foreground shadow-xl outline-none"
+            className="waku-menu-surface"
             finalFocus={false}
           >
             {selectedText && (
               <ContextMenu.Item
-                className="flex min-h-7 cursor-default select-none items-center gap-2 rounded-md px-2 outline-none data-[highlighted]:bg-accent"
+                className="waku-menu-item"
                 onClick={() => void navigator.clipboard.writeText(selectedText)}
               >
-                <WakuIcon className="size-3.5" name="copy" /> {t('common.copy_selection')}
+                <WakuIcon className="size-3" name="copy" /> {t('common.copy_selection')}
               </ContextMenu.Item>
             )}
             <ContextMenu.Item
-              className="flex min-h-7 cursor-default select-none items-center gap-2 rounded-md px-2 outline-none data-[highlighted]:bg-accent"
+              className="waku-menu-item"
               onClick={() => void navigator.clipboard.writeText(content)}
             >
-              <WakuIcon className="size-3.5" name="copy" /> {t('common.copy_message_title')}
+              <WakuIcon className="size-3" name="copy" /> {t('common.copy_message_title')}
             </ContextMenu.Item>
             {copyToComposer && (
               <ContextMenu.Item
-                className="flex min-h-7 cursor-default select-none items-center gap-2 rounded-md px-2 outline-none data-[highlighted]:bg-accent"
+                className="waku-menu-item"
                 onClick={copyToComposer}
               >
-                <WakuIcon className="size-3.5" name="compose" /> {t('common.copy_to_composer')}
+                <WakuIcon className="size-3" name="compose" /> {t('common.copy_to_composer')}
               </ContextMenu.Item>
             )}
             {code && (
               <ContextMenu.Item
-                className="flex min-h-7 cursor-default select-none items-center gap-2 rounded-md px-2 outline-none data-[highlighted]:bg-accent"
+                className="waku-menu-item"
                 onClick={() => void navigator.clipboard.writeText(code)}
               >
-                <WakuIcon className="size-3.5" name="copy" /> {t('common.copy_code')}
+                <WakuIcon className="size-3" name="copy" /> {t('common.copy_code')}
               </ContextMenu.Item>
             )}
             {rewindAction && (
               <>
-                <ContextMenu.Separator className="mx-1 my-1 h-px bg-border" />
+                <ContextMenu.Separator className="waku-menu-separator" />
                 <ContextMenu.Item
-                  className="flex min-h-7 cursor-default select-none items-center gap-2 rounded-md px-2 outline-none data-[disabled]:opacity-45 data-[highlighted]:bg-accent"
+                  className="waku-menu-item"
                   disabled={rewindAction.pending}
                   onClick={rewindAction.onBegin}
                 >
                   <WakuIcon
-                    className={cn('size-3.5', rewindAction.pending && 'motion-safe:animate-spin')}
+                    className={cn('size-3', rewindAction.pending && 'motion-safe:animate-spin')}
                     name={rewindAction.pending ? 'loaderCircle' : 'rewind'}
                   />
                   {t(rewindAction.pending ? 'session.reverting_message_title' : 'session.revert_to_here_title')}
@@ -1333,14 +1333,14 @@ function MessageContextMenu({
             )}
             {forkAction && (
               <>
-                <ContextMenu.Separator className="mx-1 my-1 h-px bg-border" />
+                <ContextMenu.Separator className="waku-menu-separator" />
                 <ContextMenu.Item
-                  className="flex min-h-7 cursor-default select-none items-center gap-2 rounded-md px-2 outline-none data-[disabled]:opacity-45 data-[highlighted]:bg-accent"
+                  className="waku-menu-item"
                   disabled={forkAction.pending}
                   onClick={() => forkAction.onFork(forkAction.turnCount)}
                 >
                   <WakuIcon
-                    className={cn('size-3.5', forkAction.pending && 'motion-safe:animate-spin')}
+                    className={cn('size-3', forkAction.pending && 'motion-safe:animate-spin')}
                     name={forkAction.pending ? 'loaderCircle' : 'fork'}
                   />
                   {t(forkAction.pending ? 'session.forking_task_title' : 'session.fork_task_title')}

@@ -910,10 +910,10 @@ pub struct Waku {
     /// Providers with a version probe in flight, so a re-detect cannot stack
     /// a second subprocess on one that has not answered.
     provider_version_probes_pending: HashSet<ProviderKind>,
-    /// PATH re-detection results from the Providers page's refresh, merged
-    /// into `probes` without touching their model catalogs.
-    provider_detection_tx: Sender<(ProviderKind, bool, Option<PathBuf>)>,
-    provider_detection_events: Receiver<(ProviderKind, bool, Option<PathBuf>)>,
+    /// Fast provider detection results from the daemon, including its cached
+    /// model catalog. Live discovery revalidates these probes afterward.
+    provider_detection_tx: Sender<ProviderProbe>,
+    provider_detection_events: Receiver<ProviderProbe>,
     /// Providers the running re-detection has not answered for yet; empty
     /// means no re-detection is in flight.
     provider_detection_remaining: usize,
@@ -1212,6 +1212,8 @@ pub struct Waku {
     header_drag_armed: bool,
     toast: Option<ToastState>,
     toast_generation: u64,
+    copied_control_feedback: HashMap<String, u64>,
+    copied_control_generation: u64,
     copied_message_feedback: HashMap<Uuid, u64>,
     copied_message_generation: u64,
     copied_activity_feedback: HashMap<(Uuid, ActivityDisclosureSectionKind), u64>,
@@ -2509,6 +2511,8 @@ impl Waku {
                     hovered: false,
                 }),
                 toast_generation: 0,
+                copied_control_feedback: HashMap::new(),
+                copied_control_generation: 0,
                 copied_message_feedback: HashMap::new(),
                 copied_message_generation: 0,
                 copied_activity_feedback: HashMap::new(),

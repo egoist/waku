@@ -1,4 +1,5 @@
 import { useQuery, useQueryClient } from '@tanstack/react-query'
+import { Popover } from '@base-ui/react/popover'
 import type {
   AgentSession,
   BranchSnapshot,
@@ -11,7 +12,6 @@ import type {
 } from '@waku/client'
 import {
   useEffect,
-  useId,
   useRef,
   useState,
   type KeyboardEvent,
@@ -65,6 +65,7 @@ import {
   type EscapeStopArm,
 } from '@/lib/escape-stop'
 import { usePrimaryShortcut } from '@/lib/platform'
+import { agentPresetDescription, agentPresetLabel } from '@/lib/agent-preset-presentation'
 import { isProjectlessProject, projectDisplayName } from '@/lib/project-presentation'
 import { useRuntime } from '@/lib/runtime-context'
 import { sessionHasStarted } from '@/lib/sidebar-presentation'
@@ -813,7 +814,7 @@ function ComposerAutocomplete({
   return (
     <div
       aria-label={t('composer.suggestions')}
-      className="absolute bottom-[calc(100%+6px)] left-0 z-[70] w-full overflow-hidden rounded-[11px] border border-input bg-[var(--raised)] p-1 shadow-[0_18px_50px_rgba(0,0,0,0.22)]"
+      className="waku-popover-surface absolute bottom-[calc(100%+6px)] left-0 z-[70] w-full overflow-hidden rounded-[11px] p-1"
       id="composer-autocomplete"
       role="listbox"
       style={{ height: Math.min(302, rows.length * 30 + 8) }}
@@ -1053,19 +1054,20 @@ function AgentPresetControl({
     ?? probe.agent_presets[0]
   return (
     <ControlMenu
+      caret={false}
       icon="bot"
       items={probe.agent_presets.map((preset) => ({
         id: preset.id,
-        label: `${preset.name}${preset.is_custom ? ` · ${t('agent_preset.custom')}` : ''}`,
-        description: preset.description ?? t('agent_preset.no_description'),
+        label: `${agentPresetLabel(preset, t)}${preset.is_custom ? ` · ${t('agent_preset.custom')}` : ''}`,
+        description: agentPresetDescription(preset, t) ?? t('agent_preset.no_description'),
         selected: preset.id === selected?.id,
         onSelect: () => onPatch({
           agent_preset: preset.id,
           ...(preset.id === 'minimal' ? { interaction_mode: 'build' as const } : {}),
         }),
       }))}
-      label={selected?.name ?? t('agent_preset.standard')}
-      menuClassName="w-[340px]"
+      label={selected ? agentPresetLabel(selected, t) : t('agent_preset.standard')}
+      menuClassName="w-80"
     />
   )
 }
@@ -1212,9 +1214,7 @@ function BranchPicker({
   const [query, setQuery] = useState('')
   const [branchName, setBranchName] = useState('')
   const [active, setActive] = useState(0)
-  const root = useRef<HTMLDivElement>(null)
   const input = useRef<HTMLInputElement>(null)
-  const menuId = useId()
   const plannedWorktree = workspace.kind === 'newWorktree'
   const selected = workspace.kind === 'newWorktree'
     ? workspace.baseBranch ?? snapshot.default_branch ?? snapshot.current ?? snapshot.detached_head
@@ -1259,35 +1259,14 @@ function BranchPicker({
     setOpen(false)
   }
 
-  useEffect(() => {
-    if (!open) return
-    const pointerDown = (event: PointerEvent) => {
-      if (!root.current?.contains(event.target as Node)) setOpen(false)
-    }
-    const keyDown = (event: globalThis.KeyboardEvent) => {
-      if (event.key === 'Escape') setOpen(false)
-    }
-    document.addEventListener('pointerdown', pointerDown)
-    document.addEventListener('keydown', keyDown)
-    return () => {
-      document.removeEventListener('pointerdown', pointerDown)
-      document.removeEventListener('keydown', keyDown)
-    }
-  }, [open])
-
   return (
-    <div className="relative shrink-0" ref={root}>
-      <button
-        aria-controls={open ? menuId : undefined}
-        aria-expanded={open}
-        aria-haspopup="dialog"
+    <Popover.Root modal={false} open={open} onOpenChange={updateOpen}>
+      <Popover.Trigger
         className={cn(
-          'flex h-6 max-w-52 items-center gap-1.5 rounded-md px-[7px] text-[11px] text-[var(--text-secondary)] outline-none hover:bg-accent focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-45',
+          'flex h-6 max-w-52 shrink-0 items-center gap-1.5 rounded-[6px] px-[7px] text-[11px] text-[var(--text-secondary)] outline-none hover:bg-accent focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-45',
           open && 'bg-accent text-foreground',
         )}
         disabled={disabled}
-        type="button"
-        onClick={() => updateOpen(!open)}
         onKeyDown={(event) => {
           if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
             event.preventDefault()
@@ -1297,133 +1276,141 @@ function BranchPicker({
       >
         <WakuIcon className="size-[11px] text-[var(--text-tertiary)]" name="gitBranch" />
         <span className="truncate">{pending ? t('branches.switching') : selected ?? t('branches.detached_head')}</span>
-      </button>
-      {open && (
-        <div
-          className="absolute bottom-[calc(100%+6px)] left-0 z-[70] flex max-h-[390px] w-[360px] flex-col overflow-hidden rounded-[13px] border bg-popover shadow-xl"
-          id={menuId}
-          role="dialog"
-          aria-label={t('branches.choose')}
-          onKeyDown={(event) => {
-            if (mode === 'create') {
-              if (event.key === 'Enter') {
-                event.preventDefault()
-                submitCreate()
-              }
-              return
-            }
-            if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
-              event.preventDefault()
-              if (!actions.length) return
-              setActive((current) => (
-                event.key === 'ArrowDown'
-                  ? (current + 1) % actions.length
-                  : (current - 1 + actions.length) % actions.length
-              ))
-            } else if (event.key === 'Home') {
-              event.preventDefault()
-              setActive(0)
-            } else if (event.key === 'End') {
-              event.preventDefault()
-              setActive(Math.max(0, actions.length - 1))
-            } else if (event.key === 'Enter') {
-              event.preventDefault()
-              const action = actions[active] ?? actions[0]
-              if (action?.kind === 'branch') choose(action.branch.name)
-              else if (action?.kind === 'create') {
-                setMode('create')
-                requestAnimationFrame(() => input.current?.focus())
-              }
-            }
-          }}
+      </Popover.Trigger>
+      <Popover.Portal>
+        <Popover.Positioner
+          align="start"
+          className="z-[100] outline-none"
+          collisionPadding={8}
+          side="top"
+          sideOffset={4}
         >
-          {mode === 'create' ? (
-            <div className="p-3.5">
-              <div className="flex items-center gap-2 text-[13px] font-medium">
-                <WakuIcon className="size-3.5 text-[var(--text-secondary)]" name="plus" />
-                {t('branches.create_and_checkout')}
+          <Popover.Popup
+            aria-label={t('branches.choose')}
+            className="waku-popover-surface flex max-h-[390px] w-[360px] flex-col overflow-hidden rounded-[13px] outline-none"
+            initialFocus={input}
+            role="dialog"
+            onKeyDown={(event) => {
+              if (mode === 'create') {
+                if (event.key === 'Enter') {
+                  event.preventDefault()
+                  submitCreate()
+                }
+                return
+              }
+              if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+                event.preventDefault()
+                if (!actions.length) return
+                setActive((current) => (
+                  event.key === 'ArrowDown'
+                    ? (current + 1) % actions.length
+                    : (current - 1 + actions.length) % actions.length
+                ))
+              } else if (event.key === 'Home') {
+                event.preventDefault()
+                setActive(0)
+              } else if (event.key === 'End') {
+                event.preventDefault()
+                setActive(Math.max(0, actions.length - 1))
+              } else if (event.key === 'Enter') {
+                event.preventDefault()
+                const action = actions[active] ?? actions[0]
+                if (action?.kind === 'branch') choose(action.branch.name)
+                else if (action?.kind === 'create') {
+                  setMode('create')
+                  requestAnimationFrame(() => input.current?.focus())
+                }
+              }
+            }}
+          >
+            {mode === 'create' ? (
+              <div className="p-3.5">
+                <div className="flex items-center gap-2 text-[13px] font-medium">
+                  <WakuIcon className="size-3.5 text-[var(--text-secondary)]" name="plus" />
+                  {t('branches.create_and_checkout')}
+                </div>
+                <input
+                  autoFocus
+                  className="mt-3 h-9 w-full rounded-[9px] border bg-background px-2.5 text-[12px] outline-none focus:border-ring"
+                  placeholder={t('input.new_branch_name')}
+                  ref={input}
+                  value={branchName}
+                  onChange={(event) => setBranchName(event.target.value)}
+                />
+                <div className="mt-2 text-[10.5px] text-[var(--text-tertiary)]">{t('branches.create_hint')}</div>
               </div>
-              <input
-                autoFocus
-                className="mt-3 h-9 w-full rounded-[9px] border bg-background px-2.5 text-[12px] outline-none focus:border-ring"
-                placeholder={t('input.new_branch_name')}
-                ref={input}
-                value={branchName}
-                onChange={(event) => setBranchName(event.target.value)}
-              />
-              <div className="mt-2 text-[10.5px] text-[var(--text-tertiary)]">{t('branches.create_hint')}</div>
-            </div>
-          ) : (
-            <>
-              <div className="h-[52px] shrink-0 px-3 pb-2 pt-2.5">
-                <label className="flex h-[34px] items-center gap-2 rounded-[9px] bg-background px-2.5 focus-within:ring-1 focus-within:ring-ring">
-                  <WakuIcon className="size-[15px] text-[var(--text-secondary)]" name="search" />
-                  <input
-                    className="min-w-0 flex-1 bg-transparent text-[12px] outline-none"
-                    placeholder={t('input.search_branches')}
-                    ref={input}
-                    value={query}
-                    onChange={(event) => {
-                      setQuery(event.target.value)
-                      setActive(0)
-                    }}
-                  />
-                </label>
-              </div>
-              <div className="px-3.5 pb-1 pt-0.5 text-[12px] font-medium text-[var(--text-tertiary)]">{t('branches.title')}</div>
-              <div className="min-h-0 max-h-[260px] overflow-y-auto px-1">
-                {!visible.length && (
-                  <div className="grid h-16 place-items-center text-[11.5px] text-[var(--text-ghost)]">{t('branches.none_found')}</div>
-                )}
-                {visible.map((branch) => {
-                  const disabledBranch = branch.checked_out_elsewhere && !plannedWorktree && branch.name !== selected
-                  const actionIndex = actions.findIndex((action) => action.kind === 'branch' && action.branch.name === branch.name)
-                  return (
+            ) : (
+              <>
+                <div className="h-[52px] shrink-0 px-3 pb-2 pt-2.5">
+                  <label className="flex h-[34px] items-center gap-2 rounded-[9px] bg-background px-2.5 focus-within:ring-1 focus-within:ring-ring">
+                    <WakuIcon className="size-[15px] text-[var(--text-secondary)]" name="search" />
+                    <input
+                      className="min-w-0 flex-1 bg-transparent text-[12px] outline-none"
+                      placeholder={t('input.search_branches')}
+                      ref={input}
+                      value={query}
+                      onChange={(event) => {
+                        setQuery(event.target.value)
+                        setActive(0)
+                      }}
+                    />
+                  </label>
+                </div>
+                <div className="px-3.5 pb-1 pt-0.5 text-[12px] font-medium text-[var(--text-tertiary)]">{t('branches.title')}</div>
+                <div className="min-h-0 max-h-[260px] overflow-y-auto px-1">
+                  {!visible.length && (
+                    <div className="grid h-16 place-items-center text-[11.5px] text-[var(--text-ghost)]">{t('branches.none_found')}</div>
+                  )}
+                  {visible.map((branch) => {
+                    const disabledBranch = branch.checked_out_elsewhere && !plannedWorktree && branch.name !== selected
+                    const actionIndex = actions.findIndex((action) => action.kind === 'branch' && action.branch.name === branch.name)
+                    return (
+                      <button
+                        className={cn(
+                          'flex h-8 w-full items-center gap-2 rounded-[6px] px-2 text-left text-[11.5px] outline-none hover:bg-accent focus-visible:bg-accent',
+                          disabledBranch && 'text-[var(--text-ghost)] hover:bg-transparent',
+                          actionIndex >= 0 && actionIndex === active && 'bg-accent',
+                        )}
+                        disabled={disabledBranch}
+                        key={branch.name}
+                        title={disabledBranch ? t('branches.checked_out_elsewhere') : undefined}
+                        type="button"
+                        onMouseEnter={() => actionIndex >= 0 && setActive(actionIndex)}
+                        onClick={() => choose(branch.name)}
+                      >
+                        <WakuIcon className="size-3 text-[var(--text-tertiary)]" name="gitBranch" />
+                        <span className="min-w-0 flex-1 truncate">{branch.name}</span>
+                        {branch.name === selected && <WakuIcon className="size-[11px] text-[var(--text-tertiary)]" name="check" />}
+                      </button>
+                    )
+                  })}
+                </div>
+                {!plannedWorktree && (
+                  <>
+                    <div className="mx-1.5 my-1 h-px bg-border" />
                     <button
                       className={cn(
-                        'flex h-8 w-full items-center gap-2 rounded-md px-2 text-left text-[11.5px] outline-none hover:bg-accent focus-visible:bg-accent',
-                        disabledBranch && 'text-[var(--text-ghost)] hover:bg-transparent',
-                        actionIndex >= 0 && actionIndex === active && 'bg-accent',
+                        'mx-1 mb-1 flex h-8 items-center gap-2 rounded-[6px] px-2 text-left text-[11.5px] outline-none hover:bg-accent focus-visible:bg-accent',
+                        actions[active]?.kind === 'create' && 'bg-accent',
                       )}
-                      disabled={disabledBranch}
-                      key={branch.name}
-                      title={disabledBranch ? t('branches.checked_out_elsewhere') : undefined}
                       type="button"
-                      onMouseEnter={() => actionIndex >= 0 && setActive(actionIndex)}
-                      onClick={() => choose(branch.name)}
+                      onMouseEnter={() => setActive(Math.max(0, actions.length - 1))}
+                      onClick={() => {
+                        setMode('create')
+                        requestAnimationFrame(() => input.current?.focus())
+                      }}
                     >
-                      <WakuIcon className="size-3 text-[var(--text-tertiary)]" name="gitBranch" />
-                      <span className="min-w-0 flex-1 truncate">{branch.name}</span>
-                      {branch.name === selected && <WakuIcon className="size-[11px] text-[var(--text-tertiary)]" name="check" />}
+                      <WakuIcon className="size-3 text-[var(--text-secondary)]" name="plus" />
+                      {t('branches.create_and_checkout_ellipsis')}
                     </button>
-                  )
-                })}
-              </div>
-              {!plannedWorktree && (
-                <>
-                  <div className="mx-1.5 my-1 h-px bg-border" />
-                  <button
-                    className={cn(
-                      'mx-1 mb-1 flex h-8 items-center gap-2 rounded-md px-2 text-left text-[11.5px] outline-none hover:bg-accent focus-visible:bg-accent',
-                      actions[active]?.kind === 'create' && 'bg-accent',
-                    )}
-                    type="button"
-                    onMouseEnter={() => setActive(Math.max(0, actions.length - 1))}
-                    onClick={() => {
-                      setMode('create')
-                      requestAnimationFrame(() => input.current?.focus())
-                    }}
-                  >
-                    <WakuIcon className="size-3 text-[var(--text-secondary)]" name="plus" />
-                    {t('branches.create_and_checkout_ellipsis')}
-                  </button>
-                </>
-              )}
-            </>
-          )}
-        </div>
-      )}
-    </div>
+                  </>
+                )}
+              </>
+            )}
+          </Popover.Popup>
+        </Popover.Positioner>
+      </Popover.Portal>
+    </Popover.Root>
   )
 }
 
@@ -1449,7 +1436,6 @@ function UsageMeter({
   const { client, config } = useDaemon()
   const settings = useDaemonSettings()
   const [open, setOpen] = useState(false)
-  const root = useRef<HTMLDivElement>(null)
   const usageShortcut = usePrimaryShortcut('⌘U', 'Ctrl+U')
   const context = session.context_usage
   const contextPercent = context?.window
@@ -1469,22 +1455,6 @@ function UsageMeter({
     onOpenSignalHandled?.()
   }, [openSignal, onOpenSignalHandled])
 
-  useEffect(() => {
-    if (!open) return
-    const pointerDown = (event: PointerEvent) => {
-      if (!root.current?.contains(event.target as Node)) setOpen(false)
-    }
-    const keyDown = (event: globalThis.KeyboardEvent) => {
-      if (event.key === 'Escape') setOpen(false)
-    }
-    document.addEventListener('pointerdown', pointerDown)
-    document.addEventListener('keydown', keyDown)
-    return () => {
-      document.removeEventListener('pointerdown', pointerDown)
-      document.removeEventListener('keydown', keyDown)
-    }
-  }, [open])
-
   const error = plan.error ? errorMessage(plan.error) : null
   const tooltip = error
     ? t('usage.refresh_failed', { error })
@@ -1493,45 +1463,51 @@ function UsageMeter({
       : t('usage.context_used', { percent: contextPercent.toFixed(0), shortcut: usageShortcut })
 
   return (
-    <div className="relative" ref={root}>
-      <button
-        aria-expanded={open}
+    <Popover.Root modal={false} open={open} onOpenChange={setOpen}>
+      <Popover.Trigger
         aria-label={tooltip}
         className={cn(
           'grid h-5 w-[23px] place-items-center rounded-[5px] outline-none hover:bg-accent focus-visible:ring-1 focus-visible:ring-ring',
           open && 'bg-accent',
         )}
         title={tooltip}
-        type="button"
-        onClick={() => setOpen((current) => !current)}
       >
         <ContextGauge percent={contextPercent} />
-      </button>
-      {open && (
-        <div
-          className="absolute bottom-[26px] right-0 z-50 flex w-80 flex-col gap-3 rounded-[10px] border bg-popover p-3.5 text-xs text-popover-foreground shadow-xl"
-          role="dialog"
-          aria-label={t('settings.usage')}
+      </Popover.Trigger>
+      <Popover.Portal>
+        <Popover.Positioner
+          align="end"
+          className="z-[100] outline-none"
+          collisionPadding={8}
+          side="top"
+          sideOffset={4}
         >
-          <UsageLane
-            label={t('usage.context_window')}
-            percent={contextPercent ?? 0}
-            value={context?.window && contextPercent != null
-              ? `${formatTokens(context.tokens)} / ${formatTokens(context.window)} (${contextPercent.toFixed(0)}%)`
-              : formatTokens(context?.tokens ?? 0)}
-          />
-          {(plan.data || plan.isFetching || error) && <div className="h-px bg-border" />}
-          {plan.data && <PlanUsageLanes locale={locale} plan={plan.data} provider={session.provider} t={t} />}
-          {plan.isFetching && supportsPlanUsage && <UsageSkeleton t={t} />}
-          {error && (
-            <div className="space-y-1 text-[11px]">
-              <div className="text-[var(--text-tertiary)]">{t('usage.plan_limits')}</div>
-              <div className="break-words text-[var(--text-secondary)]">{t('usage.unavailable', { error })}</div>
-            </div>
-          )}
-        </div>
-      )}
-    </div>
+          <Popover.Popup
+            aria-label={t('settings.usage')}
+            className="waku-popover-surface flex w-80 flex-col gap-3 rounded-[10px] p-3.5 text-xs text-popover-foreground outline-none"
+            initialFocus={false}
+            role="dialog"
+          >
+            <UsageLane
+              label={t('usage.context_window')}
+              percent={contextPercent ?? 0}
+              value={context?.window && contextPercent != null
+                ? `${formatTokens(context.tokens)} / ${formatTokens(context.window)} (${contextPercent.toFixed(0)}%)`
+                : formatTokens(context?.tokens ?? 0)}
+            />
+            {(plan.data || plan.isFetching || error) && <div className="h-px bg-border" />}
+            {plan.data && <PlanUsageLanes locale={locale} plan={plan.data} provider={session.provider} t={t} />}
+            {plan.isFetching && supportsPlanUsage && <UsageSkeleton t={t} />}
+            {error && (
+              <div className="space-y-1 text-[11px]">
+                <div className="text-[var(--text-tertiary)]">{t('usage.plan_limits')}</div>
+                <div className="break-words text-[var(--text-secondary)]">{t('usage.unavailable', { error })}</div>
+              </div>
+            )}
+          </Popover.Popup>
+        </Popover.Positioner>
+      </Popover.Portal>
+    </Popover.Root>
   )
 }
 

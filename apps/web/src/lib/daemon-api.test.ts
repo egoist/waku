@@ -77,6 +77,30 @@ describe('browseDaemonDirectory', () => {
       operation: { type: 'browseDirectory', path: '/Users/me' },
     })
   })
+
+  test('uses the daemon home when no path is provided', async () => {
+    let command: unknown
+    const result: DaemonDirectory = {
+      type: 'directory',
+      path: '/Users/me',
+      parent: '/Users',
+      home: '/Users/me',
+      filesystem_root: '/',
+      entries: [],
+    }
+    const client = {
+      request: async (next: unknown) => {
+        command = next
+        return { type: 'workspace', result }
+      },
+    } as unknown as WakuClient
+
+    await expect(browseDaemonDirectory(client, null)).resolves.toEqual(result)
+    expect(command).toEqual({
+      type: 'workspace',
+      operation: { type: 'browseDirectory', path: null },
+    })
+  })
 })
 
 describe('turn checkpoints', () => {

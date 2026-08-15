@@ -346,8 +346,10 @@ export function RightPanel({
           <ControlMenu
             align="right"
             caret={false}
+            highlightTriggerWhenOpen={false}
             label={t('right_panel.add_tab')}
             placement="below"
+            selectionMode="status"
             triggerClassName="size-7 justify-center px-0"
             items={[
               {

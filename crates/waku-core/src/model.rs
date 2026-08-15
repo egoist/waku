@@ -18,6 +18,32 @@ pub fn provider_probe(provider: ProviderKind, binary_override: Option<&str>) -> 
     }
 }
 
+/// Detect a provider and hydrate its catalog from the daemon-owned cache.
+///
+/// This is the fast half of stale-while-revalidate: clients can render the
+/// last successful catalog immediately, then request live discovery to replace
+/// it. Cache I/O stays in the daemon instead of leaking host filesystem access
+/// into desktop or Web clients.
+pub fn cached_provider_probe(
+    provider: ProviderKind,
+    binary_override: Option<&str>,
+) -> ProviderProbe {
+    let cached = crate::model_catalog::cached_models(provider);
+    apply_cached_models(provider_probe(provider, binary_override), cached)
+}
+
+fn apply_cached_models(
+    mut probe: ProviderProbe,
+    cached_models: Option<Vec<ProviderModel>>,
+) -> ProviderProbe {
+    if probe.provider.supports_model_discovery()
+        && let Some(models) = cached_models
+    {
+        probe.models = models;
+    }
+    probe
+}
+
 pub fn discover_provider_models(mut probe: ProviderProbe) -> ProviderProbe {
     if probe.provider.supports_model_discovery()
         && let Some(path) = probe.path.as_deref()
@@ -42,4 +68,26 @@ pub fn probe_provider_version(binary: &Path) -> Option<String> {
         String::from_utf8_lossy(&output.stderr)
     );
     parse_cli_version(&combined)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cached_catalog_replaces_fallback_before_live_discovery() {
+        let probe = ProviderProbe {
+            provider: ProviderKind::Codex,
+            installed: true,
+            path: Some("/usr/bin/codex".into()),
+            models: crate::model_catalog::fallback_models(ProviderKind::Codex),
+            agent_presets: Vec::new(),
+        };
+        let cached = vec![ProviderModel::new("cached-model", "Cached model").default()];
+
+        let probe = apply_cached_models(probe, Some(cached));
+
+        assert_eq!(probe.models.len(), 1);
+        assert_eq!(probe.models[0].id, "cached-model");
+    }
 }

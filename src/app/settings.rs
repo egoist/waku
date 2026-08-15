@@ -745,6 +745,8 @@ impl Waku {
                 tr!("daemon.apply")
             });
 
+        let copy_url_feedback_id = "daemon-url";
+        let url_copied = self.control_was_copied(copy_url_feedback_id);
         let copy_url = websocket_url.clone();
         let copy_url_button = div()
             .id("copy-daemon-url")
@@ -762,22 +764,36 @@ impl Waku {
             .text_color(theme.text_secondary)
             .focus_visible(|style| style.border_color(theme.accent))
             .hover(|element| element.bg(theme.overlay))
-            .child(icon("icons/copy.svg", 11.0, theme.text_tertiary))
-            .child(tr!("common.copy"))
+            .child(icon(
+                if url_copied {
+                    "icons/check.svg"
+                } else {
+                    "icons/copy.svg"
+                },
+                11.0,
+                theme.text_tertiary,
+            ))
+            .child(if url_copied {
+                tr!("common.copied")
+            } else {
+                tr!("common.copy")
+            })
             .on_click(cx.listener(move |this, _, _, cx| {
                 cx.write_to_clipboard(ClipboardItem::new_string(copy_url.clone()));
-                this.show_success_toast(tr!("daemon.url_copied"));
+                this.show_control_copied(copy_url_feedback_id, cx);
             }))
             .on_key_down(cx.listener(move |this, event: &KeyDownEvent, _, cx| {
                 if !event.keystroke.modifiers.modified()
                     && matches!(event.keystroke.key.as_str(), "enter" | "space")
                 {
                     cx.write_to_clipboard(ClipboardItem::new_string(websocket_url.clone()));
-                    this.show_success_toast(tr!("daemon.url_copied"));
+                    this.show_control_copied(copy_url_feedback_id, cx);
                     cx.stop_propagation();
                 }
             }));
 
+        let copy_token_feedback_id = "daemon-token";
+        let token_copied = self.control_was_copied(copy_token_feedback_id);
         let click_token = token.clone();
         let key_token = token.clone();
         let copy_token_button = div()
@@ -796,18 +812,30 @@ impl Waku {
             .text_color(theme.text_secondary)
             .focus_visible(|style| style.border_color(theme.accent))
             .hover(|element| element.bg(theme.overlay))
-            .child(icon("icons/copy.svg", 11.0, theme.text_tertiary))
-            .child(tr!("common.copy"))
+            .child(icon(
+                if token_copied {
+                    "icons/check.svg"
+                } else {
+                    "icons/copy.svg"
+                },
+                11.0,
+                theme.text_tertiary,
+            ))
+            .child(if token_copied {
+                tr!("common.copied")
+            } else {
+                tr!("common.copy")
+            })
             .on_click(cx.listener(move |this, _, _, cx| {
                 cx.write_to_clipboard(ClipboardItem::new_string(click_token.clone()));
-                this.show_success_toast(tr!("daemon.token_copied"));
+                this.show_control_copied(copy_token_feedback_id, cx);
             }))
             .on_key_down(cx.listener(move |this, event: &KeyDownEvent, _, cx| {
                 if !event.keystroke.modifiers.modified()
                     && matches!(event.keystroke.key.as_str(), "enter" | "space")
                 {
                     cx.write_to_clipboard(ClipboardItem::new_string(key_token.clone()));
-                    this.show_success_toast(tr!("daemon.token_copied"));
+                    this.show_control_copied(copy_token_feedback_id, cx);
                     cx.stop_propagation();
                 }
             }));

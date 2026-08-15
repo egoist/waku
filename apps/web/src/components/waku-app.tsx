@@ -1,5 +1,6 @@
 import { useQueryClient } from '@tanstack/react-query'
 import { useNavigate, useSearch } from '@tanstack/react-router'
+import { Popover } from '@base-ui/react/popover'
 import type {
   AgentSession,
   ComposerDraft,
@@ -10,7 +11,7 @@ import type {
   Project,
   ReviewDiffSource,
 } from '@waku/client'
-import { useEffect, useId, useRef, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { toast } from 'sonner'
 import { Button } from '@/components/ui/button'
 import { CommandPalette, type CommandPaletteActions } from '@/components/command-palette'
@@ -70,6 +71,7 @@ import {
 } from '@/lib/navigation-memory'
 import { transcriptLinkRoute } from '@/lib/transcript-links'
 import { shouldShowInitialDestination } from '@/lib/workspace-presentation'
+import { agentPresetIdLabel } from '@/lib/agent-preset-presentation'
 import { isProjectlessProject, projectDisplayName } from '@/lib/project-presentation'
 import {
   useRuntime,
@@ -1177,10 +1179,9 @@ export function WakuApp() {
 
       {projectPickerOpen && (
         <DaemonFilePicker
-          root={taskState.data.defaultCwd}
+          root={null}
           returnFocus={projectPickerReturnFocus}
           selectionMode="directory"
-          workspaceLabel={t('project.default_folder')}
           onClose={() => setProjectPickerOpen(false)}
           onSelect={addRemoteProject}
         />
@@ -1246,7 +1247,7 @@ function TaskHeader({
   const cwd = session && project ? sessionCwd(session, project) : undefined
   const branches = useWorkspaceBranches(cwd)
   const preset = session?.provider === 'deepSeek' && session.messages.length
-    ? session.agent_preset || t('agent_preset.standard')
+    ? agentPresetIdLabel(session.agent_preset || 'standard', t)
     : null
   return (
     <header className="flex h-12 shrink-0 items-center gap-2 px-3 lg:px-3.5">
@@ -1305,31 +1306,11 @@ function EnvironmentPopover({
   const { t } = useI18n()
   const { backgroundWork, refreshBackgroundWork, stopBackgroundWork } = useRuntime()
   const [open, setOpen] = useState(false)
-  const root = useRef<HTMLDivElement>(null)
+  const popup = useRef<HTMLDivElement>(null)
   const trigger = useRef<HTMLButtonElement>(null)
-  const popoverId = useId()
   function focusTrigger() {
     requestAnimationFrame(() => trigger.current?.focus())
   }
-  useEffect(() => {
-    if (!open) return
-    const pointerDown = (event: PointerEvent) => {
-      if (!root.current?.contains(event.target as Node)) setOpen(false)
-    }
-    const keyDown = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') {
-        event.preventDefault()
-        setOpen(false)
-        focusTrigger()
-      }
-    }
-    document.addEventListener('pointerdown', pointerDown)
-    document.addEventListener('keydown', keyDown)
-    return () => {
-      document.removeEventListener('pointerdown', pointerDown)
-      document.removeEventListener('keydown', keyDown)
-    }
-  }, [open])
   useEffect(() => {
     if (!open) return
     void refreshBackgroundWork(sessionId).catch(() => {})
@@ -1346,24 +1327,18 @@ function EnvironmentPopover({
 
   function focusMenuItem(position: 'first' | 'last') {
     requestAnimationFrame(() => {
-      const items = root.current?.querySelectorAll<HTMLElement>('[role="menuitem"]')
+      const items = popup.current?.querySelectorAll<HTMLElement>('[role="menuitem"]')
       const target = position === 'first' ? items?.[0] : items?.[Math.max(0, (items?.length ?? 1) - 1)]
       target?.focus()
     })
   }
 
   return (
-    <div className="relative shrink-0" ref={root}>
-      <Button
-        aria-controls={open ? popoverId : undefined}
-        aria-expanded={open}
-        aria-haspopup="menu"
+    <Popover.Root modal={false} open={open} onOpenChange={setOpen}>
+      <Popover.Trigger
         aria-label={t('environment.summary')}
-        className={open ? 'bg-accent' : undefined}
         ref={trigger}
-        size="icon-sm"
-        variant="ghost"
-        onClick={() => setOpen((current) => !current)}
+        render={<Button className={open ? 'bg-accent' : undefined} size="icon-sm" variant="ghost" />}
         onKeyDown={(event) => {
           if (event.key !== 'ArrowDown' && event.key !== 'ArrowUp') return
           event.preventDefault()
@@ -1373,80 +1348,89 @@ function EnvironmentPopover({
         title={backgroundWorkCountSummary(items, t)}
       >
         <WakuIcon name="info" />
-      </Button>
-      {open && (
-        <div
-          aria-label={t('environment.title')}
-          className="absolute right-0 top-[calc(100%+7px)] z-[80] max-h-[420px] w-[min(300px,calc(100vw-24px))] overflow-y-auto rounded-xl border border-input bg-[var(--raised)] p-2 text-popover-foreground shadow-[0_18px_52px_rgba(0,0,0,0.22)]"
-          id={popoverId}
-          role="menu"
-          onKeyDown={(event) => {
-            if (!['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) return
-            const menuItems = [...event.currentTarget.querySelectorAll<HTMLElement>('[role="menuitem"]')]
-            if (!menuItems.length) return
-            const current = menuItems.indexOf(document.activeElement as HTMLElement)
-            const target = event.key === 'Home'
-              ? 0
-              : event.key === 'End'
-                ? menuItems.length - 1
-                : event.key === 'ArrowDown'
-                  ? (current + 1 + menuItems.length) % menuItems.length
-                  : (current - 1 + menuItems.length) % menuItems.length
-            event.preventDefault()
-            menuItems[target]?.focus()
-          }}
+      </Popover.Trigger>
+      <Popover.Portal>
+        <Popover.Positioner
+          align="end"
+          className="z-[100] outline-none"
+          collisionPadding={8}
+          side="bottom"
+          sideOffset={4}
         >
-          <div className="flex h-[30px] items-center px-2 text-[13.5px] text-[var(--text-tertiary)]">
-            {t('environment.title')}
-          </div>
-          <EnvironmentAction
-            icon="gitCommitHorizontal"
-            label={t('environment.commit_or_push')}
-            onClick={() => {
-              setOpen(false)
-              onCommit(trigger.current)
+          <Popover.Popup
+            aria-label={t('environment.title')}
+            className="waku-popover-surface max-h-[420px] w-[min(300px,calc(100vw-24px))] overflow-y-auto rounded-[12px] p-2 text-popover-foreground outline-none"
+            initialFocus={false}
+            ref={popup}
+            role="menu"
+            onKeyDown={(event) => {
+              if (!['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) return
+              const menuItems = [...event.currentTarget.querySelectorAll<HTMLElement>('[role="menuitem"]')]
+              if (!menuItems.length) return
+              const current = menuItems.indexOf(document.activeElement as HTMLElement)
+              const target = event.key === 'Home'
+                ? 0
+                : event.key === 'End'
+                  ? menuItems.length - 1
+                  : event.key === 'ArrowDown'
+                    ? (current + 1 + menuItems.length) % menuItems.length
+                    : (current - 1 + menuItems.length) % menuItems.length
+              event.preventDefault()
+              menuItems[target]?.focus()
             }}
-          />
-          <EnvironmentAction
-            icon="github"
-            label={t('environment.compare_branch')}
-            trailing="arrowUpRight"
-            onClick={() => {
-              setOpen(false)
-              onCompareBranch()
-              focusTrigger()
-            }}
-          />
-          {hasBackgroundWork && <div className="mx-2 my-2 h-px bg-border" />}
-          {processes.length > 0 && (
-            <EnvironmentWorkSection
-              items={processes}
-              label={t('background.processes')}
-              onOpen={(key) => {
+          >
+            <div className="flex h-[30px] items-center px-2 text-[13.5px] text-[var(--text-tertiary)]">
+              {t('environment.title')}
+            </div>
+            <EnvironmentAction
+              icon="gitCommitHorizontal"
+              label={t('environment.commit_or_push')}
+              onClick={() => {
                 setOpen(false)
-                onOpenBackgroundWork(key)
+                onCommit(trigger.current)
+              }}
+            />
+            <EnvironmentAction
+              icon="github"
+              label={t('environment.compare_branch')}
+              trailing="arrowUpRight"
+              onClick={() => {
+                setOpen(false)
+                onCompareBranch()
                 focusTrigger()
               }}
-              onStop={(item) => void stopBackgroundWork(sessionId, item).catch(() => {})}
-              t={t}
             />
-          )}
-          {agents.length > 0 && (
-            <EnvironmentWorkSection
-              items={agents}
-              label={t('background.agents')}
-              onOpen={(key) => {
-                setOpen(false)
-                onOpenBackgroundWork(key)
-                focusTrigger()
-              }}
-              onStop={(item) => void stopBackgroundWork(sessionId, item).catch(() => {})}
-              t={t}
-            />
-          )}
-        </div>
-      )}
-    </div>
+            {hasBackgroundWork && <div className="mx-2 my-2 h-px bg-border" />}
+            {processes.length > 0 && (
+              <EnvironmentWorkSection
+                items={processes}
+                label={t('background.processes')}
+                onOpen={(key) => {
+                  setOpen(false)
+                  onOpenBackgroundWork(key)
+                  focusTrigger()
+                }}
+                onStop={(item) => void stopBackgroundWork(sessionId, item).catch(() => {})}
+                t={t}
+              />
+            )}
+            {agents.length > 0 && (
+              <EnvironmentWorkSection
+                items={agents}
+                label={t('background.agents')}
+                onOpen={(key) => {
+                  setOpen(false)
+                  onOpenBackgroundWork(key)
+                  focusTrigger()
+                }}
+                onStop={(item) => void stopBackgroundWork(sessionId, item).catch(() => {})}
+                t={t}
+              />
+            )}
+          </Popover.Popup>
+        </Popover.Positioner>
+      </Popover.Portal>
+    </Popover.Root>
   )
 }
 
@@ -1471,7 +1455,7 @@ function EnvironmentWorkSection({
           const stoppable = isStoppableBackgroundStatus(item.status) && item.canStop && item.controlId
           return (
             <div
-              className="group flex h-8 w-full cursor-default items-center gap-[9px] rounded-lg px-2 outline-none hover:bg-accent focus-visible:ring-1 focus-visible:ring-ring"
+              className="group flex h-8 w-full cursor-default items-center gap-[9px] rounded-[8px] px-2 outline-none hover:bg-accent focus-visible:ring-1 focus-visible:ring-ring"
               key={`${item.key.kind}:${item.key.providerId}`}
               role="menuitem"
               tabIndex={0}
@@ -1573,7 +1557,7 @@ function EnvironmentAction({
 }) {
   return (
     <button
-      className="flex min-h-8 w-full items-center gap-2.5 rounded-lg px-2 text-[13.5px] outline-none hover:bg-accent focus-visible:ring-1 focus-visible:ring-ring"
+      className="flex min-h-8 w-full items-center gap-2.5 rounded-[8px] px-2 text-[13.5px] outline-none hover:bg-accent focus-visible:ring-1 focus-visible:ring-ring"
       role="menuitem"
       type="button"
       onClick={onClick}

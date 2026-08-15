@@ -9,6 +9,7 @@ import { ControlMenu } from '@/components/control-menu'
 import { Button } from '@/components/ui/button'
 import { ProviderIcon, providerMeta, WakuIcon } from '@/components/waku-icon'
 import { useSkills } from '@/hooks/use-daemon-data'
+import { useCopyFeedback } from '@/hooks/use-copy-feedback'
 import { daemonKeys, setSkillsEnabled, trashSkills } from '@/lib/daemon-api'
 import { useDaemon } from '@/lib/daemon-context'
 import { useI18n, type AppLocale } from '@/lib/i18n'
@@ -208,6 +209,7 @@ function SkillDetail({
   onDelete: () => Promise<void>
 }) {
   const { t } = useI18n()
+  const copyFeedback = useCopyFeedback()
   const [deleteArmed, setDeleteArmed] = useState(false)
   const location = skill.installs[0]?.dir ?? ''
   const scope = skill.project
@@ -264,12 +266,10 @@ function SkillDetail({
             className="h-[26px] rounded-md px-2.5 text-[10.5px] font-normal text-[var(--text-secondary)]"
             size="sm"
             variant="outline"
-            onClick={() => {
-              void navigator.clipboard.writeText(location)
-              toast.success(t('skills.path_copied'))
-            }}
+            onClick={() => void copyFeedback.copyText(location)}
           >
-            <WakuIcon className="size-[11px]" name="copy" /> {t('skills.copy_path')}
+            <WakuIcon className="size-[11px]" name={copyFeedback.copied ? 'check' : 'copy'} />
+            {t(copyFeedback.copied ? 'common.copied' : 'skills.copy_path')}
           </Button>
           <span className="flex-1" />
           <Button

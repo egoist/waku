@@ -1396,16 +1396,17 @@ impl Waku {
                             probe_version: false,
                         },
                     );
-                    let (installed, path) = match response {
-                        Ok(waku_client::ResponsePayload::ProviderProbe { probe, .. }) => {
-                            (probe.installed, probe.path)
-                        }
-                        _ => (false, None),
+                    let probe = match response {
+                        Ok(waku_client::ResponsePayload::ProviderProbe { probe, .. }) => probe,
+                        _ => ProviderProbe {
+                            provider,
+                            installed: false,
+                            path: None,
+                            models: crate::model_catalog::fallback_models(provider),
+                            agent_presets: crate::model_catalog::fallback_agent_presets(provider),
+                        },
                     };
-                    if provider_detection_tx
-                        .send((provider, installed, path))
-                        .is_ok()
-                    {
+                    if provider_detection_tx.send(probe).is_ok() {
                         signal_event_pump(&event_wake);
                     }
                 }
@@ -1426,29 +1427,29 @@ impl Waku {
     pub(super) fn drain_provider_detection_events(&mut self) -> bool {
         let mut changed = false;
         let mut installed_providers = Vec::new();
-        while let Ok((provider, installed, path)) = self.provider_detection_events.try_recv() {
+        while let Ok(probe) = self.provider_detection_events.try_recv() {
+            let provider = probe.provider;
+            let installed = probe.installed;
             self.provider_detection_remaining = self.provider_detection_remaining.saturating_sub(1);
             if self.provider_detection_remaining == 0 {
                 self.provider_detection_checked_at = Some(Instant::now());
             }
-            // Merge detection fields only: a probe's model catalog belongs to
-            // model discovery, and overwriting it here would race a discovery
-            // still in flight.
             if let Some(existing) = self
                 .probes
                 .iter_mut()
                 .find(|existing| existing.provider == provider)
             {
-                existing.installed = installed;
-                existing.path = path;
+                if self.provider_model_discoveries_pending.contains(&provider) {
+                    // A manual refresh may overlap an older live discovery.
+                    // Keep that newer catalog while still accepting PATH
+                    // detection from this response.
+                    existing.installed = probe.installed;
+                    existing.path = probe.path;
+                } else {
+                    *existing = probe;
+                }
             } else {
-                self.probes.push(ProviderProbe {
-                    provider,
-                    installed,
-                    path,
-                    models: crate::model_catalog::fallback_models(provider),
-                    agent_presets: crate::model_catalog::fallback_agent_presets(provider),
-                });
+                self.probes.push(probe);
             }
             if installed {
                 installed_providers.push(provider);

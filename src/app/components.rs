@@ -149,6 +149,33 @@ fn format_message_time_at(created_at: u64, now: DateTime<Local>) -> String {
 }
 
 impl Waku {
+    pub(super) fn control_was_copied(&self, control_id: &str) -> bool {
+        self.copied_control_feedback.contains_key(control_id)
+    }
+
+    pub(super) fn show_control_copied(
+        &mut self,
+        control_id: impl Into<String>,
+        cx: &mut Context<Self>,
+    ) {
+        let control_id = control_id.into();
+        self.copied_control_generation = self.copied_control_generation.wrapping_add(1);
+        let generation = self.copied_control_generation;
+        self.copied_control_feedback
+            .insert(control_id.clone(), generation);
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(Duration::from_secs(2)).await;
+            let _ = this.update(cx, |this, cx| {
+                if this.copied_control_feedback.get(&control_id) == Some(&generation) {
+                    this.copied_control_feedback.remove(&control_id);
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
     fn show_message_copied(&mut self, message_id: Uuid, cx: &mut Context<Self>) {
         self.copied_message_generation = self.copied_message_generation.wrapping_add(1);
         let generation = self.copied_message_generation;

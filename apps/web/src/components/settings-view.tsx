@@ -16,6 +16,7 @@ import {
   useDaemonSettings,
   useProviderProbes,
 } from '@/hooks/use-daemon-data'
+import { useCopyFeedback } from '@/hooks/use-copy-feedback'
 import {
   daemonKeys,
   updateDaemonSettings,
@@ -64,10 +65,12 @@ export function isSettingsPageId(value: string): value is SettingsPageId {
 export function SettingsView({
   page,
   projects,
+  onBack,
   onPageChange,
 }: {
   page: SettingsPageId
   projects: Project[]
+  onBack: () => void
   onPageChange: (page: SettingsPageId) => void
 }) {
   const { t } = useI18n()
@@ -94,6 +97,16 @@ export function SettingsView({
     <div className="flex h-dvh min-w-0 flex-1 bg-background">
       <aside className="flex h-full w-[252px] shrink-0 flex-col bg-sidebar pt-3">
         <div className="px-3">
+          <button
+            className="flex h-[34px] w-full items-center gap-[9px] rounded-lg px-[9px] text-[13px] text-[var(--text-secondary)] outline-none hover:bg-sidebar-accent active:bg-accent focus-visible:ring-1 focus-visible:ring-ring"
+            type="button"
+            onClick={onBack}
+          >
+            <WakuIcon className="size-[15px] text-[var(--text-tertiary)]" name="arrowLeft" />
+            {t('settings.back')}
+          </button>
+        </div>
+        <div className="px-3 pt-2">
           <label className="flex h-8 items-center gap-2 rounded-lg border bg-[var(--inset)] px-2.5 focus-within:border-ring">
             <WakuIcon className="size-[13px] text-[var(--text-tertiary)]" name="search" />
             <input
@@ -524,13 +537,15 @@ function Toggle({ checked, label, onChange }: { checked: boolean; label: string;
 
 function DetailRow({ label, value, copy = false }: { label: string; value: string; copy?: boolean }) {
   const { t } = useI18n()
+  const copyFeedback = useCopyFeedback()
   return (
     <div className="flex min-h-12 items-center gap-4 text-[11.5px]">
       <span className="w-28 shrink-0 text-[var(--text-tertiary)]">{label}</span>
       <span className="min-w-0 flex-1 truncate font-mono">{value}</span>
       {copy && (
-        <Button size="sm" variant="outline" onClick={() => void navigator.clipboard.writeText(value)}>
-          <WakuIcon name="copy" /> {t('common.copy')}
+        <Button size="sm" variant="outline" onClick={() => void copyFeedback.copyText(value)}>
+          <WakuIcon name={copyFeedback.copied ? 'check' : 'copy'} />
+          {t(copyFeedback.copied ? 'common.copied' : 'common.copy')}
         </Button>
       )}
     </div>

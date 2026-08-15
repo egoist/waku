@@ -396,11 +396,11 @@ function SessionRow({
       <ContextMenu.Portal>
         <ContextMenu.Positioner className="z-[100] outline-none">
           <ContextMenu.Popup
-            className="min-w-32 rounded-lg border bg-popover p-1 text-xs text-popover-foreground shadow-xl outline-none"
+            className="waku-menu-surface"
             finalFocus={false}
           >
             <ContextMenu.Item
-              className="flex min-h-7 cursor-default select-none items-center gap-2 rounded-md px-2 outline-none data-[highlighted]:bg-accent"
+              className="waku-menu-item"
               onClick={() => {
                 restoreMenuFocus.current = false
                 setMenuOpen(false)
@@ -409,18 +409,18 @@ function SessionRow({
                 setRenaming(true)
               }}
             >
-              <WakuIcon className="size-3.5" name="pencil" /> {t('common.rename')}
+              <WakuIcon className="size-3" name="pencil" /> {t('common.rename')}
             </ContextMenu.Item>
-            <ContextMenu.Separator className="mx-1 my-1 h-px bg-border" />
+            <ContextMenu.Separator className="waku-menu-separator" />
             <ContextMenu.Item
-              className="flex min-h-7 cursor-default select-none items-center gap-2 rounded-md px-2 text-destructive outline-none data-[highlighted]:bg-[var(--danger-soft)]"
+              className="waku-menu-item text-destructive data-[highlighted]:bg-[var(--danger-soft)]"
               onClick={() => {
                 restoreMenuFocus.current = false
                 setMenuOpen(false)
                 void onRemove(item.session.id).catch(() => {})
               }}
             >
-              <WakuIcon className="size-3.5" name="trash" /> {t('common.remove')}
+              <WakuIcon className="size-3" name="trash" /> {t('common.remove')}
             </ContextMenu.Item>
           </ContextMenu.Popup>
         </ContextMenu.Positioner>

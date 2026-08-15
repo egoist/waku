@@ -25,8 +25,8 @@ use super::{
 use crate::git_branch::BranchEntry;
 use crate::model::{
     ActivityItem, ActivityKind, AgentSession, Checkpoint, CheckpointFile, CheckpointStatus,
-    DriverEvent, Message, MessageRole, ProviderKind, ReasoningBlock, SessionStatus,
-    TranscriptBlock, TurnStatus,
+    DriverEvent, Message, MessageRole, ProviderKind, ReasoningBlock, RuntimeEventCursor,
+    SessionStatus, TranscriptBlock, TurnStatus,
 };
 use gpui::{ListAlignment, ListState, Pixels, px};
 use std::{
@@ -664,9 +664,21 @@ fn stream_prefix_stops_at_lines_without_splitting_graphemes() {
 
 #[test]
 fn stream_chunks_use_the_frame_budget_across_short_lines_and_preserve_event_order() {
+    let runtime_id = Uuid::new_v4();
+    let epoch = Uuid::new_v4();
     let mut events = VecDeque::from([
         DriverEvent::TextDelta("first ".into()),
+        DriverEvent::RuntimeEventCursorAdvanced(RuntimeEventCursor {
+            runtime_id,
+            epoch,
+            sequence: 1,
+        }),
         DriverEvent::TextDelta("line\nsecond line".into()),
+        DriverEvent::RuntimeEventCursorAdvanced(RuntimeEventCursor {
+            runtime_id,
+            epoch,
+            sequence: 2,
+        }),
         DriverEvent::Activity {
             id: None,
             kind: ActivityKind::Tool,
@@ -682,6 +694,10 @@ fn stream_chunks_use_the_frame_budget_across_short_lines_and_preserve_event_orde
         Some(DriverEvent::TextDelta(text)) if text == "first line\ns"
     ));
     assert!(matches!(
+        events.pop_front(),
+        Some(DriverEvent::RuntimeEventCursorAdvanced(cursor)) if cursor.sequence == 1
+    ));
+    assert!(matches!(
         events.front(),
         Some(DriverEvent::TextDelta(text)) if text == "econd line"
     ));
@@ -690,14 +706,30 @@ fn stream_chunks_use_the_frame_budget_across_short_lines_and_preserve_event_orde
         pop_stream_chunk(&mut events, StreamDeltaKind::Text),
         Some(DriverEvent::TextDelta(text)) if text == "econd line"
     ));
+    assert!(matches!(
+        events.pop_front(),
+        Some(DriverEvent::RuntimeEventCursorAdvanced(cursor)) if cursor.sequence == 2
+    ));
     assert!(matches!(events.front(), Some(DriverEvent::Activity { .. })));
 }
 
 #[test]
 fn settled_stream_backlog_flushes_before_the_terminal_event() {
+    let runtime_id = Uuid::new_v4();
+    let epoch = Uuid::new_v4();
     let mut events = VecDeque::from([
         DriverEvent::TextDelta("first line\nsecond ".into()),
+        DriverEvent::RuntimeEventCursorAdvanced(RuntimeEventCursor {
+            runtime_id,
+            epoch,
+            sequence: 1,
+        }),
         DriverEvent::TextDelta("line".into()),
+        DriverEvent::RuntimeEventCursorAdvanced(RuntimeEventCursor {
+            runtime_id,
+            epoch,
+            sequence: 2,
+        }),
         DriverEvent::TurnFinished {
             success: true,
             summary: None,
@@ -708,6 +740,10 @@ fn settled_stream_backlog_flushes_before_the_terminal_event() {
     assert!(matches!(
         pop_complete_stream_chunk(&mut events, StreamDeltaKind::Text),
         Some(DriverEvent::TextDelta(text)) if text == "first line\nsecond line"
+    ));
+    assert!(matches!(
+        events.pop_front(),
+        Some(DriverEvent::RuntimeEventCursorAdvanced(cursor)) if cursor.sequence == 2
     ));
     assert!(matches!(
         events.front(),

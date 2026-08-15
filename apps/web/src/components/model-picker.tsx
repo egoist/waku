@@ -1,8 +1,13 @@
 import type { AgentSession, ProviderKind, ProviderModel, ProviderProbe } from '@waku/client'
+import { Popover } from '@base-ui/react/popover'
 import { useEffect, useRef, useState } from 'react'
 import { ProviderIcon, PROVIDERS, providerMeta, WakuIcon } from '@/components/waku-icon'
 import { useDaemonSettings, useProviderProbes } from '@/hooks/use-daemon-data'
 import { useI18n } from '@/lib/i18n'
+import {
+  nextModelPickerHighlight,
+  selectedModelPickerIndex,
+} from '@/lib/model-picker-presentation'
 import { cn } from '@/lib/utils'
 
 type PickerTab = 'favorites' | ProviderKind
@@ -24,14 +29,14 @@ export function ModelPicker({
   const [open, setOpen] = useState(false)
   const [query, setQuery] = useState('')
   const [tab, setTab] = useState<PickerTab>(session.provider)
-  const [highlight, setHighlight] = useState(0)
+  const [highlight, setHighlight] = useState<number | null>(null)
   const [favorites, setFavorites] = useState<string[]>(() => {
     if (typeof window === 'undefined') return []
     try { return JSON.parse(window.localStorage.getItem('waku.favorite-models') ?? '[]') as string[] }
     catch { return [] }
   })
-  const root = useRef<HTMLDivElement>(null)
   const search = useRef<HTMLInputElement>(null)
+  const list = useRef<HTMLDivElement>(null)
   const trigger = useRef<HTMLButtonElement>(null)
   const settings = useDaemonSettings()
   const probes = useProviderProbes(open)
@@ -39,6 +44,7 @@ export function ModelPicker({
   const currentModel = currentProbe?.models.find((model) => model.id === session.model)
     ?? currentProbe?.models.find((model) => model.is_default)
     ?? currentProbe?.models[0]
+  const selectedModelId = session.model ?? currentModel?.id
   const selectedName = currentModel?.name ?? session.model ?? providerMeta(session.provider).shortName
 
   function closeAndFocusTrigger() {
@@ -56,23 +62,7 @@ export function ModelPicker({
     if (!open) return
     setQuery('')
     setTab(session.provider)
-    setHighlight(0)
-    requestAnimationFrame(() => search.current?.focus())
-    const pointer = (event: PointerEvent) => {
-      if (!root.current?.contains(event.target as Node)) setOpen(false)
-    }
-    const escape = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') {
-        event.preventDefault()
-        closeAndFocusTrigger()
-      }
-    }
-    document.addEventListener('pointerdown', pointer)
-    document.addEventListener('keydown', escape)
-    return () => {
-      document.removeEventListener('pointerdown', pointer)
-      document.removeEventListener('keydown', escape)
-    }
+    setHighlight(null)
   }, [open, session.provider])
 
   const probeMap = ({
@@ -96,8 +86,31 @@ export function ModelPicker({
       })
       .map((model) => ({ provider: id, model })))
   })()
+  const selectedIndex = selectedModelPickerIndex(
+    rows,
+    session.provider,
+    selectedModelId,
+  )
 
-  useEffect(() => setHighlight((current) => Math.min(current, Math.max(0, rows.length - 1))), [rows.length])
+  useEffect(() => {
+    setHighlight((current) => current === null
+      ? null
+      : Math.min(current, Math.max(0, rows.length - 1)))
+  }, [rows.length])
+
+  useEffect(() => {
+    if (!open || query.trim()) return
+    const frame = requestAnimationFrame(() => {
+      if (selectedIndex < 0) {
+        list.current?.scrollTo({ top: 0 })
+        return
+      }
+      list.current
+        ?.querySelector<HTMLElement>(`[data-model-index="${selectedIndex}"]`)
+        ?.scrollIntoView({ block: 'nearest' })
+    })
+    return () => cancelAnimationFrame(frame)
+  }, [open, query, selectedIndex, tab])
 
   function choose(index: number) {
     const row = rows[index]
@@ -116,31 +129,35 @@ export function ModelPicker({
   }
 
   return (
-    <div className="relative shrink-0" ref={root}>
-      <button
-        aria-expanded={open}
-        aria-haspopup="dialog"
+    <Popover.Root modal={false} open={open} onOpenChange={setOpen}>
+      <Popover.Trigger
         aria-label={t('models.choose')}
         className={cn(
-          'flex h-6 max-w-[224px] items-center gap-1.5 rounded-md px-[7px] text-[11.5px] text-[var(--text-secondary)] outline-none hover:bg-accent focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-50',
+          'flex h-6 max-w-[224px] items-center gap-1.5 rounded-[6px] px-[7px] text-[11.5px] text-[var(--text-secondary)] outline-none hover:bg-accent focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-50',
           open && 'bg-accent text-foreground',
         )}
         disabled={session.status !== 'idle'}
         ref={trigger}
-        type="button"
-        onClick={() => setOpen((value) => !value)}
       >
         <ProviderIcon className="size-[10.5px]" provider={session.provider} />
         <span className="truncate">{selectedName}</span>
-      </button>
-      {open && (
-        <div
-          aria-label={t('models.choose')}
-          className="absolute bottom-[calc(100%+6px)] left-0 z-[75] flex h-[390px] w-[460px] max-w-[calc(100vw-32px)] overflow-hidden rounded-[13px] border bg-[var(--raised)] shadow-[0_18px_50px_rgba(0,0,0,0.22)]"
-          role="dialog"
+      </Popover.Trigger>
+      <Popover.Portal>
+        <Popover.Positioner
+          align="start"
+          className="z-[100] outline-none"
+          collisionPadding={8}
+          side="top"
+          sideOffset={4}
         >
+          <Popover.Popup
+            aria-label={t('models.choose')}
+            className="waku-popover-surface flex h-[390px] w-[460px] max-w-[calc(100vw-32px)] overflow-hidden rounded-[12px] outline-none"
+            initialFocus={search}
+            role="dialog"
+          >
           <div className="flex h-full w-[50px] shrink-0 flex-col items-center gap-1 overflow-y-auto border-r bg-background p-[5px]">
-            <ModelTab active={tab === 'favorites' && !query} label={t('models.favorites')} onClick={() => { setTab('favorites'); setQuery(''); setHighlight(0) }}>
+            <ModelTab active={tab === 'favorites' && !query} label={t('models.favorites')} onClick={() => { setTab('favorites'); setQuery(''); setHighlight(null) }}>
               <WakuIcon className="size-[17px]" name="star" />
             </ModelTab>
             <div className="my-[3px] h-px w-[34px] shrink-0 bg-border" />
@@ -152,7 +169,7 @@ export function ModelPicker({
                   disabled={!enabled}
                   key={provider.id}
                   label={provider.name}
-                  onClick={() => { setTab(provider.id); setQuery(''); setHighlight(0) }}
+                  onClick={() => { setTab(provider.id); setQuery(''); setHighlight(null) }}
                 >
                   <ProviderIcon className="size-[18px]" provider={provider.id} />
                 </ModelTab>
@@ -164,35 +181,41 @@ export function ModelPicker({
               <label className="flex h-[34px] items-center gap-2 rounded-[9px] bg-[var(--raised)] px-2.5">
                 <WakuIcon className="size-[15px] text-[var(--text-secondary)]" name="search" />
                 <input
-                  aria-activedescendant={rows[highlight] ? `model-${rows[highlight]!.provider}-${rows[highlight]!.model.id}` : undefined}
+                  aria-activedescendant={highlight !== null && rows[highlight]
+                    ? `model-${rows[highlight]!.provider}-${rows[highlight]!.model.id}`
+                    : undefined}
                   className="min-w-0 flex-1 bg-transparent text-[12px] outline-none placeholder:text-[var(--text-ghost)]"
                   placeholder={t('input.search_models')}
                   ref={search}
                   value={query}
-                  onChange={(event) => { setQuery(event.target.value); setHighlight(0) }}
+                  onChange={(event) => {
+                    const next = event.target.value
+                    setQuery(next)
+                    setHighlight(next.trim() ? 0 : null)
+                  }}
                   onKeyDown={(event) => {
                     if (event.key === 'ArrowDown') {
                       event.preventDefault()
-                      setHighlight((current) => rows.length ? (current + 1) % rows.length : 0)
+                      setHighlight((current) => nextModelPickerHighlight(current, rows.length, 'next'))
                     } else if (event.key === 'ArrowUp') {
                       event.preventDefault()
-                      setHighlight((current) => rows.length ? (current - 1 + rows.length) % rows.length : 0)
+                      setHighlight((current) => nextModelPickerHighlight(current, rows.length, 'previous'))
                     } else if (event.key === 'Enter') {
                       event.preventDefault()
-                      choose(highlight)
+                      choose(highlight ?? (selectedIndex >= 0 ? selectedIndex : 0))
                     } else if (event.key === 'Tab' && !query) {
                       event.preventDefault()
                       const tabs: PickerTab[] = ['favorites', ...usable.map(({ id }) => id)]
                       const current = tabs.indexOf(tab)
                       const delta = event.shiftKey ? -1 : 1
                       setTab(tabs[(current + delta + tabs.length) % tabs.length]!)
-                      setHighlight(0)
+                      setHighlight(null)
                     }
                   }}
                 />
               </label>
             </div>
-            <div className="min-h-0 flex-1 overflow-y-auto p-[9px]">
+            <div className="min-h-0 flex-1 overflow-y-auto p-[9px]" ref={list}>
               {!rows.length && (
                 <div className="grid h-full place-items-center text-[11.5px] text-[var(--text-ghost)]">
                   {t(query
@@ -205,7 +228,7 @@ export function ModelPicker({
                 </div>
               )}
               {rows.map((row, index) => {
-                const selected = row.provider === session.provider && row.model.id === currentModel?.id
+                const selected = row.provider === session.provider && row.model.id === selectedModelId
                 const favorite = favorites.includes(`${row.provider}:${row.model.id}`)
                 return (
                   <div
@@ -217,6 +240,7 @@ export function ModelPicker({
                     )}
                     id={`model-${row.provider}-${row.model.id}`}
                     key={`${row.provider}-${row.model.id}`}
+                    data-model-index={index}
                     role="option"
                     tabIndex={0}
                     onClick={() => choose(index)}
@@ -256,9 +280,10 @@ export function ModelPicker({
               })}
             </div>
           </div>
-        </div>
-      )}
-    </div>
+          </Popover.Popup>
+        </Popover.Positioner>
+      </Popover.Portal>
+    </Popover.Root>
   )
 }
 

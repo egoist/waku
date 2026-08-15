@@ -59,7 +59,7 @@ export const daemonKeys = {
     [...daemonKeys.composerSources(address), 'commands', provider, cwd] as const,
   workspaceTree: (address: string, cwd: string, expanded: string[]) =>
     ['daemon', address, 'workspace-tree', cwd, ...[...expanded].sort()] as const,
-  directory: (address: string, path: string) =>
+  directory: (address: string, path: string | null) =>
     ['daemon', address, 'directory', path] as const,
   workspaceFile: (address: string, cwd: string, path: string) =>
     ['daemon', address, 'workspace-file', cwd, path] as const,
@@ -267,7 +267,7 @@ export async function listWorkspaceTree(
 
 export async function browseDaemonDirectory(
   client: WakuClient,
-  path: string,
+  path: string | null,
 ): Promise<DaemonDirectory> {
   const result = await workspaceRequest(client, {
     type: 'browseDirectory',

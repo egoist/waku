@@ -1310,6 +1310,7 @@ impl Waku {
         let trigger = MenuChip::new("agent-preset")
             .icon("icons/bot.svg", theme.text_tertiary)
             .label(selected_label)
+            .caret(false)
             .selected(handle.is_open());
 
         let weak = cx.entity().downgrade();

@@ -208,7 +208,10 @@ impl Backend for WakuBackend {
             } => {
                 ensure_shell_environment();
                 let mut probe = match binary_override.as_deref() {
-                    override_value => crate::model::provider_probe(provider, override_value),
+                    override_value if discover_models || probe_version => {
+                        crate::model::provider_probe(provider, override_value)
+                    }
+                    override_value => crate::model::cached_provider_probe(provider, override_value),
                 };
                 let version = probe_version
                     .then(|| {

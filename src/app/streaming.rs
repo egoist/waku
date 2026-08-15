@@ -785,18 +785,34 @@ pub(super) fn pop_stream_chunk(
     events: &mut VecDeque<DriverEvent>,
     kind: StreamDeltaKind,
 ) -> Option<DriverEvent> {
-    let backlog = events
-        .iter()
-        .map_while(|event| stream_delta_text(event, kind))
-        .map(|text| text.graphemes(true).count())
-        .sum();
+    let mut backlog = 0;
+    for event in events.iter() {
+        if let Some(text) = stream_delta_text(event, kind) {
+            backlog += text.graphemes(true).count();
+        } else if matches!(event, DriverEvent::RuntimeEventCursorAdvanced(_)) {
+            // The remote adapter acknowledges every sequenced daemon event.
+            // Those cursors are persistence metadata, not a presentation
+            // boundary between token deltas.
+            continue;
+        } else {
+            break;
+        }
+    }
     if backlog == 0 {
         return events.pop_front();
     }
 
     let mut remaining_budget = stream_frame_budget(backlog);
     let mut chunk = String::new();
+    let mut latest_cursor = None;
     while remaining_budget > 0 {
+        if matches!(
+            events.front(),
+            Some(DriverEvent::RuntimeEventCursorAdvanced(_))
+        ) {
+            latest_cursor = events.pop_front();
+            continue;
+        }
         let Some(text) = events.front_mut().and_then(|event| match (kind, event) {
             (StreamDeltaKind::Text, DriverEvent::TextDelta(text))
             | (StreamDeltaKind::Reasoning, DriverEvent::ReasoningDelta(text)) => Some(text),
@@ -811,6 +827,13 @@ pub(super) fn pop_stream_chunk(
         if text.is_empty() {
             events.pop_front();
         }
+    }
+    if let Some(cursor) = latest_cursor {
+        // Apply the newest acknowledgement after the combined visible chunk.
+        // If the next raw delta was only partly revealed, this remains the
+        // cursor immediately before that remainder, so a crash cannot skip
+        // unpresented output when the task is replayed.
+        events.push_front(cursor);
     }
 
     match kind {
@@ -827,19 +850,27 @@ pub(super) fn pop_complete_stream_chunk(
     kind: StreamDeltaKind,
 ) -> Option<DriverEvent> {
     let mut chunk = String::new();
-    while events
-        .front()
-        .and_then(|event| stream_delta_text(event, kind))
-        .is_some()
-    {
-        let event = events.pop_front()?;
-        match (kind, event) {
-            (StreamDeltaKind::Text, DriverEvent::TextDelta(text))
-            | (StreamDeltaKind::Reasoning, DriverEvent::ReasoningDelta(text)) => {
-                chunk.push_str(&text);
+    let mut latest_cursor = None;
+    loop {
+        match events.front() {
+            Some(DriverEvent::RuntimeEventCursorAdvanced(_)) => {
+                latest_cursor = events.pop_front();
             }
-            _ => unreachable!("the stream kind was checked before removing the event"),
+            Some(event) if stream_delta_text(event, kind).is_some() => {
+                let event = events.pop_front()?;
+                match (kind, event) {
+                    (StreamDeltaKind::Text, DriverEvent::TextDelta(text))
+                    | (StreamDeltaKind::Reasoning, DriverEvent::ReasoningDelta(text)) => {
+                        chunk.push_str(&text);
+                    }
+                    _ => unreachable!("the stream kind was checked before removing the event"),
+                }
+            }
+            _ => break,
         }
+    }
+    if let Some(cursor) = latest_cursor {
+        events.push_front(cursor);
     }
     match kind {
         StreamDeltaKind::Text => Some(DriverEvent::TextDelta(chunk)),

@@ -1025,17 +1025,27 @@ impl Waku {
             }
         }));
 
+        let copy_feedback_id = format!("skill-copy-{}", skill.row_key);
+        let copied = self.control_was_copied(&copy_feedback_id);
         let copy_button = action_button(
-            SharedString::from(format!("skill-copy-{}", skill.row_key)),
-            "icons/copy.svg",
-            tr!("skills.copy_path"),
+            SharedString::from(copy_feedback_id.clone()),
+            if copied {
+                "icons/check.svg"
+            } else {
+                "icons/copy.svg"
+            },
+            if copied {
+                tr!("common.copied")
+            } else {
+                tr!("skills.copy_path")
+            },
         )
         .on_click(cx.listener({
             let dir = dir.clone();
+            let copy_feedback_id = copy_feedback_id.clone();
             move |this, _, _, cx| {
                 cx.write_to_clipboard(ClipboardItem::new_string(dir.display().to_string()));
-                this.show_success_toast(tr!("skills.path_copied"));
-                cx.notify();
+                this.show_control_copied(copy_feedback_id.clone(), cx);
             }
         }));
 

@@ -70,6 +70,10 @@ function ConnectedSettings({
     <SettingsView
       page={page}
       projects={taskState.data.projects}
+      onBack={() => void navigate({
+        to: '/',
+        search: { session: sessionId },
+      })}
       onPageChange={(next) => void navigate({
         to: '/settings/$page',
         params: { page: next },

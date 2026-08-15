@@ -3,11 +3,11 @@ import type { WorkingTreeEntry } from '@waku/client'
 import { useEffect, useRef, useState, type KeyboardEvent, type RefObject } from 'react'
 import { Virtuoso, type VirtuosoHandle } from 'react-virtuoso'
 import { Button } from '@/components/ui/button'
-import { WakuIcon } from '@/components/waku-icon'
+import { Dialog, DialogContent, DialogTitle } from '@/components/ui/dialog'
+import { FileTypeIcon, WakuIcon } from '@/components/waku-icon'
 import { browseDaemonDirectory, daemonKeys } from '@/lib/daemon-api'
 import { useDaemon } from '@/lib/daemon-context'
 import { useI18n } from '@/lib/i18n'
-import type { Translator } from '@/lib/transcript-presentation'
 import { cn } from '@/lib/utils'
 
 export function DaemonFilePicker({
@@ -18,8 +18,8 @@ export function DaemonFilePicker({
   onClose,
   onSelect,
 }: {
-  root: string
-  workspaceLabel: string
+  root: string | null
+  workspaceLabel?: string
   selectionMode?: 'attachment' | 'file' | 'directory'
   returnFocus?: RefObject<HTMLElement | null>
   onClose: () => void
@@ -27,31 +27,13 @@ export function DaemonFilePicker({
 }) {
   const { t } = useI18n()
   const { client, config, phase } = useDaemon()
-  const dialog = useRef<HTMLDivElement>(null)
-  const previousFocus = useRef<HTMLElement | null>(null)
   const list = useRef<VirtuosoHandle>(null)
   const [history, setHistory] = useState(() => [root])
   const [historyIndex, setHistoryIndex] = useState(0)
   const [filter, setFilter] = useState('')
-  const [selectedPath, setSelectedPath] = useState<string | null>(
-    selectionMode === 'directory' ? root : null,
-  )
+  const [selectedPath, setSelectedPath] = useState<string | null>(null)
   const [submittingPath, setSubmittingPath] = useState<string | null>(null)
   const currentPath = history[historyIndex]!
-
-  useEffect(() => {
-    previousFocus.current = document.activeElement instanceof HTMLElement
-      ? document.activeElement
-      : null
-    dialog.current?.focus()
-    return () => {
-      const previous = returnFocus?.current ?? previousFocus.current
-      previousFocus.current = null
-      requestAnimationFrame(() => {
-        if (previous?.isConnected) previous.focus()
-      })
-    }
-  }, [returnFocus])
 
   const directory = useQuery({
     queryKey: daemonKeys.directory(config?.address ?? 'disconnected', currentPath),
@@ -67,7 +49,7 @@ export function DaemonFilePicker({
     ? entries.filter((entry) => entry.name.toLocaleLowerCase().includes(query))
     : entries
   const selectedEntry = visibleEntries.find((entry) => entry.absolutePath === selectedPath)
-  const resolvedPath = directory.data?.path ?? currentPath
+  const resolvedPath = directory.data?.path ?? currentPath ?? ''
   const selectedTarget = selectionMode === 'directory'
     ? selectedEntry?.isDir
       ? selectedEntry.absolutePath
@@ -79,9 +61,15 @@ export function DaemonFilePicker({
         : null
 
   useEffect(() => {
-    setSelectedPath(selectionMode === 'directory' ? currentPath : null)
+    setSelectedPath(selectionMode === 'directory' && currentPath ? currentPath : null)
     setFilter('')
   }, [currentPath, selectionMode])
+
+  useEffect(() => {
+    if (selectionMode === 'directory' && !selectedPath && directory.data?.path) {
+      setSelectedPath(directory.data.path)
+    }
+  }, [directory.data?.path, selectedPath, selectionMode])
 
   useEffect(() => {
     if (
@@ -94,9 +82,15 @@ export function DaemonFilePicker({
   }, [resolvedPath, selectedPath, selectionMode, visibleEntries])
 
   function visit(path: string | null | undefined) {
-    if (!path || submittingPath) return
-    if (samePath(path, currentPath)) {
-      if (selectionMode === 'directory') setSelectedPath(currentPath)
+    if (path === undefined || submittingPath) return
+    if (path === null) {
+      if (currentPath === null) return
+      setHistory((current) => [...current.slice(0, historyIndex + 1), null])
+      setHistoryIndex(historyIndex + 1)
+      return
+    }
+    if (currentPath && samePath(path, currentPath)) {
+      if (selectionMode === 'directory') setSelectedPath(path)
       return
     }
     setHistory((current) => [...current.slice(0, historyIndex + 1), path])
@@ -142,6 +136,7 @@ export function DaemonFilePicker({
 
   function handleKeyDown(event: KeyboardEvent<HTMLDivElement>) {
     const editingFilter = (event.target as HTMLElement).tagName === 'INPUT'
+    const onButton = Boolean((event.target as HTMLElement).closest('button'))
     if (event.key === 'Escape') {
       event.preventDefault()
       onClose()
@@ -151,7 +146,7 @@ export function DaemonFilePicker({
     } else if (event.key === 'ArrowUp' && !event.metaKey) {
       event.preventDefault()
       moveSelection(-1)
-    } else if (event.key === 'Enter') {
+    } else if (event.key === 'Enter' && !onButton) {
       event.preventDefault()
       if (selectionMode === 'directory') void select()
       else activate()
@@ -168,73 +163,80 @@ export function DaemonFilePicker({
   }
 
   const dialogTitle = t(selectionMode === 'directory' ? 'file_picker.open_project' : 'file_picker.attach')
-  const explorerLabel = t(selectionMode === 'directory' ? 'file_picker.daemon_folders' : 'file_picker.daemon_items')
+  const home = directory.data?.home
+  const filesystemRoot = directory.data?.filesystem_root
+  const showWorkspace = Boolean(root && workspaceLabel)
+  const showHome = Boolean(home && (!root || !samePath(home, root)))
+  const showFilesystem = Boolean(
+    filesystemRoot
+    && (!root || !samePath(filesystemRoot, root))
+    && (!home || !samePath(filesystemRoot, home)),
+  )
 
   return (
-    <div
-      aria-label={t(selectionMode === 'directory'
-        ? 'file_picker.choose_project_folder'
-        : 'file_picker.attach_from_daemon')}
-      aria-modal="true"
-      className="fixed inset-0 z-[110] flex items-center justify-center bg-black/20 p-7 backdrop-blur-[1px] dark:bg-black/38"
-      ref={dialog}
-      role="dialog"
-      tabIndex={-1}
-      onKeyDown={handleKeyDown}
-      onMouseDown={(event) => {
-        if (event.target === event.currentTarget) onClose()
+    <Dialog
+      open
+      onOpenChange={(open) => {
+        if (!open) onClose()
       }}
     >
-      <div className="flex h-[min(600px,calc(100dvh-56px))] w-full max-w-[820px] flex-col overflow-hidden rounded-xl border bg-card shadow-[0_24px_80px_rgba(0,0,0,0.28)]">
-        <header className="relative flex h-11 shrink-0 items-center justify-center border-b bg-[var(--raised)]/70 px-4">
-          <h2 className="text-[13px] font-semibold">{dialogTitle}</h2>
-          <span className="absolute right-4 text-[10.5px] text-[var(--text-tertiary)]">{explorerLabel}</span>
+      <DialogContent
+        aria-label={t(selectionMode === 'directory'
+          ? 'file_picker.choose_project_folder'
+          : 'file_picker.attach_from_daemon')}
+        className="flex h-[min(510px,calc(100dvh-32px))] max-w-[720px] flex-col overflow-hidden rounded-[16px] bg-[var(--raised)] p-0"
+        finalFocus={returnFocus}
+        onKeyDown={handleKeyDown}
+      >
+        <header className="flex h-12 shrink-0 items-center border-b px-4 pr-12">
+          <DialogTitle className="text-[13.5px] font-semibold">{dialogTitle}</DialogTitle>
         </header>
 
         <div className="flex min-h-0 flex-1">
-          <aside className="w-[174px] shrink-0 border-r bg-[var(--raised)]/45 px-2 py-3">
-            <div className="px-2 pb-1.5 text-[10px] font-semibold text-[var(--text-tertiary)]">{t('file_picker.locations')}</div>
-            <LocationButton
-              active={samePath(resolvedPath, root)}
-              label={workspaceLabel}
-              title={root}
-              onClick={() => visit(root)}
-            />
-            {directory.data?.home && (
+          <aside className="w-[144px] shrink-0 border-r bg-background/35 p-2">
+            <div className="px-2 pb-1 pt-1 text-[9.5px] font-semibold uppercase tracking-[0.06em] text-[var(--text-tertiary)]">
+              {t('file_picker.locations')}
+            </div>
+            {showWorkspace && root && workspaceLabel && (
               <LocationButton
-                active={samePath(resolvedPath, directory.data.home)}
-                label={t('file_picker.home')}
-                title={directory.data.home}
-                onClick={() => visit(directory.data?.home)}
+                active={samePath(resolvedPath, root)}
+                label={workspaceLabel}
+                title={root}
+                onClick={() => visit(root)}
               />
             )}
-            {directory.data?.filesystem_root && (
+            {(!root || showHome) && (
               <LocationButton
-                active={samePath(resolvedPath, directory.data.filesystem_root)}
+                active={currentPath === null || Boolean(home && samePath(resolvedPath, home))}
+                label={t('file_picker.home')}
+                title={home ?? t('file_picker.home')}
+                onClick={() => visit(home ?? null)}
+              />
+            )}
+            {showFilesystem && filesystemRoot && (
+              <LocationButton
+                active={samePath(resolvedPath, filesystemRoot)}
                 label={t('file_picker.file_system')}
-                title={directory.data.filesystem_root}
-                onClick={() => visit(directory.data?.filesystem_root)}
+                title={filesystemRoot}
+                onClick={() => visit(filesystemRoot)}
               />
             )}
           </aside>
 
-          <main className="flex min-w-0 flex-1 flex-col bg-background/35">
-            <div className="flex h-11 shrink-0 items-center gap-2 border-b px-2.5">
-              <div className="flex items-center rounded-md border bg-card shadow-sm">
-                <ToolbarButton
-                  label={t('file_picker.back')}
-                  disabled={historyIndex === 0 || Boolean(submittingPath)}
-                  icon="arrowLeft"
-                  onClick={() => setHistoryIndex((current) => current - 1)}
-                />
-                <span className="h-5 w-px bg-border" />
-                <ToolbarButton
-                  label={t('file_picker.forward')}
-                  disabled={historyIndex === history.length - 1 || Boolean(submittingPath)}
-                  icon="arrowRight"
-                  onClick={() => setHistoryIndex((current) => current + 1)}
-                />
-              </div>
+          <main className="flex min-w-0 flex-1 flex-col bg-background/20">
+            <div className="flex h-11 shrink-0 items-center gap-1 border-b px-2.5">
+              <ToolbarButton
+                label={t('file_picker.back')}
+                disabled={historyIndex === 0 || Boolean(submittingPath)}
+                icon="arrowLeft"
+                onClick={() => setHistoryIndex((current) => current - 1)}
+              />
+              <ToolbarButton
+                label={t('file_picker.forward')}
+                disabled={historyIndex === history.length - 1 || Boolean(submittingPath)}
+                icon="arrowRight"
+                onClick={() => setHistoryIndex((current) => current + 1)}
+              />
               <ToolbarButton
                 label={t('file_picker.enclosing_folder')}
                 disabled={!directory.data?.parent || Boolean(submittingPath)}
@@ -242,15 +244,20 @@ export function DaemonFilePicker({
                 onClick={() => visit(directory.data?.parent)}
               />
 
-              <div className="flex min-w-0 flex-1 items-center gap-2 rounded-md px-1.5 py-1" title={resolvedPath}>
-                <WakuIcon className="size-[15px] text-[#4c9dea]" name="folder" />
-                <span className="truncate text-[11.5px] font-medium">{fileName(resolvedPath) || resolvedPath}</span>
-                <span className="min-w-0 truncate text-[10.5px] text-[var(--text-tertiary)]">{resolvedPath}</span>
+              <div
+                className="mx-1 flex min-w-0 flex-1 items-center gap-2 rounded-[7px] px-1.5 py-1"
+                title={resolvedPath || undefined}
+              >
+                <WakuIcon className="size-[14px] text-[var(--text-tertiary)]" name="folder" />
+                <span className="min-w-0 truncate text-[11.5px] text-[var(--text-secondary)]">
+                  {resolvedPath || t('file_picker.loading_folder')}
+                </span>
               </div>
 
-              <label className="flex h-7 w-40 shrink-0 items-center gap-1.5 rounded-md border bg-card px-2 shadow-sm focus-within:ring-1 focus-within:ring-ring">
+              <label className="flex h-7 w-36 shrink-0 items-center gap-1.5 rounded-[7px] bg-foreground/[0.055] px-2 focus-within:ring-1 focus-within:ring-ring">
                 <WakuIcon className="size-3 text-[var(--text-tertiary)]" name="search" />
                 <input
+                  autoFocus
                   aria-label={t('file_picker.filter_folder')}
                   className="min-w-0 flex-1 bg-transparent text-[11.5px] outline-none placeholder:text-[var(--text-ghost)]"
                   placeholder={t('file_picker.filter')}
@@ -268,11 +275,7 @@ export function DaemonFilePicker({
               />
             </div>
 
-            <div className="grid h-7 shrink-0 grid-cols-[minmax(0,1fr)_120px] items-center border-b bg-card/65 px-3 text-[10.5px] font-medium text-[var(--text-tertiary)]">
-              <span>{t('file_picker.name')}</span>
-              <span>{t('file_picker.kind')}</span>
-            </div>
-            <div className="relative min-h-0 flex-1 bg-card/35">
+            <div className="relative min-h-0 flex-1">
               {directory.isPending ? (
                 <ExplorerMessage icon="folder" title={t('file_picker.loading_folder')} />
               ) : directory.error ? (
@@ -284,55 +287,64 @@ export function DaemonFilePicker({
               ) : (
                 <Virtuoso
                   aria-label={t(selectionMode === 'directory' ? 'file_picker.folders' : 'file_picker.files')}
-                  className="size-full py-1 outline-none"
+                  className="size-full py-1.5 outline-none"
                   computeItemKey={(_, entry) => entry.absolutePath}
                   data={visibleEntries}
-                  fixedItemHeight={30}
+                  fixedItemHeight={36}
                   increaseViewportBy={180}
-                  itemContent={(index, entry) => {
-                  const selectable = selectionMode !== 'directory' || entry.isDir
-                  const selected = selectable && selectedPath === entry.absolutePath
-                  return (
-                    <button
-                      aria-disabled={!selectable}
-                      aria-selected={selected}
-                      className={cn(
-                        'grid h-[30px] w-full grid-cols-[minmax(0,1fr)_120px] items-center px-3 text-left text-[11.5px] outline-none',
-                        selected
-                          ? 'bg-[#0a84ff] text-white'
-                          : index % 2 === 1
-                            ? 'bg-foreground/[0.018] hover:bg-accent focus-visible:bg-accent'
-                            : 'hover:bg-accent focus-visible:bg-accent',
-                        !selectable && 'text-[var(--text-ghost)] hover:bg-transparent',
-                      )}
-                      role="option"
-                      type="button"
-                      onClick={() => {
-                        if (selectable) setSelectedPath(entry.absolutePath)
-                      }}
-                      onDoubleClick={() => activate(entry)}
-                    >
-                      <span className="flex min-w-0 items-center gap-2">
-                        <WakuIcon
+                  itemContent={(_, entry) => {
+                    const selectable = selectionMode !== 'directory' || entry.isDir
+                    const selected = selectable && selectedPath === entry.absolutePath
+                    return (
+                      <div className="flex h-9 items-center px-2">
+                        <button
+                          aria-disabled={!selectable}
+                          aria-selected={selected}
                           className={cn(
-                            'size-[15px]',
+                            'flex h-8 w-full min-w-0 items-center gap-2 rounded-[7px] px-2.5 text-left text-[11.5px] outline-none',
                             selected
-                              ? 'text-white'
-                              : entry.isDir
-                                ? 'text-[#4c9dea]'
-                                : selectable
-                                  ? 'text-[var(--text-tertiary)]'
-                                  : 'text-[var(--text-ghost)]',
+                              ? 'bg-accent text-foreground'
+                              : 'hover:bg-accent/70 focus-visible:bg-accent focus-visible:ring-1 focus-visible:ring-ring',
+                            !selectable && 'text-[var(--text-ghost)] hover:bg-transparent',
                           )}
-                          name={entry.isDir ? 'folder' : 'file'}
-                        />
-                        <span className="truncate">{entry.name}</span>
-                      </span>
-                      <span className={cn('truncate', selected ? 'text-white/80' : 'text-[var(--text-tertiary)]')}>
-                        {entryKind(entry, t)}
-                      </span>
-                    </button>
-                  )
+                          role="option"
+                          tabIndex={selectable ? 0 : -1}
+                          type="button"
+                          onClick={() => {
+                            if (selectable) setSelectedPath(entry.absolutePath)
+                          }}
+                          onDoubleClick={() => activate(entry)}
+                          onKeyDown={(event) => {
+                            if (event.key !== 'Enter') return
+                            event.preventDefault()
+                            event.stopPropagation()
+                            activate(entry)
+                          }}
+                        >
+                          {entry.isDir ? (
+                            <WakuIcon
+                              className={cn(
+                                'size-[15px] text-[var(--text-tertiary)]',
+                                !selectable && 'text-[var(--text-ghost)]',
+                              )}
+                              name="folder"
+                            />
+                          ) : (
+                            <FileTypeIcon
+                              className={cn(
+                                'size-[15px] opacity-75',
+                                !selectable && 'opacity-35 grayscale',
+                              )}
+                              path={entry.absolutePath}
+                            />
+                          )}
+                          <span className="min-w-0 flex-1 truncate">{entry.name}</span>
+                          {selected && (
+                            <WakuIcon className="size-3 text-[var(--text-tertiary)]" name="check" />
+                          )}
+                        </button>
+                      </div>
+                    )
                   }}
                   ref={list}
                   role="listbox"
@@ -342,16 +354,15 @@ export function DaemonFilePicker({
           </main>
         </div>
 
-        <footer className="flex h-[58px] shrink-0 items-center gap-3 border-t bg-[var(--raised)]/55 px-4">
-          <div className="min-w-0 flex-1">
-            <div className="text-[10px] text-[var(--text-tertiary)]">
-              {t(selectionMode === 'directory' ? 'file_picker.selected_folder' : 'file_picker.selected_item')}
-            </div>
-            <div className="mt-0.5 truncate text-[11.5px]" title={selectedTarget ?? undefined}>
-              {selectedTarget ?? t('file_picker.none')}
-            </div>
+        <footer className="flex h-[54px] shrink-0 items-center gap-2.5 border-t bg-background/25 px-3.5">
+          <div
+            className="flex min-w-0 flex-1 items-center gap-2 text-[11px] text-[var(--text-tertiary)]"
+            title={selectedTarget ?? undefined}
+          >
+            <WakuIcon className="size-3.5 shrink-0" name={selectedEntry?.isDir === false ? 'file' : 'folder'} />
+            <span className="truncate">{selectedTarget ?? t('file_picker.none')}</span>
           </div>
-          <Button disabled={Boolean(submittingPath)} size="sm" type="button" variant="outline" onClick={onClose}>
+          <Button disabled={Boolean(submittingPath)} size="sm" type="button" variant="ghost" onClick={onClose}>
             {t('common.cancel')}
           </Button>
           <Button
@@ -365,8 +376,8 @@ export function DaemonFilePicker({
               : t(selectionMode === 'directory' ? 'file_picker.open' : 'file_picker.attach')}
           </Button>
         </footer>
-      </div>
-    </div>
+      </DialogContent>
+    </Dialog>
   )
 }
 
@@ -384,14 +395,14 @@ function LocationButton({
   return (
     <button
       className={cn(
-        'flex h-8 w-full min-w-0 items-center gap-2 rounded-md px-2 text-left text-[12px] outline-none hover:bg-accent focus-visible:ring-1 focus-visible:ring-ring',
-        active && 'bg-accent',
+        'flex h-8 w-full min-w-0 items-center gap-2 rounded-[7px] px-2 text-left text-[11.5px] text-[var(--text-secondary)] outline-none hover:bg-accent/70 focus-visible:ring-1 focus-visible:ring-ring',
+        active && 'bg-accent text-foreground',
       )}
       title={title}
       type="button"
       onClick={onClick}
     >
-      <WakuIcon className="size-[15px] text-[#4c9dea]" name="folder" />
+      <WakuIcon className="size-[14px] text-[var(--text-tertiary)]" name="folder" />
       <span className="truncate">{label}</span>
     </button>
   )
@@ -413,7 +424,7 @@ function ToolbarButton({
   return (
     <button
       aria-label={label}
-      className="grid size-7 shrink-0 place-items-center rounded-md text-[var(--text-secondary)] outline-none hover:bg-accent focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-30"
+      className="grid size-7 shrink-0 place-items-center rounded-[7px] text-[var(--text-secondary)] outline-none hover:bg-accent focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-30"
       disabled={disabled}
       title={label}
       type="button"
@@ -443,18 +454,6 @@ function ExplorerMessage({
       </div>
     </div>
   )
-}
-
-function entryKind(entry: WorkingTreeEntry, t: Translator): string {
-  if (entry.isDir) return t('file_picker.folder')
-  const extension = entry.name.includes('.') ? entry.name.split('.').at(-1) : undefined
-  return extension
-    ? t('file_picker.typed_file', { type: extension.toLocaleUpperCase() })
-    : t('file_picker.file')
-}
-
-function fileName(path: string): string {
-  return path.split(/[\\/]/).filter(Boolean).at(-1) ?? ''
 }
 
 function samePath(left: string, right: string): boolean {

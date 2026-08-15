@@ -223,6 +223,64 @@
 }
 
 @layer components {
+  .waku-popover-surface {
+    border: 1px solid var(--input);
+    background: var(--raised);
+    box-shadow:
+      0 10px 15px -3px rgb(0 0 0 / 10%),
+      0 4px 6px -4px rgb(0 0 0 / 10%);
+  }
+
+  .waku-menu-surface {
+    min-width: 176px;
+    max-width: min(320px, calc(100vw - 16px));
+    overflow: hidden;
+    padding-block: 4px;
+    border: 1px solid var(--input);
+    border-radius: 9px;
+    background: var(--raised);
+    color: var(--popover-foreground);
+    box-shadow:
+      0 10px 15px -3px rgb(0 0 0 / 10%),
+      0 4px 6px -4px rgb(0 0 0 / 10%);
+    outline: none;
+  }
+
+  .waku-menu-item {
+    display: flex;
+    min-height: 26px;
+    margin-inline: 4px;
+    padding-inline: 8px;
+    align-items: center;
+    gap: 8px;
+    border-radius: 6px;
+    color: var(--text-secondary);
+    font-size: 11.5px;
+    line-height: 15px;
+    text-align: left;
+    cursor: default;
+    user-select: none;
+    outline: none;
+  }
+
+  .waku-menu-item[data-highlighted] {
+    background: var(--accent);
+  }
+
+  .waku-menu-item:not([data-disabled]):hover {
+    background: var(--accent);
+  }
+
+  .waku-menu-item[data-disabled] {
+    color: var(--text-ghost);
+  }
+
+  .waku-menu-separator {
+    height: 1px;
+    margin: 4px 6px;
+    background: var(--border);
+  }
+
   .markdown {
     @apply text-[14px] leading-[22px] text-foreground;
   }
