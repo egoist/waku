@@ -1069,6 +1069,11 @@ automations.menu_disable: 禁用
 automations.edit: 编辑
 automations.delete: 删除
 automations.confirm_delete: 确认删除
+automations.delete_title: 删除“%{name}”？
+automations.delete_runs: 此自动化有 %{count} 次运行。
+automations.delete_sessions: 同时删除它的 %{count} 个会话及其对话记录。
+automations.delete_irreversible: 此操作无法撤销。
+automations.delete_sessions_partial: 由于响应派生正在进行，无法删除 %{count} 个会话。
 automations.run_now: 立即运行
 automations.save: 保存
 automations.cancel: 取消

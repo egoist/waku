@@ -146,6 +146,7 @@ impl Render for Waku {
         if matches!(self.active_page.as_ref(), Some(ActivePage::Settings(_))) {
             let command_palette = self.render_command_palette(window, cx);
             let commit_dialog = self.render_commit_dialog(cx);
+            let automation_delete_dialog = self.render_automation_delete_dialog(cx);
             let content = div()
                 .relative()
                 .size_full()
@@ -153,6 +154,7 @@ impl Render for Waku {
                 .child(self.render_settings(window, cx))
                 .children(command_palette)
                 .children(commit_dialog)
+                .children(automation_delete_dialog)
                 .children(image_preview)
                 .into_any_element();
             return self.render_window_frame(content, window, cx);
@@ -164,6 +166,7 @@ impl Render for Waku {
         let theme = Theme::current(cx);
         let command_palette = self.render_command_palette(window, cx);
         let commit_dialog = self.render_commit_dialog(cx);
+        let automation_delete_dialog = self.render_automation_delete_dialog(cx);
         let (sidebar_width, right_panel_width) = self.effective_panel_widths(window);
         // The Automations page is a full-page view of the main content column —
         // it replaces the transcript and composer but leaves the sidebar (and
@@ -294,6 +297,7 @@ impl Render for Waku {
             )
             .children(command_palette)
             .children(commit_dialog)
+            .children(automation_delete_dialog)
             .children(image_preview)
             .into_any_element();
 

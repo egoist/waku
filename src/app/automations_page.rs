@@ -5,6 +5,7 @@
 //! only.
 
 use chrono::{NaiveDateTime, NaiveTime};
+use gpui::{App, KeyBinding, actions};
 
 use super::composer::AgentControlTarget;
 use super::*;
@@ -20,6 +21,105 @@ const AUTOMATIONS_ACTION_HEIGHT: f32 = 30.0;
 const AUTOMATIONS_ACTION_PADDING: f32 = 12.0;
 const AUTOMATIONS_PICKER_WIDTH: f32 = 200.0;
 const AUTOMATIONS_TIME_FIELD_WIDTH: f32 = 52.0;
+const DELETE_DIALOG_CONTEXT: &str = "AutomationDeleteDialog";
+
+actions!(
+    waku_automation_delete_dialog,
+    [DismissAutomationDeleteDialog]
+);
+
+/// Installs the key binding owned by the automation-delete confirmation modal.
+pub fn init(cx: &mut App) {
+    cx.bind_keys([KeyBinding::new(
+        "escape",
+        DismissAutomationDeleteDialog,
+        Some(DELETE_DIALOG_CONTEXT),
+    )]);
+}
+
+/// The value carried from the confirmation surface into the deletion path.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) struct DeleteAutomationRequest {
+    automation_id: Uuid,
+    delete_sessions: bool,
+}
+
+pub(super) struct AutomationDeleteDialogState {
+    request: DeleteAutomationRequest,
+    name: String,
+    run_count: usize,
+    session_count: usize,
+    cancel_focus: FocusHandle,
+    cascade_focus: Option<FocusHandle>,
+    delete_focus: FocusHandle,
+}
+
+fn automation_session_ids(state: &PersistedState, automation_id: Uuid) -> Vec<Uuid> {
+    state
+        .sessions
+        .iter()
+        .filter(|session| session.originating_automation == Some(automation_id))
+        .map(|session| session.id)
+        .collect()
+}
+
+fn automation_delete_session_ids(
+    state: &PersistedState,
+    request: DeleteAutomationRequest,
+) -> Vec<Uuid> {
+    if request.delete_sessions {
+        automation_session_ids(state, request.automation_id)
+    } else {
+        Vec::new()
+    }
+}
+
+#[derive(Debug, Eq, PartialEq)]
+struct AutomationDeleteResult {
+    automation_deleted: bool,
+    removed_session_ids: Vec<Uuid>,
+    refused_session_ids: Vec<Uuid>,
+}
+
+/// Completes the state-level part of an automation deletion after each target
+/// has gone through the ordinary session-removal path. Keeping this small seam
+/// separate makes the cascade policy testable without constructing a GPUI
+/// window; the real caller has already performed the runtime teardown by the
+/// time this function removes the corresponding state rows.
+fn finalize_automation_delete(
+    state: &mut PersistedState,
+    request: DeleteAutomationRequest,
+    session_ids: &[Uuid],
+    results: impl IntoIterator<Item = (Uuid, super::sessions::SessionRemovalResult)>,
+) -> AutomationDeleteResult {
+    let targeted = if request.delete_sessions {
+        session_ids.iter().copied().collect::<HashSet<_>>()
+    } else {
+        HashSet::new()
+    };
+    let mut result = AutomationDeleteResult {
+        automation_deleted: false,
+        removed_session_ids: Vec::new(),
+        refused_session_ids: Vec::new(),
+    };
+    for (session_id, removal) in results {
+        if !targeted.contains(&session_id) {
+            continue;
+        }
+        match removal {
+            super::sessions::SessionRemovalResult::Removed => {
+                state.sessions.retain(|session| session.id != session_id);
+                result.removed_session_ids.push(session_id);
+            }
+            super::sessions::SessionRemovalResult::ResponseForkInProgress => {
+                result.refused_session_ids.push(session_id);
+            }
+            super::sessions::SessionRemovalResult::Missing => {}
+        }
+    }
+    result.automation_deleted = state.remove_automation(request.automation_id);
+    result
+}
 
 /// Which view of the Automations page is showing.
 pub(super) enum AutomationsPage {
@@ -424,27 +524,111 @@ impl Waku {
         cx.notify();
     }
 
-    fn delete_automation(&mut self, id: Uuid, cx: &mut Context<Self>) {
-        self.automation_delete_arming = None;
-        self.invalidate_automation_preparations(id);
-        if self.state.remove_automation(id) {
-            self.automation_card_focuses.borrow_mut().remove(&id);
+    fn open_automation_delete_dialog(
+        &mut self,
+        id: Uuid,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.automation_delete_dialog.is_some() {
+            return;
+        }
+        let Some(automation) = self.state.automation(id) else {
+            return;
+        };
+        let session_count = automation_session_ids(&self.state, id).len();
+        let dialog = AutomationDeleteDialogState {
+            request: DeleteAutomationRequest {
+                automation_id: id,
+                delete_sessions: false,
+            },
+            name: automation.name.clone(),
+            run_count: automation.history.len(),
+            session_count,
+            cancel_focus: cx.focus_handle(),
+            cascade_focus: (session_count > 0).then(|| cx.focus_handle()),
+            delete_focus: cx.focus_handle(),
+        };
+        let cancel_focus = dialog.cancel_focus.clone();
+        self.automation_delete_dialog = Some(dialog);
+        // The deferred layer is not in the focus tree until after it draws.
+        // Focus Cancel only after the second frame so the underlying editor
+        // cannot receive the next key press.
+        window.on_next_frame(move |window, _| {
+            window.on_next_frame(move |window, cx| window.focus(&cancel_focus, cx));
+        });
+        cx.notify();
+    }
+
+    fn toggle_automation_delete_sessions(&mut self, cx: &mut Context<Self>) {
+        let Some(dialog) = self.automation_delete_dialog.as_mut() else {
+            return;
+        };
+        if dialog.session_count == 0 {
+            return;
+        }
+        dialog.request.delete_sessions = !dialog.request.delete_sessions;
+        cx.notify();
+    }
+
+    fn dismiss_automation_delete_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.automation_delete_dialog.take().is_none() {
+            return;
+        }
+        window.focus(&self.automations_focus, cx);
+        cx.notify();
+    }
+
+    fn confirm_automation_delete(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(dialog) = self.automation_delete_dialog.take() else {
+            return;
+        };
+        let request = dialog.request;
+        let session_ids = automation_delete_session_ids(&self.state, request);
+        // Invalidate preparation results before tearing down any spawned
+        // session. A completion racing this action must not resurrect the
+        // automation's work after the modal confirms deletion.
+        self.invalidate_automation_preparations(request.automation_id);
+
+        let removal_results = session_ids
+            .iter()
+            .copied()
+            .map(|session_id| {
+                (
+                    session_id,
+                    self.remove_session_for_automation_cascade(session_id, cx),
+                )
+            })
+            .collect::<Vec<_>>();
+        let result =
+            finalize_automation_delete(&mut self.state, request, &session_ids, removal_results);
+
+        if result.automation_deleted {
+            self.automation_card_focuses
+                .borrow_mut()
+                .remove(&request.automation_id);
             // Deleting the automation whose editor is open returns to the list.
             if matches!(
                 &self.active_page,
                 Some(ActivePage::Automations(AutomationsPage::Editor(editor)))
-                    if editor.id == Some(id)
+                    if editor.id == Some(request.automation_id)
             ) {
                 self.active_page = Some(ActivePage::Automations(AutomationsPage::List));
             }
             self.save();
-            cx.notify();
         }
+        if !result.refused_session_ids.is_empty() {
+            self.show_toast(tr!(
+                "automations.delete_sessions_partial",
+                count = result.refused_session_ids.len()
+            ));
+        }
+        window.focus(&self.automations_focus, cx);
+        cx.notify();
     }
 
     /// Closes the editor and returns to the automations list.
     fn close_automation_editor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.automation_delete_arming = None;
         self.active_page = Some(ActivePage::Automations(AutomationsPage::List));
         window.focus(&self.automations_focus, cx);
         cx.notify();
@@ -928,26 +1112,225 @@ impl Waku {
             .into_any_element()
     }
 
-    /// The delete control: a single click arms it (danger styling, "Confirm
-    /// delete"), and a second click removes the automation. Clicking away
-    /// disarms, so a stray click can never delete. Mirrors the skills page.
+    pub(super) fn render_automation_delete_dialog(
+        &mut self,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let dialog = self.automation_delete_dialog.as_ref()?;
+        let theme = Theme::current(cx);
+        let name = dialog.name.clone();
+        let run_count = dialog.run_count;
+        let session_count = dialog.session_count;
+        let delete_sessions = dialog.request.delete_sessions;
+        let cancel_focus = dialog.cancel_focus.clone();
+        let delete_focus = dialog.delete_focus.clone();
+
+        let cancel = div()
+            .id("automation-delete-cancel")
+            .track_focus(&cancel_focus)
+            .tab_index(0)
+            .h(px(32.0))
+            .px(px(14.0))
+            .rounded(px(7.0))
+            .border_1()
+            .border_color(theme.border_strong)
+            .flex()
+            .items_center()
+            .justify_center()
+            .cursor_default()
+            .text_size(px(13.0))
+            .text_color(theme.text_secondary)
+            .focus_visible(|style| style.border_color(theme.accent))
+            .hover(|element| element.bg(theme.overlay))
+            .child(tr!("automations.cancel"))
+            .on_activation(cx, |this, window, cx| {
+                this.dismiss_automation_delete_dialog(window, cx);
+            });
+
+        let delete = div()
+            .id("automation-delete-confirm")
+            .track_focus(&delete_focus)
+            .tab_index(0)
+            .h(px(32.0))
+            .px(px(14.0))
+            .rounded(px(7.0))
+            .border_1()
+            .border_color(theme.danger)
+            .flex()
+            .items_center()
+            .justify_center()
+            .cursor_default()
+            .text_size(px(13.0))
+            .bg(theme.danger)
+            .text_color(theme.on_inverse)
+            .focus_visible(|style| style.border_color(theme.accent))
+            .hover(|element| element.opacity(0.9))
+            .child(tr!("automations.delete"))
+            .on_activation(cx, |this, window, cx| {
+                this.confirm_automation_delete(window, cx);
+            });
+
+        let cascade = dialog.cascade_focus.as_ref().map(|focus| {
+            div()
+                .id("automation-delete-sessions")
+                .track_focus(focus)
+                .tab_index(0)
+                .w_full()
+                .px(px(10.0))
+                .py(px(9.0))
+                .rounded(px(8.0))
+                .flex()
+                .items_start()
+                .gap(px(10.0))
+                .cursor_default()
+                .focus_visible(|style| style.border_1().border_color(theme.accent))
+                .hover(|element| element.bg(theme.overlay))
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.toggle_automation_delete_sessions(cx);
+                }))
+                .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
+                    if !event.keystroke.modifiers.modified()
+                        && matches!(event.keystroke.key.as_str(), "enter" | "space")
+                    {
+                        this.toggle_automation_delete_sessions(cx);
+                        cx.stop_propagation();
+                    }
+                }))
+                .child(
+                    div()
+                        .mt(px(1.0))
+                        .size(px(16.0))
+                        .flex_none()
+                        .rounded(px(4.0))
+                        .border_1()
+                        .border_color(if delete_sessions {
+                            theme.accent
+                        } else {
+                            theme.border_strong
+                        })
+                        .bg(if delete_sessions {
+                            theme.accent
+                        } else {
+                            gpui::transparent_black()
+                        })
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .when(delete_sessions, |checkbox| {
+                            checkbox.child(icon("icons/check.svg", 12.0, theme.on_inverse))
+                        }),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap(px(2.0))
+                        .text_size(px(13.0))
+                        .line_height(px(18.0))
+                        .text_color(theme.text)
+                        .child(tr!("automations.delete_sessions", count = session_count))
+                        .child(
+                            div()
+                                .text_size(px(12.0))
+                                .text_color(theme.danger)
+                                .child(tr!("automations.delete_irreversible")),
+                        ),
+                )
+        });
+
+        let mut card = div()
+            .id("automation-delete-dialog-card")
+            .key_context(DELETE_DIALOG_CONTEXT)
+            .on_action(
+                cx.listener(|waku, _: &DismissAutomationDeleteDialog, window, cx| {
+                    waku.dismiss_automation_delete_dialog(window, cx);
+                }),
+            )
+            .tab_group()
+            .tab_stop(false)
+            .w_full()
+            .max_w(px(460.0))
+            .p(px(20.0))
+            .rounded(px(16.0))
+            .bg(theme.composer)
+            .shadow_xl()
+            .flex()
+            .flex_col()
+            .gap(px(10.0))
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .child(
+                div()
+                    .text_size(px(17.0))
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(theme.text)
+                    .child(tr!("automations.delete_title", name = name)),
+            )
+            .child(
+                div()
+                    .text_size(px(13.0))
+                    .line_height(px(19.0))
+                    .text_color(theme.text_secondary)
+                    .child(tr!("automations.delete_runs", count = run_count)),
+            );
+
+        if let Some(cascade) = cascade {
+            card = card.child(cascade);
+        }
+
+        card = card.child(
+            div()
+                .mt(px(4.0))
+                .flex()
+                .justify_end()
+                .gap(px(8.0))
+                .child(cancel)
+                .child(delete),
+        );
+
+        let scrim = if theme.is_dark {
+            gpui::hsla(0.0, 0.0, 0.0, 0.34)
+        } else {
+            gpui::hsla(0.0, 0.0, 0.0, 0.16)
+        };
+        let layer = div()
+            .id("automation-delete-dialog-layer")
+            .absolute()
+            .inset_0()
+            .occlude()
+            .bg(scrim)
+            .p(px(24.0))
+            .flex()
+            .items_center()
+            .justify_center()
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|waku, _, window, cx| {
+                    waku.dismiss_automation_delete_dialog(window, cx);
+                }),
+            )
+            .child(card);
+        Some(gpui::deferred(layer).with_priority(4).into_any_element())
+    }
+
+    /// The delete control opens a confirmation modal. The consequences belong
+    /// in the modal because deleting the automation and deleting its output are
+    /// intentionally separate user intents.
     fn render_automation_delete_button(
         &self,
         id: Uuid,
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> Stateful<Div> {
-        let armed = self.automation_delete_arming == Some(id);
         div()
             .id(SharedString::from(format!("automation-delete-{id}")))
+            .track_focus(&self.automation_delete_focus)
             .tab_index(0)
             .focus_visible(|style| style.border_color(theme.accent))
             .h(px(AUTOMATIONS_ACTION_HEIGHT))
             .px(px(AUTOMATIONS_ACTION_PADDING))
             .rounded(px(7.0))
             .border_1()
-            .border_color(if armed { theme.danger } else { theme.border })
-            .when(armed, |element| element.bg(theme.danger.opacity(0.12)))
+            .border_color(theme.border)
             .flex()
             .flex_none()
             .items_center()
@@ -955,40 +1338,13 @@ impl Waku {
             .gap(px(6.0))
             .cursor_default()
             .text_size(px(13.0))
-            .text_color(if armed {
-                theme.danger
-            } else {
-                theme.text_secondary
-            })
+            .text_color(theme.text_secondary)
             .hover(|element| element.bg(theme.overlay).text_color(theme.danger))
-            .child(icon(
-                "icons/trash.svg",
-                13.0,
-                if armed {
-                    theme.danger
-                } else {
-                    theme.text_tertiary
-                },
-            ))
-            .child(if armed {
-                tr!("automations.confirm_delete")
-            } else {
-                tr!("automations.delete")
+            .child(icon("icons/trash.svg", 13.0, theme.text_tertiary))
+            .child(tr!("automations.delete"))
+            .on_activation(cx, move |this, window, cx| {
+                this.open_automation_delete_dialog(id, window, cx);
             })
-            .on_activation(cx, move |this, _, cx| {
-                if this.automation_delete_arming == Some(id) {
-                    this.delete_automation(id, cx);
-                } else {
-                    this.automation_delete_arming = Some(id);
-                    cx.notify();
-                }
-            })
-            .on_mouse_down_out(cx.listener(move |this, _, _, cx| {
-                if this.automation_delete_arming == Some(id) {
-                    this.automation_delete_arming = None;
-                    cx.notify();
-                }
-            }))
     }
 
     fn render_automation_enable_toggle(
@@ -1829,6 +2185,135 @@ fn format_next_run(when: NaiveDateTime) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn automation_delete_fixture(session_count: usize) -> (PersistedState, Uuid, Vec<Uuid>) {
+        let mut state = PersistedState::fresh(PathBuf::from("/tmp/project"));
+        state.sessions.clear();
+        let project_id = state.projects[0].id;
+        let automation = Automation::new("Nightly", ProviderKind::Codex, 1_000);
+        let automation_id = automation.id;
+        state.push_automation(automation);
+        let mut session_ids = Vec::new();
+        for _ in 0..session_count {
+            let mut session = state.new_session(project_id, ProviderKind::Codex);
+            session.originating_automation = Some(automation_id);
+            session_ids.push(session.id);
+            state.push_session(session);
+        }
+        (state, automation_id, session_ids)
+    }
+
+    #[test]
+    fn automation_delete_without_cascade_removes_only_the_automation() {
+        let (mut state, automation_id, session_ids) = automation_delete_fixture(1);
+        let request = DeleteAutomationRequest {
+            automation_id,
+            delete_sessions: false,
+        };
+
+        let result = finalize_automation_delete(&mut state, request, &session_ids, []);
+
+        assert!(result.automation_deleted);
+        assert!(result.removed_session_ids.is_empty());
+        assert!(result.refused_session_ids.is_empty());
+        assert!(state.automation(automation_id).is_none());
+        assert_eq!(
+            state
+                .sessions
+                .iter()
+                .map(|session| session.id)
+                .collect::<Vec<_>>(),
+            session_ids
+        );
+    }
+
+    #[test]
+    fn automation_delete_with_cascade_targets_only_its_sessions() {
+        let (mut state, automation_id, session_ids) = automation_delete_fixture(2);
+        let other_automation = Automation::new("Weekly", ProviderKind::Codex, 1_000);
+        let other_automation_id = other_automation.id;
+        state.push_automation(other_automation);
+        let project_id = state.projects[0].id;
+        let mut unrelated = state.new_session(project_id, ProviderKind::Codex);
+        unrelated.originating_automation = Some(other_automation_id);
+        let unrelated_id = unrelated.id;
+        state.push_session(unrelated);
+        let request = DeleteAutomationRequest {
+            automation_id,
+            delete_sessions: true,
+        };
+
+        let targets = automation_delete_session_ids(&state, request);
+        let result = finalize_automation_delete(
+            &mut state,
+            request,
+            &targets,
+            targets
+                .iter()
+                .copied()
+                .map(|id| (id, super::super::sessions::SessionRemovalResult::Removed)),
+        );
+
+        assert_eq!(targets, session_ids);
+        assert!(!targets.contains(&unrelated_id));
+        assert!(result.automation_deleted);
+        assert_eq!(result.removed_session_ids, session_ids);
+        assert!(
+            state
+                .sessions
+                .iter()
+                .all(|session| session.id == unrelated_id)
+        );
+    }
+
+    #[test]
+    fn automation_delete_with_no_sessions_has_no_cascade_targets() {
+        let (mut state, automation_id, session_ids) = automation_delete_fixture(0);
+        let request = DeleteAutomationRequest {
+            automation_id,
+            delete_sessions: true,
+        };
+
+        assert!(session_ids.is_empty());
+        assert!(automation_delete_session_ids(&state, request).is_empty());
+        let result = finalize_automation_delete(&mut state, request, &[], []);
+        assert!(result.automation_deleted);
+        assert!(result.removed_session_ids.is_empty());
+        assert!(result.refused_session_ids.is_empty());
+        assert!(state.automation(automation_id).is_none());
+    }
+
+    #[test]
+    fn automation_delete_cascade_keeps_a_refusing_session_and_aggregates_once() {
+        let (mut state, automation_id, session_ids) = automation_delete_fixture(2);
+        let request = DeleteAutomationRequest {
+            automation_id,
+            delete_sessions: true,
+        };
+        let refusing = session_ids[1];
+        let result = finalize_automation_delete(
+            &mut state,
+            request,
+            &session_ids,
+            [
+                (
+                    session_ids[0],
+                    super::super::sessions::SessionRemovalResult::Removed,
+                ),
+                (
+                    refusing,
+                    super::super::sessions::SessionRemovalResult::ResponseForkInProgress,
+                ),
+            ],
+        );
+
+        assert!(result.automation_deleted);
+        assert_eq!(result.removed_session_ids, vec![session_ids[0]]);
+        assert_eq!(result.refused_session_ids, vec![refusing]);
+        assert_eq!(result.refused_session_ids.len(), 1);
+        assert_eq!(state.sessions.len(), 1);
+        assert_eq!(state.sessions[0].id, refusing);
+    }
 
     #[test]
     fn clearing_an_editor_project_also_clears_worktree_state() {

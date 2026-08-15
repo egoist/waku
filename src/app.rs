@@ -1058,6 +1058,7 @@ pub struct Waku {
     settings_focus: FocusHandle,
     automations_focus: FocusHandle,
     automation_save_focus: FocusHandle,
+    automation_delete_focus: FocusHandle,
     automation_card_focuses: RefCell<HashMap<Uuid, FocusHandle>>,
     onboarding_add_project_focus: FocusHandle,
     onboarding_projectless_focus: FocusHandle,
@@ -1413,9 +1414,9 @@ pub struct Waku {
     /// The skill directory whose delete button is armed for its confirming
     /// second click.
     skills_delete_arming: Option<PathBuf>,
-    /// The automation whose delete button is armed for a confirming second
-    /// click, mirroring `skills_delete_arming`. Runtime-only.
-    automation_delete_arming: Option<Uuid>,
+    /// Window-modal confirmation for deleting an automation, including the
+    /// optional cascade into its spawned sessions.
+    automation_delete_dialog: Option<automations_page::AutomationDeleteDialogState>,
     /// Scroll position of the settings content column, tracked so the pane
     /// can draw a scrollbar and mark the titlebar boundary once content
     /// slides under it.
@@ -1560,6 +1561,7 @@ mod usage_page;
 mod window_chrome;
 
 pub use autocomplete::init as init_composer_autocomplete;
+pub use automations_page::init as init_automation_delete_dialog_keys;
 use background_work::{
     BackgroundWorkRegistry, work_kind_icon, work_status_color, work_status_label,
 };
@@ -2710,6 +2712,7 @@ impl Waku {
                 settings_focus,
                 automations_focus,
                 automation_save_focus: cx.focus_handle(),
+                automation_delete_focus: cx.focus_handle(),
                 automation_card_focuses: RefCell::new(HashMap::new()),
                 onboarding_add_project_focus,
                 onboarding_projectless_focus,
@@ -2893,7 +2896,7 @@ impl Waku {
                 skills_detail_scrollbar: ScrollbarState::new(),
                 skills_source_filter: None,
                 skills_delete_arming: None,
-                automation_delete_arming: None,
+                automation_delete_dialog: None,
                 settings_scroll: ScrollHandle::new(),
                 settings_scrollbar: ScrollbarState::new(),
                 header_drag_armed: false,

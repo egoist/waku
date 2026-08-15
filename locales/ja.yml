@@ -1121,6 +1121,11 @@ automations.menu_disable: 無効化
 automations.edit: 編集
 automations.delete: 削除
 automations.confirm_delete: 削除を確認
+automations.delete_title: 「%{name}」を削除しますか？
+automations.delete_runs: この自動化には %{count} 件の実行があります。
+automations.delete_sessions: この自動化の %{count} 件のセッションとそのトランスクリプトも削除する。
+automations.delete_irreversible: この操作は取り消せません。
+automations.delete_sessions_partial: 応答のフォークが進行中のため、%{count} 件のセッションを削除できませんでした。
 automations.run_now: 今すぐ実行
 automations.save: 保存
 automations.cancel: キャンセル

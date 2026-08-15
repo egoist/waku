@@ -464,6 +464,16 @@ automations.delete:
   en: Delete
 automations.confirm_delete:
   en: Confirm delete
+automations.delete_title:
+  en: "Delete \"%{name}\"?"
+automations.delete_runs:
+  en: This automation has %{count} runs.
+automations.delete_sessions:
+  en: Also delete its %{count} sessions and their transcripts.
+automations.delete_irreversible:
+  en: This cannot be undone.
+automations.delete_sessions_partial:
+  en: "Could not delete %{count} sessions because a response fork is in progress."
 automations.run_now:
   en: Run now
 automations.badge:

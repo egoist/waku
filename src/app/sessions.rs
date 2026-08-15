@@ -16,6 +16,19 @@ fn cancel_automation_run_for_removed_session(state: &mut PersistedState, session
         })
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum SessionRemovalResult {
+    Removed,
+    Missing,
+    ResponseForkInProgress,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SessionRemovalFeedback {
+    ShowResponseForkToast,
+    SuppressResponseForkToast,
+}
+
 fn retain_runtime_after_cancel(provider: ProviderKind) -> bool {
     // Codex's app-server owns the Computer Use process tree, and Amp offers no
     // interrupt on its stream — stopping it means ending the process. Both
@@ -288,11 +301,45 @@ impl Waku {
         cx.notify();
     }
 
-    pub(super) fn remove_session(&mut self, session_id: Uuid, cx: &mut Context<Self>) {
+    pub(super) fn remove_session(
+        &mut self,
+        session_id: Uuid,
+        cx: &mut Context<Self>,
+    ) -> SessionRemovalResult {
+        self.remove_session_with_feedback(
+            session_id,
+            cx,
+            SessionRemovalFeedback::ShowResponseForkToast,
+        )
+    }
+
+    /// The automation cascade uses the same teardown path while deferring the
+    /// response-fork refusal to one aggregate report after all sessions are
+    /// attempted.
+    pub(super) fn remove_session_for_automation_cascade(
+        &mut self,
+        session_id: Uuid,
+        cx: &mut Context<Self>,
+    ) -> SessionRemovalResult {
+        self.remove_session_with_feedback(
+            session_id,
+            cx,
+            SessionRemovalFeedback::SuppressResponseForkToast,
+        )
+    }
+
+    fn remove_session_with_feedback(
+        &mut self,
+        session_id: Uuid,
+        cx: &mut Context<Self>,
+        feedback: SessionRemovalFeedback,
+    ) -> SessionRemovalResult {
         if self.response_fork_preparations.contains_key(&session_id) {
-            self.show_toast(tr!("session.response_fork_in_progress"));
-            cx.notify();
-            return;
+            if feedback == SessionRemovalFeedback::ShowResponseForkToast {
+                self.show_toast(tr!("session.response_fork_in_progress"));
+                cx.notify();
+            }
+            return SessionRemovalResult::ResponseForkInProgress;
         }
         let Some(index) = self
             .state
@@ -300,7 +347,7 @@ impl Waku {
             .iter()
             .position(|session| session.id == session_id)
         else {
-            return;
+            return SessionRemovalResult::Missing;
         };
         let project_id = self.state.sessions[index].project_id;
         let composer_draft_key =
@@ -390,6 +437,7 @@ impl Waku {
         cx.background_executor()
             .spawn(async move { sweep() })
             .detach();
+        SessionRemovalResult::Removed
     }
 
     pub(super) fn new_session_action(
