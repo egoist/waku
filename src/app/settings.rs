@@ -91,7 +91,7 @@ pub(super) fn visible_settings_pages(
 }
 
 impl Waku {
-    pub(super) fn render_settings(&self, cx: &mut Context<Self>) -> AnyElement {
+    pub(super) fn render_settings(&self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
         let theme = Theme::current(cx);
 
         div()
@@ -115,12 +115,12 @@ impl Waku {
             .bg(theme.canvas)
             .text_color(theme.text)
             .font_family(".SystemUIFont")
-            .child(self.render_settings_sidebar(cx))
-            .child(self.render_settings_content(cx))
+            .child(self.render_settings_sidebar(window, cx))
+            .child(self.render_settings_content(window, cx))
             .into_any_element()
     }
 
-    fn render_settings_sidebar(&self, cx: &mut Context<Self>) -> Div {
+    fn render_settings_sidebar(&self, window: &Window, cx: &mut Context<Self>) -> Div {
         let theme = Theme::current(cx);
         let current_page = self.settings_page.unwrap_or(SettingsPage::General);
         let query = self.settings_search_query(cx);
@@ -191,7 +191,7 @@ impl Waku {
             .flex()
             .flex_col()
             .bg(theme.sidebar)
-            .child(self.render_settings_sidebar_titlebar(cx))
+            .child(self.render_settings_sidebar_titlebar(window, cx))
             .child(
                 div().px(px(12.0)).child(
                     div()
@@ -254,13 +254,29 @@ impl Waku {
         self.open_settings_page(pages[next], cx);
     }
 
-    fn render_settings_sidebar_titlebar(&self, cx: &mut Context<Self>) -> Stateful<Div> {
+    fn render_settings_sidebar_titlebar(
+        &self,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
+        let left_window_controls = self.render_client_window_controls(
+            super::window_chrome::WindowControlSide::Left,
+            window,
+            cx,
+        );
+        let height = if cfg!(target_os = "macos") || left_window_controls.is_some() {
+            48.0
+        } else {
+            12.0
+        };
+
         div()
             .id("settings-sidebar-titlebar")
-            .h(px(48.0))
+            .h(px(height))
             .flex_none()
             .flex()
             .items_center()
+            .children(left_window_controls)
             .child(
                 self.window_drag_region(
                     div()
@@ -273,13 +289,19 @@ impl Waku {
             )
             .child(
                 self.render_settings_drag_region("settings-sidebar-titlebar-drag-region", cx)
+                    .h(px(height))
                     .flex_1(),
             )
     }
 
-    fn render_settings_content(&self, cx: &mut Context<Self>) -> Div {
+    fn render_settings_content(&self, window: &Window, cx: &mut Context<Self>) -> Div {
         let theme = Theme::current(cx);
         let page = self.settings_page.unwrap_or(SettingsPage::General);
+        let right_window_controls = self.render_client_window_controls(
+            super::window_chrome::WindowControlSide::Right,
+            window,
+            cx,
+        );
         // The Skills page is a mail-style split that owns the whole content
         // column — no page title, no titlebar strip, no width cap, no card.
         // Window dragging stays with the sidebar's own titlebar region.
@@ -288,10 +310,24 @@ impl Waku {
                 .flex_1()
                 .h_full()
                 .min_w_0()
+                .flex()
+                .flex_col()
                 .border_l_1()
                 .border_color(theme.sidebar_border)
                 .bg(theme.surface)
-                .child(self.render_skills_settings(cx));
+                .children(right_window_controls.map(|controls| {
+                    self.render_settings_drag_region("settings-skills-titlebar", cx)
+                        .flex()
+                        .items_center()
+                        .justify_end()
+                        .child(controls)
+                }))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_h_0()
+                        .child(self.render_skills_settings(cx)),
+                );
         }
         // The Monthly and Projects list views own their own scrolling, so
         // their pages fill the viewport instead of riding the shared scroll
@@ -352,6 +388,10 @@ impl Waku {
             .bg(theme.surface)
             .child(
                 self.render_settings_drag_region("settings-content-titlebar", cx)
+                    .flex()
+                    .items_center()
+                    .justify_end()
+                    .children(right_window_controls)
                     .when(content_scrolled, |element| {
                         element.border_b_1().border_color(theme.border)
                     }),
@@ -431,7 +471,7 @@ impl Waku {
                 this.set_analytics_enabled(!analytics_enabled, cx);
             }))
             .on_key_down(cx.listener(move |this, event: &KeyDownEvent, _, cx| {
-                if !event.keystroke.modifiers.platform
+                if !event.keystroke.modifiers.modified()
                     && matches!(event.keystroke.key.as_str(), "enter" | "space")
                 {
                     this.set_analytics_enabled(!analytics_enabled, cx);
@@ -1533,7 +1573,7 @@ impl Waku {
             .flex_none()
             .on_click(|event, window, _| {
                 if event.click_count() == 2 {
-                    window.titlebar_double_click();
+                    crate::platform::titlebar_double_click(window);
                 }
             })
             .on_mouse_down_out(cx.listener(|this, _, _, _| {

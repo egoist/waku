@@ -5,9 +5,12 @@ import { watch, type FSWatcher } from "node:fs";
 import { join, resolve } from "node:path";
 
 const root = resolve(import.meta.dir, "..");
+const isMacOS = process.platform === "darwin";
 const appName = "Waku Debug";
-const targetDir = resolve(process.env.CARGO_TARGET_DIR || 'target')
-const appPath = join(targetDir, "debug/Waku Debug.app");
+const targetDir = resolve(root, process.env.CARGO_TARGET_DIR || "target");
+const appPath = isMacOS
+  ? join(targetDir, "debug/Waku Debug.app")
+  : join(targetDir, "debug/waku");
 const watchedDirectories = ["src", "assets", "resources", "locales"];
 const watchedFiles = ["Cargo.toml", "Cargo.lock", "build.rs"];
 const rebuildDebounceMs = 1_000;
@@ -23,8 +26,10 @@ let rebuildTimer: ReturnType<typeof setTimeout> | undefined;
 const watchers: FSWatcher[] = [];
 
 async function build(): Promise<boolean> {
-  console.log("[waku-dev] Building app bundle...");
-  const result = await $`${join(root, "scripts/bundle.sh")} debug`.nothrow();
+  console.log(`[waku-dev] Building ${isMacOS ? "app bundle" : "app"}...`);
+  const result = isMacOS
+    ? await $`${join(root, "scripts/bundle.sh")} debug`.nothrow()
+    : await $`cargo build --bin waku --bin waku_js_repl`.nothrow();
   if (result.exitCode !== 0) {
     console.error("[waku-dev] Build failed; keeping the current app open.");
     return false;
@@ -35,7 +40,11 @@ async function build(): Promise<boolean> {
 async function stopApp(): Promise<void> {
   const waiter = app;
   app = undefined;
-  await $`pkill -TERM -x ${appName}`.quiet().nothrow();
+  if (isMacOS) {
+    await $`pkill -TERM -x ${appName}`.quiet().nothrow();
+  } else if (waiter?.exitCode === null) {
+    waiter.kill("SIGTERM");
+  }
   if (waiter?.exitCode === null) {
     await waiter.exited;
   }
@@ -43,7 +52,9 @@ async function stopApp(): Promise<void> {
 
 function launchApp(): ReturnType<typeof Bun.spawn> {
   console.log(`[waku-dev] Launching ${appPath}`);
-  const launchedApp = Bun.spawn(["open", "-n", "-W", appPath], {
+  const command = isMacOS ? ["open", "-n", "-W", appPath] : [appPath];
+  const launchedApp = Bun.spawn(command, {
+    cwd: root,
     stdout: "inherit",
     stderr: "inherit",
   });

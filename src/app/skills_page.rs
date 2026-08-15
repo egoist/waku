@@ -944,8 +944,8 @@ impl Waku {
         )
         .on_click(cx.listener({
             let skill_file = skill_file.clone();
-            move |_, _, _, _| {
-                crate::platform::open_with_default_app(&skill_file);
+            move |_, _, _, cx| {
+                crate::platform::open_with_default_app(&skill_file, cx);
             }
         }));
 
@@ -956,8 +956,8 @@ impl Waku {
         )
         .on_click(cx.listener({
             let skill_file = skill_file.clone();
-            move |_, _, _, _| {
-                crate::platform::reveal_in_finder(&skill_file);
+            move |_, _, _, cx| {
+                crate::platform::reveal_in_file_manager(&skill_file, cx);
             }
         }));
 

@@ -72,10 +72,13 @@ use crate::{
     ToggleUsagePanel,
 };
 
+#[cfg(target_os = "macos")]
 const TRAFFIC_LIGHT_CLEARANCE: f32 = 86.0;
+#[cfg(not(target_os = "macos"))]
+const TRAFFIC_LIGHT_CLEARANCE: f32 = 8.0;
 const CONTENT_MAX_WIDTH: f32 = 720.0;
 /// Menu-registry id of the composer's model picker, shared by its render site
-/// and the `cmd-/` toggle action.
+/// and the primary-modifier `/` toggle action.
 const MODEL_PICKER_MENU_ID: &str = "provider-model-picker";
 const BRANCH_PICKER_MENU_ID: &str = "workspace-branch-picker";
 const BRANCH_PICKER_ROW_HEIGHT: f32 = 26.0;
@@ -200,7 +203,7 @@ impl SettingsPage {
     /// its navigation entry points. Keeping this decision on the page itself
     /// makes the Settings sidebar and command palette use the same gate.
     fn is_visible_in_navigation(self) -> bool {
-        self != Self::ComputerUse || cfg!(debug_assertions)
+        self != Self::ComputerUse || cfg!(all(debug_assertions, target_os = "macos"))
     }
 }
 
@@ -1072,9 +1075,9 @@ pub struct Waku {
     right_panel_files_selected_path: Option<String>,
     right_panel_file_tree_width: f32,
     right_panel_file_editors: HashMap<String, RightPanelFileEditor>,
-    /// Find-and-replace over the visible file editor. Created on first
-    /// `cmd-f` and kept for the window's lifetime so the query and toggles
-    /// survive closing the bar; `open` inside says whether it is showing.
+    /// Find-and-replace over the visible file editor. Created on first use of
+    /// the primary find shortcut and kept for the window's lifetime so the
+    /// query and toggles survive closing the bar; `open` says whether it shows.
     file_search: Option<file_search::FileSearch>,
     right_panel_diff_source: ReviewDiffSource,
     right_panel_diff_snapshot: Option<Arc<ReviewDiffSnapshot>>,
@@ -1257,6 +1260,7 @@ mod transcript;
 mod transcript_view;
 mod usage_meter;
 mod usage_page;
+mod window_chrome;
 
 pub use autocomplete::init as init_composer_autocomplete;
 use background_work::{
@@ -1720,6 +1724,7 @@ impl Waku {
         let (computer_permission_tx, computer_permission_events) = unbounded();
         let (plan_usage_tx, plan_usage_events) = unbounded();
         let (event_wake_tx, event_wake_events) = smol::channel::bounded(1);
+        #[cfg(target_os = "macos")]
         {
             let computer_permission_tx = computer_permission_tx.clone();
             let event_wake = event_wake_tx.clone();

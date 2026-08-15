@@ -18,7 +18,11 @@ dirs = "6.0"
 # views — the browser surface's WKWebView. Drop back to upstream once the PR
 # merges.
 gpui = { git = "https://github.com/egoist/zed", branch = "waku-webview", features = ["test-support"] }
-gpui_platform = { git = "https://github.com/egoist/zed", branch = "waku-webview", features = ["font-kit"] }
+gpui_platform = { git = "https://github.com/egoist/zed", branch = "waku-webview", features = [
+    "font-kit",
+    "wayland",
+    "x11",
+] }
 parking_lot = "0.12"
 rquickjs = "0.12.2"
 rusqlite = { version = "0.37", features = ["bundled"] }
@@ -39,8 +43,10 @@ futures = "0.3"
 nucleo-matcher = "0.3.1"
 tokio = { version = "1", features = ["rt"] }
 
-[target.'cfg(target_os = "macos")'.dependencies]
+[target.'cfg(unix)'.dependencies]
 libc = "0.2"
+
+[target.'cfg(target_os = "macos")'.dependencies]
 wry = { version = "0.56", features = ["devtools"] }
 block2 = "0.6"
 # Matches the version GPUI itself renders with, so RenderImage frames are the
@@ -107,6 +113,12 @@ objc2-user-notifications = { version = "0.3", default-features = false, features
 ] }
 objc2-quartz-core = { version = "0.3", default-features = false, features = ["std", "CALayer", "objc2-core-graphics"] }
 raw-window-handle = "0.6"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# Matches the version GPUI exposes through `WindowOptions::icon`.
+image = { version = "0.25", default-features = false, features = ["png"] }
+# Implements the FreeDesktop Trash specification for files and directories.
+trash = "5.2.6"
 
 [profile.release]
 lto = "thin"

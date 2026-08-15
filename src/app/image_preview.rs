@@ -2,7 +2,7 @@
 //!
 //! Attachment tiles already render through GPUI's asynchronous image cache.
 //! Opening a preview therefore only changes in-memory UI state; the frame path
-//! never probes the filesystem. The same path also powers the Finder action.
+//! never probes the filesystem. The same path also powers the file-manager action.
 
 use gpui::{KeyBinding, actions};
 
@@ -32,8 +32,8 @@ pub(super) struct ImagePreviewState {
 
 pub(super) fn attachment_menu_items(path: PathBuf) -> Vec<MenuItem> {
     vec![
-        MenuItem::new(tr!("common.reveal_in_finder"), move |_, _| {
-            crate::platform::reveal_in_finder(&path);
+        MenuItem::new(tr!("common.reveal_in_finder"), move |_, cx| {
+            crate::platform::reveal_in_file_manager(&path, cx);
         })
         .icon("icons/folder.svg"),
     ]
