@@ -31,6 +31,7 @@ the original feature bullet instead of adding separate entries for them.
 - Restore window position, size, and display across launches
 - Contain wheel scrolling in activity and command output viewports
 - Smooth streaming markdown and reduce CPU usage while streaming
+- Enable Claude Remote Control so Desktop, claude.ai, and the mobile app can join the same local session
 
 ## [0.0.13]
 

@@ -1559,6 +1559,10 @@ pub enum DriverEvent {
     /// Authoritative over filesystem discovery, which cannot see plugin or
     /// dynamically registered commands.
     AvailableCommands(Vec<ReportedCommand>),
+    /// A human prompt entered through a provider-owned secondary client, such
+    /// as Claude Remote Control. The app creates a turn for it (or folds it
+    /// into the live turn) before accepting the following provider output.
+    ExternalUserMessage(String),
     TurnStarted,
     TextDelta(String),
     ReasoningDelta(String),

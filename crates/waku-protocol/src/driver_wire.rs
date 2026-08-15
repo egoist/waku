@@ -34,6 +34,7 @@ pub fn event_to_wire(event: DriverEvent) -> anyhow::Result<WireDriverEvent> {
         DriverEvent::AvailableCommands(commands) => {
             ("availableCommands", serde_json::to_value(commands)?)
         }
+        DriverEvent::ExternalUserMessage(text) => ("externalUserMessage", Value::String(text)),
         DriverEvent::TurnStarted => ("turnStarted", Value::Null),
         DriverEvent::TextDelta(text) => ("textDelta", Value::String(text)),
         DriverEvent::ReasoningDelta(text) => ("reasoningDelta", Value::String(text)),
@@ -123,6 +124,7 @@ pub fn event_from_wire(event: WireDriverEvent) -> anyhow::Result<DriverEvent> {
         "agentPresetSelected" => DriverEvent::AgentPresetSelected(serde_json::from_value(payload)?),
         "autoTitleUpdated" => DriverEvent::AutoTitleUpdated(serde_json::from_value(payload)?),
         "availableCommands" => DriverEvent::AvailableCommands(serde_json::from_value(payload)?),
+        "externalUserMessage" => DriverEvent::ExternalUserMessage(serde_json::from_value(payload)?),
         "turnStarted" => DriverEvent::TurnStarted,
         "textDelta" => DriverEvent::TextDelta(serde_json::from_value(payload)?),
         "reasoningDelta" => DriverEvent::ReasoningDelta(serde_json::from_value(payload)?),

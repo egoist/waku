@@ -14,10 +14,12 @@
 //! from `claude --help`.
 
 use std::collections::{HashMap, HashSet};
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::process::{Command, Stdio};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
+use std::time::Duration;
 
 use anyhow::{Context as _, anyhow};
 use crossbeam_channel::{Sender, unbounded};
@@ -36,6 +38,7 @@ use crate::model::{
 };
 
 enum CommandMessage {
+    EnableRemoteControl,
     Prompt(String),
     Steer(String),
     Cancel,
@@ -68,12 +71,105 @@ fn user_message_payload(text: &str) -> Value {
     })
 }
 
+fn external_user_text(value: &Value) -> Option<String> {
+    if value.get("isReplay").and_then(Value::as_bool) == Some(true)
+        || value.get("isSynthetic").and_then(Value::as_bool) == Some(true)
+        || value.pointer("/origin/kind").and_then(Value::as_str) != Some("human")
+        || value.get("shouldQuery").and_then(Value::as_bool) == Some(false)
+    {
+        return None;
+    }
+    let content = value.pointer("/message/content")?;
+    if let Some(text) = content
+        .as_str()
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+    {
+        return Some(text.to_owned());
+    }
+    let text = content
+        .as_array()?
+        .iter()
+        .filter(|block| block.get("type").and_then(Value::as_str) == Some("text"))
+        .filter_map(|block| block.get("text").and_then(Value::as_str))
+        .collect::<Vec<_>>()
+        .join("\n");
+    (!text.trim().is_empty()).then_some(text)
+}
+
 fn stop_task_request(request_id: u64, task_id: &str) -> Value {
     json!({
         "type": "control_request",
         "request_id": format!("waku-{request_id}"),
         "request": {"subtype": "stop_task", "task_id": task_id}
     })
+}
+
+/// Claude's Agent SDK exposes this as the undocumented
+/// `query.enableRemoteControl(true)` method. The public `--remote-control`
+/// flag only activates the interactive terminal path and is a no-op under
+/// `--print`, while this control request enables the same bridge for a
+/// stream-json session.
+fn remote_control_request(request_id: u64) -> Value {
+    json!({
+        "type": "control_request",
+        "request_id": format!("waku-{request_id}"),
+        "request": {"subtype": "remote_control", "enabled": true}
+    })
+}
+
+fn handle_remote_transcript_entry(
+    value: &Value,
+    events: &impl DriverEventSink,
+    turn_active: &Mutex<bool>,
+) {
+    if value.get("type").and_then(Value::as_str) != Some("user") {
+        return;
+    }
+    let Some(text) = external_user_text(value) else {
+        return;
+    };
+    // Only the remote prompt is absent from stream-json stdout. Its assistant
+    // response and result are already emitted there and must keep their single
+    // canonical path, otherwise transcript tailing duplicates the answer.
+    *turn_active.lock() = true;
+    let _ = events.send(DriverEvent::ExternalUserMessage(text));
+}
+
+fn watch_remote_transcript(
+    session_id: String,
+    events: DriverEventSender,
+    turn_active: Arc<Mutex<bool>>,
+    alive: Arc<AtomicBool>,
+) {
+    let existing = crate::claude_session::session_file(&session_id).ok();
+    let mut path = existing.clone();
+    let mut offset = existing
+        .as_ref()
+        .and_then(|path| path.metadata().ok())
+        .map_or(0, |metadata| metadata.len());
+    while alive.load(Ordering::Acquire) {
+        if path.is_none() {
+            path = crate::claude_session::session_file(&session_id).ok();
+        }
+        if let Some(transcript) = path.as_ref()
+            && let Ok(mut file) = std::fs::File::open(transcript)
+            && file.seek(SeekFrom::Start(offset)).is_ok()
+        {
+            let mut appended = String::new();
+            if file.read_to_string(&mut appended).is_ok()
+                && let Some(complete_len) = appended.rfind('\n').map(|index| index + 1)
+            {
+                for line in appended[..complete_len].lines() {
+                    if let Ok(value) = serde_json::from_str::<Value>(line) {
+                        handle_remote_transcript_entry(&value, &events, &turn_active);
+                    }
+                }
+                offset += complete_len as u64;
+            }
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
 }
 
 pub struct ClaudeDriver {
@@ -227,6 +323,24 @@ impl ClaudeDriver {
         let turn_active = Arc::new(Mutex::new(false));
         let pending_task_stops = Arc::new(Mutex::new(HashMap::<String, BackgroundWorkKey>::new()));
         let pending_user_inputs = Arc::new(Mutex::new(HashMap::<String, Value>::new()));
+        let process_alive = Arc::new(AtomicBool::new(true));
+
+        let transcript_thread = {
+            let transcript_events = events.clone();
+            let transcript_session = session_id.clone();
+            let transcript_turn = turn_active.clone();
+            let transcript_alive = process_alive.clone();
+            thread::Builder::new()
+                .name("waku-claude-transcript".into())
+                .spawn(move || {
+                    watch_remote_transcript(
+                        transcript_session,
+                        transcript_events,
+                        transcript_turn,
+                        transcript_alive,
+                    );
+                })?
+        };
 
         let reader_events = events.clone();
         let reader_commands = commands.clone();
@@ -272,6 +386,10 @@ impl ClaudeDriver {
                 let mut current_model = launch_model;
                 while let Ok(message) = command_rx.recv() {
                     let written = match message {
+                        CommandMessage::EnableRemoteControl => {
+                            next_request_id += 1;
+                            write_line(&mut stdin, &remote_control_request(next_request_id))
+                        }
                         CommandMessage::Prompt(text) => {
                             *writer_turn.lock() = true;
                             let _ = writer_events.send(DriverEvent::TurnStarted);
@@ -455,6 +573,14 @@ impl ClaudeDriver {
                 }
             })?;
 
+        // Queue this before returning the driver so it necessarily precedes
+        // the first prompt a caller can submit. This is the same wire request
+        // Claude Agent SDK sends from `enableRemoteControl(true)` once its
+        // query transport exists; it does not need the interactive CLI path.
+        commands
+            .send(CommandMessage::EnableRemoteControl)
+            .context("failed to enable Claude Remote Control")?;
+
         let last_visible_stderr = Arc::new(Mutex::new(None::<String>));
         let stderr_last_error = last_visible_stderr.clone();
         let stderr_events = events.clone();
@@ -477,8 +603,10 @@ impl ClaudeDriver {
             .name("waku-claude-process".into())
             .spawn(move || {
                 let status = child.wait();
+                process_alive.store(false, Ordering::Release);
                 let _ = reader_thread.join();
                 let _ = stderr_thread.join();
+                let _ = transcript_thread.join();
                 if let Ok(status) = status
                     && !status.success()
                     && last_visible_stderr.lock().is_none()
@@ -1651,6 +1779,79 @@ mod tests {
                 "request": {"subtype": "stop_task", "task_id": "agent-42"}
             })
         );
+    }
+
+    #[test]
+    fn remote_control_uses_claudes_sdk_control_request() {
+        assert_eq!(
+            remote_control_request(3),
+            json!({
+                "type": "control_request",
+                "request_id": "waku-3",
+                "request": {"subtype": "remote_control", "enabled": true}
+            })
+        );
+    }
+
+    #[test]
+    fn remote_control_transcript_prompt_is_mirrored_into_waku() {
+        let (events, event_rx, _commands, _command_rx, turn, _state) = harness();
+        *turn.lock() = false;
+        handle_remote_transcript_entry(
+            &json!({
+                "type": "user",
+                "message": {
+                    "role": "user",
+                    "content": "Интересно, а дойдет ли ответ?"
+                },
+                "origin": {"kind": "human"},
+                "uuid": "remote-user"
+            }),
+            &events,
+            &turn,
+        );
+        assert!(*turn.lock());
+        assert!(matches!(
+            event_rx.try_recv(),
+            Ok(DriverEvent::ExternalUserMessage(message))
+                if message == "Интересно, а дойдет ли ответ?"
+        ));
+
+        // The assistant entry is intentionally ignored here: Claude already
+        // emits that answer and its result on stream-json stdout.
+        handle_remote_transcript_entry(
+            &json!({
+                "type": "assistant",
+                "uuid": "remote-assistant",
+                "message": {
+                    "role": "assistant",
+                    "content": [{"type": "text", "text": "Дойдёт."}],
+                    "stop_reason": "end_turn"
+                }
+            }),
+            &events,
+            &turn,
+        );
+        assert!(event_rx.try_recv().is_err());
+        assert!(*turn.lock());
+    }
+
+    #[test]
+    fn local_waku_prompt_is_not_imported_from_native_transcript() {
+        let (events, event_rx, _commands, _command_rx, turn, _state) = harness();
+        *turn.lock() = false;
+        handle_remote_transcript_entry(
+            &json!({
+                "type": "user",
+                "message": {"role": "user", "content": [{"type": "text", "text": "go"}]},
+                "uuid": "local-user"
+            }),
+            &events,
+            &turn,
+        );
+
+        assert!(!*turn.lock());
+        assert!(event_rx.try_recv().is_err());
     }
 
     #[test]

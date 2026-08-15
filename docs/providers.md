@@ -356,6 +356,14 @@ rather than at write time. Verified against the real CLI by injecting an
 instruction while a Bash `sleep` ran: the same turn's reply honored it. Amp
 was probed the same way and behaves differently — see its section.
 
+**Remote Control** — after the stream-json transport is up, Waku sends the same
+undocumented `control_request` / `subtype: "remote_control"` that the Agent SDK
+sends from `enableRemoteControl(true)`. The public `--remote-control` flag is
+a no-op under `--print`. Assistant text, thinking, tools, and the result stay
+on stdout; a human prompt from Claude Desktop/mobile is tailed from Claude's
+native JSONL transcript and emitted as `ExternalUserMessage`. See
+[claude-remote-control.md](./claude-remote-control.md).
+
 **Model changes** — a `control_request` with `subtype: "set_model"`, so switching
 models keeps the session. The permission posture is a launch flag and still
 restarts.

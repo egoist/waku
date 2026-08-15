@@ -78,6 +78,37 @@ describe('reduceRuntimeEvent', () => {
     })
   })
 
+  test('mirrors a remote-control prompt into a new turn', () => {
+    const session = emptySession()
+    const next = apply(session, 'externalUserMessage', 'Prompt from Claude Desktop')
+
+    expect(next.status).toBe('working')
+    expect(next.auto_title).toBe('Prompt from Claude Desktop')
+    expect(next.turns).toHaveLength(1)
+    expect(next.turns[0]).toMatchObject({
+      status: 'running',
+      provider_turn_started: true,
+    })
+    expect(next.messages.at(-1)).toMatchObject({
+      role: 'user',
+      content: 'Prompt from Claude Desktop',
+      turn_id: next.turns[0]?.id,
+    })
+  })
+
+  test('folds a remote-control prompt into the live turn', () => {
+    const next = apply(runningSession(), 'externalUserMessage', 'steer from phone')
+
+    expect(next.status).toBe('working')
+    expect(next.turns).toHaveLength(1)
+    expect(next.messages.filter((message) => message.role === 'user')).toHaveLength(2)
+    expect(next.messages.at(-1)).toMatchObject({
+      role: 'user',
+      content: 'steer from phone',
+      turn_id: 'turn',
+    })
+  })
+
   test('records Claude resume position on the active turn', () => {
     const result = reduceRuntimeEvent(
       runningSession(),
@@ -233,5 +264,24 @@ function runningSession(): AgentSession {
         checkpoint: null,
       },
     ],
+  }
+}
+
+function emptySession(): AgentSession {
+  return {
+    id: 'session',
+    title: 'New task',
+    project_id: 'project',
+    workspace: { kind: 'local' },
+    provider: 'claude',
+    runtime_mode: 'fullAccess',
+    interaction_mode: 'build',
+    status: 'idle',
+    created_at: 100,
+    updated_at: 100,
+    provider_cursor: null,
+    messages: [],
+    transcript_blocks: [],
+    turns: [],
   }
 }

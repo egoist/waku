@@ -3298,6 +3298,7 @@ impl Waku {
                     DriverEvent::Connected { .. }
                         | DriverEvent::AgentPresetSelected(_)
                         | DriverEvent::AutoTitleUpdated(_)
+                        | DriverEvent::ExternalUserMessage(_)
                         | DriverEvent::Permission { .. }
                         | DriverEvent::SteerAccepted { .. }
                         | DriverEvent::SteerRejected { .. }

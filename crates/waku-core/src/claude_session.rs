@@ -28,6 +28,10 @@ pub fn session_metadata(session_id: &str) -> anyhow::Result<ClaudeSessionMetadat
     session_metadata_in(&projects_directory()?, session_id)
 }
 
+pub(crate) fn session_file(session_id: &str) -> anyhow::Result<PathBuf> {
+    find_session_file(&projects_directory()?, session_id)
+}
+
 pub fn message_id_for_turn(session_id: &str, provider_turn_count: usize) -> anyhow::Result<String> {
     message_id_for_turn_in(&projects_directory()?, session_id, provider_turn_count)
 }

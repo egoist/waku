@@ -89,6 +89,11 @@ export function reduceRuntimeEvent(
     case 'availableCommands':
       if (Array.isArray(payload)) session.available_commands = payload as ReportedCommand[]
       break
+    case 'externalUserMessage':
+      if (typeof payload === 'string' && payload.trim()) {
+        applyExternalUserMessage(session, payload, clock)
+      }
+      break
     case 'turnStarted': {
       const turn = activeTurn(session)
       if (turn) {
@@ -253,6 +258,64 @@ function asUserInputQuestion(value: unknown): PendingUserInput['questions'][numb
       : [],
     multiSelect: question.multiSelect === true,
   }
+}
+
+function applyExternalUserMessage(
+  session: AgentSession,
+  message: string,
+  clock: ReducerClock,
+) {
+  const turn = activeTurn(session)
+  if (turn) {
+    session.messages.push({
+      id: clock.randomUUID(),
+      turn_id: turn.id,
+      role: 'user',
+      content: message,
+      created_at: clock.nowSeconds(),
+      streaming: false,
+    })
+    turn.provider_turn_started = true
+  } else {
+    setTitleFromPrompt(session, message)
+    const id = clock.randomUUID()
+    session.turns.push({
+      id,
+      turn_count: session.turns.length + 1,
+      status: 'running',
+      provider_turn_started: true,
+      provider_resume_at: null,
+      started_at: clock.nowSeconds(),
+      completed_at: null,
+      checkpoint: null,
+    })
+    session.messages.push({
+      id: clock.randomUUID(),
+      turn_id: id,
+      role: 'user',
+      content: message,
+      created_at: clock.nowSeconds(),
+      streaming: false,
+    })
+    session.last_reply_at = clock.nowSeconds()
+  }
+  session.status = 'working'
+}
+
+function setTitleFromPrompt(session: AgentSession, prompt: string) {
+  if (
+    session.messages.length > 1
+    || session.title !== 'New task'
+    || session.auto_title
+  ) {
+    return
+  }
+  let title = prompt.split(/\s+/).filter(Boolean).slice(0, 7).join(' ')
+  if (!title) return
+  if ([...title].length > 54) {
+    title = `${[...title].slice(0, 53).join('')}…`
+  }
+  session.auto_title = title
 }
 
 function appendText(session: AgentSession, delta: string, clock: ReducerClock) {
