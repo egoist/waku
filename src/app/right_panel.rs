@@ -2009,7 +2009,7 @@ impl Waku {
         // native views, open menus never occlude the webview — the snapshot
         // swap is purely the fallback for a window where enabling it failed.
         let overlay_open = !self.scene_overlay_enabled && self.any_overlay_open(cx);
-        let active_browser = if self.settings_page.is_none() && self.right_panel_visible {
+        let active_browser = if self.active_page.is_none() && self.right_panel_visible {
             self.active_right_panel_surface()
                 .and_then(RightPanelSurface::browser_id)
         } else {

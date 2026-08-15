@@ -268,23 +268,21 @@ impl Waku {
     }
 
     pub(super) fn open_automations(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.settings_page = None;
-        self.automations_page = Some(AutomationsPage::List);
+        self.active_page = Some(ActivePage::Automations(AutomationsPage::List));
         self.automations_scroll.set_offset(gpui::Point::default());
         window.focus(&self.automations_focus, cx);
         cx.notify();
     }
 
     /// Opens the editor for `id`, or a blank one when `None`. Reachable from the
-    /// sidebar's automation context menu as well as the list, so it clears any
-    /// open settings page to bring the editor to the foreground.
+    /// sidebar's automation context menu as well as the list, so it brings the
+    /// editor to the foreground.
     pub(super) fn open_automation_editor(
         &mut self,
         id: Option<Uuid>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.settings_page = None;
         let (editor, name, prompt) = match id.and_then(|id| self.state.automation(id)) {
             Some(automation) => {
                 let project_exists = automation.project_id.is_some_and(|project_id| {
@@ -315,7 +313,7 @@ impl Waku {
             .update(cx, |input, cx| input.set_content(hour_text, cx));
         self.automation_minute_input
             .update(cx, |input, cx| input.set_content(minute_text, cx));
-        self.automations_page = Some(AutomationsPage::Editor(editor));
+        self.active_page = Some(ActivePage::Automations(AutomationsPage::Editor(editor)));
         self.automations_scroll.set_offset(gpui::Point::default());
         window.focus(&self.automations_focus, cx);
         cx.notify();
@@ -324,8 +322,8 @@ impl Waku {
     /// The open automation editor form, if the editor is showing. Lets the
     /// shared agent controls read the current form values.
     pub(super) fn automation_editor(&self) -> Option<&AutomationEditor> {
-        match self.automations_page.as_ref() {
-            Some(AutomationsPage::Editor(editor)) => Some(editor),
+        match self.active_page.as_ref() {
+            Some(ActivePage::Automations(AutomationsPage::Editor(editor))) => Some(editor),
             _ => None,
         }
     }
@@ -336,7 +334,9 @@ impl Waku {
         cx: &mut Context<Self>,
         change: impl FnOnce(&mut AutomationEditor),
     ) {
-        if let Some(AutomationsPage::Editor(editor)) = self.automations_page.as_mut() {
+        if let Some(ActivePage::Automations(AutomationsPage::Editor(editor))) =
+            self.active_page.as_mut()
+        {
             change(editor);
             cx.notify();
         }
@@ -378,7 +378,9 @@ impl Waku {
     }
 
     fn save_automation_editor(&mut self, cx: &mut Context<Self>) {
-        let Some(AutomationsPage::Editor(editor)) = self.automations_page.as_ref() else {
+        let Some(ActivePage::Automations(AutomationsPage::Editor(editor))) =
+            self.active_page.as_ref()
+        else {
             return;
         };
         let editor = editor.clone();
@@ -429,7 +431,9 @@ impl Waku {
         // Stay on the editor after saving. Promote a freshly created automation
         // to an existing one so a second save updates it (and Run now becomes
         // available) instead of pushing a duplicate.
-        if let Some(AutomationsPage::Editor(editor)) = self.automations_page.as_mut() {
+        if let Some(ActivePage::Automations(AutomationsPage::Editor(editor))) =
+            self.active_page.as_mut()
+        {
             editor.id = Some(saved_id);
         }
         cx.notify();
@@ -441,9 +445,12 @@ impl Waku {
         if self.state.remove_automation(id) {
             self.automation_card_focuses.borrow_mut().remove(&id);
             // Deleting the automation whose editor is open returns to the list.
-            if matches!(&self.automations_page, Some(AutomationsPage::Editor(editor)) if editor.id == Some(id))
-            {
-                self.automations_page = Some(AutomationsPage::List);
+            if matches!(
+                &self.active_page,
+                Some(ActivePage::Automations(AutomationsPage::Editor(editor)))
+                    if editor.id == Some(id)
+            ) {
+                self.active_page = Some(ActivePage::Automations(AutomationsPage::List));
             }
             self.save();
             cx.notify();
@@ -453,7 +460,7 @@ impl Waku {
     /// Closes the editor and returns to the automations list.
     fn close_automation_editor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.automation_delete_arming = None;
-        self.automations_page = Some(AutomationsPage::List);
+        self.active_page = Some(ActivePage::Automations(AutomationsPage::List));
         window.focus(&self.automations_focus, cx);
         cx.notify();
     }
@@ -674,7 +681,7 @@ impl Waku {
             return;
         };
         self.save();
-        self.automations_page = None;
+        self.active_page = None;
         self.select_session(session_id, cx);
         cx.notify();
     }
@@ -691,8 +698,10 @@ impl Waku {
             cx,
         );
 
-        let body = match self.automations_page.as_ref() {
-            Some(AutomationsPage::Editor(_)) => self.render_automation_editor(cx),
+        let body = match self.active_page.as_ref() {
+            Some(ActivePage::Automations(AutomationsPage::Editor(_))) => {
+                self.render_automation_editor(cx)
+            }
             _ => self.render_automations_list(cx),
         };
 
@@ -1011,7 +1020,9 @@ impl Waku {
 
     fn render_automation_editor(&self, cx: &mut Context<Self>) -> AnyElement {
         let theme = Theme::current(cx);
-        let Some(AutomationsPage::Editor(editor)) = self.automations_page.as_ref() else {
+        let Some(ActivePage::Automations(AutomationsPage::Editor(editor))) =
+            self.active_page.as_ref()
+        else {
             return div().into_any_element();
         };
         let editor = editor.clone();

@@ -42,7 +42,7 @@ impl Waku {
         // Secrets are revealed only for the current visit to the page. This
         // also masks the token again when the Daemon row is reselected.
         self.daemon_token_revealed = false;
-        self.settings_page = Some(page);
+        self.active_page = Some(ActivePage::Settings(page));
         // Each page starts at its own top; a scroll position carried over
         // from the previous page would land mid-content.
         self.settings_scroll.set_offset(gpui::Point::default());

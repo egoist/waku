@@ -252,6 +252,11 @@ impl SettingsPage {
     }
 }
 
+enum ActivePage {
+    Settings(SettingsPage),
+    Automations(automations_page::AutomationsPage),
+}
+
 /// Which presentation the Usage page shows: the daily dashboard, the monthly
 /// statement, or the per-project ranking.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1368,10 +1373,9 @@ pub struct Waku {
     /// When the overlay could not be enabled, the browser falls back to
     /// swapping in frozen page pixels while an overlay is open.
     scene_overlay_enabled: bool,
-    settings_page: Option<SettingsPage>,
-    /// The Automations full-page view, when open. `None` means the normal
-    /// transcript layout shows. A peer of `settings_page`, not nested under it.
-    automations_page: Option<automations_page::AutomationsPage>,
+    /// The full-page view, when open. `None` means the normal transcript
+    /// layout shows.
+    active_page: Option<ActivePage>,
     /// The automation editor's name field, reused across edits like the session
     /// rename input.
     automation_name_input: Entity<ComposerInput>,
@@ -2293,12 +2297,18 @@ impl Waku {
                     // app had focus — a checkout in a terminal, an edit in an
                     // editor. Coming back is the moment to re-check.
                     this.invalidate_workspace_queries(cx);
-                    if this.settings_page == Some(SettingsPage::ComputerUse) {
+                    if matches!(
+                        this.active_page.as_ref(),
+                        Some(ActivePage::Settings(SettingsPage::ComputerUse))
+                    ) {
                         this.request_computer_permissions(false, cx);
                     }
                     // Skill files are routinely edited in another app; coming
                     // back to the window is the moment to re-read them.
-                    if this.settings_page == Some(SettingsPage::Skills) {
+                    if matches!(
+                        this.active_page.as_ref(),
+                        Some(ActivePage::Settings(SettingsPage::Skills))
+                    ) {
                         this.ensure_skills_catalog(true, cx);
                     }
                 }
@@ -2886,8 +2896,7 @@ impl Waku {
                 right_panel_browsers: HashMap::new(),
                 right_panel_pending_browser_focus: None,
                 scene_overlay_enabled,
-                settings_page: None,
-                automations_page: None,
+                active_page: None,
                 automation_name_input,
                 automation_prompt_input,
                 automation_hour_input,

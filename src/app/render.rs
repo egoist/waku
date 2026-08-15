@@ -143,7 +143,7 @@ impl Render for Waku {
             self.tick_fps(window);
         }
         let image_preview = self.render_image_preview(cx);
-        if self.settings_page.is_some() {
+        if matches!(self.active_page.as_ref(), Some(ActivePage::Settings(_))) {
             let command_palette = self.render_command_palette(window, cx);
             let commit_dialog = self.render_commit_dialog(cx);
             let content = div()
@@ -183,7 +183,7 @@ impl Render for Waku {
             self.render_toast(message, tone, generation, cx)
                 .into_any_element()
         });
-        let main_column = if self.automations_page.is_some() {
+        let main_column = if matches!(self.active_page.as_ref(), Some(ActivePage::Automations(_))) {
             div()
                 .flex_1()
                 .h_full()
@@ -280,7 +280,7 @@ impl Render for Waku {
             })
             .child(main_column)
             .when(
-                self.right_panel_visible && self.automations_page.is_none(),
+                self.right_panel_visible && self.active_page.is_none(),
                 |root| {
                     root.child(
                         self.right_panel_pane.clone().cached(

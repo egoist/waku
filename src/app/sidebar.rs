@@ -588,7 +588,7 @@ impl Waku {
             "sidebar-automations",
             "icons/zap.svg",
             tr!("sidebar.automations"),
-            self.automations_page.is_some(),
+            matches!(self.active_page.as_ref(), Some(ActivePage::Automations(_))),
             cx,
         )
         .on_click(cx.listener(|this, _, window, cx| {
@@ -1252,7 +1252,8 @@ impl Waku {
         // When collapsed, mirror the selected run so the active automation reads
         // as selected without expanding. The Automations page owns the
         // highlight while it is open, so defer to it as session rows do.
-        let owns_selection = self.automations_page.is_none() && metadata.owns_selection;
+        let owns_selection = !matches!(self.active_page.as_ref(), Some(ActivePage::Automations(_)))
+            && metadata.owns_selection;
         let highlight = owns_selection && !expanded;
 
         // Reveal the chevron only on hover, matching the section headers.
@@ -1614,7 +1615,7 @@ impl Waku {
         };
         // While the Automations page is open it owns the selection highlight, so
         // the underlying selected session row does not also appear selected.
-        let selected = self.automations_page.is_none()
+        let selected = !matches!(self.active_page.as_ref(), Some(ActivePage::Automations(_)))
             && sidebar_session_selected(
                 self.state.selected_session,
                 self.pending_session_activation

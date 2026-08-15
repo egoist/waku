@@ -97,6 +97,13 @@ pub(super) fn visible_settings_pages(
 }
 
 impl Waku {
+    fn active_settings_page(&self) -> SettingsPage {
+        match self.active_page.as_ref() {
+            Some(ActivePage::Settings(page)) => *page,
+            _ => SettingsPage::General,
+        }
+    }
+
     pub(super) fn render_settings(&self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
         let theme = Theme::current(cx);
 
@@ -128,7 +135,7 @@ impl Waku {
 
     fn render_settings_sidebar(&self, window: &Window, cx: &mut Context<Self>) -> Div {
         let theme = Theme::current(cx);
-        let current_page = self.settings_page.unwrap_or(SettingsPage::General);
+        let current_page = self.active_settings_page();
         let query = self.settings_search_query(cx);
         let mut navigation = div().flex().flex_col().gap(px(3.0));
 
@@ -216,7 +223,7 @@ impl Waku {
                         .child(icon("icons/arrow-left.svg", 15.0, theme.text_tertiary))
                         .child(tr!("settings.back"))
                         .on_click(cx.listener(|this, _, window, cx| {
-                            this.settings_page = None;
+                            this.active_page = None;
                             let focus_handle = this.composer_focus(cx);
                             window.focus(&focus_handle, cx);
                             cx.notify();
@@ -252,7 +259,7 @@ impl Waku {
         let pages = visible_settings_pages(&query)
             .map(|(page, ..)| page)
             .collect::<Vec<_>>();
-        let current_page = self.settings_page.unwrap_or(SettingsPage::General);
+        let current_page = self.active_settings_page();
         let current = pages.iter().position(|page| *page == current_page);
         let Some(next) = next_picker_highlight(current, pages.len(), key) else {
             return;
@@ -302,7 +309,7 @@ impl Waku {
 
     fn render_settings_content(&self, window: &Window, cx: &mut Context<Self>) -> Div {
         let theme = Theme::current(cx);
-        let page = self.settings_page.unwrap_or(SettingsPage::General);
+        let page = self.active_settings_page();
         let right_window_controls = self.render_client_window_controls(
             super::window_chrome::WindowControlSide::Right,
             window,

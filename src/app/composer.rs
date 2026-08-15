@@ -807,7 +807,10 @@ impl Waku {
     /// (shared by both surfaces under one id) resolves its target from here
     /// rather than capturing a stale render-time value.
     pub(super) fn active_agent_control_target(&self) -> AgentControlTarget {
-        if matches!(self.automations_page, Some(AutomationsPage::Editor(_))) {
+        if matches!(
+            self.active_page.as_ref(),
+            Some(ActivePage::Automations(AutomationsPage::Editor(_)))
+        ) {
             AgentControlTarget::Automation
         } else {
             AgentControlTarget::Session

@@ -149,7 +149,7 @@ impl Waku {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.settings_page.is_some() || !self.usage_meter_available() {
+        if self.active_page.is_some() || !self.usage_meter_available() {
             return;
         }
         let menus = self.menus.borrow();

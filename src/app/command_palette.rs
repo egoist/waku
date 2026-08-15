@@ -347,7 +347,7 @@ impl Waku {
         // durable surface instead of remembering that soon-detached handle.
         self.command_palette.previous_focus = if open_menus.is_empty() {
             window.focused(cx)
-        } else if self.settings_page.is_some() {
+        } else if matches!(self.active_page.as_ref(), Some(ActivePage::Settings(_))) {
             Some(self.settings_focus.clone())
         } else {
             Some(self.composer_focus(cx))
@@ -1008,7 +1008,7 @@ impl Waku {
                 self.open_settings_page(page, cx);
             }
             PaletteAction::SelectTask(session_id) => {
-                self.settings_page = None;
+                self.active_page = None;
                 self.select_session(session_id, cx);
                 let focus = self.composer_focus(cx);
                 window.focus(&focus, cx);
@@ -1020,7 +1020,7 @@ impl Waku {
                 // These popovers are rendered by the composer. If the command
                 // came from Settings, reveal one normal app frame first so its
                 // persistent menu handle and anchor bounds are current.
-                self.settings_page = None;
+                self.active_page = None;
                 let focus = self.composer_focus(cx);
                 window.focus(&focus, cx);
                 let weak = cx.entity().downgrade();
