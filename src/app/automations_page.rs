@@ -755,15 +755,9 @@ impl Waku {
                     .hover(|element| element.opacity(0.9))
                     .child(icon("icons/plus.svg", 14.0, theme.on_inverse))
                     .child(tr!("automations.new"))
-                    .on_click(cx.listener(|this, _, window, cx| {
+                    .on_activation(cx, |this, window, cx| {
                         this.open_automation_editor(None, window, cx);
-                    }))
-                    .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
-                        if matches!(event.keystroke.key.as_str(), "enter" | "space") {
-                            this.open_automation_editor(None, window, cx);
-                            cx.stop_propagation();
-                        }
-                    })),
+                    }),
             );
 
         let mut list = div().flex().flex_col().gap(px(8.0)).pb(px(24.0));
@@ -878,15 +872,9 @@ impl Waku {
             .hover(|element| element.border_color(theme.border_strong))
             // The whole card opens the editor; the inner controls stop
             // propagation so they keep their own actions.
-            .on_click(cx.listener(move |this, _, window, cx| {
+            .on_activation(cx, move |this, window, cx| {
                 this.open_automation_editor(Some(id), window, cx);
-            }))
-            .on_key_down(cx.listener(move |this, event: &KeyDownEvent, window, cx| {
-                if is_button_activation(&event.keystroke.key) {
-                    this.open_automation_editor(Some(id), window, cx);
-                    cx.stop_propagation();
-                }
-            }))
+            })
             .child(
                 div()
                     .flex_1()
@@ -988,26 +976,14 @@ impl Waku {
             } else {
                 tr!("automations.delete")
             })
-            .on_click(cx.listener(move |this, _, _, cx| {
+            .on_activation(cx, move |this, _, cx| {
                 if this.automation_delete_arming == Some(id) {
                     this.delete_automation(id, cx);
                 } else {
                     this.automation_delete_arming = Some(id);
                     cx.notify();
                 }
-                cx.stop_propagation();
-            }))
-            .on_key_down(cx.listener(move |this, event: &KeyDownEvent, _, cx| {
-                if matches!(event.keystroke.key.as_str(), "enter" | "space") {
-                    if this.automation_delete_arming == Some(id) {
-                        this.delete_automation(id, cx);
-                    } else {
-                        this.automation_delete_arming = Some(id);
-                        cx.notify();
-                    }
-                    cx.stop_propagation();
-                }
-            }))
+            })
             .on_mouse_down_out(cx.listener(move |this, _, _, cx| {
                 if this.automation_delete_arming == Some(id) {
                     this.automation_delete_arming = None;
@@ -1029,7 +1005,7 @@ impl Waku {
             false,
             *theme,
             cx,
-            move |this, cx| this.toggle_automation_enabled(id, cx),
+            move |this, _, cx| this.toggle_automation_enabled(id, cx),
         )
     }
 
@@ -1064,15 +1040,9 @@ impl Waku {
                     .focus_visible(|style| style.border_1().border_color(theme.accent))
                     .hover(|element| element.text_color(theme.text))
                     .child(tr!("automations.title"))
-                    .on_click(cx.listener(|this, _, window, cx| {
+                    .on_activation(cx, |this, window, cx| {
                         this.close_automation_editor(window, cx);
-                    }))
-                    .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
-                        if matches!(event.keystroke.key.as_str(), "enter" | "space") {
-                            this.close_automation_editor(window, cx);
-                            cx.stop_propagation();
-                        }
-                    })),
+                    }),
             )
             .child(icon("icons/chevron-right.svg", 14.0, theme.text_tertiary))
             .child(
@@ -1106,15 +1076,9 @@ impl Waku {
             .focus_visible(|style| style.border_color(theme.accent))
             .hover(|element| element.opacity(0.9))
             .child(tr!("automations.save"))
-            .on_click(cx.listener(|this, _, _, cx| {
+            .on_activation(cx, |this, _, cx| {
                 this.save_automation_editor(cx);
-            }))
-            .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
-                if is_button_activation(&event.keystroke.key) {
-                    this.save_automation_editor(cx);
-                    cx.stop_propagation();
-                }
-            }));
+            });
 
         // Delete is only meaningful for an existing automation; Run now now
         // lives in the composer, bottom-right where the send button sits.
@@ -1321,15 +1285,9 @@ impl Waku {
                 .active(|element| element.opacity(0.8))
                 .child(icon("icons/zap.svg", 14.0, theme.on_inverse))
                 .tooltip(Tooltip::text(tr!("automations.run_now")))
-                .on_click(cx.listener(move |this, _, _, cx| {
+                .on_activation(cx, move |this, _, cx| {
                     this.run_automation_now(id, cx);
-                }))
-                .on_key_down(cx.listener(move |this, event: &KeyDownEvent, _, cx| {
-                    if matches!(event.keystroke.key.as_str(), "enter" | "space") {
-                        this.run_automation_now(id, cx);
-                        cx.stop_propagation();
-                    }
-                }))
+                })
         });
 
         // The exact composer controls, one source of truth, editing the open
@@ -1662,7 +1620,7 @@ impl Waku {
         cx: &mut Context<Self>,
         change: impl Fn(&mut AutomationEditor) + 'static,
     ) -> Stateful<Div> {
-        toggle_switch(id, on, false, *theme, cx, move |this, cx| {
+        toggle_switch(id, on, false, *theme, cx, move |this, _, cx| {
             this.edit_automation_form(cx, |editor| change(editor))
         })
     }
@@ -1724,9 +1682,6 @@ impl Waku {
         cx: &mut Context<Self>,
         change: impl Fn(&mut AutomationEditor) + 'static,
     ) -> Stateful<Div> {
-        // Shared so both the click and keyboard handlers can invoke it.
-        let change = std::rc::Rc::new(change);
-        let key_change = change.clone();
         div()
             .id(id)
             .tab_index(0)
@@ -1753,15 +1708,9 @@ impl Waku {
                 theme.text_secondary
             })
             .child(label)
-            .on_click(cx.listener(move |this, _, _, cx| {
+            .on_activation(cx, move |this, _, cx| {
                 this.edit_automation_form(cx, |editor| change(editor));
-            }))
-            .on_key_down(cx.listener(move |this, event: &KeyDownEvent, _, cx| {
-                if matches!(event.keystroke.key.as_str(), "enter" | "space") {
-                    this.edit_automation_form(cx, |editor| key_change(editor));
-                    cx.stop_propagation();
-                }
-            }))
+            })
     }
 }
 
@@ -1949,10 +1898,6 @@ fn format_next_run(when: NaiveDateTime) -> String {
     when.format("%a %b %-d · %-I:%M %p").to_string()
 }
 
-fn is_button_activation(key: &str) -> bool {
-    matches!(key, "enter" | "space")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1970,13 +1915,6 @@ mod tests {
         assert!(!editor.fresh_worktree);
         assert_eq!(editor.base_branch, None);
         assert_eq!(editor.workspace(), SessionWorkspace::Local);
-    }
-
-    #[test]
-    fn save_button_uses_conventional_keyboard_activation_keys() {
-        assert!(is_button_activation("enter"));
-        assert!(is_button_activation("space"));
-        assert!(!is_button_activation("escape"));
     }
 
     #[test]

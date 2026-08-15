@@ -446,7 +446,7 @@ impl Waku {
             false,
             theme,
             cx,
-            move |this, cx| this.set_analytics_enabled(!analytics_enabled, cx),
+            move |this, _, cx| this.set_analytics_enabled(!analytics_enabled, cx),
         );
         div()
             .child(
@@ -515,7 +515,7 @@ impl Waku {
                     false,
                     theme,
                     cx,
-                    move |this, cx| this.set_automatic_updates_enabled(!enabled, cx),
+                    move |this, _, cx| this.set_automatic_updates_enabled(!enabled, cx),
                 );
                 column.child(
                     div()
@@ -614,7 +614,7 @@ impl Waku {
             pending,
             theme,
             cx,
-            move |this, cx| this.set_daemon_exposure_enabled(!enabled, cx),
+            move |this, _, cx| this.set_daemon_exposure_enabled(!enabled, cx),
         );
 
         let apply_disabled = pending || !fields_dirty;
@@ -1482,7 +1482,7 @@ impl Waku {
                 false,
                 theme,
                 cx,
-                move |this, cx| this.set_provider_enabled(kind, disabled, cx),
+                move |this, _, cx| this.set_provider_enabled(kind, disabled, cx),
             );
 
             let expanded = self.expanded_provider_settings == Some(kind);
@@ -1973,7 +1973,7 @@ impl Waku {
                         false,
                         theme,
                         cx,
-                        move |this, cx| this.set_computer_use_enabled(!enabled, cx),
+                        move |this, _, cx| this.set_computer_use_enabled(!enabled, cx),
                     )),
             )
             .child(

@@ -63,6 +63,42 @@ pub fn contain_scroll(handle: &ScrollHandle, cx: &mut App) {
     }
 }
 
+/// Add conventional mouse and keyboard activation to a focusable element.
+pub trait ActivationExt: Sized {
+    fn on_activation<E>(
+        self,
+        cx: &mut Context<E>,
+        activate: impl Fn(&mut E, &mut Window, &mut Context<E>) + 'static,
+    ) -> Self
+    where
+        E: 'static;
+}
+
+impl ActivationExt for Stateful<Div> {
+    fn on_activation<E>(
+        self,
+        cx: &mut Context<E>,
+        activate: impl Fn(&mut E, &mut Window, &mut Context<E>) + 'static,
+    ) -> Self
+    where
+        E: 'static,
+    {
+        let activate = std::rc::Rc::new(activate);
+        let click_activate = activate.clone();
+        let key_activate = activate;
+        self.on_click(cx.listener(move |this, _, window, cx| {
+            click_activate(this, window, cx);
+            cx.stop_propagation();
+        }))
+        .on_key_down(cx.listener(move |this, event: &KeyDownEvent, window, cx| {
+            if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                key_activate(this, window, cx);
+                cx.stop_propagation();
+            }
+        }))
+    }
+}
+
 /// The shared pill switch used by settings and automation forms.
 ///
 /// `activate` is ignored while `disabled` is true, but the control remains in
@@ -73,14 +109,11 @@ pub fn toggle_switch<E>(
     disabled: bool,
     theme: Theme,
     cx: &mut Context<E>,
-    activate: impl Fn(&mut E, &mut Context<E>) + 'static,
+    activate: impl Fn(&mut E, &mut Window, &mut Context<E>) + 'static,
 ) -> Stateful<Div>
 where
     E: 'static,
 {
-    let activate = std::rc::Rc::new(activate);
-    let click_activate = activate.clone();
-    let key_activate = activate;
     let base = div()
         .id(id)
         .tab_index(0)
@@ -109,21 +142,10 @@ where
         }));
 
     if disabled {
-        return base;
+        base
+    } else {
+        base.on_activation(cx, activate)
     }
-
-    base.on_click(cx.listener(move |this, _, _, cx| {
-        click_activate(this, cx);
-        cx.stop_propagation();
-    }))
-    .on_key_down(cx.listener(move |this, event: &KeyDownEvent, _, cx| {
-        if !event.keystroke.modifiers.modified()
-            && matches!(event.keystroke.key.as_str(), "enter" | "space")
-        {
-            key_activate(this, cx);
-            cx.stop_propagation();
-        }
-    }))
 }
 
 /// Brand hue for each provider's official mark.
