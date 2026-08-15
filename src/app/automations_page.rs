@@ -10,10 +10,10 @@ use super::composer::AgentControlTarget;
 use super::*;
 use crate::automation::schedule::next_occurrence;
 use crate::automation::{
-    Automation, NotificationConfig, NotificationTrigger, OverlapPolicy, Schedule, TimeOfDay,
-    Weekday,
+    Automation, AutomationAgent, NotificationConfig, NotificationTrigger, OverlapPolicy, Schedule,
+    TimeOfDay, Weekday,
 };
-use crate::model::{InteractionMode, ProviderKind, RuntimeMode, SessionWorkspace};
+use crate::model::{ProviderKind, SessionWorkspace};
 
 /// Which view of the Automations page is showing.
 pub(super) enum AutomationsPage {
@@ -76,13 +76,7 @@ pub(super) struct AutomationEditor {
     // These agent fields back the shared composer controls (model picker,
     // reasoning traits, access, agent preset, interaction mode), so they are
     // read and written from `composer.rs` via `AgentControlTarget::Automation`.
-    pub(super) provider: ProviderKind,
-    pub(super) model: Option<String>,
-    pub(super) reasoning_effort: Option<String>,
-    pub(super) service_tier: Option<String>,
-    pub(super) agent_preset: Option<String>,
-    pub(super) runtime_mode: RuntimeMode,
-    pub(super) interaction_mode: InteractionMode,
+    pub(super) agent: AutomationAgent,
     // These back the shared composer project/workspace chips, so they are read
     // and written from `composer.rs` via `AgentControlTarget::Automation`.
     pub(super) project_id: Option<Uuid>,
@@ -105,13 +99,7 @@ impl AutomationEditor {
     fn new(provider: ProviderKind) -> Self {
         Self {
             id: None,
-            provider,
-            model: None,
-            reasoning_effort: None,
-            service_tier: None,
-            agent_preset: None,
-            runtime_mode: RuntimeMode::default(),
-            interaction_mode: InteractionMode::default(),
+            agent: AutomationAgent::new(provider),
             project_id: None,
             fresh_worktree: false,
             base_branch: None,
@@ -161,13 +149,7 @@ impl AutomationEditor {
         };
         Self {
             id: Some(automation.id),
-            provider: automation.agent.provider,
-            model: automation.agent.model.clone(),
-            reasoning_effort: automation.agent.reasoning_effort.clone(),
-            service_tier: automation.agent.service_tier.clone(),
-            agent_preset: automation.agent.agent_preset.clone(),
-            runtime_mode: automation.agent.runtime_mode,
-            interaction_mode: automation.agent.interaction_mode,
+            agent: automation.agent.clone(),
             project_id: automation.project_id.filter(|_| project_exists),
             fresh_worktree,
             base_branch,
@@ -238,13 +220,7 @@ impl AutomationEditor {
     fn apply_to(&self, automation: &mut Automation, name: String, prompt: String) {
         automation.name = name;
         automation.prompt = prompt;
-        automation.agent.provider = self.provider;
-        automation.agent.model = self.model.clone();
-        automation.agent.reasoning_effort = self.reasoning_effort.clone();
-        automation.agent.service_tier = self.service_tier.clone();
-        automation.agent.agent_preset = self.agent_preset.clone();
-        automation.agent.runtime_mode = self.runtime_mode;
-        automation.agent.interaction_mode = self.interaction_mode;
+        automation.agent = self.agent.clone();
         automation.project_id = self.project_id;
         automation.workspace = self.workspace();
         automation.schedule = self.schedule();
@@ -418,8 +394,11 @@ impl Waku {
                 id
             }
             None => {
-                let mut automation =
-                    Automation::new(name.clone(), editor.provider, crate::model::unix_time());
+                let mut automation = Automation::new(
+                    name.clone(),
+                    editor.agent.provider,
+                    crate::model::unix_time(),
+                );
                 editor.apply_to(&mut automation, name, prompt);
                 let id = automation.id;
                 self.state.push_automation(automation);
@@ -1194,22 +1173,32 @@ impl Waku {
             .into_any_element()
     }
 
-    /// A labeled dropdown chip. Collapses the shared `MenuChip` + `dropdown_menu`
-    /// + handle boilerplate; each field supplies only its `items`. The single
-    /// select's per-item behavior stays at the call site.
-    fn picker(
+    /// A labeled enum dropdown. The value list, label mapping, and mutation are
+    /// the only field-specific pieces; menu chrome and selection handling stay
+    /// here.
+    fn picker<T>(
         &self,
         id: &'static str,
-        label: impl Into<SharedString>,
+        value: T,
+        options: impl IntoIterator<Item = T>,
         width: f32,
         disabled: bool,
         cx: &mut Context<Self>,
-        items: impl Fn(&mut App) -> Vec<MenuItem> + 'static,
-    ) -> AnyElement {
+        label: impl Fn(T) -> String + 'static,
+        apply: impl Fn(&mut AutomationEditor, T) + 'static,
+    ) -> AnyElement
+    where
+        T: Copy + Eq + 'static,
+    {
+        let options = options.into_iter().collect::<Vec<_>>();
+        let labels = std::rc::Rc::new(label);
+        let apply = std::rc::Rc::new(apply);
+        let selected_label = labels(value);
+        let weak = cx.entity().downgrade();
         let handle = self.menu_handle(id, cx);
         dropdown_menu(
             MenuChip::new(id)
-                .label(label)
+                .label(selected_label)
                 .outlined()
                 .selected(handle.is_open())
                 .disabled(disabled)
@@ -1218,7 +1207,26 @@ impl Waku {
             SharedString::from(format!("{id}-menu")),
             &handle,
             MenuAlign::BelowRight,
-            items,
+            move |_| {
+                let labels = labels.clone();
+                let apply = apply.clone();
+                let weak = weak.clone();
+                options
+                    .iter()
+                    .copied()
+                    .map(move |option| {
+                        let labels = labels.clone();
+                        let apply = apply.clone();
+                        let item_weak = weak.clone();
+                        MenuItem::new(labels(option), move |_, cx| {
+                            let _ = item_weak.update(cx, |this, cx| {
+                                this.edit_automation_form(cx, |editor| apply(editor, option));
+                            });
+                        })
+                        .selected(option == value)
+                    })
+                    .collect()
+            },
         )
     }
 
@@ -1364,29 +1372,15 @@ impl Waku {
         cx: &mut Context<Self>,
     ) -> Div {
         // Schedule preset dropdown.
-        let preset = editor.preset;
-        let preset_weak = cx.entity().downgrade();
         let preset_picker = self.picker(
             "automation-frequency",
-            preset_label(preset),
+            editor.preset,
+            SchedulePreset::ALL,
             200.0,
             false,
             cx,
-            move |_| {
-                let weak = preset_weak.clone();
-                SchedulePreset::ALL
-                    .into_iter()
-                    .map(|option| {
-                        let weak = weak.clone();
-                        MenuItem::new(preset_label(option), move |_, cx| {
-                            let _ = weak.update(cx, |this, cx| {
-                                this.edit_automation_form(cx, |editor| editor.preset = option);
-                            });
-                        })
-                        .selected(option == preset)
-                    })
-                    .collect()
-            },
+            preset_label,
+            |editor, preset| editor.preset = preset,
         );
 
         // Time-of-day: freeform hour and minute fields the user types by hand.
@@ -1523,36 +1517,16 @@ impl Waku {
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> Div {
-        let weak = cx.entity().downgrade();
-
         // Overlap policy.
-        let overlap = editor.overlap;
-        let overlap_weak = weak.clone();
         let overlap_picker = self.picker(
             "automation-overlap",
-            overlap_label(overlap),
+            editor.overlap,
+            OverlapPolicy::ALL,
             200.0,
             false,
             cx,
-            move |_| {
-                let weak = overlap_weak.clone();
-                [
-                    OverlapPolicy::Skip,
-                    OverlapPolicy::Queue,
-                    OverlapPolicy::Concurrent,
-                ]
-                .into_iter()
-                .map(|option| {
-                    let weak = weak.clone();
-                    MenuItem::new(overlap_label(option), move |_, cx| {
-                        let _ = weak.update(cx, |this, cx| {
-                            this.edit_automation_form(cx, |editor| editor.overlap = option);
-                        });
-                    })
-                    .selected(option == overlap)
-                })
-                .collect()
-            },
+            overlap_label,
+            |editor, overlap| editor.overlap = overlap,
         );
 
         // Notifications: an enable toggle plus a trigger picker.
@@ -1564,34 +1538,15 @@ impl Waku {
             |editor| editor.notify_enabled = !editor.notify_enabled,
         );
 
-        let trigger = editor.notify_trigger;
-        let trigger_weak = weak.clone();
-        let trigger_enabled = editor.notify_enabled;
         let trigger_picker = self.picker(
             "automation-trigger",
-            trigger_label(trigger),
+            editor.notify_trigger,
+            NotificationTrigger::ALL,
             200.0,
-            !trigger_enabled,
+            !editor.notify_enabled,
             cx,
-            move |_| {
-                let weak = trigger_weak.clone();
-                [
-                    NotificationTrigger::Always,
-                    NotificationTrigger::OnSuccess,
-                    NotificationTrigger::OnFailure,
-                ]
-                .into_iter()
-                .map(|option| {
-                    let weak = weak.clone();
-                    MenuItem::new(trigger_label(option), move |_, cx| {
-                        let _ = weak.update(cx, |this, cx| {
-                            this.edit_automation_form(cx, |editor| editor.notify_trigger = option);
-                        });
-                    })
-                    .selected(option == trigger)
-                })
-                .collect()
-            },
+            trigger_label,
+            |editor, trigger| editor.notify_trigger = trigger,
         );
 
         editor_card(

@@ -297,6 +297,10 @@ pub enum OverlapPolicy {
     Concurrent,
 }
 
+impl OverlapPolicy {
+    pub const ALL: [Self; 3] = [Self::Skip, Self::Queue, Self::Concurrent];
+}
+
 /// Whether and when a finished run raises a system notification.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
 pub struct NotificationConfig {
@@ -338,6 +342,8 @@ pub enum NotificationTrigger {
 }
 
 impl NotificationTrigger {
+    pub const ALL: [Self; 3] = [Self::Always, Self::OnSuccess, Self::OnFailure];
+
     /// Whether a run finishing with `success` should notify under this trigger.
     pub fn matches(self, success: bool) -> bool {
         match self {

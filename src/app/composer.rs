@@ -825,7 +825,7 @@ impl Waku {
                 .unwrap_or_default(),
             AgentControlTarget::Automation => self
                 .automation_editor()
-                .map(|editor| editor.provider)
+                .map(|editor| editor.agent.provider)
                 .unwrap_or_default(),
         }
     }
@@ -841,8 +841,8 @@ impl Waku {
                 .map(str::to_owned),
             AgentControlTarget::Automation => {
                 let editor = self.automation_editor()?;
-                editor.model.clone().or_else(|| {
-                    self.provider_probe(editor.provider)
+                editor.agent.model.clone().or_else(|| {
+                    self.provider_probe(editor.agent.provider)
                         .and_then(|probe| probe.preferred_model())
                         .map(|model| model.id.clone())
                 })
@@ -857,7 +857,7 @@ impl Waku {
                 .and_then(|session| session.reasoning_effort.clone()),
             AgentControlTarget::Automation => self
                 .automation_editor()
-                .and_then(|editor| editor.reasoning_effort.clone()),
+                .and_then(|editor| editor.agent.reasoning_effort.clone()),
         }
     }
 
@@ -868,7 +868,7 @@ impl Waku {
                 .and_then(|session| session.service_tier.clone()),
             AgentControlTarget::Automation => self
                 .automation_editor()
-                .and_then(|editor| editor.service_tier.clone()),
+                .and_then(|editor| editor.agent.service_tier.clone()),
         }
     }
 
@@ -877,9 +877,9 @@ impl Waku {
             AgentControlTarget::Session => {
                 self.selected_session().map(|session| session.runtime_mode)
             }
-            AgentControlTarget::Automation => {
-                self.automation_editor().map(|editor| editor.runtime_mode)
-            }
+            AgentControlTarget::Automation => self
+                .automation_editor()
+                .map(|editor| editor.agent.runtime_mode),
         };
         // Plan is an interaction mode, not an access level; the access chip
         // never shows it.
@@ -895,7 +895,7 @@ impl Waku {
                 .unwrap_or_default(),
             AgentControlTarget::Automation => self
                 .automation_editor()
-                .map(|editor| editor.interaction_mode)
+                .map(|editor| editor.agent.interaction_mode)
                 .unwrap_or_default(),
         }
     }
@@ -910,10 +910,10 @@ impl Waku {
                 .and_then(|session| self.agent_preset_for_session(session)),
             AgentControlTarget::Automation => {
                 let editor = self.automation_editor()?;
-                if editor.provider != ProviderKind::DeepSeek {
+                if editor.agent.provider != ProviderKind::DeepSeek {
                     return None;
                 }
-                editor.agent_preset.clone().or_else(|| {
+                editor.agent.agent_preset.clone().or_else(|| {
                     self.provider_probe(ProviderKind::DeepSeek)
                         .and_then(|probe| probe.preferred_agent_preset())
                         .map(|preset| preset.id.clone())
@@ -962,15 +962,15 @@ impl Waku {
         match target {
             AgentControlTarget::Session => self.choose_model(provider, model, cx),
             AgentControlTarget::Automation => self.edit_automation_form(cx, |editor| {
-                if editor.provider != provider {
-                    editor.provider = provider;
+                if editor.agent.provider != provider {
+                    editor.agent.provider = provider;
                     // The preset belongs to the old provider.
-                    editor.agent_preset = None;
+                    editor.agent.agent_preset = None;
                 }
-                editor.model = Some(model);
+                editor.agent.model = Some(model);
                 // Reasoning effort and service tier belong to the old model.
-                editor.reasoning_effort = None;
-                editor.service_tier = None;
+                editor.agent.reasoning_effort = None;
+                editor.agent.service_tier = None;
             }),
         }
     }
@@ -984,7 +984,9 @@ impl Waku {
         match target {
             AgentControlTarget::Session => self.set_reasoning_effort(effort, cx),
             AgentControlTarget::Automation => {
-                self.edit_automation_form(cx, |editor| editor.reasoning_effort = Some(effort));
+                self.edit_automation_form(cx, |editor| {
+                    editor.agent.reasoning_effort = Some(effort)
+                });
             }
         }
     }
@@ -998,7 +1000,7 @@ impl Waku {
         match target {
             AgentControlTarget::Session => self.set_service_tier(tier, cx),
             AgentControlTarget::Automation => {
-                self.edit_automation_form(cx, |editor| editor.service_tier = Some(tier));
+                self.edit_automation_form(cx, |editor| editor.agent.service_tier = Some(tier));
             }
         }
     }
@@ -1012,7 +1014,7 @@ impl Waku {
         match target {
             AgentControlTarget::Session => self.set_runtime_mode(mode, cx),
             AgentControlTarget::Automation => {
-                self.edit_automation_form(cx, |editor| editor.runtime_mode = mode);
+                self.edit_automation_form(cx, |editor| editor.agent.runtime_mode = mode);
             }
         }
     }
@@ -1026,7 +1028,7 @@ impl Waku {
         match target {
             AgentControlTarget::Session => self.set_interaction_mode(mode, cx),
             AgentControlTarget::Automation => {
-                self.edit_automation_form(cx, |editor| editor.interaction_mode = mode);
+                self.edit_automation_form(cx, |editor| editor.agent.interaction_mode = mode);
             }
         }
     }
@@ -1043,9 +1045,9 @@ impl Waku {
                 // Minimal mounts no plan capability, so it forces Build — the
                 // same coupling `set_agent_preset` enforces on a session.
                 if preset == "minimal" {
-                    editor.interaction_mode = InteractionMode::Build;
+                    editor.agent.interaction_mode = InteractionMode::Build;
                 }
-                editor.agent_preset = Some(preset);
+                editor.agent.agent_preset = Some(preset);
             }),
         }
     }
