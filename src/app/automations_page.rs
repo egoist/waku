@@ -439,6 +439,7 @@ impl Waku {
         self.automation_delete_arming = None;
         self.invalidate_automation_preparations(id);
         if self.state.remove_automation(id) {
+            self.automation_card_focuses.borrow_mut().remove(&id);
             // Deleting the automation whose editor is open returns to the list.
             if matches!(&self.automations_page, Some(AutomationsPage::Editor(editor)) if editor.id == Some(id))
             {
@@ -845,6 +846,12 @@ impl Waku {
         let enabled = automation.enabled;
         let next_run = next_run_label(&automation.schedule);
         let summary = schedule_summary(&automation.schedule);
+        let row_focus = self
+            .automation_card_focuses
+            .borrow_mut()
+            .entry(id)
+            .or_insert_with(|| cx.focus_handle())
+            .clone();
 
         // Status is never color alone: an icon and a word carry it too.
         let (status_icon, status_color, status_label) = if enabled {
@@ -859,6 +866,7 @@ impl Waku {
 
         div()
             .id(SharedString::from(format!("automation-row-{id}")))
+            .track_focus(&row_focus)
             .tab_index(0)
             .flex()
             .items_center()

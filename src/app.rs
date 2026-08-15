@@ -1063,6 +1063,7 @@ pub struct Waku {
     settings_focus: FocusHandle,
     automations_focus: FocusHandle,
     automation_save_focus: FocusHandle,
+    automation_card_focuses: RefCell<HashMap<Uuid, FocusHandle>>,
     onboarding_add_project_focus: FocusHandle,
     onboarding_projectless_focus: FocusHandle,
     /// Mirror of Sparkle's persisted automatic-check setting. Refreshed when
@@ -2726,6 +2727,7 @@ impl Waku {
                 settings_focus,
                 automations_focus,
                 automation_save_focus: cx.focus_handle(),
+                automation_card_focuses: RefCell::new(HashMap::new()),
                 onboarding_add_project_focus,
                 onboarding_projectless_focus,
                 automatic_updates_enabled: cx

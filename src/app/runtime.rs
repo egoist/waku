@@ -146,7 +146,7 @@ fn automation_preparation_is_current(
         Some(version) => current.is_some_and(|automation| {
             automation.id == version.automation_id
                 && automation.enabled
-                && current_generation == Some(version.generation)
+                && current_generation.unwrap_or_default() == version.generation
         }),
     }
 }
@@ -1187,14 +1187,6 @@ impl Waku {
         }
         self.save();
         cx.notify();
-    }
-
-    fn save_after_frame(cx: &mut Context<Self>) {
-        cx.spawn(async move |waku, cx| {
-            cx.background_executor().timer(STREAM_FRAME_INTERVAL).await;
-            let _ = waku.update(cx, |waku, _| waku.save());
-        })
-        .detach();
     }
 
     pub fn composer_focus(&self, cx: &App) -> FocusHandle {
@@ -3122,7 +3114,6 @@ impl Waku {
             );
             self.settle_automation_run(session_id, crate::automation::RunOutcome::Cancelled, cx);
             self.stream_state_dirty = true;
-            Self::save_after_frame(cx);
             cx.notify();
             return;
         }
@@ -3180,7 +3171,6 @@ impl Waku {
                         cx,
                     );
                     self.stream_state_dirty = true;
-                    Self::save_after_frame(cx);
                 }
                 if selected {
                     if self
@@ -3320,7 +3310,11 @@ impl Waku {
         // Persist on the next frame boundary. Saving is intentionally after
         // the spinner-to-Stop paint: SQLite or blob externalization must not
         // hold the final preparation frame motionless.
-        Self::save_after_frame(cx);
+        cx.spawn(async move |waku, cx| {
+            cx.background_executor().timer(STREAM_FRAME_INTERVAL).await;
+            let _ = waku.update(cx, |waku, _| waku.save());
+        })
+        .detach();
     }
 
     pub(super) fn collect_runtime_events(runtime: &mut SessionRuntime) {
@@ -3550,6 +3544,15 @@ mod automation_preparation_tests {
             version,
             Some(&automation),
             Some(3)
+        ));
+        let initial_version = Some(AutomationPreparationVersion {
+            automation_id: automation.id,
+            generation: 0,
+        });
+        assert!(automation_preparation_is_current(
+            initial_version,
+            Some(&automation),
+            None
         ));
         assert!(!automation_preparation_is_current(version, None, Some(3)));
 
