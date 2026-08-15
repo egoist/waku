@@ -158,6 +158,25 @@ struct ScoredPaletteItem {
     item: CommandPaletteItem,
 }
 
+fn score_palette_candidates(
+    candidates: impl IntoIterator<Item = CommandPaletteItem>,
+    pattern: &Pattern,
+    matcher: &mut Matcher,
+    utf32: &mut Vec<char>,
+    compare: impl FnMut(&ScoredPaletteItem, &ScoredPaletteItem) -> std::cmp::Ordering,
+) -> Vec<ScoredPaletteItem> {
+    let mut scored = candidates
+        .into_iter()
+        .filter_map(|item| {
+            pattern
+                .score(Utf32Str::new(&item.search_text, utf32), matcher)
+                .map(|score| ScoredPaletteItem { score, item })
+        })
+        .collect::<Vec<_>>();
+    scored.sort_by(compare);
+    scored
+}
+
 fn next_selection_index(selected: usize, len: usize, delta: isize) -> Option<usize> {
     if len == 0 {
         return None;
@@ -869,45 +888,33 @@ impl Waku {
         });
         tasks.truncate(MAX_TASK_RESULTS);
 
-        let mut automations = self
-            .command_palette_automation_candidates()
-            .into_iter()
-            .filter_map(|item| {
-                pattern
-                    .score(
-                        Utf32Str::new(&item.search_text, &mut utf32),
-                        &mut self.command_palette.matcher,
-                    )
-                    .map(|score| ScoredPaletteItem { score, item })
-            })
-            .collect::<Vec<_>>();
-        automations.sort_by(|a, b| {
-            b.score
-                .cmp(&a.score)
-                .then(b.item.recency.cmp(&a.item.recency))
-                .then(a.item.order.cmp(&b.item.order))
-        });
+        let automations = score_palette_candidates(
+            self.command_palette_automation_candidates(),
+            &pattern,
+            &mut self.command_palette.matcher,
+            &mut utf32,
+            |a, b| {
+                b.score
+                    .cmp(&a.score)
+                    .then(b.item.recency.cmp(&a.item.recency))
+                    .then(a.item.order.cmp(&b.item.order))
+            },
+        );
 
-        let mut commands = self
-            .command_palette_commands(true)
-            .into_iter()
-            .filter_map(|item| {
-                pattern
-                    .score(
-                        Utf32Str::new(&item.search_text, &mut utf32),
-                        &mut self.command_palette.matcher,
-                    )
-                    .map(|score| ScoredPaletteItem { score, item })
-            })
-            .collect::<Vec<_>>();
-        commands.sort_by(|a, b| {
-            a.item
-                .section
-                .query_rank()
-                .cmp(&b.item.section.query_rank())
-                .then(b.score.cmp(&a.score))
-                .then(a.item.order.cmp(&b.item.order))
-        });
+        let commands = score_palette_candidates(
+            self.command_palette_commands(true),
+            &pattern,
+            &mut self.command_palette.matcher,
+            &mut utf32,
+            |a, b| {
+                a.item
+                    .section
+                    .query_rank()
+                    .cmp(&b.item.section.query_rank())
+                    .then(b.score.cmp(&a.score))
+                    .then(a.item.order.cmp(&b.item.order))
+            },
+        );
 
         let selected_action = preserve_selection.then(|| {
             self.command_palette
