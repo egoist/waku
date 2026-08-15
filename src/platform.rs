@@ -66,22 +66,62 @@ pub fn register_fonts_with_coretext(_: &[&'static [u8]]) -> anyhow::Result<()> {
 }
 
 #[cfg(target_os = "macos")]
-pub fn reduce_motion_enabled() -> bool {
+pub fn init_reduce_motion(cx: &mut gpui::App) {
     use objc2_app_kit::NSWorkspace;
 
-    NSWorkspace::sharedWorkspace().accessibilityDisplayShouldReduceMotion()
+    cx.set_reduce_motion(NSWorkspace::sharedWorkspace().accessibilityDisplayShouldReduceMotion());
 }
 
-#[cfg(not(target_os = "macos"))]
-pub fn reduce_motion_enabled() -> bool {
-    false
+#[cfg(target_os = "linux")]
+pub fn init_reduce_motion(cx: &mut gpui::App) {
+    if let Ok(value) = std::env::var("WAKU_REDUCE_MOTION")
+        && let Some(enabled) = parse_boolean_setting(&value)
+    {
+        cx.set_reduce_motion(enabled);
+        return;
+    }
+
+    // GNOME exposes its animation preference through GSettings. Resolve it
+    // once off the UI thread; frames only read GPUI's in-memory flag.
+    cx.spawn(async move |cx| {
+        let enabled = cx
+            .background_executor()
+            .spawn(async move { linux_reduce_motion_enabled() })
+            .await;
+        cx.update(|cx| cx.set_reduce_motion(enabled));
+    })
+    .detach();
+}
+
+#[cfg(target_os = "linux")]
+fn linux_reduce_motion_enabled() -> bool {
+    std::process::Command::new("gsettings")
+        .args(["get", "org.gnome.desktop.interface", "enable-animations"])
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .and_then(|output| String::from_utf8(output.stdout).ok())
+        .and_then(|value| parse_boolean_setting(&value))
+        .is_some_and(|animations_enabled| !animations_enabled)
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+pub fn init_reduce_motion(_: &mut gpui::App) {}
+
+#[cfg(target_os = "linux")]
+fn parse_boolean_setting(value: &str) -> Option<bool> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "1" | "true" | "yes" | "on" => Some(true),
+        "0" | "false" | "no" | "off" => Some(false),
+        _ => None,
+    }
 }
 
 /// Deliver an audible macOS notification. GPUI owns the notification-center
 /// delegate (and therefore click responses); Waku only supplies content here
 /// because GPUI's generic payload does not currently expose a sound field.
 #[cfg(target_os = "macos")]
-pub fn show_task_notification(tag: &str, title: &str, body: &str) {
+pub fn show_task_notification(tag: &str, title: &str, body: &str, _: &gpui::App) {
     use block2::RcBlock;
     use objc2::runtime::Bool;
     use objc2_foundation::{NSBundle, NSError, NSString};
@@ -127,7 +167,14 @@ pub fn show_task_notification(tag: &str, title: &str, body: &str) {
 }
 
 #[cfg(not(target_os = "macos"))]
-pub fn show_task_notification(_: &str, _: &str, _: &str) {}
+pub fn show_task_notification(tag: &str, title: &str, body: &str, cx: &gpui::App) {
+    cx.show_system_notification(gpui::SystemNotification {
+        tag: tag.to_owned().into(),
+        title: title.to_owned().into(),
+        body: body.to_owned().into(),
+        actions: Vec::new(),
+    });
+}
 
 #[cfg(target_os = "macos")]
 pub fn load_app_icon_for_bundle_id(bundle_id: &str) -> Option<std::sync::Arc<gpui::Image>> {
@@ -160,32 +207,16 @@ pub fn load_app_icon_for_bundle_id(_: &str) -> Option<std::sync::Arc<gpui::Image
     None
 }
 
-/// Select `path` in a Finder window.
-#[cfg(target_os = "macos")]
-pub fn reveal_in_finder(path: &std::path::Path) {
-    use objc2_app_kit::NSWorkspace;
-    use objc2_foundation::{NSArray, NSString, NSURL};
-
-    let url = NSURL::fileURLWithPath(&NSString::from_str(&path.to_string_lossy()));
-    NSWorkspace::sharedWorkspace()
-        .activateFileViewerSelectingURLs(&NSArray::from_retained_slice(&[url]));
+/// Select `path` in the platform file manager. GPUI dispatches Linux portal
+/// and subprocess work away from the UI thread.
+pub fn reveal_in_file_manager(path: &std::path::Path, cx: &gpui::App) {
+    cx.reveal_path(path);
 }
-
-#[cfg(not(target_os = "macos"))]
-pub fn reveal_in_finder(_: &std::path::Path) {}
 
 /// Open `path` with its default application — a document in its editor.
-#[cfg(target_os = "macos")]
-pub fn open_with_default_app(path: &std::path::Path) {
-    use objc2_app_kit::NSWorkspace;
-    use objc2_foundation::{NSString, NSURL};
-
-    let url = NSURL::fileURLWithPath(&NSString::from_str(&path.to_string_lossy()));
-    NSWorkspace::sharedWorkspace().openURL(&url);
+pub fn open_with_default_app(path: &std::path::Path, cx: &gpui::App) {
+    cx.open_with_system(path);
 }
-
-#[cfg(not(target_os = "macos"))]
-pub fn open_with_default_app(_: &std::path::Path) {}
 
 /// Move `path` to the Trash, recoverably. Errors surface to the caller so the
 /// UI can say why nothing moved.
@@ -199,9 +230,37 @@ pub fn trash_item(path: &std::path::Path) -> Result<(), String> {
         .map_err(|error| error.localizedDescription().to_string())
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(target_os = "linux")]
 pub fn trash_item(path: &std::path::Path) -> Result<(), String> {
-    std::fs::remove_dir_all(path).map_err(|error| error.to_string())
+    trash::delete(path).map_err(|error| error.to_string())
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+pub fn trash_item(_: &std::path::Path) -> Result<(), String> {
+    Err("moving items to Trash is not supported on this platform".to_owned())
+}
+
+/// Decode the embedded desktop icon once. X11 consumes the RGBA pixels from
+/// `WindowOptions`; Wayland associates the window through `app_id` and its
+/// installed desktop entry.
+#[cfg(target_os = "linux")]
+pub fn linux_app_icon() -> Option<std::sync::Arc<image::RgbaImage>> {
+    static ICON: std::sync::LazyLock<Option<std::sync::Arc<image::RgbaImage>>> =
+        std::sync::LazyLock::new(|| {
+            image::load_from_memory(include_bytes!("../website/public/app-icon.png"))
+                .ok()
+                .map(|image| std::sync::Arc::new(image.into_rgba8()))
+        });
+    ICON.clone()
+}
+
+/// A compact shortcut label for the platform's primary GUI modifier.
+pub const fn primary_shortcut<'a>(macos: &'a str, other: &'a str) -> &'a str {
+    if cfg!(target_os = "macos") {
+        macos
+    } else {
+        other
+    }
 }
 
 /// Keep Waku's single main window alive when the user closes it. This preserves
@@ -259,6 +318,19 @@ const SIDEBAR_WIDTH: f64 = 252.0;
 
 pub fn start_window_move(window: &Window) {
     window.start_window_move();
+}
+
+/// Perform the platform's titlebar double-click action. GPUI delegates this
+/// to the user's system preference on macOS, while Linux client decorations
+/// must toggle maximize explicitly.
+pub fn titlebar_double_click(window: &Window) {
+    #[cfg(target_os = "macos")]
+    window.titlebar_double_click();
+
+    #[cfg(not(target_os = "macos"))]
+    if window.window_controls().maximize && window.is_resizable() {
+        window.zoom_window();
+    }
 }
 
 /// Match Cursor's macOS glass window stack without asking GPUI's transparent
@@ -429,3 +501,22 @@ pub fn set_window_appearance(window: &Window, dark: Option<bool>) {
 
 #[cfg(not(target_os = "macos"))]
 pub fn set_window_appearance(_: &Window, _: Option<bool>) {}
+
+#[cfg(all(test, target_os = "linux"))]
+mod tests {
+    use super::parse_boolean_setting;
+
+    #[test]
+    fn boolean_desktop_settings_are_parsed_case_insensitively() {
+        assert_eq!(parse_boolean_setting(" true\n"), Some(true));
+        assert_eq!(parse_boolean_setting("OFF"), Some(false));
+        assert_eq!(parse_boolean_setting("default"), None);
+    }
+
+    #[test]
+    fn embedded_linux_icon_decodes_at_desktop_size() {
+        let icon = super::linux_app_icon().expect("embedded PNG should decode");
+
+        assert_eq!(icon.dimensions(), (256, 256));
+    }
+}

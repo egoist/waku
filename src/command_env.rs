@@ -8,15 +8,15 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{OnceLock, RwLock};
 use std::time::{Duration, Instant};
 
-#[cfg(target_os = "macos")]
+#[cfg(unix)]
 use std::ffi::CStr;
-#[cfg(target_os = "macos")]
+#[cfg(unix)]
 use std::mem::MaybeUninit;
 #[cfg(unix)]
 use std::os::unix::ffi::OsStringExt;
-#[cfg(target_os = "macos")]
+#[cfg(unix)]
 use std::os::unix::fs::OpenOptionsExt;
-#[cfg(target_os = "macos")]
+#[cfg(unix)]
 use std::os::unix::process::CommandExt;
 
 const LOGIN_SHELL_ENV_TIMEOUT: Duration = Duration::from_secs(5);
@@ -266,18 +266,30 @@ fn default_shell_candidates() -> Vec<PathBuf> {
     if let Some(shell) = std::env::var_os("SHELL").filter(|shell| !shell.is_empty()) {
         candidates.push(PathBuf::from(shell));
     }
-    #[cfg(target_os = "macos")]
+    #[cfg(unix)]
     if let Some(shell) = account_default_shell() {
         candidates.push(shell);
     }
+    #[cfg(target_os = "macos")]
     candidates.push(PathBuf::from("/bin/zsh"));
+    #[cfg(target_os = "linux")]
+    candidates.extend([PathBuf::from("/bin/bash"), PathBuf::from("/bin/sh")]);
 
     let mut seen = HashSet::new();
     candidates.retain(|shell| seen.insert(shell.clone()));
     candidates
 }
 
-#[cfg(target_os = "macos")]
+/// Pick the user's configured login shell for an interactive terminal, with a
+/// platform shell as a final fallback when desktop launchers omit `SHELL`.
+pub fn default_terminal_shell() -> PathBuf {
+    default_shell_candidates()
+        .into_iter()
+        .find(|shell| shell.is_file())
+        .unwrap_or_else(|| PathBuf::from("/bin/sh"))
+}
+
+#[cfg(unix)]
 fn account_default_shell() -> Option<PathBuf> {
     let suggested_size = unsafe { libc::sysconf(libc::_SC_GETPW_R_SIZE_MAX) };
     let mut buffer_size = if suggested_size > 0 {
@@ -333,7 +345,7 @@ fn capture_shell_environment(
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
-    #[cfg(target_os = "macos")]
+    #[cfg(unix)]
     command.process_group(0);
 
     let mut child = spawn(&mut command).ok()?;
@@ -401,7 +413,7 @@ fn wait_for_child(child: &mut Child, timeout: Duration) -> bool {
 }
 
 fn terminate_shell_capture(child: &mut Child) {
-    #[cfg(target_os = "macos")]
+    #[cfg(unix)]
     unsafe {
         libc::kill(-(child.id() as i32), libc::SIGKILL);
     }
@@ -419,7 +431,7 @@ impl ShellEnvironmentCapture {
                 std::env::temp_dir().join(format!(".waku-shell-env-{}-{id}", std::process::id()));
             let mut options = OpenOptions::new();
             options.write(true).create_new(true);
-            #[cfg(target_os = "macos")]
+            #[cfg(unix)]
             options.mode(0o600);
             match options.open(&path) {
                 Ok(_) => return Some(Self(path)),
@@ -445,7 +457,7 @@ impl Drop for ShellEnvironmentCapture {
 mod tests {
     use super::*;
 
-    #[cfg(target_os = "macos")]
+    #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
 
     #[test]
@@ -558,7 +570,17 @@ mod tests {
         );
     }
 
-    #[cfg(target_os = "macos")]
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_shell_candidates_have_system_fallbacks() {
+        let candidates = default_shell_candidates();
+
+        assert!(candidates.contains(&PathBuf::from("/bin/bash")));
+        assert!(candidates.contains(&PathBuf::from("/bin/sh")));
+        assert!(default_terminal_shell().is_file());
+    }
+
+    #[cfg(unix)]
     #[test]
     fn parses_null_delimited_environment_without_losing_value_contents() {
         let environment = parse_shell_environment(
@@ -582,7 +604,7 @@ mod tests {
         );
     }
 
-    #[cfg(target_os = "macos")]
+    #[cfg(unix)]
     #[test]
     fn captures_environment_from_a_shell_process() {
         let id = SHELL_ENV_CAPTURE_ID.fetch_add(1, Ordering::Relaxed);

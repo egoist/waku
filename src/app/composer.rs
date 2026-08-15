@@ -2072,7 +2072,13 @@ impl Waku {
                                             .hover(|element| element.bg(theme.overlay))
                                             .active(|element| element.opacity(0.8))
                                             .child(icon("icons/zap.svg", 13.0, theme.warning))
-                                            .tooltip(Tooltip::text(tr!("composer.steer_turn")))
+                                            .tooltip(Tooltip::text(tr!(
+                                                "composer.steer_turn",
+                                                shortcut = crate::platform::primary_shortcut(
+                                                    "⌘↩",
+                                                    "Ctrl+Enter"
+                                                )
+                                            )))
                                             .on_click(cx.listener(|this, _, _, cx| {
                                                 let prompt =
                                                     this.composer.read(cx).content().to_owned();

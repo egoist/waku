@@ -1,0 +1,84 @@
+name: Sync release
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag to sync to R2
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    name: Sync assets to R2
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Resolve release tag
+        id: release
+        run: |
+          tag="${{ github.event.release.tag_name || inputs.tag }}"
+          if [ -z "$tag" ]; then
+            echo "::error::No release tag provided"
+            exit 1
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+      - name: Install rclone
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes rclone
+
+      - name: Download release assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          mkdir -p assets
+          gh release download "${{ steps.release.outputs.tag }}" \
+            --dir assets \
+            --repo "${{ github.repository }}"
+          if [ -z "$(ls -A assets)" ]; then
+            echo "::error::Release ${{ steps.release.outputs.tag }} has no assets"
+            exit 1
+          fi
+          ls -lah assets
+
+      - name: Upload assets to R2
+        env:
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_BUCKET: ${{ secrets.R2_BUCKET }}
+          RCLONE_CONFIG_R2_TYPE: s3
+          RCLONE_CONFIG_R2_PROVIDER: Cloudflare
+          RCLONE_CONFIG_R2_NO_CHECK_BUCKET: "true"
+        run: |
+          bucket="${R2_BUCKET:-waku-releases}"
+          export RCLONE_CONFIG_R2_ACCESS_KEY_ID="$R2_ACCESS_KEY_ID"
+          export RCLONE_CONFIG_R2_SECRET_ACCESS_KEY="$R2_SECRET_ACCESS_KEY"
+          export RCLONE_CONFIG_R2_ENDPOINT="https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com"
+          destination="r2:${bucket}"
+          immutable="Cache-Control: public, max-age=31536000, immutable"
+          fresh="Cache-Control: public, max-age=300, must-revalidate"
+
+          rclone copy assets "$destination" \
+            --s3-no-check-bucket \
+            --exclude appcast.xml \
+            --header-upload "$immutable" \
+            --progress
+
+          if [ -f assets/appcast.xml ]; then
+            rclone copyto assets/appcast.xml "${destination}/appcast.xml" \
+              --s3-no-check-bucket \
+              --header-upload "$fresh" \
+              --progress
+          fi

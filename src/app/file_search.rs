@@ -636,7 +636,7 @@ impl Waku {
             replace_all_content(content, &regex, &matches, &template, use_regex)
         };
         // Through `replace_range`, not `set_content`: a whole-content splice
-        // is a recorded edit, so Replace All is one cmd-z step, while
+        // is a recorded edit, so Replace All is one undo step, while
         // `set_content` would reset the editor's undo history as a reload.
         editor.update(cx, |editor, cx| {
             let len = editor.content().len();
@@ -814,7 +814,10 @@ impl Waku {
                 .child(find_toggle(
                     "find-toggle-case",
                     "icons/case-sensitive.svg",
-                    tr!("find.match_case"),
+                    tr!(
+                        "find.match_case",
+                        shortcut = crate::platform::primary_shortcut("⌥⌘C", "Ctrl+Alt+C")
+                    ),
                     search.case_sensitive,
                     theme,
                     cx.listener(|this, _, _, cx| {
@@ -824,7 +827,10 @@ impl Waku {
                 .child(find_toggle(
                     "find-toggle-word",
                     "icons/whole-word.svg",
-                    tr!("find.match_whole_word"),
+                    tr!(
+                        "find.match_whole_word",
+                        shortcut = crate::platform::primary_shortcut("⌥⌘W", "Ctrl+Alt+W")
+                    ),
                     search.whole_word,
                     theme,
                     cx.listener(|this, _, _, cx| {
@@ -834,7 +840,10 @@ impl Waku {
                 .child(find_toggle(
                     "find-toggle-regex",
                     "icons/regex.svg",
-                    tr!("find.use_regex"),
+                    tr!(
+                        "find.use_regex",
+                        shortcut = crate::platform::primary_shortcut("⌥⌘R", "Ctrl+Alt+R")
+                    ),
                     search.use_regex,
                     theme,
                     cx.listener(|this, _, _, cx| {
@@ -912,7 +921,10 @@ impl Waku {
                 .child(find_bar_button(
                     "replace-all",
                     "icons/replace-all.svg",
-                    tr!("find.replace_all"),
+                    tr!(
+                        "find.replace_all",
+                        shortcut = crate::platform::primary_shortcut("⌥⌘Enter", "Ctrl+Alt+Enter")
+                    ),
                     has_matches,
                     theme,
                     cx.listener(|this, _, _, cx| this.file_search_replace_all(cx)),

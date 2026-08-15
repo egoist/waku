@@ -144,7 +144,7 @@ impl Waku {
         self.selected_session().is_some()
     }
 
-    /// `cmd-u`: toggle the usage panel as if its footer trigger were clicked.
+    /// Primary modifier + U: toggle the usage panel as if its footer trigger were clicked.
     pub(super) fn toggle_usage_panel_action(
         &mut self,
         _: &ToggleUsagePanel,
@@ -244,10 +244,15 @@ impl Waku {
         };
         let tooltip = match (&error, percent) {
             (Some(error), _) => SharedString::from(tr!("usage.refresh_failed", error = error)),
-            (None, Some(percent)) => {
-                SharedString::from(tr!("usage.context_used", percent = format!("{percent:.0}")))
-            }
-            (None, None) => SharedString::from(tr!("usage.shortcut")),
+            (None, Some(percent)) => SharedString::from(tr!(
+                "usage.context_used",
+                percent = format!("{percent:.0}"),
+                shortcut = crate::platform::primary_shortcut("⌘U", "Ctrl+U")
+            )),
+            (None, None) => SharedString::from(tr!(
+                "usage.shortcut",
+                shortcut = crate::platform::primary_shortcut("⌘U", "Ctrl+U")
+            )),
         };
 
         let trigger = div()

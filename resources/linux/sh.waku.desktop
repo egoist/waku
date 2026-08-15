@@ -1,0 +1,11 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=Waku
+Comment=A native control plane for local coding agents
+Exec=waku
+Icon=sh.waku
+Terminal=false
+Categories=Development;IDE;
+StartupNotify=true
+StartupWMClass=sh.waku

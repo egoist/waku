@@ -1,4 +1,4 @@
-//! The window-wide command palette opened with `cmd-k`.
+//! The window-wide command palette opened with the platform's primary shortcut + K.
 //!
 //! The search field keeps real focus while the list cursor is drawn, matching
 //! native pickers and Zed's command palette. Metadata results rebuild when the
@@ -528,7 +528,7 @@ impl Waku {
                 display_section(PaletteSection::Suggested),
                 tr!("command_palette.new_task"),
                 "icons/pencil.svg",
-                Some("⌘N"),
+                Some(crate::platform::primary_shortcut("⌘N", "Ctrl+N")),
                 PaletteAction::NewTask,
                 "new task session chat conversation start",
                 next(),
@@ -537,7 +537,7 @@ impl Waku {
                 display_section(PaletteSection::Suggested),
                 tr!("command_palette.open_project"),
                 "icons/folder.svg",
-                Some("⌘O"),
+                Some(crate::platform::primary_shortcut("⌘O", "Ctrl+O")),
                 PaletteAction::OpenProject,
                 "open add folder project workspace repository repo",
                 next(),
@@ -552,7 +552,7 @@ impl Waku {
                 display_section(PaletteSection::Suggested),
                 tr!("command_palette.choose_model"),
                 "icons/bot.svg",
-                Some("⌘/"),
+                Some(crate::platform::primary_shortcut("⌘/", "Ctrl+/")),
                 PaletteAction::ChooseModel,
                 "choose change select model provider agent",
                 next(),
@@ -564,7 +564,7 @@ impl Waku {
                 PaletteSection::Commands,
                 tr!("menu.focus_composer"),
                 "icons/pencil.svg",
-                Some("⌘L"),
+                Some(crate::platform::primary_shortcut("⌘L", "Ctrl+L")),
                 PaletteAction::FocusComposer,
                 "focus composer prompt input message",
                 next(),
@@ -574,7 +574,7 @@ impl Waku {
                     PaletteSection::Commands,
                     tr!("menu.toggle_usage_panel"),
                     "icons/gauge.svg",
-                    Some("⌘U"),
+                    Some(crate::platform::primary_shortcut("⌘U", "Ctrl+U")),
                     PaletteAction::ToggleUsage,
                     "toggle usage limits rate quota panel",
                     next(),
@@ -589,7 +589,7 @@ impl Waku {
                         "command_palette.show_sidebar"
                     }),
                     "icons/panel-left.svg",
-                    Some("⌘B"),
+                    Some(crate::platform::primary_shortcut("⌘B", "Ctrl+B")),
                     PaletteAction::ToggleSidebar,
                     "toggle show hide left sidebar history tasks",
                     next(),
@@ -602,7 +602,7 @@ impl Waku {
                         "command_palette.show_right_panel"
                     }),
                     "icons/panel-right.svg",
-                    Some("⇧⌘B"),
+                    Some(crate::platform::primary_shortcut("⇧⌘B", "Ctrl+Shift+B")),
                     PaletteAction::ToggleRightPanel,
                     "toggle show hide right panel files diff terminal browser",
                     next(),
@@ -655,7 +655,8 @@ impl Waku {
                 PaletteSection::Settings,
                 crate::i18n::translate(label_key),
                 icon,
-                (page == SettingsPage::General).then_some("⌘,"),
+                (page == SettingsPage::General)
+                    .then_some(crate::platform::primary_shortcut("⌘,", "Ctrl+,")),
                 PaletteAction::OpenSettings(page),
                 keywords,
                 next(),

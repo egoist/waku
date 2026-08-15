@@ -48,6 +48,12 @@ menu.toggle_fps_counter:
   en: Toggle FPS Counter
 menu.close_window:
   en: Close Window
+window.minimize:
+  en: Minimize
+window.maximize:
+  en: Maximize
+window.restore:
+  en: Restore
 
 updater.update:
   en: Update
@@ -751,7 +757,7 @@ skills.duplicate_many:
 skills.open_file:
   en: Open SKILL.md
 skills.reveal:
-  en: Reveal in Finder
+  en: Show in File Manager
 skills.copy_path:
   en: Copy Path
 skills.path_copied:
@@ -803,7 +809,7 @@ composer.queued_followups_description:
 composer.preparing_task:
   en: Preparing task…
 composer.steer_turn:
-  en: Steer the running turn (⌘↩)
+  en: Steer the running turn (%{shortcut})
 composer.queue_followup:
   en: Queue as follow-up (⏎)
 
@@ -1159,7 +1165,7 @@ background.status.lost:
   en: Disconnected
 
 files.unsaved_changes:
-  en: Unsaved changes — ⌘S to save
+  en: Unsaved changes — %{shortcut} to save
 files.no_project_open:
   en: No project open
 files.no_project_open_description:
@@ -1219,19 +1225,19 @@ diff.expand_context_below:
   en: Show 100 lines below · Shift-click for all
 
 browser.back:
-  en: Back (⌘[)
+  en: Back (%{shortcut})
 browser.forward:
-  en: Forward (⌘])
+  en: Forward (%{shortcut})
 browser.stop_loading:
   en: Stop loading (Esc)
 browser.reload:
-  en: Reload (⌘R)
+  en: Reload (%{shortcut})
 browser.open_external:
   en: Open in default browser
 browser.browse_web:
   en: Browse the web
 browser.start_hint:
-  en: Enter a URL or search above — ⌘L focuses the address bar
+  en: Enter a URL or search above — %{shortcut} focuses the address bar
 browser.unavailable:
   en: Browser unavailable
 browser.requires_macos:
@@ -1244,11 +1250,11 @@ find.no_results:
 find.result_count:
   en: "%{current} of %{total}"
 find.match_case:
-  en: Match case (⌥⌘C)
+  en: Match case (%{shortcut})
 find.match_whole_word:
-  en: Match whole word (⌥⌘W)
+  en: Match whole word (%{shortcut})
 find.use_regex:
-  en: Use regular expression (⌥⌘R)
+  en: Use regular expression (%{shortcut})
 find.previous_match:
   en: Previous match (⇧Enter)
 find.next_match:
@@ -1258,7 +1264,7 @@ find.close:
 find.replace:
   en: Replace (Enter)
 find.replace_all:
-  en: Replace all (⌥⌘Enter)
+  en: Replace all (%{shortcut})
 find.toggle_replace:
   en: Toggle replace
 
@@ -1266,7 +1272,7 @@ common.dismiss_notification:
   en: Dismiss notification
 
 common.reveal_in_finder:
-  en: Reveal in Finder
+  en: Show in File Manager
 
 attachments.close_preview:
   en: Close image preview
@@ -1473,9 +1479,9 @@ usage.active_day_many:
 usage.refresh_failed:
   en: "Usage refresh failed: %{error}"
 usage.context_used:
-  en: Context window %{percent}% used (⌘U)
+  en: Context window %{percent}% used (%{shortcut})
 usage.shortcut:
-  en: Usage (⌘U)
+  en: Usage (%{shortcut})
 usage.context_window:
   en: Context window
 usage.plan_limits:

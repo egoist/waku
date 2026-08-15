@@ -226,7 +226,7 @@ impl Waku {
         region
             .on_click(|event, window, _| {
                 if event.click_count() == 2 {
-                    window.titlebar_double_click();
+                    crate::platform::titlebar_double_click(window);
                 }
             })
             .on_mouse_down_out(cx.listener(|this, _, _, _| {
@@ -346,13 +346,18 @@ impl Waku {
             .child(icon(icon_path, 14.0, theme.text_tertiary))
     }
 
-    fn render_sidebar_titlebar(&self, cx: &mut Context<Self>) -> Stateful<Div> {
+    fn render_sidebar_titlebar(&self, window: &Window, cx: &mut Context<Self>) -> Stateful<Div> {
         div()
             .id("sidebar-titlebar")
             .h(px(48.0))
             .flex_none()
             .flex()
             .items_center()
+            .children(self.render_client_window_controls(
+                super::window_chrome::WindowControlSide::Left,
+                window,
+                cx,
+            ))
             .child(
                 self.window_drag_region(
                     div()
@@ -668,7 +673,12 @@ impl Waku {
             })
     }
 
-    pub(super) fn render_sidebar(&self, width: f32, cx: &mut Context<Self>) -> Div {
+    pub(super) fn render_sidebar(
+        &self,
+        width: f32,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> Div {
         let theme = Theme::current(cx);
         let is_resizing = self
             .panel_resize_drag
@@ -693,7 +703,7 @@ impl Waku {
             } else {
                 theme.sidebar
             })
-            .child(self.render_sidebar_titlebar(cx))
+            .child(self.render_sidebar_titlebar(window, cx))
             .child(
                 div()
                     .flex_none()
@@ -1187,7 +1197,11 @@ impl Waku {
 
     // ── Header ─────────────────────────────────────────────────────────────
 
-    pub(super) fn render_header(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    pub(super) fn render_header(
+        &self,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         let theme = Theme::current(cx);
         let session = self.selected_session();
         let title = session
@@ -1196,6 +1210,24 @@ impl Waku {
         let agent_preset_label = session
             .filter(|session| session.provider == ProviderKind::DeepSeek && session.has_started())
             .and_then(|session| self.agent_preset_label_for_session(session));
+        let left_window_controls = (!self.sidebar_visible)
+            .then(|| {
+                self.render_client_window_controls(
+                    super::window_chrome::WindowControlSide::Left,
+                    window,
+                    cx,
+                )
+            })
+            .flatten();
+        let right_window_controls = (!self.right_panel_visible)
+            .then(|| {
+                self.render_client_window_controls(
+                    super::window_chrome::WindowControlSide::Right,
+                    window,
+                    cx,
+                )
+            })
+            .flatten();
         div()
             .id("window-header")
             .h(px(48.0))
@@ -1203,6 +1235,7 @@ impl Waku {
             .flex()
             .items_center()
             .gap(px(8.0))
+            .children(left_window_controls)
             .pl(if self.sidebar_visible {
                 px(14.0)
             } else {
@@ -1302,6 +1335,7 @@ impl Waku {
                     })
                     .child(self.render_right_panel_toggle(cx))
             })
+            .children(right_window_controls)
     }
 
     // ── Empty states ───────────────────────────────────────────────────────

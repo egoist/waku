@@ -1,7 +1,5 @@
 use std::collections::HashMap;
-use std::ffi::OsString;
 use std::fs;
-use std::os::unix::ffi::OsStringExt as _;
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -15,6 +13,11 @@ use uuid::Uuid;
 use crate::computer_use;
 use crate::driver::DriverEventSender;
 use crate::model::DriverEvent;
+
+#[cfg(target_os = "macos")]
+use std::ffi::OsString;
+#[cfg(target_os = "macos")]
+use std::os::unix::ffi::OsStringExt as _;
 
 #[derive(Clone)]
 pub(super) struct ComputerUseConfig {
@@ -172,6 +175,7 @@ pub(super) fn registered_processes(directory: &Path) -> Vec<(i32, PathBuf)> {
         .collect()
 }
 
+#[cfg(target_os = "macos")]
 pub(super) fn process_executable(pid: i32) -> Option<PathBuf> {
     let mut buffer = vec![0_u8; libc::PROC_PIDPATHINFO_MAXSIZE as usize];
     let length = unsafe {
@@ -186,4 +190,14 @@ pub(super) fn process_executable(pid: i32) -> Option<PathBuf> {
     }
     buffer.truncate(length as usize);
     Some(PathBuf::from(OsString::from_vec(buffer)))
+}
+
+#[cfg(target_os = "linux")]
+pub(super) fn process_executable(pid: i32) -> Option<PathBuf> {
+    fs::read_link(format!("/proc/{pid}/exe")).ok()
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+pub(super) fn process_executable(_: i32) -> Option<PathBuf> {
+    None
 }

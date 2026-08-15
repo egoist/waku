@@ -1467,7 +1467,7 @@ impl Waku {
                 self.open_right_panel_surface(RightPanelSurface::Files, cx);
                 self.open_right_panel_file(relative_path, cx);
             }
-            TranscriptLinkRoute::Finder(path) => crate::platform::reveal_in_finder(&path),
+            TranscriptLinkRoute::Finder(path) => crate::platform::reveal_in_file_manager(&path, cx),
             TranscriptLinkRoute::External => return false,
         }
         true
@@ -1914,7 +1914,7 @@ impl Waku {
             .border_color(theme.border_strong)
             .bg(theme.surface)
             .relative()
-            .child(self.render_right_panel_header(cx))
+            .child(self.render_right_panel_header(window, cx))
             .child(body)
             .child(self.render_panel_resize_handle(
                 "right-panel-resize-handle",
@@ -2043,7 +2043,7 @@ impl Waku {
         }
     }
 
-    fn render_right_panel_header(&self, cx: &mut Context<Self>) -> Stateful<Div> {
+    fn render_right_panel_header(&self, window: &Window, cx: &mut Context<Self>) -> Stateful<Div> {
         let theme = Theme::current(cx);
         let active_surface = self.right_panel_active_surface;
         let mut tabs = div()
@@ -2126,7 +2126,12 @@ impl Waku {
                                 .rounded_full()
                                 .bg(theme.warning)
                                 .tooltip(|window, cx| {
-                                    Tooltip::new(tr!("files.unsaved_changes")).build(window, cx)
+                                    Tooltip::new(tr!(
+                                        "files.unsaved_changes",
+                                        shortcut =
+                                            crate::platform::primary_shortcut("⌘S", "Ctrl+S")
+                                    ))
+                                    .build(window, cx)
                                 }),
                         )
                     })
@@ -2241,7 +2246,16 @@ impl Waku {
             );
         }
 
-        self.window_drag_region(header.child(self.render_right_panel_toggle(cx)), cx)
+        self.window_drag_region(
+            header.child(self.render_right_panel_toggle(cx)).children(
+                self.render_client_window_controls(
+                    super::window_chrome::WindowControlSide::Right,
+                    window,
+                    cx,
+                ),
+            ),
+            cx,
+        )
     }
 
     fn render_right_panel_chooser(&self, cx: &mut Context<Self>) -> Stateful<Div> {

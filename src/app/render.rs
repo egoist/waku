@@ -82,15 +82,16 @@ impl Render for Waku {
         if self.settings_page.is_some() {
             let command_palette = self.render_command_palette(window, cx);
             let commit_dialog = self.render_commit_dialog(cx);
-            return div()
+            let content = div()
                 .relative()
                 .size_full()
                 .on_action(cx.listener(Self::toggle_command_palette_action))
-                .child(self.render_settings(cx))
+                .child(self.render_settings(window, cx))
                 .children(command_palette)
                 .children(commit_dialog)
                 .children(image_preview)
                 .into_any_element();
+            return self.render_window_frame(content, window, cx);
         }
         // Re-armed every frame this window shows time labels; parks while
         // settings covers them and while the window isn't drawing at all.
@@ -126,7 +127,7 @@ impl Render for Waku {
             } else {
                 0.0
             };
-        div()
+        let content = div()
             .key_context("Waku")
             .on_action(cx.listener(Self::close_window_or_right_panel_tab_action))
             .on_action(cx.listener(Self::new_session_action))
@@ -162,7 +163,7 @@ impl Render for Waku {
             .text_color(theme.text)
             .font_family(".SystemUIFont")
             .when(self.sidebar_visible, |root| {
-                root.child(self.render_sidebar(sidebar_width, cx))
+                root.child(self.render_sidebar(sidebar_width, window, cx))
             })
             .child(
                 div()
@@ -175,7 +176,7 @@ impl Render for Waku {
                     .when(self.sidebar_visible, |element| {
                         element.border_l_1().border_color(theme.sidebar_border)
                     })
-                    .child(self.render_header(cx))
+                    .child(self.render_header(window, cx))
                     .child(if empty {
                         self.render_empty_state(cx).into_any_element()
                     } else {
@@ -205,7 +206,9 @@ impl Render for Waku {
             .children(command_palette)
             .children(commit_dialog)
             .children(image_preview)
-            .into_any_element()
+            .into_any_element();
+
+        self.render_window_frame(content, window, cx)
     }
 }
 

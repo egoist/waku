@@ -17,8 +17,12 @@ const DIALOG_INPUT_CONTEXT: &str = "CommitDialog > ComposerInput";
 
 pub fn init(cx: &mut App) {
     cx.bind_keys([
-        KeyBinding::new("cmd-enter", ConfirmCommitDialog, Some(DIALOG_INPUT_CONTEXT)),
-        KeyBinding::new("cmd-enter", ConfirmCommitDialog, Some(DIALOG_CONTEXT)),
+        KeyBinding::new(
+            "secondary-enter",
+            ConfirmCommitDialog,
+            Some(DIALOG_INPUT_CONTEXT),
+        ),
+        KeyBinding::new("secondary-enter", ConfirmCommitDialog, Some(DIALOG_CONTEXT)),
         KeyBinding::new("escape", DismissCommitDialog, Some(DIALOG_CONTEXT)),
     ]);
 }
@@ -569,7 +573,7 @@ impl Waku {
                         let _ = click_weak.update(cx, |waku, cx| waku.toggle_include_unstaged(cx));
                     })
                     .on_key_down(move |event: &KeyDownEvent, _, cx| {
-                        if !event.keystroke.modifiers.platform
+                        if !event.keystroke.modifiers.modified()
                             && matches!(event.keystroke.key.as_str(), "enter" | "space")
                         {
                             let _ =
@@ -598,7 +602,7 @@ impl Waku {
             },
             can_commit,
             commit_active,
-            Some("⌘↩"),
+            Some(crate::platform::primary_shortcut("⌘↩", "Ctrl+Enter")),
             CommitAction::Commit,
             weak.clone(),
             &theme,
@@ -820,7 +824,7 @@ fn render_commit_action_row(
                 });
             })
             .on_key_down(move |event: &KeyDownEvent, window, cx| {
-                if !event.keystroke.modifiers.platform
+                if !event.keystroke.modifiers.modified()
                     && matches!(event.keystroke.key.as_str(), "enter" | "space")
                 {
                     let _ = key_weak.update(cx, |waku, cx| {

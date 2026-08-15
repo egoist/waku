@@ -26,10 +26,11 @@
 use std::rc::Rc;
 
 use gpui::{
-    App, AsyncApp, Context, Div, Entity, FocusHandle, Focusable, ForegroundExecutor, IntoElement,
-    ObjectFit, Render, SharedString, Stateful, Subscription, WeakEntity, Window, canvas, div, img,
-    prelude::*, px,
+    App, Context, Div, Entity, FocusHandle, Focusable, IntoElement, ObjectFit, Render,
+    SharedString, Stateful, Subscription, Window, canvas, div, img, prelude::*, px,
 };
+#[cfg(target_os = "macos")]
+use gpui::{AsyncApp, ForegroundExecutor, WeakEntity};
 
 use crate::input::{ComposerEvent, ComposerInput};
 use crate::theme::Theme;
@@ -43,6 +44,7 @@ use crate::{
 
 const TOOLBAR_HEIGHT: f32 = 42.0;
 /// Mirror Safari's UA so sites serve the webview their real desktop build.
+#[cfg(target_os = "macos")]
 const USER_AGENT: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) \
      AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.5 Safari/605.1.15";
 
@@ -368,12 +370,14 @@ use host::WebviewHost;
 /// on the main thread but can fire while GPUI holds the app borrow, so the
 /// update always takes the next executor turn instead of re-entering.
 #[derive(Clone)]
+#[cfg(target_os = "macos")]
 struct Deferred {
     executor: ForegroundExecutor,
     cx: AsyncApp,
     view: WeakEntity<BrowserView>,
 }
 
+#[cfg(target_os = "macos")]
 impl Deferred {
     fn update(&self, f: impl FnOnce(&mut BrowserView, &mut Context<BrowserView>) + 'static) {
         let mut cx = self.cx.clone();
@@ -462,7 +466,7 @@ impl BrowserView {
             let view = weak_for_focus_in;
             move |_, cx| {
                 let _ = view.update(cx, |this: &mut Self, cx| {
-                    // Clicking, ⌘L-ing, or tabbing into the address bar while
+                    // Clicking, using the focus shortcut, or tabbing into the address bar while
                     // the page holds the native keyboard: take it back, or
                     // every keystroke keeps going to the page.
                     if this
@@ -658,6 +662,7 @@ impl BrowserView {
         self.host_error = Some(tr!("browser.requires_macos"));
     }
 
+    #[cfg(target_os = "macos")]
     fn page_load_changed(&mut self, event: PageLoad, url: String, cx: &mut Context<Self>) {
         match event {
             PageLoad::Started => {
@@ -678,6 +683,7 @@ impl BrowserView {
         cx.notify();
     }
 
+    #[cfg(target_os = "macos")]
     fn title_changed(&mut self, title: String, cx: &mut Context<Self>) {
         let title = (!title.trim().is_empty()).then_some(title);
         if self.page_title != title {
@@ -693,9 +699,6 @@ impl BrowserView {
             self.can_go_forward = host.webview.can_go_forward().unwrap_or(false);
         }
     }
-
-    #[cfg(not(target_os = "macos"))]
-    fn refresh_navigation_state(&mut self) {}
 
     /// Push the committed page URL into the address field unless the user is
     /// mid-edit there.
@@ -726,11 +729,11 @@ impl BrowserView {
         self.navigate_to_url(url, cx);
     }
 
+    #[cfg(target_os = "macos")]
     pub fn navigate_to_url(&mut self, url: String, cx: &mut Context<Self>) {
         let Some(host) = &self.host else {
             return;
         };
-        #[cfg(target_os = "macos")]
         if host.webview.load_url(&url).is_err() {
             return;
         }
@@ -743,13 +746,16 @@ impl BrowserView {
         cx.notify();
     }
 
+    #[cfg(not(target_os = "macos"))]
+    pub fn navigate_to_url(&mut self, _url: String, _cx: &mut Context<Self>) {}
+
     /// Hand the keyboard to the page. `makeFirstResponder` runs responder
     /// callbacks synchronously and this is reached from inside an entity
     /// update, so the native call takes the next executor turn.
-    fn focus_page(&mut self, cx: &mut Context<Self>) {
+    fn focus_page(&mut self, _cx: &mut Context<Self>) {
         #[cfg(target_os = "macos")]
         if let Some(host) = self.host.clone() {
-            cx.foreground_executor()
+            _cx.foreground_executor()
                 .spawn(async move {
                     let _ = host.webview.focus();
                 })
@@ -915,10 +921,10 @@ impl BrowserView {
 
     /// Return the native first responder to GPUI's view — deferred, since
     /// `makeFirstResponder` runs responder callbacks that may re-enter GPUI.
-    fn reclaim_native_keyboard(&mut self, cx: &mut Context<Self>) {
+    fn reclaim_native_keyboard(&mut self, _cx: &mut Context<Self>) {
         #[cfg(target_os = "macos")]
         if let Some(host) = self.host.clone() {
-            cx.foreground_executor()
+            _cx.foreground_executor()
                 .spawn(async move {
                     let _ = host.webview.focus_parent();
                 })
@@ -939,53 +945,53 @@ impl BrowserView {
         0.0
     }
 
-    fn go_back(&mut self, cx: &mut Context<Self>) {
+    fn go_back(&mut self, _cx: &mut Context<Self>) {
         #[cfg(target_os = "macos")]
         if let Some(host) = &self.host {
             let _ = host.webview.go_back();
             self.refresh_navigation_state();
-            cx.notify();
+            _cx.notify();
         }
     }
 
-    fn go_forward(&mut self, cx: &mut Context<Self>) {
+    fn go_forward(&mut self, _cx: &mut Context<Self>) {
         #[cfg(target_os = "macos")]
         if let Some(host) = &self.host {
             let _ = host.webview.go_forward();
             self.refresh_navigation_state();
-            cx.notify();
+            _cx.notify();
         }
     }
 
-    fn reload(&mut self, cx: &mut Context<Self>) {
+    fn reload(&mut self, _cx: &mut Context<Self>) {
         #[cfg(target_os = "macos")]
         if let Some(host) = &self.host
             && self.navigation_requested
         {
             let _ = host.webview.reload();
             self.loading = true;
-            cx.notify();
+            _cx.notify();
         }
     }
 
-    fn hard_reload(&mut self, cx: &mut Context<Self>) {
+    fn hard_reload(&mut self, _cx: &mut Context<Self>) {
         #[cfg(target_os = "macos")]
         if let Some(host) = &self.host
             && self.navigation_requested
         {
             unsafe { host.wk().reloadFromOrigin() };
             self.loading = true;
-            cx.notify();
+            _cx.notify();
         }
     }
 
-    fn stop_loading(&mut self, cx: &mut Context<Self>) {
+    fn stop_loading(&mut self, _cx: &mut Context<Self>) {
         #[cfg(target_os = "macos")]
         if let Some(host) = &self.host {
             unsafe { host.wk().stopLoading() };
             self.loading = false;
             self.refresh_navigation_state();
-            cx.notify();
+            _cx.notify();
         }
     }
 
@@ -1096,7 +1102,10 @@ impl BrowserView {
                 "browser-back",
                 "icons/arrow-left.svg",
                 self.can_go_back,
-                tr!("browser.back"),
+                tr!(
+                    "browser.back",
+                    shortcut = crate::platform::primary_shortcut("⌘[", "Ctrl+[")
+                ),
                 theme,
                 |this, _, cx| this.go_back(cx),
                 cx,
@@ -1105,7 +1114,10 @@ impl BrowserView {
                 "browser-forward",
                 "icons/arrow-right.svg",
                 self.can_go_forward,
-                tr!("browser.forward"),
+                tr!(
+                    "browser.forward",
+                    shortcut = crate::platform::primary_shortcut("⌘]", "Ctrl+]")
+                ),
                 theme,
                 |this, _, cx| this.go_forward(cx),
                 cx,
@@ -1125,7 +1137,10 @@ impl BrowserView {
                     "browser-reload",
                     "icons/rotate-cw.svg",
                     has_page,
-                    tr!("browser.reload"),
+                    tr!(
+                        "browser.reload",
+                        shortcut = crate::platform::primary_shortcut("⌘R", "Ctrl+R")
+                    ),
                     theme,
                     |this, _, cx| this.reload(cx),
                     cx,
@@ -1201,7 +1216,10 @@ impl BrowserView {
                     .line_height(px(17.0))
                     .text_color(theme.text_tertiary)
                     .whitespace_normal()
-                    .child(tr!("browser.start_hint")),
+                    .child(tr!(
+                        "browser.start_hint",
+                        shortcut = crate::platform::primary_shortcut("⌘L", "Ctrl+L")
+                    )),
             )
     }
 
@@ -1279,6 +1297,7 @@ impl BrowserView {
 
 /// Distilled page-load event, so handler closures stay free of wry types.
 #[derive(Clone, Copy)]
+#[cfg(target_os = "macos")]
 enum PageLoad {
     Started,
     Finished,
@@ -1334,6 +1353,7 @@ fn snapshot_render_image(
 /// reversed in memory. Snapshots are opaque, so premultiplication needs no
 /// undoing. Returns `None` for layouts snapshots never use (fewer than three
 /// samples, undersized buffers) — the caller falls back to no snapshot.
+#[cfg(any(target_os = "macos", test))]
 fn bgra_from_bitmap(
     bytes: &[u8],
     width: usize,
