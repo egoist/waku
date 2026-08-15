@@ -299,6 +299,7 @@ impl Backend for WakuBackend {
                         .iter()
                         .map(AgentSession::list_projection)
                         .collect(),
+                    automations: state.automations.clone(),
                     default_cwd: self.default_cwd.clone(),
                     projectless_root: crate::projectless::workspace_root(),
                 })
@@ -307,6 +308,7 @@ impl Backend for WakuBackend {
                 projects,
                 live_session_ids: _,
                 sessions,
+                automations,
             } => {
                 let active_runtimes = self
                     .sessions
@@ -366,6 +368,13 @@ impl Backend for WakuBackend {
                 });
                 for session_id in &saved_ids {
                     state.mark_session_dirty(*session_id);
+                }
+                // A sender that owns automations sends its complete set, and
+                // replacing wholesale is what makes a deletion stick. A sender
+                // that omits the field (the web client, which saves only the
+                // one session it changed) must leave the set untouched.
+                if let Some(automations) = automations {
+                    state.automations = automations;
                 }
                 self.task_store.save(&mut state)?;
                 let sessions = saved_ids

@@ -1047,6 +1047,7 @@ mod tests {
                     sessions: self.sessions.lock().clone(),
                     default_cwd: PathBuf::from("/tmp"),
                     projectless_root: Some(PathBuf::from("/tmp/.waku/projects")),
+                    automations: Vec::new(),
                 }),
                 _ => Ok(ResponsePayload::Ack),
             }
@@ -1106,6 +1107,7 @@ mod tests {
                         projects: Vec::new(),
                         live_session_ids: vec![session_id],
                         sessions: vec![session],
+                        automations: None,
                     },
                 )
                 .unwrap(),
@@ -1138,6 +1140,7 @@ mod tests {
                     projects: Vec::new(),
                     live_session_ids: vec![session_id],
                     sessions: vec![checkpoint],
+                    automations: None,
                 },
             )
             .unwrap();
@@ -1160,6 +1163,7 @@ mod tests {
                     projects: Vec::new(),
                     live_session_ids: vec![session_id, second_id],
                     sessions: vec![second],
+                    automations: None,
                 },
             )
             .unwrap();
@@ -1219,6 +1223,7 @@ mod tests {
                     projects: vec![project.clone()],
                     live_session_ids: vec![session.id],
                     sessions: vec![session.clone()],
+                    automations: None,
                 },
             )
             .unwrap();
@@ -1233,6 +1238,7 @@ mod tests {
                     projects: vec![project],
                     live_session_ids: vec![session.id],
                     sessions: vec![session],
+                    automations: None,
                 },
             )
             .unwrap()

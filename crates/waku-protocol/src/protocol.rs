@@ -6,6 +6,7 @@ use ts_rs::TS;
 use uuid::Uuid;
 
 use crate::attachments::{AttachmentUpload, StoredAttachment};
+use crate::automation::Automation;
 use crate::computer_use::ComputerPermissions;
 use crate::model::{AgentSession, Project, ProviderKind, ProviderProbe, UserInputAnswer};
 use crate::persistence::{ComposerDraftChange, ComposerDrafts, SessionMessageMatch};
@@ -157,6 +158,13 @@ pub enum Command {
         projects: Vec<Project>,
         live_session_ids: Vec<Uuid>,
         sessions: Vec<AgentSession>,
+        /// The sender's complete automation set, or `None` when the sender
+        /// does not own automations. Only a client that authors them sends
+        /// `Some`; every other client omits the field so a partial task save
+        /// cannot wipe the daemon's set.
+        #[serde(default)]
+        #[ts(optional)]
+        automations: Option<Vec<Automation>>,
     },
     /// Explicitly remove one daemon-owned task. Ordinary state saves are
     /// merge-only so a stale client snapshot cannot delete tasks another
@@ -385,6 +393,8 @@ pub enum ResponsePayload {
     TaskState {
         projects: Vec<Project>,
         sessions: Vec<AgentSession>,
+        #[serde(default)]
+        automations: Vec<Automation>,
         default_cwd: PathBuf,
         projectless_root: Option<PathBuf>,
     },

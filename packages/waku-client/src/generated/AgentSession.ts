@@ -37,7 +37,13 @@ context_window?: string | null,
  * Currently populated by DeepSeek Harness; unlike Build/Plan, Harness
  * locks this value once conversation history exists.
  */
-agent_preset?: string | null, status: SessionStatus, created_at: number,
+agent_preset?: string | null, status: SessionStatus,
+/**
+ * The automation this session was spawned by, when it originated from one.
+ * A promoted column, so the sidebar can badge the row without hydrating
+ * the transcript.
+ */
+originating_automation?: string | null, created_at: number,
 /**
  * Any mutation, including title edits and truncation. Use
  * [`Self::last_reply_at`] for conversation recency.

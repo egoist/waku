@@ -1952,9 +1952,17 @@ impl Waku {
         let provider = self.control_provider(target);
         let selected_model = self.control_selected_model(target);
         let model = self.model_metadata(provider, selected_model.as_deref())?;
+        // Automations predate configurable context windows and do not persist
+        // one. Keep that session-only trait out of the shared editor until the
+        // automation domain can carry it end to end.
+        let context_windows = if matches!(target, AgentControlTarget::Session) {
+            model.context_windows.clone()
+        } else {
+            Vec::new()
+        };
         if model.reasoning_efforts.is_empty()
             && model.service_tiers.is_empty()
-            && model.context_windows.is_empty()
+            && context_windows.is_empty()
         {
             return None;
         }
@@ -2007,22 +2015,17 @@ impl Waku {
                 .map(|option| option.label.clone())
                 .unwrap_or_else(|| selected_tier.clone())
         };
-        let selected_window = session
-            .context_window
+        let context_window = match target {
+            AgentControlTarget::Session => self
+                .selected_session()
+                .and_then(|session| session.context_window.clone()),
+            AgentControlTarget::Automation => None,
+        };
+        let selected_window = context_window
             .as_deref()
-            .filter(|selected| {
-                model
-                    .context_windows
-                    .iter()
-                    .any(|option| option.id == *selected)
-            })
+            .filter(|selected| context_windows.iter().any(|option| option.id == *selected))
             .or(model.default_context_window.as_deref())
-            .or_else(|| {
-                model
-                    .context_windows
-                    .first()
-                    .map(|option| option.id.as_str())
-            })
+            .or_else(|| context_windows.first().map(|option| option.id.as_str()))
             .map(str::to_owned);
         // A non-default window changes what the session costs and how much it
         // can hold, so it reads on the chip rather than only inside the menu.
@@ -2038,15 +2041,16 @@ impl Waku {
             });
 
         let fast = selected_tier == "fast" || tier_label.eq_ignore_ascii_case("fast");
-        let trigger_label = match (effort_label.unwrap_or_else(|| tier_label.clone()), window_label)
-        {
+        let trigger_label = match (
+            effort_label.unwrap_or_else(|| tier_label.clone()),
+            window_label,
+        ) {
             (label, Some(window)) => format!("{label} · {window}"),
             (label, None) => label,
         };
         let reasoning_efforts = model.reasoning_efforts.clone();
         let default_effort = model.default_reasoning_effort.clone();
         let service_tiers = model.service_tiers.clone();
-        let context_windows = model.context_windows.clone();
         let default_window = model.default_context_window.clone();
         let default_tier = model
             .default_service_tier

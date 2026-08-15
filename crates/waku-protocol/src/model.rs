@@ -900,6 +900,10 @@ impl AgentSession {
             context_window: None,
             agent_preset: None,
             status: self.status,
+            // The sidebar groups runs under their automation straight from the
+            // catalog, so this projection must carry the link even though it
+            // drops every other detail field.
+            originating_automation: self.originating_automation,
             created_at: self.created_at,
             updated_at: self.updated_at,
             last_reply_at: self.last_reply_at,

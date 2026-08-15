@@ -15,6 +15,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::{Command, DaemonExposureSettings, DaemonSettings, DaemonSupervisor, ResponsePayload};
+use waku_protocol::automation::Automation;
 use waku_protocol::computer_use::ComputerAppGrant;
 use waku_protocol::i18n::AppLanguage;
 use waku_protocol::identity::DATA_DIRECTORY_NAME;
@@ -272,6 +273,11 @@ pub struct PersistedState {
     pub analytics_enabled: bool,
     pub projects: Vec<Project>,
     pub sessions: Vec<AgentSession>,
+    /// Saved scheduling automations, mirrored from the daemon alongside the
+    /// task catalog. Read whole and reconciled on save; no dirty tracking
+    /// because they are few and cheap to re-serialize.
+    #[serde(default)]
+    pub automations: Vec<Automation>,
     pub selected_project: Option<Uuid>,
     pub selected_session: Option<Uuid>,
     pub last_provider: ProviderKind,
@@ -333,6 +339,29 @@ impl PersistedState {
         self.sessions.push(session);
     }
 
+    pub fn automation(&self, id: Uuid) -> Option<&Automation> {
+        self.automations
+            .iter()
+            .find(|automation| automation.id == id)
+    }
+
+    pub fn automation_mut(&mut self, id: Uuid) -> Option<&mut Automation> {
+        self.automations
+            .iter_mut()
+            .find(|automation| automation.id == id)
+    }
+
+    pub fn push_automation(&mut self, automation: Automation) {
+        self.automations.push(automation);
+    }
+
+    /// Removes an automation, returning whether one was found.
+    pub fn remove_automation(&mut self, id: Uuid) -> bool {
+        let before = self.automations.len();
+        self.automations.retain(|automation| automation.id != id);
+        self.automations.len() != before
+    }
+
     pub fn empty() -> Self {
         Self {
             version: STATE_VERSION,
@@ -340,6 +369,7 @@ impl PersistedState {
             analytics_enabled: true,
             projects: Vec::new(),
             sessions: Vec::new(),
+            automations: Vec::new(),
             selected_project: None,
             selected_session: None,
             last_provider: ProviderKind::Codex,
@@ -784,7 +814,7 @@ impl StateStore {
     }
 
     pub fn load(&self) -> io::Result<PersistedState> {
-        let (projects, mut sessions, default_cwd) = match self
+        let (projects, mut sessions, automations, default_cwd) = match self
             .daemon
             .client()
             .request(Uuid::nil(), Uuid::nil(), Command::LoadTaskState)
@@ -793,11 +823,12 @@ impl StateStore {
             ResponsePayload::TaskState {
                 projects,
                 sessions,
+                automations,
                 default_cwd,
                 projectless_root,
             } => {
                 waku_protocol::projectless::set_workspace_root(projectless_root);
-                (projects, sessions, default_cwd)
+                (projects, sessions, automations, default_cwd)
             }
             _ => {
                 return Err(io::Error::other(
@@ -810,6 +841,7 @@ impl StateStore {
         let mut state = PersistedState::empty();
         state.projects = projects;
         state.sessions = sessions;
+        state.automations = automations;
         let app_settings_missing = !self.app_settings_path.is_file();
         if let Some(settings) = self.read_app_settings()? {
             state.apply_app_settings(settings);
@@ -871,6 +903,7 @@ impl StateStore {
                     projects: state.projects.clone(),
                     live_session_ids,
                     sessions,
+                    automations: Some(state.automations.clone()),
                 },
             )
             .map_err(to_io_error)?;
@@ -1009,6 +1042,7 @@ mod tests {
             sessions: vec![session],
             default_cwd: PathBuf::from("/daemon/project"),
             projectless_root: None,
+            automations: Vec::new(),
         })
         .unwrap();
         let ResponsePayload::TaskState { mut sessions, .. } =

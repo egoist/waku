@@ -170,9 +170,18 @@ fn prepare_submission(
     let allocated_project_path = if project.is_projectless()
         && crate::projectless::workspace_root().is_some_and(|root| project.path == root)
     {
-        let workspace = crate::projectless::create_workspace(Some(prompt))?;
-        project.path = workspace.cwd.clone();
-        Some(workspace.cwd)
+        // The daemon owns the projectless workspace root, so allocation is an
+        // RPC rather than a local mkdir.
+        let cwd = match workspace_client.request(
+            waku_client::WorkspaceOperation::CreateProjectlessWorkspace {
+                prompt: Some(prompt.to_owned()),
+            },
+        )? {
+            waku_client::WorkspaceResult::ProjectlessWorkspace { cwd } => cwd,
+            _ => anyhow::bail!("the daemon returned an invalid projectless workspace response"),
+        };
+        project.path = cwd.clone();
+        Some(cwd)
     } else {
         None
     };

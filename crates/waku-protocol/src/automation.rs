@@ -19,6 +19,7 @@ pub mod planner;
 pub mod schedule;
 
 use serde::{Deserialize, Serialize};
+use ts_rs::TS;
 use uuid::Uuid;
 
 use crate::model::{InteractionMode, ProviderKind, RuntimeMode, SessionWorkspace};
@@ -32,7 +33,7 @@ pub const MAX_HISTORY: usize = 50;
 /// Persisted whole as a JSON blob keyed by [`Automation::id`]. The schedule is a
 /// tagged enum ([`Schedule`]) so a raw-cron variant can be added later without
 /// migrating existing rows.
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize, TS)]
 pub struct Automation {
     pub id: Uuid,
     pub name: String,
@@ -154,7 +155,7 @@ impl Automation {
 
 /// The agent configuration a run is spawned with. Mirrors the config fields of
 /// [`crate::model::AgentSession`] so it drops straight onto a spawned session.
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize, TS)]
 pub struct AutomationAgent {
     pub provider: ProviderKind,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -188,7 +189,7 @@ impl AutomationAgent {
 
 /// Local-time wall clock, no date. Interpreted in the machine's local timezone
 /// at the scheduling boundary.
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
 pub struct TimeOfDay {
     pub hour: u8,
     pub minute: u8,
@@ -209,7 +210,7 @@ impl Default for TimeOfDay {
 
 /// A day of the week, Monday-first. Kept independent of `chrono::Weekday` so its
 /// serialized spelling is stable regardless of chrono's serde feature.
-#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize, TS)]
 #[serde(rename_all = "camelCase")]
 pub enum Weekday {
     Monday,
@@ -247,7 +248,7 @@ impl Weekday {
 
 /// When an automation fires. A tagged enum so a raw-cron variant can be added
 /// later without migrating stored rows.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum Schedule {
     /// Never fires on its own; runs only when the user starts it (Run-now).
@@ -289,7 +290,7 @@ impl Schedule {
 
 /// What to do when a schedule comes due while a prior run of the same
 /// automation is still active.
-#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize, TS)]
 #[serde(rename_all = "camelCase")]
 pub enum OverlapPolicy {
     /// Skip the due occurrence and record it as skipped.
@@ -302,7 +303,7 @@ pub enum OverlapPolicy {
 }
 
 /// Whether and when a finished run raises a system notification.
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
 pub struct NotificationConfig {
     pub enabled: bool,
     pub trigger: NotificationTrigger,
@@ -332,7 +333,7 @@ impl Default for NotificationConfig {
 }
 
 /// Which outcomes a notification fires for.
-#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize, TS)]
 #[serde(rename_all = "camelCase")]
 pub enum NotificationTrigger {
     Always,
@@ -353,7 +354,7 @@ impl NotificationTrigger {
 }
 
 /// One entry in an automation's bounded run history.
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize, TS)]
 pub struct AutomationRun {
     pub id: Uuid,
     /// When the run was initiated (or skipped), unix seconds.
@@ -393,7 +394,7 @@ impl AutomationRun {
 }
 
 /// The lifecycle outcome recorded for a run.
-#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize, TS)]
 #[serde(rename_all = "camelCase")]
 pub enum RunOutcome {
     /// Spawned and still in flight.
