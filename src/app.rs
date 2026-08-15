@@ -142,17 +142,6 @@ pub(crate) fn task_notification_tag(session_id: Uuid) -> String {
     format!("{TASK_NOTIFICATION_TAG_PREFIX}{session_id}")
 }
 
-pub(crate) fn task_id_from_notification_tag(tag: &str) -> Option<Uuid> {
-    tag.strip_prefix(TASK_NOTIFICATION_TAG_PREFIX)?.parse().ok()
-}
-
-fn should_show_generic_task_notification(
-    app_is_backgrounded: bool,
-    originating_automation: Option<Uuid>,
-) -> bool {
-    app_is_backgrounded && originating_automation.is_none()
-}
-
 /// Delay from `now` to the next whole wall-clock minute.
 fn automation_boundary_delay(now: std::time::SystemTime) -> Duration {
     let elapsed = now
@@ -2514,42 +2503,28 @@ impl Waku {
                 },
             )
             .detach();
-            cx.subscribe(
-                &automation_name_input,
-                |_: &mut Self, _, event: &ComposerEvent, cx| {
+            for input in [&automation_name_input, &automation_prompt_input] {
+                cx.subscribe(input, |_: &mut Self, _, event: &ComposerEvent, cx| {
                     if matches!(event, ComposerEvent::Edited) {
                         cx.notify();
                     }
-                },
-            )
-            .detach();
-            cx.subscribe(
-                &automation_prompt_input,
-                |_: &mut Self, _, event: &ComposerEvent, cx| {
-                    if matches!(event, ComposerEvent::Edited) {
-                        cx.notify();
-                    }
-                },
-            )
-            .detach();
-            cx.subscribe(
-                &automation_hour_input,
-                |this: &mut Self, _, event: &ComposerEvent, cx| {
-                    if matches!(event, ComposerEvent::Edited) {
-                        this.on_automation_time_edited(false, cx);
-                    }
-                },
-            )
-            .detach();
-            cx.subscribe(
-                &automation_minute_input,
-                |this: &mut Self, _, event: &ComposerEvent, cx| {
-                    if matches!(event, ComposerEvent::Edited) {
-                        this.on_automation_time_edited(true, cx);
-                    }
-                },
-            )
-            .detach();
+                })
+                .detach();
+            }
+            for (input, minute_field) in [
+                (&automation_hour_input, false),
+                (&automation_minute_input, true),
+            ] {
+                cx.subscribe(
+                    input,
+                    move |this: &mut Self, _, event: &ComposerEvent, cx| {
+                        if matches!(event, ComposerEvent::Edited) {
+                            this.on_automation_time_edited(minute_field, cx);
+                        }
+                    },
+                )
+                .detach();
+            }
             cx.subscribe(
                 &session_rename_input,
                 |this: &mut Self, _, event: &ComposerEvent, cx| match event {

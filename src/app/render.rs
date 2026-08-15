@@ -183,35 +183,21 @@ impl Render for Waku {
             self.render_toast(message, tone, generation, cx)
                 .into_any_element()
         });
-        let main_column = if matches!(self.active_page.as_ref(), Some(ActivePage::Automations(_))) {
-            div()
-                .flex_1()
-                .h_full()
-                .min_w_0()
-                .flex()
-                .flex_col()
-                .bg(theme.surface)
-                .when(self.sidebar_visible, |element| {
-                    element.border_l_1().border_color(theme.sidebar_border)
-                })
-                .child(self.render_automations(window, cx))
-                .relative()
-                .children(toast)
-                .children(sidebar_resize_handle)
+        let automations_page_open =
+            matches!(self.active_page.as_ref(), Some(ActivePage::Automations(_)));
+        let computer_use = if automations_page_open {
+            None
+        } else {
+            self.render_computer_use_overlay(cx)
+        };
+        let main_body = if automations_page_open {
+            self.render_automations(window, cx)
         } else {
             let empty = should_render_empty_state(self.selected_session());
             let permission = self.render_permission(cx);
-            let computer_use = self.render_computer_use_overlay(cx);
             div()
-                .flex_1()
-                .h_full()
-                .min_w_0()
                 .flex()
                 .flex_col()
-                .bg(theme.surface)
-                .when(self.sidebar_visible, |element| {
-                    element.border_l_1().border_color(theme.sidebar_border)
-                })
                 .child(self.render_header(window, cx))
                 .child(if empty {
                     self.render_empty_state(cx).into_any_element()
@@ -228,11 +214,25 @@ impl Render for Waku {
                         .child(self.render_composer(window, cx))
                         .child(self.render_workspace_footer(cx))
                 })
-                .relative()
-                .children(toast)
-                .children(computer_use)
-                .children(sidebar_resize_handle)
+                .flex_1()
+                .min_h_0()
+                .into_any_element()
         };
+        let main_column = div()
+            .flex_1()
+            .h_full()
+            .min_w_0()
+            .flex()
+            .flex_col()
+            .bg(theme.surface)
+            .when(self.sidebar_visible, |element| {
+                element.border_l_1().border_color(theme.sidebar_border)
+            })
+            .child(main_body)
+            .relative()
+            .children(toast)
+            .children(computer_use)
+            .children(sidebar_resize_handle);
         let content = div()
             .key_context("Waku")
             .on_action(cx.listener(Self::close_window_or_right_panel_tab_action))

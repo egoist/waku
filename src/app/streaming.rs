@@ -508,10 +508,7 @@ impl Waku {
                     .iter()
                     .find(|session| session.id == session_id)
                     .filter(|session| {
-                        should_show_generic_task_notification(
-                            cx.active_window().is_none(),
-                            session.originating_automation,
-                        )
+                        cx.active_window().is_none() && session.originating_automation.is_none()
                     })
                     .map(|session| {
                         let title = if session.display_title() == AgentSession::DEFAULT_TITLE {

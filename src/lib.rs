@@ -343,7 +343,10 @@ pub fn run() {
             cx.on_system_notification_response({
                 let window = window;
                 move |response, cx| {
-                    let Some(session_id) = crate::app::task_id_from_notification_tag(&response.tag)
+                    let Some(session_id) = response
+                        .tag
+                        .strip_prefix("waku-task:")
+                        .and_then(|id| id.parse().ok())
                     else {
                         return;
                     };
