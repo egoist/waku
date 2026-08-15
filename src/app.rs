@@ -2992,6 +2992,9 @@ impl Waku {
             for session_id in startup_live_session_ids {
                 this.start_runtime_attachment(session_id, cx);
             }
+            if this.stream_state_dirty {
+                this.schedule_stream_state_save(cx);
+            }
             this.start_pending_checkpoint_captures(cx);
             // The autocomplete indexes prefetch alongside, so typing `/` or
             // `@` into the very first prompt already has data to draw.

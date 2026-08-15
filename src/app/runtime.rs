@@ -151,6 +151,10 @@ fn automation_preparation_is_current(
     }
 }
 
+fn stream_save_delay(elapsed: Duration) -> Duration {
+    STREAM_SAVE_INTERVAL.saturating_sub(elapsed)
+}
+
 /// Perform every blocking operation between accepting a submission and
 /// starting its provider. This function is called only from the background
 /// executor; the UI thread owns applying the returned workspace afterward.
@@ -1187,6 +1191,16 @@ impl Waku {
         }
         self.save();
         cx.notify();
+    }
+
+    pub(super) fn schedule_stream_state_save(&self, cx: &mut Context<Self>) {
+        let delay = stream_save_delay(self.last_stream_save.elapsed());
+        let event_wake = self.event_wake_tx.clone();
+        cx.spawn(async move |_, cx| {
+            cx.background_executor().timer(delay).await;
+            signal_event_pump(&event_wake);
+        })
+        .detach();
     }
 
     pub fn composer_focus(&self, cx: &App) -> FocusHandle {
@@ -3114,6 +3128,7 @@ impl Waku {
             );
             self.settle_automation_run(session_id, crate::automation::RunOutcome::Cancelled, cx);
             self.stream_state_dirty = true;
+            self.schedule_stream_state_save(cx);
             cx.notify();
             return;
         }
@@ -3171,6 +3186,7 @@ impl Waku {
                         cx,
                     );
                     self.stream_state_dirty = true;
+                    self.schedule_stream_state_save(cx);
                 }
                 if selected {
                     if self
@@ -3529,7 +3545,12 @@ mod response_fork_title_tests {
 
 #[cfg(test)]
 mod automation_preparation_tests {
-    use super::{AutomationPreparationVersion, automation_preparation_is_current};
+    use std::time::Duration;
+
+    use super::{
+        AutomationPreparationVersion, automation_preparation_is_current, stream_save_delay,
+    };
+    use crate::app::STREAM_SAVE_INTERVAL;
     use crate::automation::Automation;
     use crate::model::ProviderKind;
 
@@ -3569,6 +3590,16 @@ mod automation_preparation_tests {
             Some(4)
         ));
         assert!(automation_preparation_is_current(None, None, None));
+    }
+
+    #[test]
+    fn deferred_stream_saves_wait_only_for_the_remaining_batch_interval() {
+        assert_eq!(stream_save_delay(Duration::ZERO), STREAM_SAVE_INTERVAL);
+        assert_eq!(
+            stream_save_delay(STREAM_SAVE_INTERVAL / 2),
+            STREAM_SAVE_INTERVAL / 2
+        );
+        assert_eq!(stream_save_delay(STREAM_SAVE_INTERVAL * 2), Duration::ZERO);
     }
 }
 
