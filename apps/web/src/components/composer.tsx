@@ -15,6 +15,7 @@ import {
   useRef,
   useState,
   type KeyboardEvent,
+  type MouseEvent as ReactMouseEvent,
   type RefObject,
 } from 'react'
 import { Virtuoso, type VirtuosoHandle } from 'react-virtuoso'
@@ -72,6 +73,14 @@ import { sessionHasStarted } from '@/lib/sidebar-presentation'
 import { cn } from '@/lib/utils'
 
 type Translator = (key: string, params?: Record<string, string | number>) => string
+
+function preserveComposerFocusOnMouseDown(event: ReactMouseEvent<HTMLElement>) {
+  // Portal events still bubble through the React tree. Only cancel the native
+  // focus transfer for controls physically inside this footer, not menu rows.
+  if (event.button === 0 && event.currentTarget.contains(event.target as Node)) {
+    event.preventDefault()
+  }
+}
 
 const MODEL_OPTION_KEYS: Record<string, string> = {
   none: 'model_option.none',
@@ -620,25 +629,15 @@ export function Composer({
               onKeyDown={keyDown}
               onSelect={(event) => setCursor(event.currentTarget.selectionStart)}
             />
-          <div className="mt-2 flex min-w-0 items-center gap-1 pb-px text-[11.5px] leading-[14px]">
-            <Button
-              aria-expanded={filePickerOpen}
-              aria-haspopup="dialog"
-              aria-label={t('composer.attach_daemon')}
-              className="size-6 rounded-md text-[var(--text-secondary)]"
-              disabled={!client || uploading}
-              size="icon-sm"
-              title={t('composer.attach_daemon_title')}
-              type="button"
-              variant="ghost"
-              onClick={() => setFilePickerOpen(true)}
-            >
-              <WakuIcon className="size-[14px]" name="paperclip" />
-            </Button>
+          <div
+            className="mt-2 flex min-w-0 items-center gap-1 pb-px text-[11.5px] leading-[14px]"
+            onMouseDown={preserveComposerFocusOnMouseDown}
+          >
             <ModelPicker
               currentProbe={probe.data}
               openSignal={modelPickerSignal}
               onOpenSignalHandled={onModelPickerSignalHandled}
+              returnFocus={composerInput}
               session={session}
               onChange={(provider, model) => {
                 const preferences = config
@@ -661,14 +660,24 @@ export function Composer({
               }}
             />
             {selectedModel && (
-              <ModelTraitsControl model={selectedModel} session={session} onPatch={savePatch} />
+              <ModelTraitsControl
+                model={selectedModel}
+                returnFocus={composerInput}
+                session={session}
+                onPatch={savePatch}
+              />
             )}
-            <AgentPresetControl probe={probe.data} session={session} onPatch={savePatch} />
-            <AccessControl session={session} onPatch={savePatch} />
+            <AgentPresetControl
+              probe={probe.data}
+              returnFocus={composerInput}
+              session={session}
+              onPatch={savePatch}
+            />
+            <AccessControl returnFocus={composerInput} session={session} onPatch={savePatch} />
             <InteractionModeControl session={session} onPatch={savePatch} />
             <div className="flex-1" />
-            {busy ? (
-              <div className="flex items-center gap-1.5">
+            <div className="flex items-center gap-2">
+              {busy && (
                 <Button
                   aria-label={t(escapeStopArmed ? 'composer.stop_confirm' : 'composer.stop')}
                   className="rounded-full"
@@ -680,18 +689,34 @@ export function Composer({
                     ? <span className="text-[10px] font-semibold">Esc</span>
                     : <WakuIcon className="size-[18px]" name="stopFilled" />}
                 </Button>
-                {canSteer && hasDraft && (
-                  <Button
-                    aria-label={t('composer.steer_current')}
-                    className="rounded-full text-[var(--warning)]"
-                    size="icon-sm"
-                    variant="secondary"
-                    onClick={() => void steer()}
-                  >
-                    <WakuIcon className="size-[13px]" name="zap" />
-                  </Button>
-                )}
-                {hasDraft && (
+              )}
+              {busy && canSteer && hasDraft && (
+                <Button
+                  aria-label={t('composer.steer_current')}
+                  className="rounded-full text-[var(--warning)]"
+                  size="icon-sm"
+                  variant="secondary"
+                  onClick={() => void steer()}
+                >
+                  <WakuIcon className="size-[13px]" name="zap" />
+                </Button>
+              )}
+              <Button
+                aria-expanded={filePickerOpen}
+                aria-haspopup="dialog"
+                aria-label={t('composer.attach_daemon')}
+                className="size-6 rounded-md text-[var(--text-secondary)]"
+                disabled={!client || uploading}
+                size="icon-sm"
+                title={t('composer.attach_daemon_title')}
+                type="button"
+                variant="ghost"
+                onClick={() => setFilePickerOpen(true)}
+              >
+                <WakuIcon className="size-[14px]" name="paperclip" />
+              </Button>
+              {busy ? (
+                hasDraft && (
                   <Button
                     aria-label={t('composer.queue_followup')}
                     className="rounded-full"
@@ -701,19 +726,19 @@ export function Composer({
                   >
                     <WakuIcon name="arrowUp" />
                   </Button>
-                )}
-              </div>
-            ) : (
-              <Button
-                aria-label={t('common.send')}
-                className="rounded-full"
-                disabled={submitting || uploading || !hasDraft}
-                size="icon-sm"
-                onClick={() => void submit()}
-              >
-                <WakuIcon name="arrowUp" />
-              </Button>
-            )}
+                )
+              ) : (
+                <Button
+                  aria-label={t('common.send')}
+                  className="rounded-full"
+                  disabled={submitting || uploading || !hasDraft}
+                  size="icon-sm"
+                  onClick={() => void submit()}
+                >
+                  <WakuIcon name="arrowUp" />
+                </Button>
+              )}
+            </div>
             </div>
           </section>
         </div>
@@ -728,7 +753,10 @@ export function Composer({
           />
         )}
 
-        <div className="flex h-8 min-w-0 items-center gap-1 px-2 text-[11px] text-[var(--text-tertiary)]">
+        <div
+          className="flex h-8 min-w-0 items-center gap-1 px-2 text-[11px] text-[var(--text-tertiary)]"
+          onMouseDown={preserveComposerFocusOnMouseDown}
+        >
           <ControlMenu
             caret={false}
             disabled={busy || sessionHasStarted(session)}
@@ -758,6 +786,7 @@ export function Composer({
             ]}
             label={projectless ? t('project.choose_project') : projectName}
             menuClassName="w-56"
+            returnFocus={composerInput}
             triggerClassName="h-6 max-w-36 px-1.5 text-[11px]"
           />
           <ControlMenu
@@ -769,12 +798,14 @@ export function Composer({
               { id: 'newWorktree', section: t('workspace.work_in'), label: t('workspace.new_worktree'), icon: 'fork', disabled: projectless, selected: !workspaceLocal, onSelect: () => savePatch({ workspace: { kind: 'newWorktree' } }) },
             ]}
             label={workspaceLabel}
+            returnFocus={composerInput}
             triggerClassName="h-6 max-w-32 px-1.5 text-[11px]"
           />
           {!projectless && branches.data && (
             <BranchPicker
               disabled={busy || branchPending}
               pending={branchPending}
+              returnFocus={composerInput}
               snapshot={branches.data}
               workspace={workspace}
               onCreate={(branch) => void switchBranch(branch, true)}
@@ -787,6 +818,7 @@ export function Composer({
           <UsageMeter
             openSignal={usagePanelSignal}
             providerVersion={probe.data?.version ?? null}
+            returnFocus={composerInput}
             session={session}
             onOpenSignalHandled={onUsagePanelSignalHandled}
           />
@@ -960,6 +992,7 @@ function ComposerAttachmentTile({
         className="absolute right-[3px] top-[3px] z-10 grid size-4 place-items-center rounded-[5px] bg-background/80 text-[var(--text-secondary)] outline-none hover:bg-background focus-visible:ring-1 focus-visible:ring-ring"
         type="button"
         onClick={onRemove}
+        onMouseDown={(event) => event.preventDefault()}
       >
         <WakuIcon className="size-[9px]" name="x" />
       </button>
@@ -971,10 +1004,12 @@ function ModelTraitsControl({
   session,
   model,
   onPatch,
+  returnFocus,
 }: {
   session: AgentSession
   model: ProviderModel
   onPatch: (patch: Partial<AgentSession>) => void
+  returnFocus: RefObject<HTMLElement | null>
 }) {
   const { t } = useI18n()
   if (!model.reasoning_efforts.length && !model.service_tiers.length) return null
@@ -1029,6 +1064,7 @@ function ModelTraitsControl({
       items={items}
       label={effortLabel ?? tierLabel}
       menuClassName="w-56"
+      returnFocus={returnFocus}
     />
   )
 }
@@ -1037,10 +1073,12 @@ function AgentPresetControl({
   session,
   probe,
   onPatch,
+  returnFocus,
 }: {
   session: AgentSession
   probe?: ProviderProbe
   onPatch: (patch: Partial<AgentSession>) => void
+  returnFocus: RefObject<HTMLElement | null>
 }) {
   const { t } = useI18n()
   if (
@@ -1068,6 +1106,7 @@ function AgentPresetControl({
       }))}
       label={selected ? agentPresetLabel(selected, t) : t('agent_preset.standard')}
       menuClassName="w-80"
+      returnFocus={returnFocus}
     />
   )
 }
@@ -1087,9 +1126,11 @@ const ACCESS_MODES: Array<{
 function AccessControl({
   session,
   onPatch,
+  returnFocus,
 }: {
   session: AgentSession
   onPatch: (patch: Partial<AgentSession>) => void
+  returnFocus: RefObject<HTMLElement | null>
 }) {
   const { t } = useI18n()
   const selectedId = session.runtime_mode === 'plan' ? 'ask' : session.runtime_mode
@@ -1108,6 +1149,7 @@ function AccessControl({
       }))}
       label={t(selected.labelKey)}
       menuClassName="w-[304px]"
+      returnFocus={returnFocus}
     />
   )
 }
@@ -1196,6 +1238,7 @@ function BranchPicker({
   workspace,
   disabled,
   pending,
+  returnFocus,
   onSelect,
   onCreate,
   onRefresh,
@@ -1204,6 +1247,7 @@ function BranchPicker({
   workspace: NonNullable<AgentSession['workspace']>
   disabled: boolean
   pending: boolean
+  returnFocus: RefObject<HTMLElement | null>
   onSelect: (branch: string) => void
   onCreate: (branch: string) => void
   onRefresh: () => void
@@ -1288,6 +1332,7 @@ function BranchPicker({
           <Popover.Popup
             aria-label={t('branches.choose')}
             className="waku-popover-surface flex max-h-[390px] w-[360px] flex-col overflow-hidden rounded-[13px] outline-none"
+            finalFocus={(closeType) => closeType === 'keyboard' ? true : returnFocus.current}
             initialFocus={input}
             role="dialog"
             onKeyDown={(event) => {
@@ -1426,11 +1471,13 @@ function UsageMeter({
   providerVersion,
   openSignal,
   onOpenSignalHandled,
+  returnFocus,
 }: {
   session: AgentSession
   providerVersion: string | null
   openSignal?: number
   onOpenSignalHandled?: () => void
+  returnFocus: RefObject<HTMLElement | null>
 }) {
   const { locale, t } = useI18n()
   const { client, config } = useDaemon()
@@ -1485,6 +1532,7 @@ function UsageMeter({
           <Popover.Popup
             aria-label={t('settings.usage')}
             className="waku-popover-surface flex w-80 flex-col gap-3 rounded-[10px] p-3.5 text-xs text-popover-foreground outline-none"
+            finalFocus={(closeType) => closeType === 'keyboard' ? true : returnFocus.current}
             initialFocus={false}
             role="dialog"
           >

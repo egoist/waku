@@ -38,6 +38,8 @@ const ICONS: &[(&str, &[u8])] = icons![
     "copy",
     "cursor-spark",
     "download",
+    "eye",
+    "eye-off",
     "external-link",
     "file",
     "folder",

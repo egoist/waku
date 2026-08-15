@@ -58,8 +58,6 @@ import { useI18n } from '@/lib/i18n'
 import {
   browserComposerPreferenceStorage,
   readComposerPreferences,
-  rememberComposerSession,
-  writeComposerPreferences,
 } from '@/lib/composer-preferences'
 import {
   browserNavigationStorage,
@@ -351,25 +349,6 @@ export function WakuApp() {
     }
     composerDraftTimers.current.clear()
   }, [])
-
-  const currentProvider = current?.provider
-  const currentModel = current?.model
-  const currentReasoningEffort = current?.reasoning_effort
-  const currentServiceTier = current?.service_tier
-  useEffect(() => {
-    if (!config || !currentProvider || !currentModel) return
-    const storage = browserComposerPreferenceStorage()
-    writeComposerPreferences(
-      storage,
-      config.address,
-      rememberComposerSession(readComposerPreferences(storage, config.address), {
-        provider: currentProvider,
-        model: currentModel,
-        reasoning_effort: currentReasoningEffort ?? null,
-        service_tier: currentServiceTier ?? null,
-      }),
-    )
-  }, [config, currentModel, currentProvider, currentReasoningEffort, currentServiceTier])
 
   useEffect(() => {
     window.localStorage.setItem('waku.sidebarVisible', String(sidebarVisible))

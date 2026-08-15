@@ -478,7 +478,12 @@ function DaemonSettings() {
         <SettingText title={t('daemon.credentials_title')} description={t('daemon.web_connection_description')} />
         <div className="mt-4 divide-y rounded-xl border bg-background px-3">
           <DetailRow label={t('daemon.websocket_url')} value={config?.address ?? t('daemon.not_configured')} copy />
-          <DetailRow label={t('daemon.token')} value={config?.token ? '••••••••••••••••••••••••' : t('daemon.not_configured')} />
+          <DetailRow
+            copy={Boolean(config?.token)}
+            label={t('daemon.token')}
+            secret={Boolean(config?.token)}
+            value={config?.token ?? t('daemon.not_configured')}
+          />
           <DetailRow label={t('daemon.status')} value={t(`daemon.phase_${phase}`)} />
         </div>
         {error && <p className="mt-3 text-[11.5px] text-destructive">{error}</p>}
@@ -535,13 +540,39 @@ function Toggle({ checked, label, onChange }: { checked: boolean; label: string;
   )
 }
 
-function DetailRow({ label, value, copy = false }: { label: string; value: string; copy?: boolean }) {
+function DetailRow({
+  label,
+  value,
+  copy = false,
+  secret = false,
+}: {
+  label: string
+  value: string
+  copy?: boolean
+  secret?: boolean
+}) {
   const { t } = useI18n()
   const copyFeedback = useCopyFeedback()
+  const [revealed, setRevealed] = useState(false)
   return (
     <div className="flex min-h-12 items-center gap-4 text-[11.5px]">
       <span className="w-28 shrink-0 text-[var(--text-tertiary)]">{label}</span>
-      <span className="min-w-0 flex-1 truncate font-mono">{value}</span>
+      <span className="min-w-0 flex-1 truncate font-mono">
+        {secret && !revealed ? '••••••••••••••••••••••••' : value}
+      </span>
+      {secret && (
+        <Button
+          aria-label={t(revealed ? 'daemon.hide_token' : 'daemon.reveal_token')}
+          aria-pressed={revealed}
+          size="icon-sm"
+          title={t(revealed ? 'daemon.hide_token' : 'daemon.reveal_token')}
+          type="button"
+          variant="outline"
+          onClick={() => setRevealed((current) => !current)}
+        >
+          <WakuIcon name={revealed ? 'eyeOff' : 'eye'} />
+        </Button>
+      )}
       {copy && (
         <Button size="sm" variant="outline" onClick={() => void copyFeedback.copyText(value)}>
           <WakuIcon name={copyFeedback.copied ? 'check' : 'copy'} />

@@ -165,7 +165,7 @@ daemon.allowed_origins:
 daemon.allowed_origins_description:
   en: Exact http:// or https:// origins allowed to open the WebSocket.
 daemon.allowed_origins_placeholder:
-  en: https://waku.example.com
+  en: https://waku.example.com, http://localhost:3001
 daemon.apply:
   en: Apply
 daemon.restarting:
@@ -178,6 +178,10 @@ daemon.websocket_url:
   en: WebSocket URL
 daemon.token:
   en: Token
+daemon.reveal_token:
+  en: Reveal token
+daemon.hide_token:
+  en: Hide token
 daemon.regenerate_token:
   en: Regenerate
 daemon.security_warning:

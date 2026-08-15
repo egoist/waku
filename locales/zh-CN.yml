@@ -80,13 +80,15 @@ daemon.port_description: 启用暴露后，Waku 会在所有网络接口的此�
 daemon.port_placeholder: "34123"
 daemon.allowed_origins: 允许的浏览器来源
 daemon.allowed_origins_description: 可打开 WebSocket 的确切 http:// 或 https:// 来源。
-daemon.allowed_origins_placeholder: https://waku.example.com
+daemon.allowed_origins_placeholder: https://waku.example.com, http://localhost:3001
 daemon.apply: 应用
 daemon.restarting: 正在重启…
 daemon.credentials_title: 连接信息
 daemon.credentials_description: 在 Waku Web 中输入这些信息。此地址使用这台 Mac 的局域网主机名。
 daemon.websocket_url: WebSocket 地址
 daemon.token: 令牌
+daemon.reveal_token: 显示令牌
+daemon.hide_token: 隐藏令牌
 daemon.regenerate_token: 重新生成
 daemon.security_warning: 此令牌可完全访问这台 Mac 上的任务、文件、Git、附件和编程智能体。在私有网络之外请通过受信任的 TLS 代理使用 WSS。
 daemon.external_title: 外部守护进程

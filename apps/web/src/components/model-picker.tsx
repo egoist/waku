@@ -1,6 +1,6 @@
 import type { AgentSession, ProviderKind, ProviderModel, ProviderProbe } from '@waku/client'
 import { Popover } from '@base-ui/react/popover'
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useRef, useState, type RefObject } from 'react'
 import { ProviderIcon, PROVIDERS, providerMeta, WakuIcon } from '@/components/waku-icon'
 import { useDaemonSettings, useProviderProbes } from '@/hooks/use-daemon-data'
 import { useI18n } from '@/lib/i18n'
@@ -18,12 +18,14 @@ export function ModelPicker({
   openSignal,
   onOpenSignalHandled,
   onChange,
+  returnFocus,
 }: {
   session: AgentSession
   currentProbe?: ProviderProbe
   openSignal?: number
   onOpenSignalHandled?: () => void
   onChange: (provider: ProviderKind, model: ProviderModel) => void
+  returnFocus?: RefObject<HTMLElement | null>
 }) {
   const { t } = useI18n()
   const [open, setOpen] = useState(false)
@@ -37,7 +39,6 @@ export function ModelPicker({
   })
   const search = useRef<HTMLInputElement>(null)
   const list = useRef<HTMLDivElement>(null)
-  const trigger = useRef<HTMLButtonElement>(null)
   const settings = useDaemonSettings()
   const probes = useProviderProbes(open)
   const lockedProvider = session.messages.length ? session.provider : null
@@ -46,11 +47,6 @@ export function ModelPicker({
     ?? currentProbe?.models[0]
   const selectedModelId = session.model ?? currentModel?.id
   const selectedName = currentModel?.name ?? session.model ?? providerMeta(session.provider).shortName
-
-  function closeAndFocusTrigger() {
-    setOpen(false)
-    requestAnimationFrame(() => trigger.current?.focus())
-  }
 
   useEffect(() => {
     if (!openSignal) return
@@ -116,7 +112,7 @@ export function ModelPicker({
     const row = rows[index]
     if (!row) return
     onChange(row.provider, row.model)
-    closeAndFocusTrigger()
+    setOpen(false)
   }
 
   function toggleFavorite(provider: ProviderKind, model: string) {
@@ -137,7 +133,6 @@ export function ModelPicker({
           open && 'bg-accent text-foreground',
         )}
         disabled={session.status !== 'idle'}
-        ref={trigger}
       >
         <ProviderIcon className="size-[10.5px]" provider={session.provider} />
         <span className="truncate">{selectedName}</span>
@@ -153,6 +148,9 @@ export function ModelPicker({
           <Popover.Popup
             aria-label={t('models.choose')}
             className="waku-popover-surface flex h-[390px] w-[460px] max-w-[calc(100vw-32px)] overflow-hidden rounded-[12px] outline-none"
+            finalFocus={returnFocus
+              ? (closeType) => closeType === 'keyboard' ? true : returnFocus.current
+              : undefined}
             initialFocus={search}
             role="dialog"
           >

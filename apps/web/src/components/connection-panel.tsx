@@ -14,6 +14,7 @@ export function ConnectionPanel({ title }: { title?: string } = {}) {
   useDocumentTitle(title)
   const [address, setAddress] = useState(config?.address ?? '')
   const [token, setToken] = useState(config?.token ?? '')
+  const [tokenRevealed, setTokenRevealed] = useState(false)
   const [remember, setRemember] = useState(config?.remember ?? false)
   const [localError, setLocalError] = useState<string | null>(null)
 
@@ -21,6 +22,7 @@ export function ConnectionPanel({ title }: { title?: string } = {}) {
     if (!config) return
     setAddress(config.address)
     setToken(config.token)
+    setTokenRevealed(false)
     setRemember(config.remember)
   }, [config])
 
@@ -68,17 +70,34 @@ export function ConnectionPanel({ title }: { title?: string } = {}) {
                 onChange={(event) => setAddress(event.target.value)}
               />
             </label>
-            <label className="grid gap-1.5 sm:grid-cols-[120px_1fr] sm:items-center">
-              <span className="text-[12px] font-medium">{t('daemon.token')}</span>
-              <Input
-                autoComplete="current-password"
-                className="bg-card"
-                placeholder={t('web.token_placeholder')}
-                type="password"
-                value={token}
-                onChange={(event) => setToken(event.target.value)}
-              />
-            </label>
+            <div className="grid gap-1.5 sm:grid-cols-[120px_1fr] sm:items-center">
+              <label className="text-[12px] font-medium" htmlFor="daemon-connection-token">
+                {t('daemon.token')}
+              </label>
+              <div className="relative">
+                <Input
+                  autoComplete="current-password"
+                  className="bg-card pr-10"
+                  id="daemon-connection-token"
+                  placeholder={t('web.token_placeholder')}
+                  type={tokenRevealed ? 'text' : 'password'}
+                  value={token}
+                  onChange={(event) => setToken(event.target.value)}
+                />
+                <Button
+                  aria-label={t(tokenRevealed ? 'daemon.hide_token' : 'daemon.reveal_token')}
+                  aria-pressed={tokenRevealed}
+                  className="absolute right-1 top-1 size-7 text-[var(--text-tertiary)]"
+                  size="icon-sm"
+                  title={t(tokenRevealed ? 'daemon.hide_token' : 'daemon.reveal_token')}
+                  type="button"
+                  variant="ghost"
+                  onClick={() => setTokenRevealed((revealed) => !revealed)}
+                >
+                  <WakuIcon name={tokenRevealed ? 'eyeOff' : 'eye'} />
+                </Button>
+              </div>
+            </div>
             <label className="flex cursor-pointer items-start gap-2.5 border-t pt-4 text-[12px]">
               <input
                 checked={remember}

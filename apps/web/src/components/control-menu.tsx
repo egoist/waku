@@ -1,5 +1,5 @@
 import { Menu } from '@base-ui/react/menu'
-import { type ReactNode, useState } from 'react'
+import { type ReactNode, type RefObject, useState } from 'react'
 import { WakuIcon, type WakuIconName } from '@/components/waku-icon'
 import { cn } from '@/lib/utils'
 
@@ -30,6 +30,7 @@ export function ControlMenu({
   highlightTriggerWhenOpen = true,
   selectionMode = 'choice',
   onOpenChange,
+  returnFocus,
 }: {
   label: string
   icon?: WakuIconName
@@ -44,6 +45,7 @@ export function ControlMenu({
   highlightTriggerWhenOpen?: boolean
   selectionMode?: 'choice' | 'status'
   onOpenChange?: (open: boolean) => void
+  returnFocus?: RefObject<HTMLElement | null>
 }) {
   const [open, setOpen] = useState(false)
 
@@ -81,6 +83,9 @@ export function ControlMenu({
           <Menu.Popup
             aria-label={label}
             className={cn('waku-menu-surface', menuClassName)}
+            finalFocus={returnFocus
+              ? (closeType) => closeType === 'keyboard' ? true : returnFocus.current
+              : undefined}
           >
             {items.map((item, index) => (
               <div key={item.id}>

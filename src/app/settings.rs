@@ -796,6 +796,49 @@ impl Waku {
         let token_copied = self.control_was_copied(copy_token_feedback_id);
         let click_token = token.clone();
         let key_token = token.clone();
+        let token_revealed = self.daemon_token_revealed;
+        let reveal_token_button = div()
+            .id("reveal-daemon-token")
+            .tab_index(0)
+            .size(px(27.0))
+            .rounded(px(6.0))
+            .border_1()
+            .border_color(theme.border_strong)
+            .flex()
+            .items_center()
+            .justify_center()
+            .cursor_default()
+            .text_color(theme.text_secondary)
+            .focus_visible(|style| style.border_color(theme.accent))
+            .hover(|element| element.bg(theme.overlay))
+            .active(|element| element.bg(theme.overlay_strong))
+            .child(icon(
+                if token_revealed {
+                    "icons/eye-off.svg"
+                } else {
+                    "icons/eye.svg"
+                },
+                12.0,
+                theme.text_tertiary,
+            ))
+            .tooltip(Tooltip::text(if token_revealed {
+                tr!("daemon.hide_token")
+            } else {
+                tr!("daemon.reveal_token")
+            }))
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.daemon_token_revealed = !this.daemon_token_revealed;
+                cx.notify();
+            }))
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
+                if !event.keystroke.modifiers.modified()
+                    && matches!(event.keystroke.key.as_str(), "enter" | "space")
+                {
+                    this.daemon_token_revealed = !this.daemon_token_revealed;
+                    cx.stop_propagation();
+                    cx.notify();
+                }
+            }));
         let copy_token_button = div()
             .id("copy-daemon-token")
             .tab_index(0)
@@ -966,11 +1009,12 @@ impl Waku {
                             div()
                                 .mt(px(14.0))
                                 .flex()
-                                .gap(px(12.0))
+                                .items_start()
+                                .gap(px(24.0))
                                 .child(
                                     div()
-                                        .w(px(150.0))
-                                        .flex_none()
+                                        .flex_1()
+                                        .min_w_0()
                                         .child(
                                             div()
                                                 .text_size(px(11.0))
@@ -989,22 +1033,25 @@ impl Waku {
                                         ),
                                 )
                                 .child(
-                                    TextField::new(
-                                        "daemon-port-field",
-                                        self.daemon_port_input.clone(),
-                                    )
-                                    .w(px(150.0)),
+                                    div().flex_1().min_w_0().flex().justify_end().child(
+                                        TextField::new(
+                                            "daemon-port-field",
+                                            self.daemon_port_input.clone(),
+                                        )
+                                        .w(px(150.0)),
+                                    ),
                                 ),
                         )
                         .child(
                             div()
                                 .mt(px(14.0))
                                 .flex()
-                                .gap(px(12.0))
+                                .items_start()
+                                .gap(px(24.0))
                                 .child(
                                     div()
-                                        .w(px(150.0))
-                                        .flex_none()
+                                        .flex_1()
+                                        .min_w_0()
                                         .child(
                                             div()
                                                 .text_size(px(11.0))
@@ -1023,11 +1070,14 @@ impl Waku {
                                         ),
                                 )
                                 .child(
-                                    TextField::new(
-                                        "daemon-origins-field",
-                                        self.daemon_origins_input.clone(),
-                                    )
-                                    .flex_1(),
+                                    div().flex_1().min_w_0().flex().justify_end().child(
+                                        TextField::new(
+                                            "daemon-origins-field",
+                                            self.daemon_origins_input.clone(),
+                                        )
+                                        .w_full()
+                                        .max_w(px(360.0)),
+                                    ),
                                 ),
                         )
                         .child(div().mt(px(13.0)).flex().justify_end().child(apply_button)),
@@ -1111,8 +1161,13 @@ impl Waku {
                                         .font_family(".SystemUIFontMonospaced")
                                         .text_size(px(11.0))
                                         .text_color(theme.text)
-                                        .child("••••••••••••••••••••••••••••••••"),
+                                        .child(SharedString::from(if token_revealed {
+                                            token.clone()
+                                        } else {
+                                            "••••••••••••••••••••••••••••••••".to_owned()
+                                        })),
                                 )
+                                .child(reveal_token_button)
                                 .child(copy_token_button)
                                 .child(regenerate_button),
                         )
@@ -1177,6 +1232,9 @@ impl Waku {
     }
 
     fn set_daemon_exposure_enabled(&mut self, enabled: bool, cx: &mut Context<Self>) {
+        if !enabled {
+            self.daemon_token_revealed = false;
+        }
         let settings = if enabled {
             match self.daemon_exposure_from_fields(cx) {
                 Ok(mut settings) => {
@@ -1216,6 +1274,7 @@ impl Waku {
             }
         };
         settings.token = waku_client::DaemonExposureSettings::new_token();
+        self.daemon_token_revealed = false;
         self.apply_daemon_exposure(settings, cx);
     }
 

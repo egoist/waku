@@ -16,6 +16,8 @@ export const WAKU_ICONS = {
   cloudUpload: 'i-waku-cloud-upload',
   compose: 'i-waku-compose',
   copy: 'i-waku-copy',
+  eye: 'i-waku-eye',
+  eyeOff: 'i-waku-eye-off',
   file: 'i-waku-file',
   fileDiff: 'i-waku-file-diff',
   folder: 'i-waku-folder',

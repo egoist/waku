@@ -84,13 +84,15 @@ daemon.port_description: 公開中は、すべてのネットワークインタ�
 daemon.port_placeholder: "34123"
 daemon.allowed_origins: 許可するブラウザオリジン
 daemon.allowed_origins_description: WebSocket を開ける正確な http:// または https:// オリジンです。
-daemon.allowed_origins_placeholder: https://waku.example.com
+daemon.allowed_origins_placeholder: https://waku.example.com, http://localhost:3001
 daemon.apply: 適用
 daemon.restarting: 再起動中…
 daemon.credentials_title: 接続情報
 daemon.credentials_description: Waku Web に入力してください。URL にはこの Mac のローカルネットワーク用ホスト名が使われます。
 daemon.websocket_url: WebSocket URL
 daemon.token: トークン
+daemon.reveal_token: トークンを表示
+daemon.hide_token: トークンを隠す
 daemon.regenerate_token: 再生成
 daemon.security_warning: このトークンは、この Mac 上のタスク、ファイル、Git、添付ファイル、コーディングエージェントへの完全なアクセス権を持ちます。プライベートネットワーク外では信頼できる TLS プロキシ経由で WSS を使用してください。
 daemon.external_title: 外部デーモン
