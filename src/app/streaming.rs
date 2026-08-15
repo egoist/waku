@@ -557,6 +557,7 @@ impl Waku {
                         &task_notification_tag(session_id),
                         &title,
                         &body,
+                        cx,
                     );
                 }
             }

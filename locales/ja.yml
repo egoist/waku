@@ -24,6 +24,9 @@ menu.toggle_usage_panel: 使用状況パネルの表示を切り替える
 menu.window: ウインドウ
 menu.toggle_fps_counter: FPS カウンターの表示を切り替える
 menu.close_window: ウインドウを閉じる
+window.minimize: 最小化
+window.maximize: 最大化
+window.restore: 元に戻す
 
 updater.update: アップデート
 updater.checking: アップデートを確認中…
@@ -390,7 +393,7 @@ skills.allowed_tools: ツール
 skills.duplicate_one: 同名のスキルが他の 1 か所にもあります — 最も限定的な場所にあるスキルが優先されます
 skills.duplicate_many: "同名のスキルが他の %{count} か所にもあります — 最も限定的な場所にあるスキルが優先されます"
 skills.open_file: SKILL.md を開く
-skills.reveal: Finder に表示
+skills.reveal: ファイルマネージャーで表示
 skills.copy_path: パスをコピー
 skills.path_copied: パスをコピーしました
 skills.delete: 削除
@@ -417,7 +420,7 @@ composer.edit_in_composer: 入力欄で編集
 composer.queued_followups: キューに追加したフォローアップ
 composer.queued_followups_description: キューに追加したフォローアップ · 現在のターンが完了すると送信されます
 composer.preparing_task: タスクを準備中…
-composer.steer_turn: 実行中のターンに指示を追加（⌘↩）
+composer.steer_turn: 実行中のターンに指示を追加（%{shortcut}）
 composer.queue_followup: フォローアップとしてキューに追加（⏎）
 
 branches.detached_head: Detached HEAD
@@ -601,7 +604,7 @@ background.status.failed: 失敗
 background.status.stopped: 停止
 background.status.lost: 切断
 
-files.unsaved_changes: 未保存の変更があります — ⌘S で保存
+files.unsaved_changes: 未保存の変更があります — %{shortcut} で保存
 files.no_project_open: プロジェクトが開かれていません
 files.no_project_open_description: プロジェクトを開くとファイルを閲覧できます
 files.no_project_is_open: 開いているプロジェクトはありません
@@ -632,31 +635,31 @@ diff.expand_context: 未変更の行を展開 · Shift キーを押しながら�
 diff.expand_context_above: 上の 100 行を表示 · Shift キーを押しながらクリックですべて表示
 diff.expand_context_below: 下の 100 行を表示 · Shift キーを押しながらクリックですべて表示
 
-browser.back: 戻る（⌘[）
-browser.forward: 進む（⌘]）
+browser.back: 戻る（%{shortcut}）
+browser.forward: 進む（%{shortcut}）
 browser.stop_loading: 読み込みを停止（Esc）
-browser.reload: 再読み込み（⌘R）
+browser.reload: 再読み込み（%{shortcut}）
 browser.open_external: デフォルトのブラウザで開く
 browser.browse_web: ウェブを閲覧
-browser.start_hint: 上に URL または検索語句を入力してください — ⌘L でアドレスバーにフォーカス
+browser.start_hint: 上に URL または検索語句を入力してください — %{shortcut} でアドレスバーにフォーカス
 browser.unavailable: ブラウザを利用できません
 browser.requires_macos: ブラウザパネルは macOS でのみ利用できます
 
 find.bad_pattern: 無効なパターン
 find.no_results: 結果なし
 find.result_count: "%{total} 件中 %{current} 件目"
-find.match_case: 大文字と小文字を区別（⌥⌘C）
-find.match_whole_word: 単語単位で検索（⌥⌘W）
-find.use_regex: 正規表現を使用（⌥⌘R）
+find.match_case: 大文字と小文字を区別（%{shortcut}）
+find.match_whole_word: 単語単位で検索（%{shortcut}）
+find.use_regex: 正規表現を使用（%{shortcut}）
 find.previous_match: 前の一致項目（⇧Enter）
 find.next_match: 次の一致項目（Enter）
 find.close: 閉じる（Esc）
 find.replace: 置換（Enter）
-find.replace_all: すべて置換（⌥⌘Enter）
+find.replace_all: すべて置換（%{shortcut}）
 find.toggle_replace: 置換欄の表示を切り替える
 
 common.dismiss_notification: 通知を閉じる
-common.reveal_in_finder: Finder に表示
+common.reveal_in_finder: ファイルマネージャーで表示
 
 attachments.close_preview: 画像プレビューを閉じる
 attachments.preview_unavailable: 画像を表示できません
@@ -761,8 +764,8 @@ usage.model_many: "%{count} 個のモデル"
 usage.active_day_one: "アクティブ %{count} 日"
 usage.active_day_many: "アクティブ %{count} 日"
 usage.refresh_failed: "使用状況の更新に失敗しました：%{error}"
-usage.context_used: コンテキストウインドウを %{percent}% 使用（⌘U）
-usage.shortcut: 使用状況（⌘U）
+usage.context_used: コンテキストウインドウを %{percent}% 使用（%{shortcut}）
+usage.shortcut: 使用状況（%{shortcut}）
 usage.context_window: コンテキストウインドウ
 usage.plan_limits: プランの使用量上限
 usage.plan_limits_named: プランの使用量上限 · %{plan}

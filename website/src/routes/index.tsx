@@ -92,7 +92,7 @@ const FAQ = [
   },
   {
     q: 'What about Windows and Linux?',
-    a: "Waku's core is cross-platform Rust. macOS ships first; Windows and Linux builds are planned.",
+    a: "Waku runs natively on macOS and Linux. Prebuilt downloads currently target Apple Silicon; Linux can be built from source, and Windows remains planned.",
   },
   {
     q: 'What is the future plan?',

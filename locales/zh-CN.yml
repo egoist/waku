@@ -24,6 +24,9 @@ menu.toggle_usage_panel: 打开或关闭用量面板
 menu.window: 窗口
 menu.toggle_fps_counter: 显示或隐藏帧率
 menu.close_window: 关闭窗口
+window.minimize: 最小化
+window.maximize: 最大化
+window.restore: 还原
 updater.update: 更新
 updater.checking: 正在检查更新…
 updater.updating: 正在更新…
@@ -362,7 +365,7 @@ skills.allowed_tools: 工具
 skills.duplicate_one: 另有 1 处同名技能 — 更具体的一份生效
 skills.duplicate_many: "另有 %{count} 处同名技能 — 更具体的一份生效"
 skills.open_file: 打开 SKILL.md
-skills.reveal: 在访达中显示
+skills.reveal: 在文件管理器中显示
 skills.copy_path: 复制路径
 skills.path_copied: 已复制路径
 skills.delete: 删除
@@ -387,7 +390,7 @@ composer.edit_in_composer: 在输入框中编辑
 composer.queued_followups: 已排队的后续消息
 composer.queued_followups_description: 已排队的后续消息 · 当前回复结束后发送
 composer.preparing_task: 正在准备任务…
-composer.steer_turn: 向本轮补充指示（⌘↩）
+composer.steer_turn: 向本轮补充指示（%{shortcut}）
 composer.queue_followup: 排队为后续消息（⏎）
 branches.detached_head: 游离 HEAD
 branches.search_project: 搜索 %{project} 的分支
@@ -559,7 +562,7 @@ background.status.completed: 已完成
 background.status.failed: 失败
 background.status.stopped: 已停止
 background.status.lost: 已断开
-files.unsaved_changes: 有未保存的更改 — 按 ⌘S 保存
+files.unsaved_changes: 有未保存的更改 — 按 %{shortcut} 保存
 files.no_project_open: 尚未打开项目
 files.no_project_open_description: 打开一个项目即可浏览其中的文件
 files.no_project_is_open: 尚未打开项目
@@ -588,29 +591,29 @@ diff.expand_all_context: 展开所有未更改的行
 diff.expand_context: 展开未更改的行 · 按住 Shift 点击可全部展开
 diff.expand_context_above: 显示上方 100 行 · 按住 Shift 点击可全部展开
 diff.expand_context_below: 显示下方 100 行 · 按住 Shift 点击可全部展开
-browser.back: 后退（⌘[）
-browser.forward: 前进（⌘]）
+browser.back: 后退（%{shortcut}）
+browser.forward: 前进（%{shortcut}）
 browser.stop_loading: 停止加载（Esc）
-browser.reload: 重新加载（⌘R）
+browser.reload: 重新加载（%{shortcut}）
 browser.open_external: 在默认浏览器中打开
 browser.browse_web: 浏览网页
-browser.start_hint: 在上方输入网址或搜索内容 — 按 ⌘L 聚焦地址栏
+browser.start_hint: 在上方输入网址或搜索内容 — 按 %{shortcut} 聚焦地址栏
 browser.unavailable: 浏览器不可用
 browser.requires_macos: 浏览器面板仅支持 macOS
 find.bad_pattern: 表达式无效
 find.no_results: 无结果
 find.result_count: "%{current} / %{total}"
-find.match_case: 区分大小写（⌥⌘C）
-find.match_whole_word: 全字匹配（⌥⌘W）
-find.use_regex: 使用正则表达式（⌥⌘R）
+find.match_case: 区分大小写（%{shortcut}）
+find.match_whole_word: 全字匹配（%{shortcut}）
+find.use_regex: 使用正则表达式（%{shortcut}）
 find.previous_match: 上一个匹配项（⇧Enter）
 find.next_match: 下一个匹配项（Enter）
 find.close: 关闭（Esc）
 find.replace: 替换（Enter）
-find.replace_all: 全部替换（⌥⌘Enter）
+find.replace_all: 全部替换（%{shortcut}）
 find.toggle_replace: 展开或收起替换栏
 common.dismiss_notification: 关闭通知
-common.reveal_in_finder: 在访达中显示
+common.reveal_in_finder: 在文件管理器中显示
 attachments.close_preview: 关闭图片预览
 attachments.preview_unavailable: 无法显示图片
 common.copy_named: 复制%{name}
@@ -710,8 +713,8 @@ usage.model_many: "%{count} 个模型"
 usage.active_day_one: "%{count} 个活跃日"
 usage.active_day_many: "%{count} 个活跃日"
 usage.refresh_failed: "用量刷新失败：%{error}"
-usage.context_used: 上下文窗口已使用 %{percent}%（⌘U）
-usage.shortcut: 用量（⌘U）
+usage.context_used: 上下文窗口已使用 %{percent}%（%{shortcut}）
+usage.shortcut: 用量（%{shortcut}）
 usage.context_window: 上下文窗口
 usage.plan_limits: 套餐用量限额
 usage.plan_limits_named: 套餐用量限额 · %{plan}

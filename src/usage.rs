@@ -1,6 +1,6 @@
 //! Account plan-usage limits per provider, read the way CodexBar reads them:
-//! Claude's OAuth credential (keychain first, `~/.claude/.credentials.json`
-//! as fallback) calls `api.anthropic.com/api/oauth/usage`; Codex's
+//! Claude's OAuth credential (macOS keychain first, then
+//! `~/.claude/.credentials.json`) calls `api.anthropic.com/api/oauth/usage`; Codex's
 //! `~/.codex/auth.json` token calls the ChatGPT backend's usage endpoint;
 //! OpenCode Go's API key calls `opencode.ai/zen/go/v1/usage`; Grok answers
 //! the `x.ai/billing` extension request on a short-lived `grok agent stdio`
@@ -21,6 +21,7 @@ use serde_json::{Value, json};
 
 const CLAUDE_USAGE_URL: &str = "https://api.anthropic.com/api/oauth/usage";
 const CLAUDE_PROFILE_URL: &str = "https://api.anthropic.com/api/oauth/profile";
+#[cfg(target_os = "macos")]
 const KEYCHAIN_SERVICE: &str = "Claude Code-credentials";
 /// The usage endpoint rejects requests without this beta header.
 const OAUTH_BETA_HEADER: &str = "oauth-2025-04-20";
@@ -533,16 +534,21 @@ pub fn openai_plan_label(plan: Option<&str>) -> Option<String> {
 }
 
 /// The Claude Code OAuth blob: keychain on macOS, with the credentials file as
-/// the cross-setup fallback. Claude Code stores the item via `security`, so
-/// `security` is on its ACL and this read does not prompt.
+/// the cross-platform fallback. Claude Code stores the macOS item via
+/// `security`, so `security` is on its ACL and this read does not prompt.
 fn read_credentials() -> anyhow::Result<OauthCredentials> {
+    #[cfg(target_os = "macos")]
     let payload = keychain_payload().or_else(|keychain_error| {
         credentials_file_payload()
             .map_err(|_| keychain_error.context(tr!("usage_error.claude_credentials_missing")))
     })?;
+    #[cfg(not(target_os = "macos"))]
+    let payload =
+        credentials_file_payload().context(tr!("usage_error.claude_credentials_missing"))?;
     parse_credentials(&payload)
 }
 
+#[cfg(target_os = "macos")]
 fn keychain_payload() -> anyhow::Result<String> {
     let output = Command::new("/usr/bin/security")
         .args(["find-generic-password", "-s", KEYCHAIN_SERVICE, "-w"])

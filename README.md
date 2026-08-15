@@ -32,13 +32,19 @@ structured protocol and session continuity.
 
 ## Development
 
-Development currently requires macOS, [Rust 1.96 or newer](https://www.rust-lang.org/tools/install),
-and [Bun](https://bun.sh/).
+Development is supported on macOS and Linux and requires
+[Rust 1.96 or newer](https://www.rust-lang.org/tools/install) and
+[Bun](https://bun.sh/). Linux supports both Wayland and X11; install the native
+build prerequisites listed in [CONTRIBUTING.md](CONTRIBUTING.md) first.
 
 ```sh
 bun install
 bun run dev
 ```
+
+The embedded browser and experimental computer-use integration currently
+remain macOS-only. Agent sessions, projects, transcripts, skills, usage,
+diffs, file editing, and the terminal run natively on Linux.
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for the development workflow and checks.
 Release maintainers should also read [RELEASING.md](RELEASING.md).

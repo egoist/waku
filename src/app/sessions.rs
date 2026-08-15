@@ -689,7 +689,7 @@ impl Waku {
         }
     }
 
-    /// `cmd-/`: toggle the composer's model picker as if its chip were clicked.
+    /// Primary modifier + /: toggle the composer's model picker as if its chip were clicked.
     pub(super) fn toggle_model_picker_action(
         &mut self,
         _: &ToggleModelPicker,

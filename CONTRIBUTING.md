@@ -5,12 +5,24 @@ well-scoped features are welcome.
 
 ## Development setup
 
-The debug app currently requires:
+The debug app requires:
 
-- macOS
+- macOS or Linux (Wayland or X11)
 - Rust 1.96 or newer
 - Bun
 - A supported agent CLI when testing a provider integration
+
+On Ubuntu and Debian, install the Linux compiler and GPUI runtime
+prerequisites with:
+
+```sh
+sudo apt install build-essential clang cmake pkg-config libfontconfig-dev \
+  libwayland-dev libx11-xcb-dev libxkbcommon-x11-dev libvulkan1 \
+  xdg-desktop-portal
+```
+
+Equivalent packages are available on Fedora, Arch, and other desktop Linux
+distributions. A working Vulkan driver is required at runtime.
 
 Install dependencies and start the development watcher from the repository
 root:
@@ -20,10 +32,29 @@ bun install
 bun run dev
 ```
 
-The watcher builds and signs `target/debug/Waku Debug.app`, launches it, and
-rebuilds and relaunches it after source changes. Keep that watcher running while
-you work. Do not start a second watcher or manually relaunch the debug app.
-Press `Ctrl-C`, or quit the app, to stop it.
+On macOS the watcher builds and signs `target/debug/Waku Debug.app`; on Linux
+it builds `target/debug/waku`. It launches the result and rebuilds and
+relaunches it after source changes. Keep that watcher running while you work.
+Do not start a second watcher or manually relaunch the debug app. Press
+`Ctrl-C`, or quit the app, to stop it.
+
+The embedded browser and experimental computer-use integration are currently
+macOS-only. On Linux the browser reports that it is unavailable, while the
+computer-use UI and runtime stay disabled.
+
+## Linux bundle
+
+To produce a distro-compatible release archive with the binary, desktop entry,
+icon, and license:
+
+```sh
+./scripts/bundle-linux.sh
+```
+
+The archive is written under `target/release` with an install-prefix layout
+(`bin/` and `share/`) beneath one versioned directory. It intentionally does
+not bundle system graphics libraries; distribution packages should declare
+those runtime dependencies normally.
 
 ## Making changes
 

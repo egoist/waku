@@ -186,6 +186,9 @@ const ICONS: &[(&str, &[u8])] = icons![
     "trash",
     "whole-word",
     "wrench",
+    "window-maximize",
+    "window-minimize",
+    "window-restore",
     "x",
     "zap",
 ];

@@ -57,38 +57,18 @@ pub fn init(cx: &mut App) {
     cx.bind_keys([
         KeyBinding::new("backspace", Backspace, Some("ComposerInput")),
         KeyBinding::new("delete", Delete, Some("ComposerInput")),
-        KeyBinding::new("cmd-backspace", DeleteToStart, Some("ComposerInput")),
-        KeyBinding::new("cmd-delete", DeleteToEnd, Some("ComposerInput")),
         KeyBinding::new("alt-backspace", DeleteToPreviousWord, Some("ComposerInput")),
         KeyBinding::new("alt-delete", DeleteToNextWord, Some("ComposerInput")),
-        KeyBinding::new("ctrl-h", Backspace, Some("ComposerInput")),
-        KeyBinding::new("ctrl-d", Delete, Some("ComposerInput")),
-        KeyBinding::new("ctrl-u", DeleteToStart, Some("ComposerInput")),
-        KeyBinding::new("ctrl-k", DeleteToEnd, Some("ComposerInput")),
         KeyBinding::new("left", Left, Some("ComposerInput")),
         KeyBinding::new("right", Right, Some("ComposerInput")),
         KeyBinding::new("up", Up, Some("ComposerInput")),
         KeyBinding::new("down", Down, Some("ComposerInput")),
-        KeyBinding::new("ctrl-b", Left, Some("ComposerInput")),
-        KeyBinding::new("ctrl-f", Right, Some("ComposerInput")),
         KeyBinding::new("shift-left", SelectLeft, Some("ComposerInput")),
         KeyBinding::new("shift-right", SelectRight, Some("ComposerInput")),
         KeyBinding::new("home", Home, Some("ComposerInput")),
         KeyBinding::new("end", End, Some("ComposerInput")),
-        KeyBinding::new("cmd-left", Home, Some("ComposerInput")),
-        KeyBinding::new("cmd-right", End, Some("ComposerInput")),
-        KeyBinding::new("cmd-up", Home, Some("ComposerInput")),
-        KeyBinding::new("cmd-down", End, Some("ComposerInput")),
-        KeyBinding::new("ctrl-a", Home, Some("ComposerInput")),
-        KeyBinding::new("ctrl-e", End, Some("ComposerInput")),
         KeyBinding::new("shift-home", SelectToStart, Some("ComposerInput")),
         KeyBinding::new("shift-end", SelectToEnd, Some("ComposerInput")),
-        KeyBinding::new("shift-cmd-left", SelectToStart, Some("ComposerInput")),
-        KeyBinding::new("shift-cmd-right", SelectToEnd, Some("ComposerInput")),
-        KeyBinding::new("cmd-shift-up", SelectToStart, Some("ComposerInput")),
-        KeyBinding::new("cmd-shift-down", SelectToEnd, Some("ComposerInput")),
-        KeyBinding::new("ctrl-shift-a", SelectToStart, Some("ComposerInput")),
-        KeyBinding::new("ctrl-shift-e", SelectToEnd, Some("ComposerInput")),
         KeyBinding::new("alt-left", MoveToPreviousWord, Some("ComposerInput")),
         KeyBinding::new("alt-right", MoveToNextWord, Some("ComposerInput")),
         KeyBinding::new(
@@ -97,17 +77,59 @@ pub fn init(cx: &mut App) {
             Some("ComposerInput"),
         ),
         KeyBinding::new("alt-shift-right", SelectToNextWord, Some("ComposerInput")),
-        KeyBinding::new("cmd-a", SelectAll, Some("ComposerInput")),
-        KeyBinding::new("cmd-v", Paste, Some("ComposerInput")),
-        KeyBinding::new("cmd-c", Copy, Some("ComposerInput")),
-        KeyBinding::new("cmd-x", Cut, Some("ComposerInput")),
-        KeyBinding::new("cmd-z", Undo, Some("ComposerInput")),
-        KeyBinding::new("cmd-shift-z", Redo, Some("ComposerInput")),
+        KeyBinding::new("secondary-a", SelectAll, Some("ComposerInput")),
+        KeyBinding::new("secondary-v", Paste, Some("ComposerInput")),
+        KeyBinding::new("secondary-c", Copy, Some("ComposerInput")),
+        KeyBinding::new("secondary-x", Cut, Some("ComposerInput")),
+        KeyBinding::new("secondary-z", Undo, Some("ComposerInput")),
+        KeyBinding::new("secondary-shift-z", Redo, Some("ComposerInput")),
         KeyBinding::new("enter", Enter, Some("ComposerInput")),
         KeyBinding::new("shift-enter", Newline, Some("ComposerInput")),
-        // While a turn is running, Enter queues a follow-up; ⌘Enter injects
-        // the message into the running turn when the provider supports it.
-        KeyBinding::new("cmd-enter", SubmitSteer, Some("ComposerInput")),
+        // While a turn is running, Enter queues a follow-up; the platform's
+        // primary modifier + Enter injects it when the provider supports it.
+        KeyBinding::new("secondary-enter", SubmitSteer, Some("ComposerInput")),
+    ]);
+
+    #[cfg(target_os = "macos")]
+    cx.bind_keys([
+        KeyBinding::new("cmd-backspace", DeleteToStart, Some("ComposerInput")),
+        KeyBinding::new("cmd-delete", DeleteToEnd, Some("ComposerInput")),
+        KeyBinding::new("ctrl-h", Backspace, Some("ComposerInput")),
+        KeyBinding::new("ctrl-d", Delete, Some("ComposerInput")),
+        KeyBinding::new("ctrl-u", DeleteToStart, Some("ComposerInput")),
+        KeyBinding::new("ctrl-k", DeleteToEnd, Some("ComposerInput")),
+        KeyBinding::new("ctrl-b", Left, Some("ComposerInput")),
+        KeyBinding::new("ctrl-f", Right, Some("ComposerInput")),
+        KeyBinding::new("cmd-left", Home, Some("ComposerInput")),
+        KeyBinding::new("cmd-right", End, Some("ComposerInput")),
+        KeyBinding::new("cmd-up", Home, Some("ComposerInput")),
+        KeyBinding::new("cmd-down", End, Some("ComposerInput")),
+        KeyBinding::new("ctrl-a", Home, Some("ComposerInput")),
+        KeyBinding::new("ctrl-e", End, Some("ComposerInput")),
+        KeyBinding::new("shift-cmd-left", SelectToStart, Some("ComposerInput")),
+        KeyBinding::new("shift-cmd-right", SelectToEnd, Some("ComposerInput")),
+        KeyBinding::new("cmd-shift-up", SelectToStart, Some("ComposerInput")),
+        KeyBinding::new("cmd-shift-down", SelectToEnd, Some("ComposerInput")),
+        KeyBinding::new("ctrl-shift-a", SelectToStart, Some("ComposerInput")),
+        KeyBinding::new("ctrl-shift-e", SelectToEnd, Some("ComposerInput")),
+    ]);
+
+    #[cfg(target_os = "linux")]
+    cx.bind_keys([
+        KeyBinding::new(
+            "ctrl-backspace",
+            DeleteToPreviousWord,
+            Some("ComposerInput"),
+        ),
+        KeyBinding::new("ctrl-delete", DeleteToNextWord, Some("ComposerInput")),
+        KeyBinding::new("ctrl-left", MoveToPreviousWord, Some("ComposerInput")),
+        KeyBinding::new("ctrl-right", MoveToNextWord, Some("ComposerInput")),
+        KeyBinding::new(
+            "ctrl-shift-left",
+            SelectToPreviousWord,
+            Some("ComposerInput"),
+        ),
+        KeyBinding::new("ctrl-shift-right", SelectToNextWord, Some("ComposerInput")),
     ]);
 }
 
@@ -435,7 +457,7 @@ fn common_suffix_len(a: &str, b: &str) -> usize {
 #[derive(Clone)]
 pub enum ComposerEvent {
     Submit(String),
-    /// ⌘Enter: deliver the message into the running turn instead of queueing
+    /// Primary modifier + Enter: deliver the message into the running turn instead of queueing
     /// it behind the turn. Only composer-mode fields emit this.
     SubmitSteer(String),
     /// The field took focus. A code editor uses this to re-read its file, so
@@ -865,7 +887,7 @@ impl ComposerInput {
         self.vertical_navigation = None;
         self.highlight.clear();
         // A programmatic clear is a new baseline, not an edit to step back
-        // over — a submitted prompt should not resurface via cmd-z.
+        // over — a submitted prompt should not resurface via the undo shortcut.
         if changed {
             self.history = EditHistory::default();
         }
@@ -1200,7 +1222,7 @@ impl ComposerInput {
     fn submit_steer(&mut self, _: &SubmitSteer, _: &mut Window, cx: &mut Context<Self>) {
         if self.mode != FieldMode::Composer {
             // Search and code fields have no running turn to steer; let an
-            // outer handler claim ⌘Enter instead of swallowing it.
+            // outer handler claim the primary-modifier Enter shortcut instead of swallowing it.
             cx.propagate();
             return;
         }
@@ -1777,7 +1799,7 @@ fn cursor_should_be_visible(
 /// - a partial selection too wide to fit follows its head, the way a native
 ///   field tracks shift+End;
 /// - a whole-content selection holds still — native `selectAll` never moves
-///   the view, which keeps ⌘L on the address bar showing the host.
+///   the view, which keeps the focus shortcut on the address bar showing the host.
 fn single_line_scroll(
     previous: Pixels,
     viewport: Pixels,

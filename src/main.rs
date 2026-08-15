@@ -65,7 +65,7 @@ use gpui::{
 };
 
 use crate::app::Waku;
-use crate::identity::APP_NAME;
+use crate::identity::{APP_ID, APP_NAME};
 actions!(
     waku,
     [
@@ -135,6 +135,10 @@ fn main() {
         .with_assets(crate::assets::Assets)
         .with_main_window_reopen()
         .run(|cx: &mut App| {
+            // Linux uses this for Wayland app_id/X11 WM_CLASS and notification
+            // attribution. Other platforms also benefit from one stable
+            // process identity.
+            cx.set_app_identity(APP_ID, APP_NAME);
             crate::assets::register_fonts(cx).expect("failed to register bundled fonts");
             crate::input::init(cx);
             crate::ui::menu::init(cx);
@@ -146,7 +150,7 @@ fn main() {
             crate::app::init_sidebar_keys(cx);
             crate::app::init_skills_keys(cx);
             crate::theme::init(cx);
-            cx.set_reduce_motion(crate::platform::reduce_motion_enabled());
+            crate::platform::init_reduce_motion(cx);
 
             // Sparkle only runs from a bundled release build (or when forced
             // via WAKU_FORCE_UPDATER=1); everywhere else the menu item is
@@ -162,59 +166,79 @@ fn main() {
             cx.on_action(|_: &About, _| crate::platform::show_about_panel());
 
             cx.bind_keys([
-                KeyBinding::new("cmd-q", Quit, None),
-                KeyBinding::new("cmd-w", CloseWindow, None),
-                KeyBinding::new("cmd-n", NewSession, None),
-                KeyBinding::new("cmd-o", NewProject, None),
-                KeyBinding::new("cmd-,", OpenSettings, None),
-                KeyBinding::new("cmd-b", ToggleSidebar, None),
-                KeyBinding::new("cmd-shift-b", ToggleRightPanel, None),
-                KeyBinding::new("cmd-k", ToggleCommandPalette, None),
-                KeyBinding::new("cmd-alt-shift-f", ToggleFpsCounter, None),
-                KeyBinding::new("cmd-[", NavigateBack, Some("Waku")),
-                KeyBinding::new("cmd-]", NavigateForward, Some("Waku")),
-                KeyBinding::new("cmd-l", FocusComposer, None),
-                KeyBinding::new("cmd-/", ToggleModelPicker, None),
-                KeyBinding::new("cmd-u", ToggleUsagePanel, None),
-                KeyBinding::new("cmd-s", SaveFile, None),
+                // `secondary` is Command on macOS and Control elsewhere.
+                KeyBinding::new("secondary-q", Quit, None),
+                KeyBinding::new("secondary-w", CloseWindow, None),
+                KeyBinding::new("secondary-n", NewSession, None),
+                KeyBinding::new("secondary-o", NewProject, None),
+                KeyBinding::new("secondary-,", OpenSettings, None),
+                KeyBinding::new("secondary-b", ToggleSidebar, None),
+                KeyBinding::new("secondary-shift-b", ToggleRightPanel, None),
+                KeyBinding::new("secondary-k", ToggleCommandPalette, None),
+                KeyBinding::new("secondary-alt-shift-f", ToggleFpsCounter, None),
+                KeyBinding::new("secondary-[", NavigateBack, Some("Waku")),
+                KeyBinding::new("secondary-]", NavigateForward, Some("Waku")),
+                KeyBinding::new("secondary-l", FocusComposer, None),
+                KeyBinding::new("secondary-/", ToggleModelPicker, None),
+                KeyBinding::new("secondary-u", ToggleUsagePanel, None),
+                KeyBinding::new("secondary-s", SaveFile, None),
                 KeyBinding::new("escape", CancelTurn, Some("Waku")),
-                KeyBinding::new("cmd-c", CopySelection, Some("Waku")),
+                KeyBinding::new("secondary-c", CopySelection, Some("Waku")),
                 // Find and replace in the right panel's file editor, on the
-                // conventional VS Code bindings. `cmd-g` cycles matches from
+                // conventional VS Code bindings. The primary shortcut + G cycles matches from
                 // the editor without moving focus to the bar.
-                KeyBinding::new("cmd-f", OpenFind, Some("Waku")),
-                KeyBinding::new("cmd-alt-f", OpenFindReplace, Some("Waku")),
-                KeyBinding::new("cmd-g", FindNext, Some("Waku")),
-                KeyBinding::new("cmd-shift-g", FindPrevious, Some("Waku")),
+                KeyBinding::new("secondary-f", OpenFind, Some("Waku")),
+                KeyBinding::new("secondary-alt-f", OpenFindReplace, Some("Waku")),
+                KeyBinding::new("secondary-g", FindNext, Some("Waku")),
+                KeyBinding::new("secondary-shift-g", FindPrevious, Some("Waku")),
                 // Scoped to the editor pane: escape closes the bar there and
                 // falls through to CancelTurn anywhere else.
                 KeyBinding::new("escape", CloseFind, Some("FileEditorPane")),
-                KeyBinding::new("cmd-alt-c", ToggleFindCaseSensitive, Some("FileEditorPane")),
-                KeyBinding::new("cmd-alt-w", ToggleFindWholeWord, Some("FileEditorPane")),
-                KeyBinding::new("cmd-alt-r", ToggleFindRegex, Some("FileEditorPane")),
+                KeyBinding::new(
+                    "secondary-alt-c",
+                    ToggleFindCaseSensitive,
+                    Some("FileEditorPane"),
+                ),
+                KeyBinding::new(
+                    "secondary-alt-w",
+                    ToggleFindWholeWord,
+                    Some("FileEditorPane"),
+                ),
+                KeyBinding::new("secondary-alt-r", ToggleFindRegex, Some("FileEditorPane")),
                 KeyBinding::new("shift-enter", FindPrevious, Some("FindBar")),
-                KeyBinding::new("cmd-alt-enter", ReplaceAllMatches, Some("FindBar")),
+                KeyBinding::new("secondary-alt-enter", ReplaceAllMatches, Some("FindBar")),
                 // Browser surface. Deeper than "Waku", so while focus is on the
-                // page or its address bar the browser reads ⌘L/⌘R/⌘[/⌘]/Esc
-                // the way every macOS browser does; the same keys elsewhere
+                // page or its address bar the browser reads the platform's
+                // conventional navigation shortcuts; the same keys elsewhere
                 // keep their app meanings. The clipboard trio is rebound
                 // because GPUI's window view claims key equivalents before
                 // AppKit can walk the responder chain into the webview.
-                KeyBinding::new("cmd-l", FocusBrowserAddress, Some("Browser")),
-                KeyBinding::new("cmd-r", BrowserReload, Some("Browser")),
-                KeyBinding::new("cmd-shift-r", BrowserHardReload, Some("Browser")),
-                KeyBinding::new("cmd-[", BrowserBack, Some("Browser")),
-                KeyBinding::new("cmd-]", BrowserForward, Some("Browser")),
+                KeyBinding::new("secondary-l", FocusBrowserAddress, Some("Browser")),
+                KeyBinding::new("secondary-r", BrowserReload, Some("Browser")),
+                KeyBinding::new("secondary-shift-r", BrowserHardReload, Some("Browser")),
+                KeyBinding::new("secondary-[", BrowserBack, Some("Browser")),
+                KeyBinding::new("secondary-]", BrowserForward, Some("Browser")),
                 KeyBinding::new("escape", BrowserStop, Some("Browser")),
-                KeyBinding::new("cmd-alt-i", BrowserDevtools, Some("Browser")),
-                KeyBinding::new("cmd-c", WebviewCopy, Some("Browser")),
-                KeyBinding::new("cmd-x", WebviewCut, Some("Browser")),
-                KeyBinding::new("cmd-v", WebviewPaste, Some("Browser")),
-                KeyBinding::new("cmd-a", WebviewSelectAll, Some("Browser")),
+                KeyBinding::new("secondary-alt-i", BrowserDevtools, Some("Browser")),
+                KeyBinding::new("secondary-c", WebviewCopy, Some("Browser")),
+                KeyBinding::new("secondary-x", WebviewCut, Some("Browser")),
+                KeyBinding::new("secondary-v", WebviewPaste, Some("Browser")),
+                KeyBinding::new("secondary-a", WebviewSelectAll, Some("Browser")),
                 KeyBinding::new("escape", BrowserAddressCancel, Some("BrowserAddress")),
             ]);
 
             cx.on_action(|_: &Quit, cx| cx.quit());
+
+            // Unlike AppKit, Linux has no Dock activation path that can
+            // restore a hidden last window. Follow Zed's GPUI precedent and
+            // terminate when the final window closes.
+            #[cfg(not(target_os = "macos"))]
+            cx.on_window_closed(|cx, _| {
+                if cx.windows().is_empty() {
+                    cx.quit();
+                }
+            })
+            .detach();
 
             let bounds = Bounds::centered(None, size(px(1380.0), px(880.0)), cx);
 
@@ -223,13 +247,26 @@ fn main() {
                     WindowOptions {
                         titlebar: Some(TitlebarOptions {
                             title: Some(APP_NAME.into()),
-                            appears_transparent: true,
-                            traffic_light_position: Some(point(px(16.0), px(17.0))),
+                            appears_transparent: cfg!(target_os = "macos"),
+                            traffic_light_position: cfg!(target_os = "macos")
+                                .then(|| point(px(16.0), px(17.0))),
                         }),
-                        // Waku owns titlebar gestures so controls embedded in the header
-                        // never inherit AppKit's implicit drag/double-click behavior.
-                        is_movable: false,
-                        window_background: WindowBackgroundAppearance::Blurred,
+                        // Waku moves its custom macOS titlebar explicitly. Keep
+                        // the NSWindow movable so native controls and Window-menu
+                        // tiling remain enabled.
+                        is_movable: true,
+                        app_owns_titlebar_drag: cfg!(target_os = "macos"),
+                        window_background: if cfg!(target_os = "macos") {
+                            WindowBackgroundAppearance::Blurred
+                        } else {
+                            WindowBackgroundAppearance::Opaque
+                        },
+                        app_id: Some(APP_ID.to_owned()),
+                        // GPUI defaults to compositor/server decorations. If a
+                        // Wayland compositor declines them, it reports the
+                        // client fallback and Waku renders that frame itself.
+                        #[cfg(target_os = "linux")]
+                        icon: crate::platform::linux_app_icon(),
                         window_bounds: Some(WindowBounds::Windowed(bounds)),
                         window_min_size: Some(size(px(980.0), px(680.0))),
                         ..Default::default()

@@ -266,7 +266,7 @@ impl Waku {
 
     /// Copy the transcript's text selection.
     ///
-    /// This is the fallback leg of `cmd-c`: the composer holds focus almost
+    /// This is the fallback leg of the copy shortcut: the composer holds focus almost
     /// always, so it handles the keystroke first and propagates when it has
     /// nothing selected of its own.
     pub(super) fn copy_selection_action(

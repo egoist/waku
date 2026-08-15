@@ -13,8 +13,12 @@ concurrency:
 
 jobs:
   test:
-    name: Rust
-    runs-on: macos-latest
+    name: Rust (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, ubuntu-24.04]
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 60
 
     steps:
@@ -25,6 +29,21 @@ jobs:
         run: |
           rustup toolchain install 1.96.0 --profile minimal
           rustup default 1.96.0
+
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes \
+            clang \
+            cmake \
+            libfontconfig-dev \
+            libvulkan1 \
+            libwayland-dev \
+            libx11-xcb-dev \
+            libxkbcommon-x11-dev \
+            pkg-config \
+            xdg-desktop-portal
 
       - name: Cache Cargo
         uses: actions/cache@v4
