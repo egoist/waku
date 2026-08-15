@@ -1023,41 +1023,14 @@ impl Waku {
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> Stateful<Div> {
-        div()
-            .id(SharedString::from(format!("automation-toggle-{id}")))
-            .tab_index(0)
-            .flex_none()
-            .focus_visible(|style| style.border_color(theme.accent))
-            .w(px(36.0))
-            .h(px(20.0))
-            .p(px(2.0))
-            .rounded_full()
-            .cursor_default()
-            .bg(if enabled { theme.inverse } else { theme.inset })
-            .border_1()
-            .border_color(if enabled {
-                theme.inverse
-            } else {
-                theme.border_strong
-            })
-            .flex()
-            .items_center()
-            .when(enabled, |element| element.justify_end())
-            .child(div().w(px(14.0)).h(px(14.0)).rounded_full().bg(if enabled {
-                theme.on_inverse
-            } else {
-                theme.text_tertiary
-            }))
-            .on_click(cx.listener(move |this, _, _, cx| {
-                this.toggle_automation_enabled(id, cx);
-                cx.stop_propagation();
-            }))
-            .on_key_down(cx.listener(move |this, event: &KeyDownEvent, _, cx| {
-                if matches!(event.keystroke.key.as_str(), "enter" | "space") {
-                    this.toggle_automation_enabled(id, cx);
-                    cx.stop_propagation();
-                }
-            }))
+        toggle_switch(
+            SharedString::from(format!("automation-toggle-{id}")),
+            enabled,
+            false,
+            *theme,
+            cx,
+            move |this, cx| this.toggle_automation_enabled(id, cx),
+        )
     }
 
     fn render_automation_editor(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -1689,43 +1662,9 @@ impl Waku {
         cx: &mut Context<Self>,
         change: impl Fn(&mut AutomationEditor) + 'static,
     ) -> Stateful<Div> {
-        // Shared so both the click and keyboard handlers can invoke it.
-        let change = std::rc::Rc::new(change);
-        let key_change = change.clone();
-        div()
-            .id(id)
-            .tab_index(0)
-            .flex_none()
-            .focus_visible(|style| style.border_color(theme.accent))
-            .w(px(36.0))
-            .h(px(20.0))
-            .p(px(2.0))
-            .rounded_full()
-            .cursor_default()
-            .bg(if on { theme.inverse } else { theme.inset })
-            .border_1()
-            .border_color(if on {
-                theme.inverse
-            } else {
-                theme.border_strong
-            })
-            .flex()
-            .items_center()
-            .when(on, |element| element.justify_end())
-            .child(div().w(px(14.0)).h(px(14.0)).rounded_full().bg(if on {
-                theme.on_inverse
-            } else {
-                theme.text_tertiary
-            }))
-            .on_click(cx.listener(move |this, _, _, cx| {
-                this.edit_automation_form(cx, |editor| change(editor));
-            }))
-            .on_key_down(cx.listener(move |this, event: &KeyDownEvent, _, cx| {
-                if matches!(event.keystroke.key.as_str(), "enter" | "space") {
-                    this.edit_automation_form(cx, |editor| key_change(editor));
-                    cx.stop_propagation();
-                }
-            }))
+        toggle_switch(id, on, false, *theme, cx, move |this, cx| {
+            this.edit_automation_form(cx, |editor| change(editor))
+        })
     }
 
     fn weekday_chips(

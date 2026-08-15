@@ -63,7 +63,7 @@ use crate::theme::{Theme, ThemePreference};
 use crate::ui::text_field::TextField;
 use crate::ui::{
     MenuChip, ProjectNameSelector, activity_icon, activity_noun, contain_scroll, file_icon, icon,
-    icon_button, motion, provider_color, provider_icon, status_color,
+    icon_button, motion, provider_color, provider_icon, status_color, toggle_switch,
 };
 use crate::{
     CancelTurn, CloseFind, CloseWindow, CopySelection, FindNext, FindPrevious, FocusComposer,

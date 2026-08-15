@@ -1,7 +1,8 @@
 use gpui::{
-    AnyElement, App, Div, ElementId, Hsla, Img, InteractiveElement, Interactivity, ParentElement,
-    PathBuilder, Pixels, RenderOnce, ScrollHandle, SharedString, Stateful, StyleRefinement, Styled,
-    Svg, Window, canvas, div, img, point, prelude::*, px, rgb, svg,
+    AnyElement, App, Context, Div, ElementId, Hsla, Img, InteractiveElement, Interactivity,
+    KeyDownEvent, ParentElement, PathBuilder, Pixels, RenderOnce, ScrollHandle, SharedString,
+    Stateful, StyleRefinement, Styled, Svg, Window, canvas, div, img, point, prelude::*, px, rgb,
+    svg,
 };
 
 pub mod menu;
@@ -60,6 +61,69 @@ pub fn contain_scroll(handle: &ScrollHandle, cx: &mut App) {
     if handle.max_offset().y > px(0.5) {
         cx.stop_propagation();
     }
+}
+
+/// The shared pill switch used by settings and automation forms.
+///
+/// `activate` is ignored while `disabled` is true, but the control remains in
+/// the tab order so a pending operation does not move focus unexpectedly.
+pub fn toggle_switch<E>(
+    id: impl Into<ElementId>,
+    on: bool,
+    disabled: bool,
+    theme: Theme,
+    cx: &mut Context<E>,
+    activate: impl Fn(&mut E, &mut Context<E>) + 'static,
+) -> Stateful<Div>
+where
+    E: 'static,
+{
+    let activate = std::rc::Rc::new(activate);
+    let click_activate = activate.clone();
+    let key_activate = activate;
+    let base = div()
+        .id(id)
+        .tab_index(0)
+        .focus_visible(|style| style.border_color(theme.accent))
+        .w(px(36.0))
+        .h(px(20.0))
+        .p(px(2.0))
+        .flex_none()
+        .rounded_full()
+        .cursor_default()
+        .when(disabled, |element| element.opacity(0.55))
+        .bg(if on { theme.inverse } else { theme.inset })
+        .border_1()
+        .border_color(if on {
+            theme.inverse
+        } else {
+            theme.border_strong
+        })
+        .flex()
+        .items_center()
+        .when(on, |element| element.justify_end())
+        .child(div().w(px(14.0)).h(px(14.0)).rounded_full().bg(if on {
+            theme.on_inverse
+        } else {
+            theme.text_tertiary
+        }));
+
+    if disabled {
+        return base;
+    }
+
+    base.on_click(cx.listener(move |this, _, _, cx| {
+        click_activate(this, cx);
+        cx.stop_propagation();
+    }))
+    .on_key_down(cx.listener(move |this, event: &KeyDownEvent, _, cx| {
+        if !event.keystroke.modifiers.modified()
+            && matches!(event.keystroke.key.as_str(), "enter" | "space")
+        {
+            key_activate(this, cx);
+            cx.stop_propagation();
+        }
+    }))
 }
 
 /// Brand hue for each provider's official mark.
