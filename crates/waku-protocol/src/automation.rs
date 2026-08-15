@@ -98,12 +98,7 @@ impl Automation {
 
     /// Update the outcome (and, if newly known, the spawned-task link) of the
     /// history entry for `run_id`. Called when a spawned run completes.
-    pub fn resolve_run(
-        &mut self,
-        run_id: Uuid,
-        outcome: RunOutcome,
-        session_id: Option<Uuid>,
-    ) -> bool {
+    fn resolve_run(&mut self, run_id: Uuid, outcome: RunOutcome, session_id: Option<Uuid>) -> bool {
         if let Some(entry) = self
             .history
             .iter_mut()

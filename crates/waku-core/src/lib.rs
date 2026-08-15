@@ -19,8 +19,8 @@ macro_rules! tr {
 
 pub mod amp_session;
 pub mod attachments;
+pub mod automation;
 pub mod blob_store;
-pub use waku_protocol::automation;
 pub mod checkpoint;
 pub mod claude_session;
 pub mod command_env;

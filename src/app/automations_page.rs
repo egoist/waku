@@ -565,14 +565,11 @@ impl Waku {
             .automations
             .iter()
             .map(|automation| crate::automation::planner::AutomationTick {
-                id: automation.id,
-                enabled: automation.enabled,
-                schedule: automation.schedule.clone(),
+                automation,
                 // Before an automation has ever run, its creation time is the
                 // baseline, so a fresh automation never immediately catch-up
                 // fires.
                 marker: local_naive(automation.last_run_at.unwrap_or(automation.created_at)),
-                overlap: automation.overlap,
                 active: active.contains(&automation.id),
             })
             .collect();

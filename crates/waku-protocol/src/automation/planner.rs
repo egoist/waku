@@ -12,20 +12,17 @@ use chrono::NaiveDateTime;
 use uuid::Uuid;
 
 use super::schedule::due_state;
-use super::{OverlapPolicy, Schedule};
+use super::{Automation, OverlapPolicy};
 
-/// One automation's state, as the planner needs to see it. Decoupled from the
-/// stored [`super::Automation`] so the planner stays pure and trivially
-/// testable.
+/// One automation's state, as the planner needs to see it. The stored
+/// automation is borrowed because it is already clock-free and storage-free;
+/// only the values injected by the scheduler live in this projection.
 #[derive(Clone, Debug)]
-pub struct AutomationTick {
-    pub id: Uuid,
-    pub enabled: bool,
-    pub schedule: Schedule,
+pub struct AutomationTick<'a> {
+    pub automation: &'a Automation,
     /// The scheduling reference: the last run, or the automation's baseline
     /// before it has ever run — already converted to local wall clock.
     pub marker: NaiveDateTime,
-    pub overlap: OverlapPolicy,
     /// Whether a prior run of this automation is still active.
     pub active: bool,
 }
@@ -42,21 +39,12 @@ pub enum PlanDecision {
     Skip { id: Uuid, catch_up: bool },
 }
 
-impl PlanDecision {
-    #[cfg(test)]
-    pub fn id(self) -> Uuid {
-        match self {
-            Self::Fire { id, .. } | Self::Skip { id, .. } => id,
-        }
-    }
-}
-
 /// Resolve every automation's decision for this tick.
 ///
 /// `catch_up_grace` absorbs the tick cadence when distinguishing an on-time fire
 /// from a catch-up (see [`due_state`]).
 pub fn plan(
-    automations: &[AutomationTick],
+    automations: &[AutomationTick<'_>],
     now: NaiveDateTime,
     catch_up_grace: chrono::Duration,
 ) -> Vec<PlanDecision> {
@@ -67,15 +55,20 @@ pub fn plan(
 }
 
 fn decide(
-    automation: &AutomationTick,
+    automation: &AutomationTick<'_>,
     now: NaiveDateTime,
     catch_up_grace: chrono::Duration,
 ) -> Option<PlanDecision> {
-    if !automation.enabled {
+    if !automation.automation.enabled {
         return None;
     }
-    let due = due_state(&automation.schedule, automation.marker, now, catch_up_grace)?;
-    let id = automation.id;
+    let due = due_state(
+        &automation.automation.schedule,
+        automation.marker,
+        now,
+        catch_up_grace,
+    )?;
+    let id = automation.automation.id;
     let catch_up = due.catch_up;
 
     if !automation.active {
@@ -83,7 +76,7 @@ fn decide(
     }
 
     // A prior run is still active: the overlap policy decides.
-    match automation.overlap {
+    match automation.automation.overlap {
         OverlapPolicy::Concurrent => Some(PlanDecision::Fire { id, catch_up }),
         OverlapPolicy::Skip => Some(PlanDecision::Skip { id, catch_up }),
         // Defer: leave the occurrence pending (marker unchanged) so it fires on
@@ -95,7 +88,8 @@ fn decide(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::automation::TimeOfDay;
+    use crate::automation::{Automation, Schedule, TimeOfDay};
+    use crate::model::ProviderKind;
     use chrono::NaiveDate;
 
     fn at(year: i32, month: u32, day: u32, hour: u32, minute: u32) -> NaiveDateTime {
@@ -111,18 +105,22 @@ mod tests {
         }
     }
 
-    fn tick(
-        id: Uuid,
+    fn automation(id: Uuid, overlap: OverlapPolicy) -> Automation {
+        let mut automation = Automation::new("Test", ProviderKind::Codex, 1_000);
+        automation.id = id;
+        automation.schedule = daily(9, 0);
+        automation.overlap = overlap;
+        automation
+    }
+
+    fn tick<'a>(
+        automation: &'a Automation,
         marker: NaiveDateTime,
-        overlap: OverlapPolicy,
         active: bool,
-    ) -> AutomationTick {
+    ) -> AutomationTick<'a> {
         AutomationTick {
-            id,
-            enabled: true,
-            schedule: daily(9, 0),
+            automation,
             marker,
-            overlap,
             active,
         }
     }
@@ -132,7 +130,8 @@ mod tests {
     #[test]
     fn a_due_idle_automation_fires() {
         let id = Uuid::new_v4();
-        let ticks = vec![tick(id, at(2026, 8, 12, 9, 0), OverlapPolicy::Skip, false)];
+        let automation = automation(id, OverlapPolicy::Skip);
+        let ticks = vec![tick(&automation, at(2026, 8, 12, 9, 0), false)];
         let decisions = plan(&ticks, at(2026, 8, 13, 9, 1), GRACE);
         assert_eq!(
             decisions,
@@ -146,7 +145,8 @@ mod tests {
     #[test]
     fn a_not_yet_due_automation_produces_no_decision() {
         let id = Uuid::new_v4();
-        let ticks = vec![tick(id, at(2026, 8, 13, 8, 0), OverlapPolicy::Skip, false)];
+        let automation = automation(id, OverlapPolicy::Skip);
+        let ticks = vec![tick(&automation, at(2026, 8, 13, 8, 0), false)];
         // now is before today's 9:00 slot.
         let decisions = plan(&ticks, at(2026, 8, 13, 8, 30), GRACE);
         assert!(decisions.is_empty());
@@ -155,16 +155,18 @@ mod tests {
     #[test]
     fn a_disabled_automation_never_fires_even_when_due() {
         let id = Uuid::new_v4();
-        let mut disabled = tick(id, at(2026, 8, 12, 9, 0), OverlapPolicy::Skip, false);
+        let mut disabled = automation(id, OverlapPolicy::Skip);
         disabled.enabled = false;
-        let decisions = plan(&[disabled], at(2026, 8, 13, 9, 1), GRACE);
+        let ticks = vec![tick(&disabled, at(2026, 8, 12, 9, 0), false)];
+        let decisions = plan(&ticks, at(2026, 8, 13, 9, 1), GRACE);
         assert!(decisions.is_empty());
     }
 
     #[test]
     fn skip_policy_skips_against_an_active_run() {
         let id = Uuid::new_v4();
-        let ticks = vec![tick(id, at(2026, 8, 12, 9, 0), OverlapPolicy::Skip, true)];
+        let automation = automation(id, OverlapPolicy::Skip);
+        let ticks = vec![tick(&automation, at(2026, 8, 12, 9, 0), true)];
         let decisions = plan(&ticks, at(2026, 8, 13, 9, 1), GRACE);
         assert_eq!(
             decisions,
@@ -178,7 +180,8 @@ mod tests {
     #[test]
     fn queue_policy_defers_against_an_active_run() {
         let id = Uuid::new_v4();
-        let ticks = vec![tick(id, at(2026, 8, 12, 9, 0), OverlapPolicy::Queue, true)];
+        let automation = automation(id, OverlapPolicy::Queue);
+        let ticks = vec![tick(&automation, at(2026, 8, 12, 9, 0), true)];
         let decisions = plan(&ticks, at(2026, 8, 13, 9, 1), GRACE);
         // Deferred: no decision, marker untouched so it re-evaluates next tick.
         assert!(decisions.is_empty());
@@ -187,12 +190,8 @@ mod tests {
     #[test]
     fn concurrent_policy_fires_against_an_active_run() {
         let id = Uuid::new_v4();
-        let ticks = vec![tick(
-            id,
-            at(2026, 8, 12, 9, 0),
-            OverlapPolicy::Concurrent,
-            true,
-        )];
+        let automation = automation(id, OverlapPolicy::Concurrent);
+        let ticks = vec![tick(&automation, at(2026, 8, 12, 9, 0), true)];
         let decisions = plan(&ticks, at(2026, 8, 13, 9, 1), GRACE);
         assert_eq!(
             decisions,
@@ -211,7 +210,8 @@ mod tests {
             OverlapPolicy::Concurrent,
         ] {
             let id = Uuid::new_v4();
-            let ticks = vec![tick(id, at(2026, 8, 12, 9, 0), overlap, false)];
+            let automation = automation(id, overlap);
+            let ticks = vec![tick(&automation, at(2026, 8, 12, 9, 0), false)];
             let decisions = plan(&ticks, at(2026, 8, 13, 9, 1), GRACE);
             assert_eq!(
                 decisions,
@@ -227,8 +227,9 @@ mod tests {
     #[test]
     fn a_stale_missed_occurrence_fires_once_as_catch_up() {
         let id = Uuid::new_v4();
+        let automation = automation(id, OverlapPolicy::Skip);
         // Marker two days ago, now well past today's slot: the app was closed.
-        let ticks = vec![tick(id, at(2026, 8, 11, 9, 0), OverlapPolicy::Skip, false)];
+        let ticks = vec![tick(&automation, at(2026, 8, 11, 9, 0), false)];
         let decisions = plan(&ticks, at(2026, 8, 13, 14, 0), GRACE);
         // Exactly one fire, flagged catch-up — never a burst.
         assert_eq!(decisions, vec![PlanDecision::Fire { id, catch_up: true }]);
@@ -239,22 +240,26 @@ mod tests {
         let due_idle = Uuid::new_v4();
         let due_active_skip = Uuid::new_v4();
         let not_due = Uuid::new_v4();
+        let due_idle_automation = automation(due_idle, OverlapPolicy::Skip);
+        let due_active_skip_automation = automation(due_active_skip, OverlapPolicy::Skip);
+        let not_due_automation = automation(not_due, OverlapPolicy::Skip);
         let ticks = vec![
-            tick(due_idle, at(2026, 8, 12, 9, 0), OverlapPolicy::Skip, false),
-            tick(
-                due_active_skip,
-                at(2026, 8, 12, 9, 0),
-                OverlapPolicy::Skip,
-                true,
-            ),
+            tick(&due_idle_automation, at(2026, 8, 12, 9, 0), false),
+            tick(&due_active_skip_automation, at(2026, 8, 12, 9, 0), true),
             // Already ran at 9:03 today: its next slot is tomorrow.
-            tick(not_due, at(2026, 8, 13, 9, 3), OverlapPolicy::Skip, false),
+            tick(&not_due_automation, at(2026, 8, 13, 9, 3), false),
         ];
         // 9:03, three minutes past the 9:00 slot — inside the grace window, so
         // the two due automations fire/skip on time rather than as catch-ups.
         let decisions = plan(&ticks, at(2026, 8, 13, 9, 3), GRACE);
         // not_due already ran today; due_idle fires; due_active_skip skips.
-        assert!(!decisions.iter().any(|decision| decision.id() == not_due));
+        assert!(!decisions.iter().any(|decision| {
+            matches!(
+                decision,
+                PlanDecision::Fire { id, .. } | PlanDecision::Skip { id, .. }
+                    if *id == not_due
+            )
+        }));
         assert!(decisions.iter().any(|decision| *decision
             == PlanDecision::Fire {
                 id: due_idle,

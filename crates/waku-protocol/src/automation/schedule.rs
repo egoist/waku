@@ -79,25 +79,19 @@ pub fn next_occurrence(schedule: &Schedule, after: NaiveDateTime) -> Option<Naiv
             let mut month = after.month();
             for _ in 0..MONTH_SEARCH_LIMIT {
                 let last = last_day_of_month(year, month);
-                let mut best: Option<NaiveDateTime> = None;
-                for &day in days {
-                    let clamped = u32::from(day).clamp(1, last);
-                    let Some(date) = NaiveDate::from_ymd_opt(year, month, clamped) else {
-                        continue;
-                    };
-                    let candidate = date.and_time(time);
-                    if candidate > after {
-                        best = Some(best.map_or(candidate, |current| current.min(candidate)));
-                    }
-                }
+                let best = days
+                    .iter()
+                    .filter_map(|&day| {
+                        let clamped = u32::from(day).clamp(1, last);
+                        let date = NaiveDate::from_ymd_opt(year, month, clamped)?;
+                        let candidate = date.and_time(time);
+                        (candidate > after).then_some(candidate)
+                    })
+                    .min();
                 if let Some(candidate) = best {
                     return Some(candidate);
                 }
-                (year, month) = if month == 12 {
-                    (year + 1, 1)
-                } else {
-                    (year, month + 1)
-                };
+                (year, month) = next_month(year, month);
             }
             None
         }
@@ -136,12 +130,16 @@ pub struct Due {
 }
 
 /// The last calendar day of `month` in `year` (28-31).
-fn last_day_of_month(year: i32, month: u32) -> u32 {
-    let (next_year, next_month) = if month == 12 {
+fn next_month(year: i32, month: u32) -> (i32, u32) {
+    if month == 12 {
         (year + 1, 1)
     } else {
         (year, month + 1)
-    };
+    }
+}
+
+fn last_day_of_month(year: i32, month: u32) -> u32 {
+    let (next_year, next_month) = next_month(year, month);
     NaiveDate::from_ymd_opt(next_year, next_month, 1)
         .and_then(|first| first.pred_opt())
         .map_or(28, |last| last.day())

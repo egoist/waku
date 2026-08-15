@@ -325,29 +325,6 @@ impl PersistedState {
         self.sessions.push(session);
     }
 
-    pub fn automation(&self, id: Uuid) -> Option<&Automation> {
-        self.automations
-            .iter()
-            .find(|automation| automation.id == id)
-    }
-
-    pub fn automation_mut(&mut self, id: Uuid) -> Option<&mut Automation> {
-        self.automations
-            .iter_mut()
-            .find(|automation| automation.id == id)
-    }
-
-    pub fn push_automation(&mut self, automation: Automation) {
-        self.automations.push(automation);
-    }
-
-    /// Removes an automation, returning whether one was found.
-    pub fn remove_automation(&mut self, id: Uuid) -> bool {
-        let before = self.automations.len();
-        self.automations.retain(|automation| automation.id != id);
-        self.automations.len() != before
-    }
-
     pub fn empty() -> Self {
         Self {
             version: STATE_VERSION,
@@ -692,10 +669,16 @@ fn collect_references(data: &str, scheme: &str, references: &mut HashSet<String>
 }
 
 fn fingerprint(value: &str) -> u64 {
+    fingerprint_pieces([value])
+}
+
+fn fingerprint_pieces<'a>(pieces: impl IntoIterator<Item = &'a str>) -> u64 {
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
-    for byte in value.as_bytes() {
-        hash ^= u64::from(*byte);
-        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    for piece in pieces {
+        for byte in piece.as_bytes() {
+            hash ^= u64::from(*byte);
+            hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+        }
     }
     hash
 }
@@ -1393,15 +1376,25 @@ impl StateStore {
 
         // Automations are few and always read whole, so a change to any one
         // rewrites the small set rather than tracking per-automation dirtiness.
-        let automations = serde_json::to_string(&state.automations).map_err(to_io_error)?;
-        let automations_fingerprint = fingerprint(&automations);
-        let mut next_automation_fingerprint = None;
-        let mut next_persisted_automations = None;
+        // Keep each encoding for the write path and fingerprint those same
+        // pieces; the previous implementation encoded the set and every item.
+        let serialized_automations = state
+            .automations
+            .iter()
+            .map(|automation| {
+                Ok::<_, io::Error>((
+                    automation.id,
+                    serde_json::to_string(automation).map_err(to_io_error)?,
+                ))
+            })
+            .collect::<io::Result<Vec<_>>>()?;
+        let automations_fingerprint =
+            fingerprint_pieces(serialized_automations.iter().map(|(_, data)| data.as_str()));
+        let mut next_automation_state = None;
         if automations_fingerprint != storage.saved_automations {
-            let current_ids = state
-                .automations
+            let current_ids = serialized_automations
                 .iter()
-                .map(|automation| automation.id)
+                .map(|(id, _)| *id)
                 .collect::<HashSet<_>>();
             for removed in storage.persisted_automations.difference(&current_ids) {
                 transaction
@@ -1411,14 +1404,12 @@ impl StateStore {
                     )
                     .map_err(to_io_error)?;
             }
-            for automation in &state.automations {
-                let data = serde_json::to_string(automation).map_err(to_io_error)?;
+            for (id, data) in &serialized_automations {
                 transaction
-                    .execute(UPSERT_AUTOMATION, params![automation.id.to_string(), data])
+                    .execute(UPSERT_AUTOMATION, params![id.to_string(), data])
                     .map_err(to_io_error)?;
             }
-            next_automation_fingerprint = Some(automations_fingerprint);
-            next_persisted_automations = Some(current_ids);
+            next_automation_state = Some((automations_fingerprint, current_ids));
         }
 
         // Only sessions the app reported as changed are written. A draft that
@@ -1501,10 +1492,8 @@ impl StateStore {
         }
 
         transaction.commit().map_err(to_io_error)?;
-        if let Some(fingerprint) = next_automation_fingerprint {
+        if let Some((fingerprint, ids)) = next_automation_state {
             storage.saved_automations = fingerprint;
-        }
-        if let Some(ids) = next_persisted_automations {
             storage.persisted_automations = ids;
         }
         // Now that the rows are durable, and not before.
@@ -1967,13 +1956,17 @@ mod tests {
         }
         let automation_id = automation.id;
         let expected = automation.clone();
-        state.push_automation(automation);
+        state.automations.push(automation);
         store.save(&mut state).unwrap();
 
         // Reopen from disk to prove durability.
         let restored = store_in(&directory).load().unwrap();
         assert_eq!(restored.automations.len(), 1);
-        let loaded = restored.automation(automation_id).unwrap();
+        let loaded = restored
+            .automations
+            .iter()
+            .find(|automation| automation.id == automation_id)
+            .unwrap();
         assert_eq!(loaded.history.len(), MAX_HISTORY);
         assert_eq!(loaded, &expected);
         // Newest-first survived the round trip.
@@ -1996,17 +1989,29 @@ mod tests {
         let drop = Automation::new("Drop", ProviderKind::Codex, 1_000);
         let keep_id = keep.id;
         let drop_id = drop.id;
-        state.push_automation(keep);
-        state.push_automation(drop);
+        state.automations.push(keep);
+        state.automations.push(drop);
         store.save(&mut state).unwrap();
 
-        assert!(state.remove_automation(drop_id));
+        state
+            .automations
+            .retain(|automation| automation.id != drop_id);
         store.save(&mut state).unwrap();
 
         let restored = store_in(&directory).load().unwrap();
         assert_eq!(restored.automations.len(), 1);
-        assert!(restored.automation(keep_id).is_some());
-        assert!(restored.automation(drop_id).is_none());
+        assert!(
+            restored
+                .automations
+                .iter()
+                .any(|automation| automation.id == keep_id)
+        );
+        assert!(
+            !restored
+                .automations
+                .iter()
+                .any(|automation| automation.id == drop_id)
+        );
 
         fs::remove_dir_all(directory).ok();
     }
@@ -2020,7 +2025,7 @@ mod tests {
         let mut state = PersistedState::fresh(PathBuf::from("/tmp/project"));
         let automation = Automation::new("Known", ProviderKind::Codex, 1_000);
         let known_id = automation.id;
-        state.push_automation(automation);
+        state.automations.push(automation);
         store.save(&mut state).unwrap();
 
         let unknown_id = Uuid::new_v4();
@@ -2038,9 +2043,16 @@ mod tests {
 
         let reopened = store_in(&directory);
         let mut loaded = reopened.load().unwrap();
-        loaded.automation_mut(known_id).unwrap().name = "Updated".to_owned();
+        loaded
+            .automations
+            .iter_mut()
+            .find(|automation| automation.id == known_id)
+            .unwrap()
+            .name = "Updated".to_owned();
         reopened.save(&mut loaded).unwrap();
-        assert!(loaded.remove_automation(known_id));
+        loaded
+            .automations
+            .retain(|automation| automation.id != known_id);
         reopened.save(&mut loaded).unwrap();
 
         let storage = reopened.storage.lock();
@@ -2073,15 +2085,22 @@ mod tests {
             let mut state = PersistedState::fresh(PathBuf::from("/tmp/project"));
             let automation = Automation::new("Before", ProviderKind::Codex, 1_000);
             let automation_id = automation.id;
-            state.push_automation(automation);
+            state.automations.push(automation);
             let session_id = state.sessions[0].id;
             state.session_mut(session_id).unwrap().begin_turn("initial");
             store.save(&mut state).unwrap();
 
             if delete {
-                assert!(state.remove_automation(automation_id));
+                state
+                    .automations
+                    .retain(|automation| automation.id != automation_id);
             } else {
-                state.automation_mut(automation_id).unwrap().name = "After".to_owned();
+                state
+                    .automations
+                    .iter_mut()
+                    .find(|automation| automation.id == automation_id)
+                    .unwrap()
+                    .name = "After".to_owned();
             }
             state.session_mut(session_id).unwrap().title = "force session write".to_owned();
             {
@@ -2108,9 +2127,22 @@ mod tests {
 
             let restored = store_in(&directory).load().unwrap();
             if delete {
-                assert!(restored.automation(automation_id).is_none());
+                assert!(
+                    !restored
+                        .automations
+                        .iter()
+                        .any(|automation| automation.id == automation_id)
+                );
             } else {
-                assert_eq!(restored.automation(automation_id).unwrap().name, "After");
+                assert_eq!(
+                    restored
+                        .automations
+                        .iter()
+                        .find(|automation| automation.id == automation_id)
+                        .unwrap()
+                        .name,
+                    "After"
+                );
             }
             fs::remove_dir_all(directory).ok();
         }
