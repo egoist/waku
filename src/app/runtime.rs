@@ -3167,7 +3167,7 @@ impl Waku {
             .unwrap_or(self.state.last_provider);
         // Provider syntax resolves here, at the seam between the transcript
         // and the transport. The user message keeps the typed slash form,
-        // while templates expand and Codex skills become `$catalog:key`.
+        // while templates expand and skills adopt provider-native syntax.
         // Claude's commands pass through untouched; its CLI owns expansion.
         let prompt = submission.prompt;
         let driver_prompt = self.resolve_provider_submission(provider, &prompt);

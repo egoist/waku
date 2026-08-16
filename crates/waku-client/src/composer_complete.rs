@@ -162,9 +162,9 @@ pub fn expand_command_template(template: &str, args: &str) -> String {
 
 /// Resolve composer text into the exact prompt expected by the provider.
 ///
-/// Template commands expand to their body. Codex skills keep a slash in the
-/// composer and transcript, but its harness requires a dollar-prefixed catalog
-/// key at the transport boundary.
+/// Template commands expand to their body. Skills keep a slash in the
+/// composer and transcript, then resolve to each provider's native syntax at
+/// the transport boundary.
 pub fn resolved_submission(
     provider: ProviderKind,
     prompt: &str,
@@ -188,17 +188,24 @@ pub fn resolved_skill_submission(
     prompt: &str,
     commands: &[SlashCommand],
 ) -> Option<String> {
-    if provider != ProviderKind::Codex {
+    if !matches!(provider, ProviderKind::Codex | ProviderKind::Pi) {
         return None;
     }
     let invocation = prompt.strip_prefix('/')?;
     let name = invocation
         .split_once(char::is_whitespace)
         .map_or(invocation, |(name, _)| name);
-    commands
+    if !commands
         .iter()
         .any(|command| command.name == name && command.scope == CommandScope::Skill)
-        .then(|| format!("${invocation}"))
+    {
+        return None;
+    }
+    Some(match provider {
+        ProviderKind::Codex => format!("${invocation}"),
+        ProviderKind::Pi => format!("/skill:{invocation}"),
+        _ => unreachable!("non-native skill providers returned above"),
+    })
 }
 
 pub fn matcher() -> Matcher {
@@ -404,6 +411,23 @@ mod tests {
             ),
             None
         );
+    }
+
+    #[test]
+    fn pi_skill_submission_uses_the_skill_command() {
+        for name in ["to-spec", "to-tickets"] {
+            let skill = command(name, CommandScope::Skill);
+            let expected = format!("/skill:{name} carefully");
+            assert_eq!(
+                resolved_skill_submission(
+                    ProviderKind::Pi,
+                    &format!("/{name} carefully"),
+                    &[skill]
+                )
+                .as_deref(),
+                Some(expected.as_str())
+            );
+        }
     }
 
     fn command(name: &str, scope: CommandScope) -> SlashCommand {

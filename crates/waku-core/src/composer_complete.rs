@@ -194,6 +194,7 @@ fn builtin_claude_commands() -> Vec<SlashCommand> {
 /// provider and always sent raw using its native invocation. Codex plugin
 /// skills retain the qualified `plugin:skill` catalog key so the client can
 /// translate its composer slash to `$plugin:skill` at the transport boundary.
+/// Pi skills retain their short name and resolve to `/skill:name` there.
 ///
 /// On top of the native sources, every provider reads Waku's own layer —
 /// `.waku/commands` in the project and `~/.config/waku/commands` — and gets
@@ -681,7 +682,7 @@ pub fn resolved_skill_submission(
     prompt: &str,
     commands: &[SlashCommand],
 ) -> Option<String> {
-    if provider != ProviderKind::Codex {
+    if !matches!(provider, ProviderKind::Codex | ProviderKind::Pi) {
         return None;
     }
     let invocation = prompt.strip_prefix('/')?;
@@ -689,10 +690,17 @@ pub fn resolved_skill_submission(
         Some((name, _)) => name,
         None => invocation,
     };
-    commands
+    if !commands
         .iter()
         .any(|command| command.name == name && command.scope == CommandScope::Skill)
-        .then(|| format!("${invocation}"))
+    {
+        return None;
+    }
+    Some(match provider {
+        ProviderKind::Codex => format!("${invocation}"),
+        ProviderKind::Pi => format!("/skill:{invocation}"),
+        _ => unreachable!("non-native skill providers returned above"),
+    })
 }
 
 // ── Workspace file index ───────────────────────────────────────────────────
@@ -1356,6 +1364,10 @@ mod tests {
         assert_eq!(
             resolved_submission(ProviderKind::Amp, "/deploy-runbook staging", &commands),
             None
+        );
+        assert_eq!(
+            resolved_submission(ProviderKind::Pi, "/deploy-runbook staging", &commands).as_deref(),
+            Some("/skill:deploy-runbook staging")
         );
 
         // Each ecosystem's own project-level skill tree is read too.
