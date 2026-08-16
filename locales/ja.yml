@@ -1054,11 +1054,6 @@ automations.edit_title: 自動化を編集
 automations.default_name: 新規自動化
 automations.empty_title: 自動化がまだありません
 automations.empty_body: 保存したプロンプトを毎日・毎週・毎月のスケジュールで実行する自動化を作成します。
-automations.badge: 自動化から
-automations.section_prompt: プロンプト
-automations.section_schedule: スケジュール
-automations.section_agent: エージェント
-automations.section_behavior: 動作
 automations.field_name: 名前
 automations.field_name_description: サイドバー・通知・コマンドパレットに表示されます。
 automations.field_instructions: 指示

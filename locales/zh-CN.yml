@@ -1002,11 +1002,6 @@ automations.edit_title: 编辑自动化
 automations.default_name: 新建自动化
 automations.empty_title: 暂无自动化
 automations.empty_body: 创建自动化，按每日、每周或每月的计划运行已保存的提示词。
-automations.badge: 来自自动化
-automations.section_prompt: 提示词
-automations.section_schedule: 计划
-automations.section_agent: 智能体
-automations.section_behavior: 行为
 automations.field_name: 名称
 automations.field_name_description: 显示在侧边栏、通知和命令面板中。
 automations.field_instructions: 指令

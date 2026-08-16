@@ -538,8 +538,6 @@ automations.delete_sessions_partial:
   en: "Could not delete %{count} sessions because a response fork is in progress."
 automations.run_now:
   en: Run now
-automations.badge:
-  en: From automation
 automations.notify_succeeded:
   en: Automation run completed
 automations.notify_failed:
@@ -556,14 +554,6 @@ automations.next_run:
   en: "Next run %{time}"
 automations.next_run_none:
   en: Not scheduled
-automations.section_prompt:
-  en: Prompt
-automations.section_agent:
-  en: Agent
-automations.section_schedule:
-  en: Schedule
-automations.section_behavior:
-  en: Behavior
 automations.field_name:
   en: Name
 automations.field_name_description:
