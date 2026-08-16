@@ -6,7 +6,7 @@ use std::sync::{Arc, Weak};
 use std::time::Duration;
 
 use anyhow::{Context as _, bail};
-use crossbeam_channel::{Receiver, Sender, unbounded};
+use crossbeam_channel::{Receiver, RecvTimeoutError, Sender, bounded, unbounded};
 use parking_lot::Mutex;
 use subtle::ConstantTimeEq as _;
 use tungstenite::handshake::server::{
@@ -56,7 +56,10 @@ pub trait Backend: Send + Sync + 'static {
 
     /// Called by the daemon-owned scheduler on its planning cadence.
     /// Backends that do not host automations can keep the default no-op.
-    fn tick(&self, _events: EventSink) {}
+    ///
+    /// Takes an owned handle so an implementation can move work it must not do
+    /// on the scheduler thread onto its own thread.
+    fn tick(self: Arc<Self>, _events: EventSink) {}
 
     fn shutdown(&self) {}
 }
@@ -534,54 +537,78 @@ pub fn serve(
     let scheduler_backend = backend.clone();
     let scheduler_hub = hub.clone();
     let scheduler_shutdown = shutdown.clone();
+    // A dedicated stop channel rather than only the shutdown flag: the loop
+    // spends nearly all of its time parked between ticks, and polling the flag
+    // would make teardown wait out a whole tick interval.
+    let (scheduler_stop, scheduler_stopped) = bounded::<()>(1);
     let scheduler = std::thread::Builder::new()
         .name("waku-daemon-automation-scheduler".into())
         .spawn(move || {
             while !scheduler_shutdown.load(Ordering::Acquire) {
-                scheduler_backend.tick(scheduler_hub.event_sink(Uuid::nil(), Uuid::nil()));
-                std::thread::sleep(AUTOMATION_TICK_INTERVAL);
+                scheduler_backend
+                    .clone()
+                    .tick(scheduler_hub.event_sink(Uuid::nil(), Uuid::nil()));
+                if !matches!(
+                    scheduler_stopped.recv_timeout(AUTOMATION_TICK_INTERVAL),
+                    Err(RecvTimeoutError::Timeout)
+                ) {
+                    break;
+                }
             }
         })
         .context("could not start automation scheduler")?;
-    while !shutdown.load(Ordering::Acquire) {
-        match listener.accept() {
-            Ok((stream, _)) => {
-                if active_connections
-                    .fetch_update(Ordering::AcqRel, Ordering::Acquire, |active| {
-                        (active < MAX_CONNECTIONS).then_some(active + 1)
-                    })
-                    .is_err()
-                {
-                    continue;
+
+    // Every exit from the accept loop — clean shutdown, listener failure, or a
+    // connection thread that would not spawn — has to run the same teardown, so
+    // the loop yields a result instead of returning straight out of `serve`.
+    let listener_outcome = (|| -> anyhow::Result<()> {
+        while !shutdown.load(Ordering::Acquire) {
+            match listener.accept() {
+                Ok((stream, _)) => {
+                    if active_connections
+                        .fetch_update(Ordering::AcqRel, Ordering::Acquire, |active| {
+                            (active < MAX_CONNECTIONS).then_some(active + 1)
+                        })
+                        .is_err()
+                    {
+                        continue;
+                    }
+                    let connection_permit = ConnectionPermit(active_connections.clone());
+                    let token = token.clone();
+                    let dispatcher = dispatcher.clone();
+                    let hub = hub.clone();
+                    let shutdown = shutdown.clone();
+                    let options = options.clone();
+                    std::thread::Builder::new()
+                        .name("waku-daemon-connection".into())
+                        .spawn(move || {
+                            let _connection_permit = connection_permit;
+                            if let Err(error) = handle_connection(
+                                stream, &token, dispatcher, hub, shutdown, &options,
+                            ) {
+                                eprintln!("waku-daemon connection ended: {error:#}");
+                            }
+                        })
+                        .context("could not start Waku daemon connection thread")?;
                 }
-                let connection_permit = ConnectionPermit(active_connections.clone());
-                let token = token.clone();
-                let dispatcher = dispatcher.clone();
-                let hub = hub.clone();
-                let shutdown = shutdown.clone();
-                let options = options.clone();
-                std::thread::Builder::new()
-                    .name("waku-daemon-connection".into())
-                    .spawn(move || {
-                        let _connection_permit = connection_permit;
-                        if let Err(error) =
-                            handle_connection(stream, &token, dispatcher, hub, shutdown, &options)
-                        {
-                            eprintln!("waku-daemon connection ended: {error:#}");
-                        }
-                    })
-                    .context("could not start Waku daemon connection thread")?;
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(ACCEPT_POLL_INTERVAL);
+                }
+                Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+                Err(error) => return Err(error).context("Waku daemon listener failed"),
             }
-            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-                std::thread::sleep(ACCEPT_POLL_INTERVAL);
-            }
-            Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
-            Err(error) => return Err(error).context("Waku daemon listener failed"),
         }
-    }
-    backend.shutdown();
+        Ok(())
+    })();
+
+    // Stop the scheduler before the backend tears down. `shutdown()` drops every
+    // live driver handle, and a tick still in flight would otherwise insert a
+    // freshly spawned provider into the session map after that sweep, orphaning
+    // its process for the lifetime of the machine.
+    let _ = scheduler_stop.try_send(());
     let _ = scheduler.join();
-    Ok(())
+    backend.shutdown();
+    listener_outcome
 }
 
 fn handle_connection(

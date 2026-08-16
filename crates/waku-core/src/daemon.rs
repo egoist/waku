@@ -54,6 +54,16 @@ pub struct WakuBackend {
     usage_scan_cache: Mutex<crate::usage_history::ScanCache>,
     checkpoint_capture_locks: Mutex<HashMap<(PathBuf, Uuid, usize), Arc<Mutex<()>>>>,
     automation_locks: Mutex<HashMap<Uuid, Arc<Mutex<()>>>>,
+    /// Automations whose start is running off the scheduler thread but has not
+    /// written its durable claim yet. Planning skips them so an occurrence
+    /// cannot be resolved twice in that window.
+    automation_starts_in_flight: Mutex<HashSet<Uuid>>,
+    /// Handles for the work automations push off the request and scheduler
+    /// threads — starting a run, and sweeping blobs after a cascade delete.
+    /// Joined by [`Backend::shutdown`] so a run still spawning a provider
+    /// cannot install it after the session map has been swept, and so a sweep
+    /// cannot still be walking the data directory after the daemon exits.
+    automation_worker_threads: Mutex<Vec<std::thread::JoinHandle<()>>>,
     usage_rates_dir: std::path::PathBuf,
     default_cwd: std::path::PathBuf,
 }
@@ -94,6 +104,8 @@ impl WakuBackend {
             usage_scan_cache: Mutex::new(HashMap::new()),
             checkpoint_capture_locks: Mutex::new(HashMap::new()),
             automation_locks: Mutex::new(HashMap::new()),
+            automation_starts_in_flight: Mutex::new(HashSet::new()),
+            automation_worker_threads: Mutex::new(Vec::new()),
             usage_rates_dir,
             default_cwd: std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
         })
@@ -725,11 +737,15 @@ impl Backend for WakuBackend {
         }
     }
 
-    fn tick(&self, events: EventSink) {
+    fn tick(self: Arc<Self>, events: EventSink) {
         self.tick_automations(events);
     }
 
     fn shutdown(&self) {
+        // Drain the off-thread starts first. Each one may still be about to
+        // install a provider into `sessions`, and anything installed after the
+        // sweep below would outlive the daemon as an orphaned process.
+        self.join_automation_workers();
         let sessions = std::mem::take(&mut *self.sessions.lock());
         drop(sessions);
         let terminals = std::mem::take(&mut *self.terminals.lock());
@@ -768,6 +784,8 @@ impl WakuBackend {
             let automation_id = change.automation_id();
             let lock = self.automation_lock(automation_id);
             let mut removed_handles = Vec::new();
+            let mut removed_automation = None;
+            let mut swept_sessions = false;
             {
                 let _automation_guard = lock.lock();
                 match change {
@@ -788,8 +806,10 @@ impl WakuBackend {
                         automation_id,
                         cascade_sessions,
                     } => {
+                        removed_automation = Some(automation_id);
                         let mut state = self.task_state.lock();
                         if cascade_sessions {
+                            swept_sessions = true;
                             let session_ids = state
                                 .sessions
                                 .iter()
@@ -831,18 +851,73 @@ impl WakuBackend {
             // Runtime teardown may join its event forwarder, which also takes
             // this automation lock. Drop handles only after releasing it.
             drop(removed_handles);
+            if let Some(automation_id) = removed_automation {
+                self.release_automation_lock(automation_id, &lock);
+            }
+            if swept_sessions {
+                // A client that deletes one session follows up with
+                // `SweepBlobs`, but a cascade removes an unknown number of them
+                // inside a single command, so the caller has nothing to react
+                // to. Sweeping here is what keeps those sessions' attachments
+                // from leaking. It walks the database and the attachment
+                // directory, so it does not belong on the connection thread
+                // holding up the delete response.
+                let task_store = self.task_store.clone();
+                match std::thread::Builder::new()
+                    .name("waku-daemon-automation-cascade-sweep".into())
+                    .spawn(move || task_store.blob_sweep()())
+                {
+                    // Tracked, not detached: the sweep walks the data directory,
+                    // so it has to be joined at teardown rather than left racing
+                    // whatever tears that directory down.
+                    Ok(handle) => self.automation_worker_threads.lock().push(handle),
+                    Err(error) => eprintln!(
+                        "could not start the blob sweep for an automation cascade: {error}"
+                    ),
+                }
+            }
         }
         let automations = self.task_state.lock().automations.clone();
         Ok(ResponsePayload::AutomationChangesApplied { automations })
     }
 
-    fn tick_automations(&self, events: EventSink) {
+    /// Drop a deleted automation's lock entry, but only while this call holds
+    /// the sole remaining handle.
+    ///
+    /// The map lock is held across the check so no one can clone the entry in
+    /// between. A strong count of two means the map and `held` — any waiter
+    /// would raise it, and handing a waiter a lock that no longer guards the
+    /// same entry is exactly how two callers end up running concurrently for
+    /// one id.
+    fn release_automation_lock(&self, automation_id: Uuid, held: &Arc<Mutex<()>>) {
+        let mut locks = self.automation_locks.lock();
+        if locks
+            .get(&automation_id)
+            .is_some_and(|existing| Arc::ptr_eq(existing, held) && Arc::strong_count(existing) == 2)
+        {
+            locks.remove(&automation_id);
+        }
+    }
+
+    fn tick_automations(self: &Arc<Self>, events: EventSink) {
+        self.automation_worker_threads
+            .lock()
+            .retain(|start| !start.is_finished());
+        // Cloned rather than held, so the planning block never nests this lock
+        // inside the task-state lock.
+        let in_flight = self.automation_starts_in_flight.lock().clone();
         let now = Local::now().naive_local();
         let decisions = {
             let state = self.task_state.lock();
             let ticks = state
                 .automations
                 .iter()
+                // A start already running off-thread has not persisted its
+                // claim yet. Leaving the marker untouched re-evaluates the
+                // occurrence next tick, by which point the claim makes the
+                // automation read as active and the overlap policy applies
+                // normally — rather than racing a second run past the lock.
+                .filter(|automation| !in_flight.contains(&automation.id))
                 .map(|automation| crate::automation::planner::AutomationTick {
                     automation,
                     marker: local_naive(automation.last_run_at.unwrap_or(automation.created_at)),
@@ -860,17 +935,11 @@ impl WakuBackend {
         };
 
         let mut changed = false;
+        let mut firing = Vec::new();
         for decision in decisions {
             match decision {
                 crate::automation::planner::PlanDecision::Fire { id, catch_up } => {
-                    match self.start_automation_run(id, catch_up, events.clone()) {
-                        Ok(AutomationStartResult::Started { .. })
-                        | Ok(AutomationStartResult::Skipped) => changed = true,
-                        Ok(AutomationStartResult::Deferred) => {}
-                        Err(error) => {
-                            eprintln!("could not start scheduled automation {id}: {error:#}")
-                        }
-                    }
+                    firing.push((id, catch_up));
                 }
                 crate::automation::planner::PlanDecision::Skip { id, catch_up } => {
                     if self.record_scheduled_skip(id, catch_up) {
@@ -881,6 +950,54 @@ impl WakuBackend {
         }
         if changed {
             events.task_state_changed();
+        }
+        for (id, catch_up) in firing {
+            self.spawn_automation_start(id, catch_up, events.clone());
+        }
+    }
+
+    /// Wait for every off-thread automation worker to finish. The guard lock is
+    /// released before joining so a start that is still claiming its occurrence
+    /// cannot deadlock against this drain.
+    fn join_automation_workers(&self) {
+        let starts = std::mem::take(&mut *self.automation_worker_threads.lock());
+        for start in starts {
+            let _ = start.join();
+        }
+    }
+
+    /// Start one planned occurrence off the scheduler thread.
+    ///
+    /// Claiming the occurrence, materializing a worktree, and spawning the
+    /// provider all block — the worktree path shells out to `git` and the
+    /// provider path spawns a process — so none of it may run on the scheduler
+    /// loop. Serially, one slow start delays every other automation due in the
+    /// same minute; one hung start stalls scheduling for the daemon's lifetime.
+    fn spawn_automation_start(self: &Arc<Self>, id: Uuid, catch_up: bool, events: EventSink) {
+        if !self.automation_starts_in_flight.lock().insert(id) {
+            return;
+        }
+        let backend = self.clone();
+        let spawned = std::thread::Builder::new()
+            .name(format!("waku-daemon-automation-start-{id}"))
+            .spawn(move || {
+                let result = backend.start_automation_run(id, catch_up, events.clone());
+                backend.automation_starts_in_flight.lock().remove(&id);
+                match result {
+                    Ok(AutomationStartResult::Started { .. })
+                    | Ok(AutomationStartResult::Skipped) => events.task_state_changed(),
+                    Ok(AutomationStartResult::Deferred) => {}
+                    Err(error) => {
+                        eprintln!("could not start scheduled automation {id}: {error:#}")
+                    }
+                }
+            });
+        match spawned {
+            Ok(handle) => self.automation_worker_threads.lock().push(handle),
+            Err(error) => {
+                self.automation_starts_in_flight.lock().remove(&id);
+                eprintln!("could not start a thread for scheduled automation {id}: {error}");
+            }
         }
     }
 
@@ -3032,6 +3149,38 @@ mod tests {
     }
 
     #[test]
+    fn a_deleted_automations_lock_is_released_only_when_unheld() {
+        let root = std::env::temp_dir().join(format!("waku-automation-lock-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let backend = WakuBackend::new(
+            DaemonSettingsStore::open(root.join("settings.json")).unwrap(),
+            StateStore::daemon(root.join("app.db")),
+        )
+        .unwrap();
+
+        let automation_id = Uuid::new_v4();
+        let lock = backend.automation_lock(automation_id);
+        // A second caller is mid-flight holding the same Arc, so dropping the
+        // map entry now would hand the next caller a lock guarding nothing.
+        let waiter = lock.clone();
+        backend.release_automation_lock(automation_id, &lock);
+        assert!(backend.automation_locks.lock().contains_key(&automation_id));
+
+        drop(waiter);
+        backend.release_automation_lock(automation_id, &lock);
+        assert!(!backend.automation_locks.lock().contains_key(&automation_id));
+
+        // A stale handle must never evict the entry a later caller installed.
+        let replacement = backend.automation_lock(automation_id);
+        backend.release_automation_lock(automation_id, &lock);
+        assert!(backend.automation_locks.lock().contains_key(&automation_id));
+        drop(replacement);
+
+        drop(backend);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn automation_removal_applies_its_cascade_choice() {
         let root = std::env::temp_dir().join(format!("waku-automation-remove-{}", Uuid::new_v4()));
         std::fs::create_dir_all(&root).unwrap();
@@ -3060,6 +3209,9 @@ mod tests {
                 cascade_sessions: true,
             }])
             .unwrap();
+        // The cascade sweeps blobs off-thread; that sweep walks this directory,
+        // so it has to finish before the test tears the directory down.
+        backend.join_automation_workers();
         let state = backend.task_state.lock();
         assert!(
             state
@@ -3193,9 +3345,14 @@ mod tests {
         store.save(&mut state).unwrap();
         drop(store);
 
-        let backend = WakuBackend::new(settings, StateStore::daemon(root.join("app.db"))).unwrap();
+        let backend =
+            Arc::new(WakuBackend::new(settings, StateStore::daemon(root.join("app.db"))).unwrap());
+        // Starts run off the scheduler thread, so each tick is drained before
+        // the next one plans against the state it produced.
         backend.tick_automations(EventSink::for_test());
+        backend.join_automation_workers();
         backend.tick_automations(EventSink::for_test());
+        backend.join_automation_workers();
         drop(backend);
 
         let reopened = StateStore::daemon(root.join("app.db"));

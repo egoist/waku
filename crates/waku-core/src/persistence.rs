@@ -377,9 +377,7 @@ impl PersistedState {
                 .reasoning_effort
                 .clone_from(&self.last_reasoning_effort);
             session.service_tier.clone_from(&self.last_service_tier);
-            session
-                .context_window
-                .clone_from(&self.last_context_window);
+            session.context_window.clone_from(&self.last_context_window);
         }
         session
     }
@@ -670,6 +668,27 @@ fn collect_references(data: &str, scheme: &str, references: &mut HashSet<String>
 
 fn fingerprint(value: &str) -> u64 {
     fingerprint_pieces([value])
+}
+
+/// Encode every automation once, paired with the fingerprint of exactly those
+/// encodings.
+///
+/// The save path keeps the encodings to write them, and both the load seed and
+/// the save comparison must hash the same pieces. Hashing the whole array on one
+/// side and the concatenated items on the other silently makes the two values
+/// unequal forever, so the first save after every load rewrites the whole table.
+fn encode_automations(automations: &[Automation]) -> io::Result<(Vec<(Uuid, String)>, u64)> {
+    let encoded = automations
+        .iter()
+        .map(|automation| {
+            Ok::<_, io::Error>((
+                automation.id,
+                serde_json::to_string(automation).map_err(to_io_error)?,
+            ))
+        })
+        .collect::<io::Result<Vec<_>>>()?;
+    let fingerprint = fingerprint_pieces(encoded.iter().map(|(_, data)| data.as_str()));
+    Ok((encoded, fingerprint))
 }
 
 fn fingerprint_pieces<'a>(pieces: impl IntoIterator<Item = &'a str>) -> u64 {
@@ -1201,9 +1220,7 @@ impl StateStore {
             written_messages: HashMap::new(),
             saved_projects: 0,
             persisted_automations,
-            saved_automations: fingerprint(
-                &serde_json::to_string(&state.automations).map_err(to_io_error)?,
-            ),
+            saved_automations: encode_automations(&state.automations)?.1,
             saved_app_settings: if app_settings_are_saved {
                 fingerprint(&serde_json::to_string(&app_settings).map_err(to_io_error)?)
             } else {
@@ -1376,20 +1393,8 @@ impl StateStore {
 
         // Automations are few and always read whole, so a change to any one
         // rewrites the small set rather than tracking per-automation dirtiness.
-        // Keep each encoding for the write path and fingerprint those same
-        // pieces; the previous implementation encoded the set and every item.
-        let serialized_automations = state
-            .automations
-            .iter()
-            .map(|automation| {
-                Ok::<_, io::Error>((
-                    automation.id,
-                    serde_json::to_string(automation).map_err(to_io_error)?,
-                ))
-            })
-            .collect::<io::Result<Vec<_>>>()?;
-        let automations_fingerprint =
-            fingerprint_pieces(serialized_automations.iter().map(|(_, data)| data.as_str()));
+        let (serialized_automations, automations_fingerprint) =
+            encode_automations(&state.automations)?;
         let mut next_automation_state = None;
         if automations_fingerprint != storage.saved_automations {
             let current_ids = serialized_automations
@@ -2014,6 +2019,53 @@ mod tests {
         );
 
         fs::remove_dir_all(directory).ok();
+    }
+
+    #[test]
+    fn saving_unchanged_automations_after_a_load_writes_nothing() {
+        use crate::automation::Automation;
+
+        for populated in [false, true] {
+            let directory = temporary_directory();
+            let store = store_in(&directory);
+            let mut state = PersistedState::fresh(PathBuf::from("/tmp/project"));
+            if populated {
+                state
+                    .automations
+                    .push(Automation::new("Nightly", ProviderKind::Codex, 1_000));
+                state
+                    .automations
+                    .push(Automation::new("Weekly", ProviderKind::Codex, 1_000));
+            }
+            store.save(&mut state).unwrap();
+            drop(store);
+
+            // A fresh open seeds the saved fingerprint from the rows it just
+            // read. Seeding it with a different encoding than the save path
+            // computes makes the two permanently unequal, so every first save
+            // after a load rewrites the whole table for no reason.
+            let reopened = store_in(&directory);
+            let mut loaded = reopened.load().unwrap();
+            assert_eq!(loaded.automations.len(), if populated { 2 } else { 0 });
+            reopened
+                .storage
+                .lock()
+                .as_ref()
+                .unwrap()
+                .connection
+                .execute_batch(
+                    "CREATE TRIGGER fail_automation_insert BEFORE INSERT ON automations
+                         BEGIN SELECT RAISE(FAIL, 'unexpected automation write'); END;
+                     CREATE TRIGGER fail_automation_update BEFORE UPDATE ON automations
+                         BEGIN SELECT RAISE(FAIL, 'unexpected automation write'); END;
+                     CREATE TRIGGER fail_automation_delete BEFORE DELETE ON automations
+                         BEGIN SELECT RAISE(FAIL, 'unexpected automation write'); END;",
+                )
+                .unwrap();
+            reopened.save(&mut loaded).unwrap();
+
+            fs::remove_dir_all(directory).ok();
+        }
     }
 
     #[test]
@@ -2880,11 +2932,7 @@ mod tests {
         assert_eq!(restored.sessions[0].context_window.as_deref(), Some("1m"));
         assert_eq!(
             restored.model_traits_for(ProviderKind::Codex, "gpt-5.6-luna"),
-            (
-                Some("xhigh".into()),
-                Some("fast".into()),
-                Some("1m".into())
-            )
+            (Some("xhigh".into()), Some("fast".into()), Some("1m".into()))
         );
         assert_eq!(
             restored.sessions[0].runtime_mode,
