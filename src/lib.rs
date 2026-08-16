@@ -325,10 +325,7 @@ pub fn run() {
                         icon: crate::platform::linux_app_icon(),
                         window_bounds: Some(window_bounds),
                         display_id,
-                        window_min_size: Some(size(
-                            px(MIN_WINDOW_WIDTH),
-                            px(MIN_WINDOW_HEIGHT),
-                        )),
+                        window_min_size: Some(size(px(MIN_WINDOW_WIDTH), px(MIN_WINDOW_HEIGHT))),
                         ..Default::default()
                     },
                     move |window, cx| {
@@ -344,10 +341,7 @@ pub fn run() {
             cx.on_system_notification_response({
                 let window = window;
                 move |response, cx| {
-                    let Some(session_id) = response
-                        .tag
-                        .strip_prefix("waku-task:")
-                        .and_then(|id| id.parse().ok())
+                    let Some(session_id) = crate::app::task_id_from_notification_tag(&response.tag)
                     else {
                         return;
                     };

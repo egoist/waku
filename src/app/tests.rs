@@ -14,12 +14,12 @@ use super::{
     folded_transcript_row_kinds, format_worked_duration, format_working_elapsed,
     maintain_transcript_anchor, message_starts_followup_turn, navigation_preview_snippet,
     navigation_rail_fade_visibility, navigation_rail_height, navigation_rail_scale,
-    paused_toast_duration, pop_complete_stream_chunk, pop_stream_batch, pop_stream_chunk,
-    push_transcript_activity, session_is_reapable, should_refresh_branch_after_activity,
-    should_show_navigation_rail, should_show_scroll_to_bottom, stream_backlog_should_flush,
-    take_stream_prefix, transcript_anchor_end_space, transcript_navigation_turns,
-    transcript_row_kinds, transcript_row_splice, transcript_rows_fingerprint,
-    widened_panel_width_for_file_editor, widened_panel_width_for_review,
+    paused_toast_duration, pop_stream_batch, push_transcript_activity, session_is_reapable,
+    should_refresh_branch_after_activity, should_show_navigation_rail,
+    should_show_scroll_to_bottom, task_id_from_notification_tag, task_notification_tag,
+    transcript_anchor_end_space, transcript_navigation_turns, transcript_row_kinds,
+    transcript_row_splice, transcript_rows_fingerprint, widened_panel_width_for_file_editor,
+    widened_panel_width_for_review,
 };
 use crate::git_branch::BranchEntry;
 use crate::model::{
@@ -351,6 +351,16 @@ fn session_navigation_prunes_deleted_tasks() {
     navigation.remove(third);
     assert_eq!(navigation.go_back(second), None);
     assert_eq!(navigation.go_forward(second), None);
+}
+
+#[test]
+fn task_notification_tags_route_to_the_corresponding_task() {
+    let session_id = Uuid::new_v4();
+    let tag = task_notification_tag(session_id);
+
+    assert_eq!(task_id_from_notification_tag(&tag), Some(session_id));
+    assert_eq!(task_id_from_notification_tag("waku-task:not-a-uuid"), None);
+    assert_eq!(task_id_from_notification_tag(&session_id.to_string()), None);
 }
 
 #[test]
