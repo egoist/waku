@@ -1704,7 +1704,7 @@ impl Waku {
             .activities_expanded
             .get(&block_index)
             .copied()
-            .unwrap_or(live_turn);
+            .unwrap_or(!self.state.collapse_activity_groups_by_default && live_turn);
         let live_reasoning_id = (self
             .selected_runtime()
             .is_some_and(|runtime| runtime.stream_phase == Some(StreamPhase::Reasoning))

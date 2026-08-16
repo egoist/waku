@@ -59,7 +59,7 @@ settings.usage: 用量
 settings.daemon: 守护进程
 settings.computer_use: 电脑操作
 settings.general_keywords: 通用 本地 项目 对话 隐私 匿名 使用数据 分析 分享 更新 自动 版本
-settings.appearance_keywords: 外观 主题 系统 浅色 深色 语言 英语 中文 简体
+settings.appearance_keywords: 外观 主题 系统 浅色 深色 语言 英语 中文 简体 活动 工具 折叠
 settings.providers_keywords: 服务商 智能体 模型 命令行 版本 安装 检测 claude codex cursor opencode amp grok pi
 settings.skills: 技能
 settings.skills_keywords: 技能 技能库 智能体 禁用 启用 删除 claude codex cursor opencode pi amp 共享
@@ -135,6 +135,8 @@ web.error_secure_websocket_required: 安全的 Waku Web 页面只能通过 wss:/
 web.error_daemon_token_required: 请输入守护进程令牌
 settings.theme: 主题
 settings.theme_description: 选择跟随系统、浅色或深色主题
+settings.collapse_activity_groups: 默认折叠活动列表
+settings.collapse_activity_groups_description: 在手动展开前保持智能体操作列表紧凑
 settings.theme_system: 跟随系统
 settings.theme_light: 浅色
 settings.theme_dark: 深色

@@ -66,6 +66,10 @@ fn default_analytics_enabled() -> bool {
     true
 }
 
+fn default_collapse_activity_groups() -> bool {
+    true
+}
+
 fn default_provider() -> ProviderKind {
     ProviderKind::Codex
 }
@@ -191,6 +195,7 @@ pub struct AppSettings {
     pub favorite_models: Vec<FavoriteModel>,
     pub theme: ThemePreference,
     pub language: AppLanguage,
+    pub collapse_activity_groups_by_default: bool,
 }
 
 impl Default for AppSettings {
@@ -200,6 +205,7 @@ impl Default for AppSettings {
             favorite_models: Vec::new(),
             theme: ThemePreference::System,
             language: AppLanguage::default(),
+            collapse_activity_groups_by_default: true,
         }
     }
 }
@@ -268,6 +274,8 @@ pub struct PersistedState {
     pub theme: ThemePreference,
     #[serde(default)]
     pub language: AppLanguage,
+    #[serde(default = "default_collapse_activity_groups")]
+    pub collapse_activity_groups_by_default: bool,
     #[serde(default = "default_sidebar_visibility")]
     pub sidebar_visible: bool,
     #[serde(default = "default_right_panel_visibility")]
@@ -338,6 +346,7 @@ impl PersistedState {
             favorite_models: Vec::new(),
             theme: ThemePreference::System,
             language: AppLanguage::default(),
+            collapse_activity_groups_by_default: true,
             sidebar_visible: true,
             right_panel_visible: false,
             sidebar_width: DEFAULT_SIDEBAR_WIDTH,
@@ -436,6 +445,7 @@ impl PersistedState {
             favorite_models: self.favorite_models.clone(),
             theme: self.theme,
             language: self.language,
+            collapse_activity_groups_by_default: self.collapse_activity_groups_by_default,
         }
     }
 
@@ -473,6 +483,7 @@ impl PersistedState {
         self.favorite_models = settings.favorite_models;
         self.theme = settings.theme;
         self.language = settings.language;
+        self.collapse_activity_groups_by_default = settings.collapse_activity_groups_by_default;
     }
 
     pub fn apply_daemon_settings(&mut self, settings: crate::DaemonSettings) {
@@ -1919,6 +1930,7 @@ mod tests {
         assert_eq!(settings.theme, ThemePreference::Dark);
         assert_eq!(settings.language, AppLanguage::System);
         assert!(settings.analytics_enabled);
+        assert!(settings.collapse_activity_groups_by_default);
     }
 
     #[test]
@@ -2684,6 +2696,7 @@ mod tests {
         let mut state = PersistedState::fresh(PathBuf::from("/tmp/project"));
         state.theme = ThemePreference::Light;
         state.language = AppLanguage::SimplifiedChinese;
+        state.collapse_activity_groups_by_default = false;
         state.sidebar_width = 301.0;
         store.save(&mut state).unwrap();
 
@@ -2696,6 +2709,7 @@ mod tests {
         let value: serde_json::Value = serde_json::from_str(&text).unwrap();
         assert_eq!(value["theme"], "light");
         assert_eq!(value["language"], "simplified-chinese");
+        assert_eq!(value["collapse_activity_groups_by_default"], false);
         for daemon_key in [
             "computer_use_enabled",
             "computer_use_allowed_apps",
@@ -2739,6 +2753,7 @@ mod tests {
             "favorite_models",
             "theme",
             "language",
+            "collapse_activity_groups_by_default",
             "computer_use_enabled",
             "computer_use_allowed_apps",
             "disabled_providers",
