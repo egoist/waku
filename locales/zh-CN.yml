@@ -1085,3 +1085,21 @@ automations.summary_monthly: "每月 %{days} 日 %{time}"
 automations.summary_hourly: "每小时 :%{minute}"
 automations.summary_manual: 手动 — 无计划
 automations.prompt_required: 请先输入提示词再保存此自动化。
+automations.web_description: 查看计划任务、运行结果和对话记录。
+automations.daemon_required: 只有 Waku 客户端运行时，计划任务才会执行。
+automations.client_connected: Waku 客户端已连接
+automations.client_disconnected: Waku 客户端未连接
+automations.empty_read_body: 在 Waku 中创建的自动化及其运行历史会显示在这里。
+automations.history: 运行历史
+automations.no_runs: 尚无运行记录。
+automations.select_hint: 选择一个自动化以查看计划和运行历史。
+automations.run_transcript: 运行对话记录
+automations.loading_transcript: 正在加载对话记录…
+automations.transcript_unavailable: 此运行没有可用的对话记录。
+automations.open_task: 打开任务
+automations.catch_up: 补运行
+automations.outcome_running: 运行中
+automations.outcome_succeeded: 成功
+automations.outcome_failed: 失败
+automations.outcome_cancelled: 已取消
+automations.outcome_skipped: 已跳过

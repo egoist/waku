@@ -30,6 +30,8 @@ interface SidebarProps {
   onWidthChange: (width: number) => void
   onNewTask: () => void
   onAddProject: () => void
+  onAutomations: () => void
+  automationsSelected?: boolean
   onSelectSession: (sessionId: string) => void
   onRenameSession: (sessionId: string, title: string) => Promise<void>
   onRemoveSession: (sessionId: string) => Promise<void>
@@ -58,6 +60,8 @@ export function Sidebar({
   onWidthChange,
   onNewTask,
   onAddProject,
+  onAutomations,
+  automationsSelected = false,
   onSelectSession,
   onRenameSession,
   onRemoveSession,
@@ -130,6 +134,15 @@ export function Sidebar({
             label={t('menu.new_task')}
             onClick={() => {
               onNewTask()
+              onMobileOpenChange(false)
+            }}
+          />
+          <SidebarAction
+            active={automationsSelected}
+            icon={<WakuIcon name="zap" />}
+            label={t('sidebar.automations')}
+            onClick={() => {
+              onAutomations()
               onMobileOpenChange(false)
             }}
           />
@@ -256,17 +269,23 @@ export function Sidebar({
 }
 
 function SidebarAction({
+  active = false,
   icon,
   label,
   onClick,
 }: {
+  active?: boolean
   icon: ReactNode
   label: string
   onClick: () => void
 }) {
   return (
     <button
-      className="flex h-8 w-full items-center gap-2.5 rounded-[7px] px-1 text-left text-[13px] text-[var(--text-secondary)] outline-none hover:bg-sidebar-accent focus-visible:ring-1 focus-visible:ring-ring active:bg-sidebar-accent"
+      aria-current={active ? 'page' : undefined}
+      className={cn(
+        'flex h-8 w-full items-center gap-2.5 rounded-[7px] px-1 text-left text-[13px] text-[var(--text-secondary)] outline-none hover:bg-sidebar-accent focus-visible:ring-1 focus-visible:ring-ring active:bg-sidebar-accent',
+        active && 'bg-sidebar-accent text-foreground',
+      )}
       type="button"
       onClick={onClick}
     >

@@ -939,6 +939,7 @@ export function WakuApp() {
         <Sidebar
           mobileOpen={mobileSidebar}
           onAddProject={openProjectPicker}
+          onAutomations={() => void navigate({ to: '/automations' })}
           onMobileOpenChange={setMobileSidebar}
           onNewTask={() => startNewTask()}
           onRemoveSession={removeSessionById}

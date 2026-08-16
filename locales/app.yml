@@ -450,6 +450,42 @@ automations.minute_placeholder:
   en: MM
 automations.prompt_required:
   en: Add a prompt before saving this automation.
+automations.web_description:
+  en: Review scheduled work, run outcomes, and transcripts.
+automations.daemon_required:
+  en: Scheduled runs only fire while a Waku client is running.
+automations.client_connected:
+  en: Waku client connected
+automations.client_disconnected:
+  en: Waku client disconnected
+automations.empty_read_body:
+  en: Automations created in Waku will appear here with their run history.
+automations.history:
+  en: Run history
+automations.no_runs:
+  en: No runs recorded yet.
+automations.select_hint:
+  en: Select an automation to inspect its schedule and run history.
+automations.run_transcript:
+  en: Run transcript
+automations.loading_transcript:
+  en: Loading transcript…
+automations.transcript_unavailable:
+  en: This run has no available transcript.
+automations.open_task:
+  en: Open task
+automations.catch_up:
+  en: catch-up
+automations.outcome_running:
+  en: Running
+automations.outcome_succeeded:
+  en: Succeeded
+automations.outcome_failed:
+  en: Failed
+automations.outcome_cancelled:
+  en: Cancelled
+automations.outcome_skipped:
+  en: Skipped
 automations.create_title:
   en: New automation
 automations.edit_title:

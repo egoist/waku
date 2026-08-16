@@ -1137,3 +1137,21 @@ automations.summary_monthly: "毎月 %{days} 日 %{time}"
 automations.summary_hourly: "毎時 :%{minute}"
 automations.summary_manual: 手動 — スケジュールなし
 automations.prompt_required: 保存する前にプロンプトを入力してください。
+automations.web_description: スケジュール、実行結果、トランスクリプトを確認できます。
+automations.daemon_required: スケジュール実行には Waku クライアントが起動している必要があります。
+automations.client_connected: Waku クライアントに接続済み
+automations.client_disconnected: Waku クライアントに未接続
+automations.empty_read_body: Waku で作成した自動化とその実行履歴がここに表示されます。
+automations.history: 実行履歴
+automations.no_runs: 実行履歴はまだありません。
+automations.select_hint: 自動化を選択するとスケジュールと実行履歴を確認できます。
+automations.run_transcript: 実行トランスクリプト
+automations.loading_transcript: トランスクリプトを読み込み中…
+automations.transcript_unavailable: この実行のトランスクリプトは利用できません。
+automations.open_task: タスクを開く
+automations.catch_up: キャッチアップ
+automations.outcome_running: 実行中
+automations.outcome_succeeded: 成功
+automations.outcome_failed: 失敗
+automations.outcome_cancelled: キャンセル
+automations.outcome_skipped: スキップ
