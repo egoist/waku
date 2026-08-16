@@ -23,7 +23,7 @@ const SETTINGS_SEARCH_CONTEXT: &str = "SettingsSidebar > ComposerInput";
 
 /// The sidebar's rows in display order, each with the keyword haystack the
 /// search field filters against.
-const SETTINGS_PAGES: [(SettingsPage, &str, &str, &str); 6] = [
+const SETTINGS_PAGES: [(SettingsPage, &str, &str, &str); 7] = [
     (
         SettingsPage::General,
         "settings.general",
@@ -53,6 +53,12 @@ const SETTINGS_PAGES: [(SettingsPage, &str, &str, &str); 6] = [
         "settings.usage",
         "icons/chart-column.svg",
         "settings.usage_keywords",
+    ),
+    (
+        SettingsPage::Daemon,
+        "settings.daemon",
+        "icons/server.svg",
+        "settings.daemon_keywords",
     ),
     (
         SettingsPage::ComputerUse,
@@ -364,6 +370,7 @@ impl Waku {
                         SettingsPage::Providers => tr!("settings.providers"),
                         SettingsPage::Skills => tr!("settings.skills"),
                         SettingsPage::Usage => tr!("settings.usage"),
+                        SettingsPage::Daemon => tr!("settings.daemon"),
                         SettingsPage::ComputerUse => tr!("settings.computer_use"),
                         SettingsPage::Appearance => tr!("settings.appearance"),
                     }),
@@ -373,6 +380,7 @@ impl Waku {
                 SettingsPage::Providers => self.render_providers_settings(cx),
                 SettingsPage::Skills => self.render_skills_settings(cx),
                 SettingsPage::Usage => self.render_usage_settings(cx),
+                SettingsPage::Daemon => self.render_daemon_settings(cx),
                 SettingsPage::ComputerUse => self.render_computer_use_settings(cx),
                 SettingsPage::Appearance => self.render_appearance_settings(cx),
             });
@@ -620,6 +628,717 @@ impl Waku {
         {
             updater.set_automatically_checks_for_updates(enabled);
         }
+        cx.notify();
+    }
+
+    fn render_daemon_settings(&self, cx: &mut Context<Self>) -> AnyElement {
+        let theme = Theme::current(cx);
+        if self.daemon.is_remote() {
+            return div()
+                .mt(px(15.0))
+                .w_full()
+                .px(px(20.0))
+                .py(px(16.0))
+                .rounded(px(13.0))
+                .bg(theme.raised)
+                .child(
+                    div()
+                        .text_size(px(13.5))
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(theme.text)
+                        .child(tr!("daemon.external_title")),
+                )
+                .child(
+                    div()
+                        .mt(px(5.0))
+                        .text_size(px(12.5))
+                        .line_height(px(18.0))
+                        .text_color(theme.text_secondary)
+                        .child(tr!("daemon.external_description")),
+                )
+                .into_any_element();
+        }
+
+        let enabled = self.state.daemon_exposure.enabled;
+        let pending = self.daemon_reconfigure_pending;
+        let fields_dirty = self.daemon_exposure_fields_dirty(cx);
+        let port = self.state.daemon_exposure.port;
+        let websocket_url = format!("ws://{}:{port}", self.daemon_hostname);
+        let token = self.state.daemon_exposure.token.clone();
+
+        let exposure_toggle = div()
+            .id("daemon-exposure-toggle")
+            .tab_index(0)
+            .focus_visible(|style| style.border_color(theme.accent))
+            .w(px(36.0))
+            .h(px(20.0))
+            .p(px(2.0))
+            .flex_none()
+            .rounded_full()
+            .cursor_default()
+            .opacity(if pending { 0.55 } else { 1.0 })
+            .bg(if enabled { theme.inverse } else { theme.inset })
+            .border_1()
+            .border_color(if enabled {
+                theme.inverse
+            } else {
+                theme.border_strong
+            })
+            .flex()
+            .items_center()
+            .when(enabled, |element| element.justify_end())
+            .child(div().w(px(14.0)).h(px(14.0)).rounded_full().bg(if enabled {
+                theme.on_inverse
+            } else {
+                theme.text_tertiary
+            }))
+            .when(!pending, |element| {
+                element
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.set_daemon_exposure_enabled(!enabled, cx);
+                    }))
+                    .on_key_down(cx.listener(move |this, event: &KeyDownEvent, _, cx| {
+                        if !event.keystroke.modifiers.modified()
+                            && matches!(event.keystroke.key.as_str(), "enter" | "space")
+                        {
+                            this.set_daemon_exposure_enabled(!enabled, cx);
+                            cx.stop_propagation();
+                        }
+                    }))
+            });
+
+        let apply_disabled = pending || !fields_dirty;
+        let apply_button = div()
+            .id("apply-daemon-settings")
+            .tab_index(0)
+            .h(px(29.0))
+            .px(px(11.0))
+            .rounded(px(7.0))
+            .border_1()
+            .border_color(theme.border_strong)
+            .flex()
+            .items_center()
+            .justify_center()
+            .cursor_default()
+            .text_size(px(10.5))
+            .text_color(theme.text_secondary)
+            .opacity(if apply_disabled { 0.55 } else { 1.0 })
+            .focus_visible(|style| style.border_color(theme.accent))
+            .when(!apply_disabled, |element| {
+                element
+                    .hover(|element| element.bg(theme.overlay))
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.apply_daemon_exposure_fields(cx);
+                    }))
+                    .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
+                        if !event.keystroke.modifiers.modified()
+                            && matches!(event.keystroke.key.as_str(), "enter" | "space")
+                        {
+                            this.apply_daemon_exposure_fields(cx);
+                            cx.stop_propagation();
+                        }
+                    }))
+            })
+            .child(if pending {
+                tr!("daemon.restarting")
+            } else {
+                tr!("daemon.apply")
+            });
+
+        let copy_url_feedback_id = "daemon-url";
+        let url_copied = self.control_was_copied(copy_url_feedback_id);
+        let copy_url = websocket_url.clone();
+        let copy_url_button = div()
+            .id("copy-daemon-url")
+            .tab_index(0)
+            .h(px(27.0))
+            .px(px(9.0))
+            .rounded(px(6.0))
+            .border_1()
+            .border_color(theme.border_strong)
+            .flex()
+            .items_center()
+            .gap(px(5.0))
+            .cursor_default()
+            .text_size(px(10.5))
+            .text_color(theme.text_secondary)
+            .focus_visible(|style| style.border_color(theme.accent))
+            .hover(|element| element.bg(theme.overlay))
+            .child(icon(
+                if url_copied {
+                    "icons/check.svg"
+                } else {
+                    "icons/copy.svg"
+                },
+                11.0,
+                theme.text_tertiary,
+            ))
+            .child(if url_copied {
+                tr!("common.copied")
+            } else {
+                tr!("common.copy")
+            })
+            .on_click(cx.listener(move |this, _, _, cx| {
+                cx.write_to_clipboard(ClipboardItem::new_string(copy_url.clone()));
+                this.show_control_copied(copy_url_feedback_id, cx);
+            }))
+            .on_key_down(cx.listener(move |this, event: &KeyDownEvent, _, cx| {
+                if !event.keystroke.modifiers.modified()
+                    && matches!(event.keystroke.key.as_str(), "enter" | "space")
+                {
+                    cx.write_to_clipboard(ClipboardItem::new_string(websocket_url.clone()));
+                    this.show_control_copied(copy_url_feedback_id, cx);
+                    cx.stop_propagation();
+                }
+            }));
+
+        let copy_token_feedback_id = "daemon-token";
+        let token_copied = self.control_was_copied(copy_token_feedback_id);
+        let click_token = token.clone();
+        let key_token = token.clone();
+        let token_revealed = self.daemon_token_revealed;
+        let reveal_token_button = div()
+            .id("reveal-daemon-token")
+            .tab_index(0)
+            .size(px(27.0))
+            .rounded(px(6.0))
+            .border_1()
+            .border_color(theme.border_strong)
+            .flex()
+            .items_center()
+            .justify_center()
+            .cursor_default()
+            .text_color(theme.text_secondary)
+            .focus_visible(|style| style.border_color(theme.accent))
+            .hover(|element| element.bg(theme.overlay))
+            .active(|element| element.bg(theme.overlay_strong))
+            .child(icon(
+                if token_revealed {
+                    "icons/eye-off.svg"
+                } else {
+                    "icons/eye.svg"
+                },
+                12.0,
+                theme.text_tertiary,
+            ))
+            .tooltip(Tooltip::text(if token_revealed {
+                tr!("daemon.hide_token")
+            } else {
+                tr!("daemon.reveal_token")
+            }))
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.daemon_token_revealed = !this.daemon_token_revealed;
+                cx.notify();
+            }))
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
+                if !event.keystroke.modifiers.modified()
+                    && matches!(event.keystroke.key.as_str(), "enter" | "space")
+                {
+                    this.daemon_token_revealed = !this.daemon_token_revealed;
+                    cx.stop_propagation();
+                    cx.notify();
+                }
+            }));
+        let copy_token_button = div()
+            .id("copy-daemon-token")
+            .tab_index(0)
+            .h(px(27.0))
+            .px(px(9.0))
+            .rounded(px(6.0))
+            .border_1()
+            .border_color(theme.border_strong)
+            .flex()
+            .items_center()
+            .gap(px(5.0))
+            .cursor_default()
+            .text_size(px(10.5))
+            .text_color(theme.text_secondary)
+            .focus_visible(|style| style.border_color(theme.accent))
+            .hover(|element| element.bg(theme.overlay))
+            .child(icon(
+                if token_copied {
+                    "icons/check.svg"
+                } else {
+                    "icons/copy.svg"
+                },
+                11.0,
+                theme.text_tertiary,
+            ))
+            .child(if token_copied {
+                tr!("common.copied")
+            } else {
+                tr!("common.copy")
+            })
+            .on_click(cx.listener(move |this, _, _, cx| {
+                cx.write_to_clipboard(ClipboardItem::new_string(click_token.clone()));
+                this.show_control_copied(copy_token_feedback_id, cx);
+            }))
+            .on_key_down(cx.listener(move |this, event: &KeyDownEvent, _, cx| {
+                if !event.keystroke.modifiers.modified()
+                    && matches!(event.keystroke.key.as_str(), "enter" | "space")
+                {
+                    cx.write_to_clipboard(ClipboardItem::new_string(key_token.clone()));
+                    this.show_control_copied(copy_token_feedback_id, cx);
+                    cx.stop_propagation();
+                }
+            }));
+
+        let regenerate_button = div()
+            .id("regenerate-daemon-token")
+            .tab_index(0)
+            .h(px(27.0))
+            .px(px(9.0))
+            .rounded(px(6.0))
+            .border_1()
+            .border_color(theme.border_strong)
+            .flex()
+            .items_center()
+            .cursor_default()
+            .text_size(px(10.5))
+            .text_color(theme.text_secondary)
+            .opacity(if pending { 0.55 } else { 1.0 })
+            .focus_visible(|style| style.border_color(theme.accent))
+            .when(!pending, |element| {
+                element
+                    .hover(|element| element.bg(theme.overlay))
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.regenerate_daemon_token(cx);
+                    }))
+                    .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
+                        if !event.keystroke.modifiers.modified()
+                            && matches!(event.keystroke.key.as_str(), "enter" | "space")
+                        {
+                            this.regenerate_daemon_token(cx);
+                            cx.stop_propagation();
+                        }
+                    }))
+            })
+            .child(tr!("daemon.regenerate_token"));
+
+        div()
+            .mt(px(15.0))
+            .w_full()
+            .flex()
+            .flex_col()
+            .gap(px(12.0))
+            .child(
+                div()
+                    .min_h(px(66.0))
+                    .px(px(20.0))
+                    .py(px(13.0))
+                    .rounded(px(13.0))
+                    .bg(theme.raised)
+                    .flex()
+                    .items_center()
+                    .gap(px(24.0))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap(px(7.0))
+                                    .child(
+                                        div()
+                                            .text_size(px(13.5))
+                                            .font_weight(FontWeight::MEDIUM)
+                                            .text_color(theme.text)
+                                            .child(tr!("daemon.expose_title")),
+                                    )
+                                    .child(
+                                        div()
+                                            .px(px(6.0))
+                                            .py(px(2.0))
+                                            .rounded_full()
+                                            .text_size(px(9.5))
+                                            .text_color(if enabled {
+                                                theme.success
+                                            } else {
+                                                theme.text_tertiary
+                                            })
+                                            .bg(theme.overlay)
+                                            .child(if pending {
+                                                tr!("daemon.status_restarting")
+                                            } else if enabled {
+                                                tr!("daemon.status_exposed")
+                                            } else {
+                                                tr!("daemon.status_local")
+                                            }),
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .mt(px(5.0))
+                                    .min_w_0()
+                                    .whitespace_normal()
+                                    .text_size(px(12.0))
+                                    .line_height(px(18.0))
+                                    .text_color(theme.text_secondary)
+                                    .child(tr!("daemon.expose_description")),
+                            ),
+                    )
+                    .child(exposure_toggle),
+            )
+            .when(enabled, |column| {
+                column.child(
+                    div()
+                        .px(px(20.0))
+                        .py(px(15.0))
+                        .rounded(px(13.0))
+                        .bg(theme.raised)
+                        .child(
+                            div()
+                                .text_size(px(13.5))
+                                .font_weight(FontWeight::MEDIUM)
+                                .text_color(theme.text)
+                                .child(tr!("daemon.connection_title")),
+                        )
+                        .child(
+                            div()
+                                .mt(px(4.0))
+                                .min_w_0()
+                                .whitespace_normal()
+                                .text_size(px(11.5))
+                                .line_height(px(16.0))
+                                .text_color(theme.text_secondary)
+                                .child(tr!("daemon.connection_description")),
+                        )
+                        .child(
+                            div()
+                                .mt(px(14.0))
+                                .flex()
+                                .items_start()
+                                .gap(px(24.0))
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .min_w_0()
+                                        .child(
+                                            div()
+                                                .text_size(px(11.0))
+                                                .font_weight(FontWeight::MEDIUM)
+                                                .text_color(theme.text)
+                                                .child(tr!("daemon.port")),
+                                        )
+                                        .child(
+                                            div()
+                                                .mt(px(3.0))
+                                                .whitespace_normal()
+                                                .text_size(px(10.0))
+                                                .line_height(px(14.0))
+                                                .text_color(theme.text_tertiary)
+                                                .child(tr!("daemon.port_description")),
+                                        ),
+                                )
+                                .child(
+                                    div().flex_1().min_w_0().flex().justify_end().child(
+                                        TextField::new(
+                                            "daemon-port-field",
+                                            self.daemon_port_input.clone(),
+                                        )
+                                        .w(px(150.0)),
+                                    ),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .mt(px(14.0))
+                                .flex()
+                                .items_start()
+                                .gap(px(24.0))
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .min_w_0()
+                                        .child(
+                                            div()
+                                                .text_size(px(11.0))
+                                                .font_weight(FontWeight::MEDIUM)
+                                                .text_color(theme.text)
+                                                .child(tr!("daemon.allowed_origins")),
+                                        )
+                                        .child(
+                                            div()
+                                                .mt(px(3.0))
+                                                .whitespace_normal()
+                                                .text_size(px(10.0))
+                                                .line_height(px(14.0))
+                                                .text_color(theme.text_tertiary)
+                                                .child(tr!("daemon.allowed_origins_description")),
+                                        ),
+                                )
+                                .child(
+                                    div().flex_1().min_w_0().flex().justify_end().child(
+                                        TextField::new(
+                                            "daemon-origins-field",
+                                            self.daemon_origins_input.clone(),
+                                        )
+                                        .w_full()
+                                        .max_w(px(360.0)),
+                                    ),
+                                ),
+                        )
+                        .child(div().mt(px(13.0)).flex().justify_end().child(apply_button)),
+                )
+            })
+            .when(enabled, |column| {
+                column.child(
+                    div()
+                        .px(px(20.0))
+                        .py(px(15.0))
+                        .rounded(px(13.0))
+                        .bg(theme.raised)
+                        .child(
+                            div()
+                                .text_size(px(13.5))
+                                .font_weight(FontWeight::MEDIUM)
+                                .text_color(theme.text)
+                                .child(tr!("daemon.credentials_title")),
+                        )
+                        .child(
+                            div()
+                                .mt(px(4.0))
+                                .min_w_0()
+                                .whitespace_normal()
+                                .text_size(px(11.5))
+                                .line_height(px(16.0))
+                                .text_color(theme.text_secondary)
+                                .child(tr!("daemon.credentials_description")),
+                        )
+                        .child(
+                            div()
+                                .mt(px(13.0))
+                                .py(px(8.0))
+                                .flex()
+                                .items_center()
+                                .gap(px(10.0))
+                                .child(
+                                    div()
+                                        .w(px(80.0))
+                                        .flex_none()
+                                        .text_size(px(10.5))
+                                        .text_color(theme.text_tertiary)
+                                        .child(tr!("daemon.websocket_url")),
+                                )
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .min_w_0()
+                                        .truncate()
+                                        .font_family(".SystemUIFontMonospaced")
+                                        .text_size(px(11.0))
+                                        .text_color(theme.text)
+                                        .child(SharedString::from(format!(
+                                            "ws://{}:{port}",
+                                            self.daemon_hostname
+                                        ))),
+                                )
+                                .child(copy_url_button),
+                        )
+                        .child(
+                            div()
+                                .py(px(8.0))
+                                .border_t_1()
+                                .border_color(theme.border)
+                                .flex()
+                                .items_center()
+                                .gap(px(10.0))
+                                .child(
+                                    div()
+                                        .w(px(80.0))
+                                        .flex_none()
+                                        .text_size(px(10.5))
+                                        .text_color(theme.text_tertiary)
+                                        .child(tr!("daemon.token")),
+                                )
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .min_w_0()
+                                        .truncate()
+                                        .font_family(".SystemUIFontMonospaced")
+                                        .text_size(px(11.0))
+                                        .text_color(theme.text)
+                                        .child(SharedString::from(if token_revealed {
+                                            token.clone()
+                                        } else {
+                                            "••••••••••••••••••••••••••••••••".to_owned()
+                                        })),
+                                )
+                                .child(reveal_token_button)
+                                .child(copy_token_button)
+                                .child(regenerate_button),
+                        )
+                        .child(
+                            div()
+                                .mt(px(7.0))
+                                .px(px(10.0))
+                                .py(px(8.0))
+                                .rounded(px(8.0))
+                                .bg(theme.inset)
+                                .w_full()
+                                .min_w_0()
+                                .flex()
+                                .gap(px(8.0))
+                                .child(icon("icons/alert.svg", 13.0, theme.warning))
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .min_w_0()
+                                        .whitespace_normal()
+                                        .text_size(px(10.5))
+                                        .line_height(px(15.0))
+                                        .text_color(theme.text_secondary)
+                                        .child(tr!("daemon.security_warning")),
+                                ),
+                        ),
+                )
+            })
+            .into_any_element()
+    }
+
+    fn daemon_exposure_from_fields(
+        &self,
+        cx: &App,
+    ) -> Result<waku_client::DaemonExposureSettings, String> {
+        let port = self
+            .daemon_port_input
+            .read(cx)
+            .content()
+            .trim()
+            .parse::<u16>()
+            .map_err(|_| tr!("daemon.invalid_port"))?;
+        if port == 0 {
+            return Err(tr!("daemon.invalid_port"));
+        }
+        let origins = self.daemon_origins_input.read(cx).content().to_owned();
+        let mut settings = self.state.daemon_exposure.clone();
+        settings.port = port;
+        settings
+            .with_allowed_origins_text(&origins)
+            .and_then(waku_client::DaemonExposureSettings::validate)
+            .map_err(|error| error.to_string())
+    }
+
+    fn daemon_exposure_fields_dirty(&self, cx: &App) -> bool {
+        self.daemon_exposure_from_fields(cx)
+            .map(|settings| {
+                settings.port != self.state.daemon_exposure.port
+                    || settings.allowed_origins != self.state.daemon_exposure.allowed_origins
+            })
+            .unwrap_or(true)
+    }
+
+    fn set_daemon_exposure_enabled(&mut self, enabled: bool, cx: &mut Context<Self>) {
+        if !enabled {
+            self.daemon_token_revealed = false;
+        }
+        let settings = if enabled {
+            match self.daemon_exposure_from_fields(cx) {
+                Ok(mut settings) => {
+                    settings.enabled = true;
+                    settings
+                }
+                Err(error) => {
+                    self.show_toast(tr!("daemon.invalid_settings", error = error));
+                    return;
+                }
+            }
+        } else {
+            let mut settings = self.state.daemon_exposure.clone();
+            settings.enabled = false;
+            settings
+        };
+        self.apply_daemon_exposure(settings, cx);
+    }
+
+    pub(super) fn apply_daemon_exposure_fields(&mut self, cx: &mut Context<Self>) {
+        let settings = match self.daemon_exposure_from_fields(cx) {
+            Ok(settings) => settings,
+            Err(error) => {
+                self.show_toast(tr!("daemon.invalid_settings", error = error));
+                return;
+            }
+        };
+        self.apply_daemon_exposure(settings, cx);
+    }
+
+    fn regenerate_daemon_token(&mut self, cx: &mut Context<Self>) {
+        let mut settings = match self.daemon_exposure_from_fields(cx) {
+            Ok(settings) => settings,
+            Err(error) => {
+                self.show_toast(tr!("daemon.invalid_settings", error = error));
+                return;
+            }
+        };
+        settings.token = waku_client::DaemonExposureSettings::new_token();
+        self.daemon_token_revealed = false;
+        self.apply_daemon_exposure(settings, cx);
+    }
+
+    fn apply_daemon_exposure(
+        &mut self,
+        settings: waku_client::DaemonExposureSettings,
+        cx: &mut Context<Self>,
+    ) {
+        if self.daemon_reconfigure_pending || settings == self.state.daemon_exposure {
+            return;
+        }
+        if self.daemon.is_remote() {
+            self.show_toast(tr!("daemon.external_description"));
+            return;
+        }
+        if self
+            .state
+            .sessions
+            .iter()
+            .any(|session| !matches!(session.status, SessionStatus::Idle | SessionStatus::Failed))
+        {
+            self.show_toast(tr!("daemon.stop_active_tasks"));
+            return;
+        }
+
+        let needs_restart = self.state.daemon_exposure.enabled || settings.enabled;
+        if !needs_restart {
+            self.state.daemon_exposure = settings;
+            self.save();
+            cx.notify();
+            return;
+        }
+
+        self.daemon_reconfigure_pending = true;
+        let daemon = self.daemon.clone();
+        let applied = settings.clone();
+        let restart = cx
+            .background_executor()
+            .spawn(async move { daemon.reconfigure(settings) });
+        cx.spawn(async move |this, cx| {
+            let result = restart.await;
+            let _ = this.update(cx, |this, cx| {
+                this.daemon_reconfigure_pending = false;
+                match result {
+                    Ok(()) => {
+                        this.state.daemon_exposure = applied.clone();
+                        this.runtimes.clear();
+                        this.daemon_port_input.update(cx, |input, cx| {
+                            input.set_content(applied.port.to_string(), cx)
+                        });
+                        this.daemon_origins_input.update(cx, |input, cx| {
+                            input.set_content(applied.allowed_origins_text(), cx)
+                        });
+                        this.save();
+                        this.show_success_toast(tr!("daemon.settings_applied"));
+                    }
+                    Err(error) => {
+                        this.show_toast(tr!("daemon.restart_failed", error = error.to_string()))
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
         cx.notify();
     }
 
@@ -1231,6 +1950,7 @@ impl Waku {
                 self.state.last_model = None;
                 self.state.last_reasoning_effort = None;
                 self.state.last_service_tier = None;
+                self.state.last_context_window = None;
             }
             let draft_ids = self
                 .state
@@ -1245,6 +1965,7 @@ impl Waku {
                     session.model = None;
                     session.reasoning_effort = None;
                     session.service_tier = None;
+                    session.context_window = None;
                 }
             }
         }
@@ -1503,11 +2224,21 @@ impl Waku {
         self.computer_permission_request_pending = true;
         let tx = self.computer_permission_tx.clone();
         let event_wake = self.event_wake_tx.clone();
+        let daemon = self.daemon.client();
         std::thread::Builder::new()
             .name("waku-computer-permission-request".into())
             .spawn(move || {
-                let result = crate::computer_use::probe_permissions(prompt)
-                    .map_err(|error| error.to_string());
+                let result = match daemon.request(
+                    Uuid::nil(),
+                    Uuid::nil(),
+                    waku_client::Command::ProbeComputerPermissions { prompt },
+                ) {
+                    Ok(waku_client::ResponsePayload::ComputerPermissions { permissions }) => {
+                        Ok(permissions)
+                    }
+                    Ok(_) => Err("the daemon returned an invalid permission response".into()),
+                    Err(error) => Err(error.to_string()),
+                };
                 if tx.send(result).is_ok() {
                     signal_event_pump(&event_wake);
                 }

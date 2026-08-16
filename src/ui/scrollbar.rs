@@ -42,6 +42,8 @@ pub struct ScrollbarState {
     last_scroll: Cell<Option<Instant>>,
     /// Offset at the previous paint, to notice movement.
     last_offset: Cell<Option<Pixels>>,
+    /// A hold-expiry wake is in flight; see `arm_fade_wake`.
+    fade_wake_armed: Cell<bool>,
 }
 
 impl ScrollbarState {
@@ -51,6 +53,14 @@ impl ScrollbarState {
 
     fn is_grabbed(&self) -> bool {
         self.grab_offset.get().is_some()
+    }
+
+    /// True while the pointer is over the track or a drag is in progress.
+    /// Bubble-phase mouse listeners run in reverse registration order, so a
+    /// surface painted beneath the bar hears these events too and must be able
+    /// to ignore the ones the bar is handling.
+    pub fn engaged(&self) -> bool {
+        self.hovered.get() || self.is_grabbed()
     }
 
     /// Note the current scroll offset, starting the reveal timer when it moved.
@@ -189,11 +199,34 @@ fn scroll_to(surface: &impl Scrollable, offset: Pixels, max_offset: Pixels) {
     surface.scroll_to(offset.clamp(Pixels::ZERO, max_offset));
 }
 
+/// One in-flight wake for the end of the reveal hold. If the content keeps
+/// moving, the paint that this wake triggers finds the hold extended and arms
+/// the next wake — one timer alive at a time, one no-op frame per expiry.
+fn arm_fade_wake(
+    state: &Rc<ScrollbarState>,
+    view: gpui::EntityId,
+    delay: Duration,
+    cx: &mut App,
+) {
+    if state.fade_wake_armed.replace(true) {
+        return;
+    }
+    let state = state.clone();
+    cx.spawn(async move |cx| {
+        cx.background_executor()
+            .timer(delay + Duration::from_millis(16))
+            .await;
+        state.fade_wake_armed.set(false);
+        cx.update(|cx| cx.notify(view));
+    })
+    .detach();
+}
+
 /// An overlay vertical scrollbar pinned to the right edge of its parent.
 ///
 /// The parent must be `relative()`; this element positions itself absolutely
 /// and never participates in layout, so adding it cannot change content size.
-pub fn vertical<S>(surface: &S, state: &Rc<ScrollbarState>) -> impl IntoElement
+pub fn vertical<S>(surface: &S, state: &Rc<ScrollbarState>) -> impl IntoElement + use<S>
 where
     S: Scrollable + Clone + 'static,
 {
@@ -247,9 +280,20 @@ where
                     BorderStyle::default(),
                 ));
                 if !active {
-                    // Keep driving frames through the hold and the fade;
-                    // nothing else would repaint a resting transcript.
-                    window.request_animation_frame();
+                    match since_scroll {
+                        // The hold is constant-opacity: it needs no repaints,
+                        // only a wake at the moment the fade should begin. A
+                        // streaming transcript moves its content every commit
+                        // and so holds its bar for the whole turn — driving
+                        // frames through that hold pinned the pane at pulse
+                        // rate for nothing.
+                        Some(elapsed) if elapsed < HOLD => {
+                            arm_fade_wake(&state, window.current_view(), HOLD - elapsed, cx);
+                        }
+                        // The fade itself animates; ride the shared pulse
+                        // clock, which parks shortly after the bar hides.
+                        _ => super::motion::pulse_lease(window.current_view(), cx),
+                    }
                 }
             }
 

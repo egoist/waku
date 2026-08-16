@@ -1,0 +1,44 @@
+[package]
+name = "waku-core"
+version = "0.1.0"
+edition = "2024"
+description = "Headless provider, persistence, and workspace runtime for Waku"
+license = "GPL-3.0-only"
+readme = "README.md"
+
+[dependencies]
+agent-client-protocol = "2.0.0"
+alacritty_terminal = { version = "0.26", default-features = false }
+anyhow = "1.0"
+base64 = "0.22"
+chrono = { version = "0.4", features = ["serde"] }
+crossbeam-channel = "0.5"
+dirs = "6.0"
+nucleo-matcher = "0.3"
+parking_lot = "0.12"
+rust-i18n = "4"
+rusqlite = { version = "0.37", features = ["bundled"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+smol = "2"
+subtle = "2"
+toml = "0.8"
+trash = "5.2.6"
+tungstenite = { version = "0.30", default-features = false, features = ["handshake"] }
+url = "2"
+uuid = { version = "1.18", features = ["v4", "serde"] }
+waku-protocol = { path = "../waku-protocol" }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2-foundation = { version = "0.3", default-features = false, features = [
+    "std",
+    "NSArray",
+    "NSLocale",
+    "NSString",
+] }
+
+[dev-dependencies]
+waku-client = { path = "../waku-client" }

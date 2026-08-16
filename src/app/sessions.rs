@@ -1,5 +1,5 @@
 use super::*;
-use crate::claude_session::ImportedRecord;
+use waku_client::provider_session::{ImportedSessionRecord, ResumableSession};
 
 fn retain_runtime_after_cancel(provider: ProviderKind) -> bool {
     // Codex's app-server owns the Computer Use process tree, and Amp offers no
@@ -19,6 +19,15 @@ impl Waku {
     }
 
     pub(super) fn select_session(&mut self, session_id: Uuid, cx: &mut Context<Self>) {
+        self.request_session_activation(session_id, SessionActivationTransition::Visit, cx);
+    }
+
+    fn request_session_activation(
+        &mut self,
+        session_id: Uuid,
+        transition: SessionActivationTransition,
+        cx: &mut Context<Self>,
+    ) {
         if !self
             .state
             .sessions
@@ -27,39 +36,138 @@ impl Waku {
         {
             return;
         }
-        self.session_navigation
-            .visit(self.state.selected_session, session_id);
+        let needs_hydration = self
+            .state
+            .sessions
+            .iter()
+            .find(|session| session.id == session_id)
+            .is_some_and(|session| !session.detail_loaded);
+        if needs_hydration {
+            self.pending_session_activation = Some(PendingSessionActivation {
+                session_id,
+                transition,
+            });
+            // Keep the current transcript visible until the daemon returns the
+            // target session, but acknowledge the click immediately in the
+            // sidebar instead of making the UI appear unresponsive.
+            cx.notify();
+            self.ensure_session_loaded(session_id, cx);
+            return;
+        }
+        self.pending_session_activation = None;
+        self.finish_session_activation(session_id, transition, cx);
+    }
+
+    fn finish_session_activation(
+        &mut self,
+        session_id: Uuid,
+        transition: SessionActivationTransition,
+        cx: &mut Context<Self>,
+    ) {
+        match transition {
+            SessionActivationTransition::Visit => self
+                .session_navigation
+                .visit(self.state.selected_session, session_id),
+            SessionActivationTransition::Back { from } => {
+                if self.state.selected_session != Some(from)
+                    || self.session_navigation.back_target() != Some(session_id)
+                {
+                    return;
+                }
+                let _ = self.session_navigation.go_back(from);
+            }
+            SessionActivationTransition::Forward { from } => {
+                if self.state.selected_session != Some(from)
+                    || self.session_navigation.forward_target() != Some(session_id)
+                {
+                    return;
+                }
+                let _ = self.session_navigation.go_forward(from);
+            }
+        }
         self.activate_session(session_id, cx);
     }
 
     /// Loads a session's transcript if startup only fetched its list columns.
     ///
-    /// One row plus that session's messages, so it stays well inside a frame;
-    /// the alternative is paying for all of history at launch.
-    pub(super) fn ensure_session_loaded(&mut self, session_id: Uuid) {
-        let Some(session) = self
+    /// The SQLite query and daemon round trip both stay off the UI thread. The
+    /// current selection stays rendered until the requested session is whole.
+    pub(super) fn ensure_session_loaded(&mut self, session_id: Uuid, cx: &mut Context<Self>) {
+        let needs_hydration = self
             .state
             .sessions
-            .iter_mut()
+            .iter()
             .find(|session| session.id == session_id)
-            .filter(|session| !session.detail_loaded)
-        else {
+            .is_some_and(|session| !session.detail_loaded);
+        if !needs_hydration || !self.session_hydrations.insert(session_id) {
             return;
-        };
-        if let Err(error) = self.store.hydrate(session) {
-            self.show_toast(tr!("errors.open_session", error = error));
         }
+        let daemon = self.daemon.clone();
+        cx.spawn(async move |waku, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move {
+                    match waku_client::persistence::hydrate_session(&daemon, session_id)? {
+                        Some(session) => Ok(session),
+                        None => {
+                            anyhow::bail!("the task no longer exists")
+                        }
+                    }
+                })
+                .await;
+            let _ = waku.update(cx, |waku, cx| {
+                waku.session_hydrations.remove(&session_id);
+                match result {
+                    Ok(session) => {
+                        let replaced = if let Some(existing) = waku
+                            .state
+                            .sessions
+                            .iter_mut()
+                            .find(|existing| existing.id == session_id)
+                        {
+                            *existing = session;
+                            true
+                        } else {
+                            false
+                        };
+                        let pending = waku
+                            .pending_session_activation
+                            .filter(|pending| pending.session_id == session_id);
+                        if pending.is_some() {
+                            waku.pending_session_activation = None;
+                        }
+                        if replaced && let Some(pending) = pending {
+                            waku.finish_session_activation(session_id, pending.transition, cx);
+                        } else if waku.state.selected_session == Some(session_id) {
+                            waku.reset_visible_state();
+                            waku.reset_transcript_rows(waku.transcript_row_count());
+                            waku.refresh_composer_sources(cx);
+                        }
+                    }
+                    Err(error) => {
+                        if waku
+                            .pending_session_activation
+                            .is_some_and(|pending| pending.session_id == session_id)
+                        {
+                            waku.pending_session_activation = None;
+                        }
+                        waku.show_toast(tr!("errors.open_session", error = error));
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     fn activate_session(&mut self, session_id: Uuid, cx: &mut Context<Self>) {
-        self.ensure_session_loaded(session_id);
         let session_changed = self.state.selected_session != Some(session_id);
         if session_changed {
             self.capture_and_save_current_composer_draft(cx);
             self.store_selected_right_panel_state();
         }
         self.state.selected_session = Some(session_id);
-        if let Some((project_id, provider, model, reasoning_effort, service_tier)) =
+        if let Some((project_id, provider, model, reasoning_effort, service_tier, context_window)) =
             self.selected_session().map(|session| {
                 (
                     session.project_id,
@@ -67,6 +175,7 @@ impl Waku {
                     session.model.clone(),
                     session.reasoning_effort.clone(),
                     session.service_tier.clone(),
+                    session.context_window.clone(),
                 )
             })
         {
@@ -75,6 +184,7 @@ impl Waku {
             self.state.last_model = model;
             self.state.last_reasoning_effort = reasoning_effort;
             self.state.last_service_tier = service_tier;
+            self.state.last_context_window = context_window;
         }
         if self
             .selected_session()
@@ -84,6 +194,7 @@ impl Waku {
         }
         if session_changed {
             self.restore_selected_composer_draft(cx);
+            self.sync_user_input_answer(cx);
             self.restore_right_panel_state(session_id, cx);
         } else {
             self.ensure_right_panel_terminals(cx);
@@ -98,6 +209,12 @@ impl Waku {
         self.refresh_composer_sources(cx);
         self.reset_transcript_rows(self.transcript_row_count());
         self.save();
+        if self
+            .selected_session()
+            .is_some_and(AgentSession::has_started)
+        {
+            self.start_runtime_attachment(session_id, cx);
+        }
         cx.notify();
     }
 
@@ -146,7 +263,7 @@ impl Waku {
     /// startup, so this only sets it and imports the transcript behind it.
     pub(super) fn resume_provider_session(
         &mut self,
-        resumable: crate::provider_sessions::ResumableSession,
+        resumable: ResumableSession,
         cx: &mut Context<Self>,
     ) {
         let cursor = resumable.cursor;
@@ -180,13 +297,7 @@ impl Waku {
         session.updated_at = unix_time();
         let session_id = session.id;
         self.state.last_provider = provider;
-        if let ProviderResumeCursor::Claude {
-            session_id: native_id,
-            ..
-        } = &cursor
-        {
-            self.import_claude_transcript(session_id, native_id.clone(), cx);
-        }
+        self.import_provider_transcript(session_id, cursor, cx);
         // A cursor this task holds must leave the picker, or `/resume` would
         // offer one CLI thread to a second task.
         self.refresh_composer_sources(cx);
@@ -194,25 +305,24 @@ impl Waku {
         cx.notify();
     }
 
-    /// Replace a just-resumed task's transcript with the conversation Claude
-    /// Code recorded for it. Tens of megabytes, so the read and the conversion
-    /// both run on the background executor.
-    fn import_claude_transcript(
+    /// Replace a just-resumed task's transcript with the provider conversation.
+    fn import_provider_transcript(
         &mut self,
         session_id: Uuid,
-        native_id: String,
+        cursor: ProviderResumeCursor,
         cx: &mut Context<Self>,
     ) {
+        let workspace = waku_client::WorkspaceClient::new(self.daemon.client());
         cx.spawn(async move |waku, cx| {
             let imported = cx
                 .background_executor()
-                .spawn(async move { crate::claude_session::imported_transcript(&native_id) })
+                .spawn(async move { workspace.import_provider_session(cursor) })
                 .await;
-            let Ok(imported) = imported else {
+            let Ok(records) = imported else {
                 return;
             };
             waku.update(cx, |waku, cx| {
-                waku.install_imported_transcript(session_id, imported, cx);
+                waku.install_imported_transcript(session_id, records, cx);
             })
             .ok();
         })
@@ -222,7 +332,7 @@ impl Waku {
     fn install_imported_transcript(
         &mut self,
         session_id: Uuid,
-        imported: Vec<ImportedRecord>,
+        imported: Vec<ImportedSessionRecord>,
         cx: &mut Context<Self>,
     ) {
         let Some(session) = self.state.session_mut(session_id) else {
@@ -240,15 +350,15 @@ impl Waku {
         let mut continuing_work = false;
         for record in imported {
             match record {
-                ImportedRecord::Prompt(text) => {
+                ImportedSessionRecord::Prompt(text) => {
                     session.begin_turn_with_presentation(text, None, Vec::new());
                     continuing_work = false;
                 }
-                ImportedRecord::Assistant(text) => {
+                ImportedSessionRecord::Assistant(text) => {
                     session.push_message(MessageRole::Assistant, text);
                     continuing_work = false;
                 }
-                ImportedRecord::Activity(item) => {
+                ImportedSessionRecord::Activity(item) => {
                     super::streaming::push_transcript_activity(session, item, continuing_work);
                     continuing_work = true;
                 }
@@ -282,9 +392,6 @@ impl Waku {
             cx.notify();
             return;
         }
-        // The turn count drives checkpoint cleanup, so the transcript has to be
-        // loaded before it can be trusted.
-        self.ensure_session_loaded(session_id);
         let Some(index) = self
             .state
             .sessions
@@ -302,7 +409,6 @@ impl Waku {
             .iter()
             .find(|project| project.id == project_id)
             .is_some_and(Project::is_projectless);
-        let last_turn_count = self.state.sessions[index].turns.len();
         let project_path = self
             .workspace_path_for_session(&self.state.sessions[index])
             .map(std::path::Path::to_path_buf);
@@ -313,6 +419,15 @@ impl Waku {
         self.remove_right_panel_session_state(session_id);
         self.remove_composer_draft(composer_draft_key, cx);
         self.state.sessions.remove(index);
+        if let Err(error) = self.store.remove_session(session_id) {
+            self.show_toast(tr!("errors.save_local_state", error = error));
+        }
+        if self
+            .pending_session_activation
+            .is_some_and(|pending| pending.session_id == session_id)
+        {
+            self.pending_session_activation = None;
+        }
         self.session_navigation.remove(session_id);
         let project_still_used = self
             .state
@@ -332,7 +447,15 @@ impl Waku {
             }
         }
         if let Some(project_path) = project_path {
-            let _ = checkpoint::delete_session_refs(&project_path, session_id, last_turn_count);
+            let workspace = waku_client::WorkspaceClient::new(self.daemon.client());
+            cx.background_executor()
+                .spawn(async move {
+                    let _ = workspace.request(waku_client::WorkspaceOperation::DeleteSessionRefs {
+                        cwd: project_path,
+                        session_id,
+                    });
+                })
+                .detach();
         }
         self.invalidate_checkpoint_refs();
 
@@ -482,6 +605,34 @@ impl Waku {
         self.save();
     }
 
+    /// Mirror the live window frame into persisted state; disk waits for the
+    /// app-quit save (any other `save` carries the frame along for free).
+    /// macOS reports a zoomed window as `Windowed` with screen-filling bounds,
+    /// so while maximized (and while fullscreen) the last floating frame is
+    /// kept as the restore size — and the display it was captured on — and
+    /// only the flag advances.
+    pub(super) fn capture_window_state(&mut self, window: &Window, cx: &App) {
+        // Bounds also change when the OS relocates the window — a monitor
+        // unplugged, a display asleep. Those moves are not the user's; like
+        // Zed, only capture while the window is the active one.
+        if !window.is_window_active() {
+            return;
+        }
+        let previous = self.state.window_state;
+        let display = window.display(cx).and_then(|display| display.uuid().ok());
+        self.state.window_state = Some(match window.window_bounds() {
+            WindowBounds::Fullscreen(restore) => {
+                previous.unwrap_or_else(|| persisted_window_state(restore, false, display))
+            }
+            WindowBounds::Maximized(restore) => persisted_window_state(restore, true, display),
+            WindowBounds::Windowed(bounds) if window.is_maximized() => PersistedWindowState {
+                maximized: true,
+                ..previous.unwrap_or_else(|| persisted_window_state(bounds, true, display))
+            },
+            WindowBounds::Windowed(bounds) => persisted_window_state(bounds, false, display),
+        });
+    }
+
     pub(super) fn effective_panel_widths(&self, window: &Window) -> (f32, f32) {
         fitted_panel_widths(
             f32::from(window.viewport_size().width),
@@ -606,9 +757,13 @@ impl Waku {
         let Some(current) = self.state.selected_session else {
             return;
         };
-        if let Some(target) = self.session_navigation.go_back(current) {
+        if let Some(target) = self.session_navigation.back_target() {
             self.settings_page = None;
-            self.activate_session(target, cx);
+            self.request_session_activation(
+                target,
+                SessionActivationTransition::Back { from: current },
+                cx,
+            );
         }
     }
 
@@ -625,9 +780,13 @@ impl Waku {
         let Some(current) = self.state.selected_session else {
             return;
         };
-        if let Some(target) = self.session_navigation.go_forward(current) {
+        if let Some(target) = self.session_navigation.forward_target() {
             self.settings_page = None;
-            self.activate_session(target, cx);
+            self.request_session_activation(
+                target,
+                SessionActivationTransition::Forward { from: current },
+                cx,
+            );
         }
     }
 
@@ -716,6 +875,25 @@ impl Waku {
         // Selection belongs to the session being left.
         self.transcript_selection.selection.borrow_mut().clear();
         self.transcript_selection.registry.borrow_mut().clear();
+        let (streaming_messages, live_reasoning) = self.selected_session().map_or_else(
+            || (Vec::new(), Vec::new()),
+            |session| {
+                let messages = session
+                    .messages
+                    .iter()
+                    .filter(|message| message.role == MessageRole::Assistant && message.streaming)
+                    .map(|message| message.id)
+                    .collect();
+                let reasoning = session
+                    .transcript_blocks
+                    .iter()
+                    .flat_map(|block| &block.activities)
+                    .filter(|activity| activity.reasoning.is_some() && !activity.complete)
+                    .map(|activity| activity.id)
+                    .collect();
+                (messages, reasoning)
+            },
+        );
         // Parsed messages are keyed by message id, which is unique across
         // sessions, so they stay cached — switching back to a recent session
         // then costs no re-parse. Bounded so a long-running window cannot grow
@@ -728,10 +906,23 @@ impl Waku {
         if cached_bytes > MAX_CACHED_MESSAGE_SOURCE_BYTES {
             message_markdown.clear();
         }
+        for id in streaming_messages {
+            message_markdown
+                .entry(id)
+                .or_insert_with(MarkdownView::new)
+                .seed_streaming_baseline();
+        }
         drop(message_markdown);
         // Block parses are keyed by position within the session, so they would
         // be read as another session's blocks.
-        self.activity_markdown.borrow_mut().clear();
+        let mut activity_markdown = self.activity_markdown.borrow_mut();
+        activity_markdown.clear();
+        for id in live_reasoning {
+            activity_markdown.insert(id, MarkdownView::seeded());
+        }
+        drop(activity_markdown);
+        self.reasoning_window_starts.borrow_mut().clear();
+        self.activity_scroll_viewports.borrow_mut().clear();
         self.menus.borrow_mut().clear();
         self.message_edit = None;
         self.hide_toast();
@@ -745,25 +936,32 @@ impl Waku {
     pub(super) fn reset_session_runtime(&mut self, session_id: Uuid) {
         if let Some(runtime) = self.runtimes.remove(&session_id) {
             runtime.driver.cancel();
+            runtime.driver.close();
             self.mark_background_work_lost(session_id);
         }
     }
 
     fn remember_selected_model_traits(&mut self) {
-        let Some((provider, model, reasoning_effort, service_tier)) =
+        let Some((provider, model, reasoning_effort, service_tier, context_window)) =
             self.selected_session().and_then(|session| {
                 Some((
                     session.provider,
                     self.model_for_session(session)?.to_owned(),
                     session.reasoning_effort.clone(),
                     session.service_tier.clone(),
+                    session.context_window.clone(),
                 ))
             })
         else {
             return;
         };
-        self.state
-            .remember_model_traits(provider, &model, reasoning_effort, service_tier);
+        self.state.remember_model_traits(
+            provider,
+            &model,
+            reasoning_effort,
+            service_tier,
+            context_window,
+        );
     }
 
     pub(super) fn choose_model(
@@ -785,7 +983,8 @@ impl Waku {
         };
 
         self.remember_selected_model_traits();
-        let (reasoning_effort, service_tier) = self.state.model_traits_for(provider, &model);
+        let (reasoning_effort, service_tier, context_window) =
+            self.state.model_traits_for(provider, &model);
         if let Some(session) = self.selected_session_mut() {
             session.provider = provider;
             session.model = Some(model.clone());
@@ -794,10 +993,12 @@ impl Waku {
             }
             session.reasoning_effort.clone_from(&reasoning_effort);
             session.service_tier.clone_from(&service_tier);
+            session.context_window.clone_from(&context_window);
             self.state.last_provider = provider;
             self.state.last_model = Some(model);
             self.state.last_reasoning_effort = reasoning_effort;
             self.state.last_service_tier = service_tier;
+            self.state.last_context_window = context_window;
             self.model_picker_tab = ModelPickerTab::Provider(provider);
             // A different provider is a different binary and protocol; only a
             // model change within one provider can be applied in session.
@@ -806,7 +1007,7 @@ impl Waku {
                 // A different provider is also a different command registry.
                 self.refresh_composer_sources(cx);
             } else {
-                self.apply_session_options(session_id);
+                self.apply_session_options(session_id, cx);
             }
             self.save();
             cx.notify();
@@ -856,6 +1057,12 @@ impl Waku {
     pub(super) fn select_model_picker_tab(&mut self, tab: ModelPickerTab, cx: &mut Context<Self>) {
         if self.model_picker_tab != tab {
             self.model_picker_tab = tab;
+            if let ModelPickerTab::Provider(provider) = tab {
+                // Selecting a rail re-runs that provider's catalog discovery,
+                // so each tab is fresh when viewed without probing every
+                // provider on open.
+                self.refresh_provider_model_discovery(provider);
+            }
             // A different tab renumbers the rows under the keyboard cursor,
             // and would otherwise inherit the old tab's scroll offset.
             self.model_picker_highlight = None;
@@ -895,7 +1102,7 @@ impl Waku {
         {
             let session_id = session.id;
             session.runtime_mode = mode;
-            self.apply_session_options(session_id);
+            self.apply_session_options(session_id, cx);
             self.save();
             cx.notify();
         }
@@ -907,7 +1114,7 @@ impl Waku {
         {
             let session_id = session.id;
             session.interaction_mode = mode;
-            self.apply_session_options(session_id);
+            self.apply_session_options(session_id, cx);
             self.save();
             cx.notify();
         }
@@ -921,7 +1128,7 @@ impl Waku {
             session.reasoning_effort = Some(effort.clone());
             self.state.last_reasoning_effort = Some(effort);
             self.remember_selected_model_traits();
-            self.apply_session_options(session_id);
+            self.apply_session_options(session_id, cx);
             self.save();
             cx.notify();
         }
@@ -935,7 +1142,21 @@ impl Waku {
             session.service_tier = Some(tier.clone());
             self.state.last_service_tier = Some(tier);
             self.remember_selected_model_traits();
-            self.apply_session_options(session_id);
+            self.apply_session_options(session_id, cx);
+            self.save();
+            cx.notify();
+        }
+    }
+
+    pub(super) fn set_context_window(&mut self, window: String, cx: &mut Context<Self>) {
+        if let Some(session) = self.selected_session_mut()
+            && session.context_window.as_deref() != Some(window.as_str())
+        {
+            let session_id = session.id;
+            session.context_window = Some(window.clone());
+            self.state.last_context_window = Some(window);
+            self.remember_selected_model_traits();
+            self.apply_session_options(session_id, cx);
             self.save();
             cx.notify();
         }
@@ -1033,6 +1254,7 @@ impl Waku {
         if let Some(runtime) = runtime.as_mut() {
             runtime.stream_phase = None;
             runtime.pending_permission = None;
+            runtime.pending_user_input = None;
             runtime.pending_computer_approval = None;
             runtime.computer_use_previews.clear();
         }
@@ -1062,11 +1284,12 @@ impl Waku {
         // prompt resumes the same provider thread with a fresh runtime. A
         // detached process or subagent is the exception: its provider must
         // remain resident so Waku can keep observing and stopping it.
-        if retain_runtime
-            && keep_runtime
-            && let Some(runtime) = runtime
-        {
-            self.runtimes.insert(session_id, runtime);
+        if retain_runtime && keep_runtime {
+            if let Some(runtime) = runtime.take() {
+                self.runtimes.insert(session_id, runtime);
+            }
+        } else if let Some(runtime) = runtime {
+            runtime.driver.close();
         }
         self.remeasure_transcript_tail();
         self.save();
@@ -1118,6 +1341,177 @@ impl Waku {
         }
         if let Some(session) = self.selected_session_mut() {
             session.status = SessionStatus::Working;
+        }
+        cx.notify();
+    }
+
+    pub(super) fn sync_user_input_answer(&mut self, cx: &mut Context<Self>) {
+        let answer = self
+            .selected_runtime()
+            .and_then(|runtime| runtime.pending_user_input.as_ref())
+            .and_then(|pending| {
+                pending
+                    .current_question()
+                    .map(|question| (pending, question))
+            })
+            .and_then(|(pending, question)| pending.custom_answers.get(&question.id))
+            .cloned()
+            .unwrap_or_default();
+        self.user_input_answer
+            .update(cx, |input, cx| input.set_content(answer, cx));
+    }
+
+    pub(super) fn update_user_input_custom_answer(
+        &mut self,
+        answer: impl AsRef<str>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(session_id) = self.state.selected_session else {
+            return;
+        };
+        let Some(pending) = self
+            .runtimes
+            .get_mut(&session_id)
+            .and_then(|runtime| runtime.pending_user_input.as_mut())
+        else {
+            return;
+        };
+        let Some(question_id) = pending
+            .current_question()
+            .map(|question| question.id.clone())
+        else {
+            return;
+        };
+        let answer = answer.as_ref().to_owned();
+        if answer.trim().is_empty() {
+            pending.custom_answers.remove(&question_id);
+        } else {
+            pending.custom_answers.insert(question_id.clone(), answer);
+            pending.selections.remove(&question_id);
+        }
+        cx.notify();
+    }
+
+    pub(super) fn submit_user_input_custom_answer(
+        &mut self,
+        answer: String,
+        cx: &mut Context<Self>,
+    ) {
+        if answer.trim().is_empty() {
+            return;
+        }
+        self.update_user_input_custom_answer(answer, cx);
+        self.advance_user_input(cx);
+    }
+
+    pub(super) fn select_user_input_option(&mut self, label: String, cx: &mut Context<Self>) {
+        let Some(session_id) = self.state.selected_session else {
+            return;
+        };
+        let Some(pending) = self
+            .runtimes
+            .get_mut(&session_id)
+            .and_then(|runtime| runtime.pending_user_input.as_mut())
+        else {
+            return;
+        };
+        let Some((question_id, multi_select)) = pending
+            .current_question()
+            .map(|question| (question.id.clone(), question.multi_select))
+        else {
+            return;
+        };
+        let selected = pending.selections.entry(question_id.clone()).or_default();
+        if multi_select {
+            if let Some(index) = selected.iter().position(|answer| answer == &label) {
+                selected.remove(index);
+            } else {
+                selected.push(label);
+            }
+        } else {
+            selected.clear();
+            selected.push(label);
+        }
+        if selected.is_empty() {
+            pending.selections.remove(&question_id);
+        }
+        pending.custom_answers.remove(&question_id);
+        self.user_input_answer
+            .update(cx, |input, cx| input.clear(cx));
+        cx.notify();
+    }
+
+    pub(super) fn previous_user_input(&mut self, cx: &mut Context<Self>) {
+        let Some(session_id) = self.state.selected_session else {
+            return;
+        };
+        let Some(pending) = self
+            .runtimes
+            .get_mut(&session_id)
+            .and_then(|runtime| runtime.pending_user_input.as_mut())
+        else {
+            return;
+        };
+        if pending.question_index == 0 {
+            return;
+        }
+        pending.question_index -= 1;
+        self.sync_user_input_answer(cx);
+        cx.notify();
+    }
+
+    pub(super) fn advance_user_input(&mut self, cx: &mut Context<Self>) {
+        let Some(session_id) = self.state.selected_session else {
+            return;
+        };
+        let should_submit = {
+            let Some(pending) = self
+                .runtimes
+                .get_mut(&session_id)
+                .and_then(|runtime| runtime.pending_user_input.as_mut())
+            else {
+                return;
+            };
+            let Some(question) = pending.current_question() else {
+                return;
+            };
+            let answered = pending
+                .custom_answers
+                .get(&question.id)
+                .is_some_and(|answer| !answer.trim().is_empty())
+                || pending
+                    .selections
+                    .get(&question.id)
+                    .is_some_and(|answers| !answers.is_empty());
+            if !answered {
+                return;
+            }
+            if pending.question_index + 1 < pending.questions.len() {
+                pending.question_index += 1;
+                false
+            } else {
+                true
+            }
+        };
+
+        if should_submit {
+            let Some(runtime) = self.runtimes.get_mut(&session_id) else {
+                return;
+            };
+            let Some(pending) = runtime.pending_user_input.take() else {
+                return;
+            };
+            let answers = pending.answers();
+            runtime
+                .driver
+                .respond_user_input(pending.request_id, answers);
+            if let Some(session) = self.state.session_mut(session_id) {
+                session.status = SessionStatus::Working;
+            }
+            self.user_input_answer
+                .update(cx, |input, cx| input.clear(cx));
+        } else {
+            self.sync_user_input_answer(cx);
         }
         cx.notify();
     }
@@ -1222,6 +1616,11 @@ impl Waku {
     }
 
     pub(super) fn add_project(&mut self, cx: &mut Context<Self>) {
+        if self.daemon.is_remote() {
+            self.show_toast(tr!("errors.remote_project_picker"));
+            cx.notify();
+            return;
+        }
         let receiver = cx.prompt_for_paths(PathPromptOptions {
             files: false,
             directories: true,
@@ -1267,19 +1666,36 @@ impl Waku {
             return;
         }
 
-        let workspace = match crate::projectless::create_workspace(None) {
-            Ok(workspace) => workspace,
-            Err(error) => {
-                self.show_toast(tr!("errors.create_projectless_task", error = error));
-                cx.notify();
-                return;
-            }
-        };
-        let mut project = Project::from_path(workspace.cwd);
-        project.name = Project::PROJECTLESS_NAME.to_owned();
-        let project_id = project.id;
-        self.state.projects.push(project);
-        self.create_session_for(project_id, self.state.last_provider, cx);
+        let workspace = waku_client::WorkspaceClient::new(self.daemon.client());
+        cx.spawn(async move |waku, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move {
+                    match workspace.request(
+                        waku_client::WorkspaceOperation::CreateProjectlessWorkspace {
+                            prompt: None,
+                        },
+                    )? {
+                        waku_client::WorkspaceResult::ProjectlessWorkspace { cwd } => Ok(cwd),
+                        _ => anyhow::bail!("the daemon returned an invalid projectless response"),
+                    }
+                })
+                .await;
+            let _ = waku.update(cx, |waku, cx| match result {
+                Ok(cwd) => {
+                    let mut project = Project::from_path(cwd);
+                    project.name = Project::PROJECTLESS_NAME.to_owned();
+                    let project_id = project.id;
+                    waku.state.projects.push(project);
+                    waku.create_session_for(project_id, waku.state.last_provider, cx);
+                }
+                Err(error) => {
+                    waku.show_toast(tr!("errors.create_projectless_task", error = error));
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
     }
 }
 

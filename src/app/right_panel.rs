@@ -144,13 +144,9 @@ fn workspace_relative_file_path(workspace: &Path, target: &Path) -> Option<Strin
 
     let workspace = normalized_path(workspace);
     let target = normalized_path(target);
-    match (
-        std::fs::canonicalize(&workspace),
-        std::fs::canonicalize(&target),
-    ) {
-        (Ok(workspace), Ok(target)) => relative(&workspace, &target),
-        _ => relative(&workspace, &target),
-    }
+    // These are daemon-host paths. Routing is intentionally lexical: probing
+    // the desktop filesystem would reinterpret a remote workspace locally.
+    relative(&workspace, &target)
 }
 
 fn transcript_link_route(target: &str, workspace: Option<&Path>) -> TranscriptLinkRoute {
@@ -534,6 +530,7 @@ fn file_icon_for_name(name: &str) -> &'static str {
     }
 }
 
+#[cfg(test)]
 fn visible_working_tree_entries(
     root: &Path,
     expanded_paths: &HashSet<PathBuf>,
@@ -669,9 +666,23 @@ fn file_highlighter_language(relative_path: &str) -> &'static str {
 ///
 /// One unbounded `read_to_string`, so callers keep it off the UI thread; the
 /// only caller is [`Waku::read_right_panel_file_into_editor`].
-fn read_right_panel_file(project_path: &Path, relative_path: &str) -> (String, bool) {
-    match std::fs::read_to_string(project_path.join(relative_path)) {
-        Ok(content) => (content, true),
+fn read_right_panel_file(
+    workspace: &waku_client::WorkspaceClient,
+    project_path: &Path,
+    relative_path: &str,
+) -> (String, bool) {
+    match workspace.request(waku_client::WorkspaceOperation::ReadTextFile {
+        root: project_path.to_path_buf(),
+        relative_path: PathBuf::from(relative_path),
+    }) {
+        Ok(waku_client::WorkspaceResult::TextFile { content }) => (content, true),
+        Ok(_) => (
+            tr!(
+                "files.unable_to_edit",
+                error = "the daemon returned an invalid file response"
+            ),
+            false,
+        ),
         Err(error) => (
             tr!("files.unable_to_edit", error = error.to_string()),
             false,
@@ -1117,6 +1128,24 @@ mod tests {
         }
     }
 
+    #[test]
+    fn review_diff_text_rows_soft_wrap() {
+        let source = include_str!("right_panel.rs");
+        let start = source
+            .find("\n    fn render_right_panel_diff_line(")
+            .expect("review diff line renderer");
+        let body = &source[start + 1..];
+        let end = body
+            .find("\n    #[allow(clippy::too_many_arguments)]")
+            .expect("review diff line renderer end");
+        let body = &body[..end];
+
+        assert!(!body.contains(".whitespace_nowrap()"));
+        assert!(body.matches(".whitespace_normal()").count() >= 3);
+        assert!(body.contains(".min_h(px(20.0))"));
+        assert!(!body.contains(".h(px(20.0))"));
+    }
+
     /// The render path must never reach the filesystem. This reads the source
     /// rather than the behaviour, because the cost of a regression here is a
     /// syscall per directory entry on every frame — invisible until a project
@@ -1328,19 +1357,6 @@ mod tests {
     }
 
     #[test]
-    fn editable_file_reader_keeps_the_complete_disk_content() {
-        let root = std::env::temp_dir().join(format!("waku-editor-file-{}", Uuid::new_v4()));
-        std::fs::create_dir_all(&root).unwrap();
-        let content = "line\n".repeat(10_000);
-        std::fs::write(root.join("large.txt"), &content).unwrap();
-
-        assert_eq!(read_right_panel_file(&root, "large.txt"), (content, true));
-        assert!(!read_right_panel_file(&root, "missing.txt").1);
-
-        std::fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
     fn only_reuses_single_instance_surface_tabs() {
         let browser = RightPanelSurface::new_browser();
         let terminal = RightPanelSurface::new_terminal();
@@ -1467,7 +1483,14 @@ impl Waku {
                 self.open_right_panel_surface(RightPanelSurface::Files, cx);
                 self.open_right_panel_file(relative_path, cx);
             }
-            TranscriptLinkRoute::Finder(path) => crate::platform::reveal_in_file_manager(&path, cx),
+            TranscriptLinkRoute::Finder(path) => {
+                if self.daemon.is_remote() {
+                    self.show_toast(tr!("errors.remote_host_path"));
+                    cx.notify();
+                } else {
+                    crate::platform::reveal_in_file_manager(&path, cx);
+                }
+            }
             TranscriptLinkRoute::External => return false,
         }
         true
@@ -2001,6 +2024,13 @@ impl Waku {
     }
 
     fn ensure_right_panel_terminal(&mut self, terminal_id: Uuid, cx: &mut Context<Self>) {
+        if self.daemon.is_remote() {
+            // A desktop PTY would interpret the daemon's cwd on the wrong
+            // machine. Keep the surface unavailable until the protocol grows
+            // a daemon-owned streaming terminal.
+            self.right_panel_terminals.remove(&terminal_id);
+            return;
+        }
         let Some(working_directory) = self
             .selected_workspace_path()
             .map(std::path::Path::to_path_buf)
@@ -2707,6 +2737,7 @@ impl Waku {
         editor.reading = true;
         editor.read_epoch += 1;
         let epoch = editor.read_epoch;
+        let workspace = waku_client::WorkspaceClient::new(self.daemon.client());
 
         cx.spawn(async move |waku, cx| {
             let read = cx
@@ -2714,7 +2745,7 @@ impl Waku {
                 .spawn({
                     let project_path = project_path.clone();
                     let relative_path = relative_path.clone();
-                    async move { read_right_panel_file(&project_path, &relative_path) }
+                    async move { read_right_panel_file(&workspace, &project_path, &relative_path) }
                 })
                 .await;
             waku.update(cx, |waku, cx| {
@@ -2957,27 +2988,64 @@ impl Waku {
         }
 
         let content = editor.state.read(cx).content().to_owned();
-        match std::fs::write(project_path.join(&relative_path), content.as_bytes()) {
-            Ok(()) => {
-                if let Some(editor) = self.right_panel_file_editors.get_mut(&relative_path) {
-                    editor.disk_content = content;
-                    editor.dirty = false;
-                    // Any read still in flight predates this write, so its
-                    // result must not land back over what was just saved.
-                    editor.reading = false;
-                    editor.read_epoch += 1;
+        let Some(session_id) = self.state.selected_session else {
+            return;
+        };
+        let epoch = if let Some(editor) = self.right_panel_file_editors.get_mut(&relative_path) {
+            editor.reading = false;
+            editor.read_epoch += 1;
+            editor.read_epoch
+        } else {
+            return;
+        };
+        let workspace = waku_client::WorkspaceClient::new(self.daemon.client());
+        cx.spawn(async move |waku, cx| {
+            let result = cx
+                .background_executor()
+                .spawn({
+                    let project_path = project_path.clone();
+                    let relative_path = relative_path.clone();
+                    let content = content.clone();
+                    async move {
+                        match workspace.request(waku_client::WorkspaceOperation::WriteTextFile {
+                            root: project_path,
+                            relative_path: PathBuf::from(relative_path),
+                            content,
+                        })? {
+                            waku_client::WorkspaceResult::Ack => Ok(()),
+                            _ => anyhow::bail!("the daemon returned an invalid file response"),
+                        }
+                    }
+                })
+                .await;
+            let _ = waku.update(cx, |waku, cx| {
+                if waku.state.selected_session != Some(session_id)
+                    || waku
+                        .selected_workspace_path()
+                        .is_none_or(|path| path != project_path)
+                {
+                    return;
+                }
+                match result {
+                    Ok(()) => {
+                        if let Some(editor) = waku.right_panel_file_editors.get_mut(&relative_path)
+                            && editor.read_epoch == epoch
+                        {
+                            let current = editor.state.read(cx).content();
+                            editor.disk_content = content.clone();
+                            editor.dirty = current != content;
+                        }
+                    }
+                    Err(error) => waku.show_toast(tr!(
+                        "files.could_not_save",
+                        path = relative_path,
+                        error = error.to_string()
+                    )),
                 }
                 cx.notify();
-            }
-            Err(error) => {
-                self.show_toast(tr!(
-                    "files.could_not_save",
-                    path = relative_path,
-                    error = error.to_string()
-                ));
-                cx.notify();
-            }
-        }
+            });
+        })
+        .detach();
     }
 
     fn render_right_panel_diff(
@@ -3131,19 +3199,7 @@ impl Waku {
             });
         let refresh_focus = self.transcript_control_focus("right-panel-diff-refresh", cx);
         let refresh_icon: AnyElement = if self.right_panel_diff_loading {
-            icon("icons/loader-circle.svg", 12.0, theme.text_tertiary)
-                .with_animation(
-                    "right-panel-diff-refresh-spinner",
-                    Animation::new(Duration::from_millis(900))
-                        .repeat()
-                        .with_easing(gpui::linear),
-                    |icon, delta| {
-                        icon.with_transformation(gpui::Transformation::rotate(gpui::percentage(
-                            delta,
-                        )))
-                    },
-                )
-                .into_any_element()
+            motion::spin(icon("icons/loader-circle.svg", 12.0, theme.text_tertiary))
         } else {
             icon("icons/rotate-cw.svg", 12.0, theme.text_tertiary).into_any_element()
         };
@@ -3392,18 +3448,20 @@ impl Waku {
                     .into_any_element()
             }
             crate::review_diff::LineKind::HunkHeader => div()
-                .h(px(24.0))
+                .min_h(px(24.0))
                 .w_full()
                 .min_w_0()
                 .flex()
-                .items_center()
+                .items_stretch()
                 .font_family(md::render::MONO_FAMILY)
                 .text_size(px(10.0))
+                .line_height(px(16.0))
                 .text_color(theme.text_tertiary)
                 .child(
                     div()
                         .w(px(52.0))
-                        .h_full()
+                        .min_h(px(24.0))
+                        .self_stretch()
                         .flex_none()
                         .border_r_1()
                         .border_color(theme.border)
@@ -3411,34 +3469,38 @@ impl Waku {
                 )
                 .child(
                     div()
-                        .h_full()
+                        .min_h(px(24.0))
                         .min_w_0()
                         .flex_1()
                         .px(px(12.0))
+                        .py(px(4.0))
                         .flex()
-                        .items_center()
+                        .items_start()
                         .overflow_hidden()
-                        .whitespace_nowrap()
+                        .whitespace_normal()
                         .bg(theme.overlay)
                         .child(line.content.clone()),
                 )
                 .into_any_element(),
             crate::review_diff::LineKind::Meta => div()
-                .h(px(24.0))
+                .min_h(px(24.0))
                 .w_full()
                 .min_w_0()
                 .flex()
-                .items_center()
+                .items_stretch()
                 .font_family(md::render::MONO_FAMILY)
                 .text_size(px(10.5))
+                .line_height(px(16.0))
                 .text_color(theme.text_tertiary)
-                .child(div().w(px(52.0)).h_full().flex_none())
+                .child(div().w(px(52.0)).min_h(px(24.0)).self_stretch().flex_none())
                 .child(
                     div()
+                        .min_h(px(24.0))
                         .min_w_0()
                         .flex_1()
+                        .py(px(4.0))
                         .overflow_hidden()
-                        .whitespace_nowrap()
+                        .whitespace_normal()
                         .pr(px(10.0))
                         .child(line.content.clone()),
                 )
@@ -3489,11 +3551,12 @@ impl Waku {
                 );
                 let gutter = div()
                     .w(px(52.0))
-                    .h_full()
+                    .min_h(px(20.0))
+                    .self_stretch()
                     .flex_none()
                     .pr(px(9.0))
                     .flex()
-                    .items_center()
+                    .items_start()
                     .justify_end()
                     .border_r_1()
                     .border_color(theme.border)
@@ -3503,35 +3566,36 @@ impl Waku {
                     })
                     .child(shown_line.map(|line| line.to_string()).unwrap_or_default());
                 let body = div()
-                    .h_full()
+                    .min_h(px(20.0))
+                    .self_stretch()
                     .min_w_0()
                     .flex_1()
                     .pl(px(12.0))
                     .flex()
-                    .items_center()
+                    .items_start()
                     .when_some(body_background, |body, background| body.bg(background))
                     .child(
                         div()
                             .id(SharedString::from(format!(
                                 "review-diff-line-content-{index}"
                             )))
-                            .h_full()
+                            .min_h(px(20.0))
                             .min_w_0()
                             .flex_1()
                             .pr(px(10.0))
                             .flex()
-                            .items_center()
+                            .items_start()
                             .overflow_hidden()
-                            .whitespace_nowrap()
+                            .whitespace_normal()
                             .child(selectable),
                     );
                 div()
                     .id(SharedString::from(format!("review-diff-row-{index}")))
                     .w_full()
                     .min_w_0()
-                    .h(px(20.0))
+                    .min_h(px(20.0))
                     .flex()
-                    .items_center()
+                    .items_stretch()
                     .font_family(md::render::MONO_FAMILY)
                     .text_size(px(10.5))
                     .line_height(px(20.0))
@@ -3931,12 +3995,35 @@ impl Waku {
             Query::Pending => {}
             Query::Missing(token) => {
                 let expanded = self.right_panel_expanded_paths.clone();
+                let workspace = waku_client::WorkspaceClient::new(self.daemon.client());
                 cx.spawn(async move |waku, cx| {
                     let entries = cx
                         .background_executor()
                         .spawn({
                             let path = project_path.clone();
-                            async move { visible_working_tree_entries(&path, &expanded) }
+                            async move {
+                                match workspace.request(waku_client::WorkspaceOperation::ListTree {
+                                    root: path,
+                                    expanded_paths: expanded.into_iter().collect(),
+                                }) {
+                                    Ok(waku_client::WorkspaceResult::WorkingTree { entries }) => {
+                                        entries
+                                            .into_iter()
+                                            .map(|entry| WorkingTreeEntry {
+                                                file_icon: (!entry.is_dir)
+                                                    .then(|| file_icon_for_name(&entry.name)),
+                                                relative_path: entry.relative_path,
+                                                absolute_path: entry.absolute_path,
+                                                name: entry.name,
+                                                is_dir: entry.is_dir,
+                                                expanded: entry.expanded,
+                                                depth: entry.depth,
+                                            })
+                                            .collect()
+                                    }
+                                    Ok(_) | Err(_) => Vec::new(),
+                                }
+                            }
                         })
                         .await;
                     waku.update(cx, |waku, cx| {
@@ -4056,12 +4143,30 @@ impl Waku {
         self.right_panel_diff_error = None;
         cx.notify();
 
+        let workspace = waku_client::WorkspaceClient::new(self.daemon.client());
         cx.spawn(async move |waku, cx| {
             let result = cx
                 .background_executor()
                 .spawn({
                     let project_path = project_path.clone();
-                    async move { crate::review_diff::collect(&project_path, source) }
+                    async move {
+                        match workspace.request(
+                            waku_client::WorkspaceOperation::CollectReviewDiff {
+                                cwd: project_path,
+                                source: crate::review_diff::wire_source(source),
+                            },
+                        )? {
+                            waku_client::WorkspaceResult::ReviewDiff { data } => {
+                                Ok(crate::review_diff::parse_collected(
+                                    source,
+                                    &data.numstat,
+                                    &data.patch,
+                                    data.complete_context,
+                                ))
+                            }
+                            _ => anyhow::bail!("the daemon returned an invalid diff response"),
+                        }
+                    }
                 })
                 .await;
             waku.update(cx, |waku, cx| {

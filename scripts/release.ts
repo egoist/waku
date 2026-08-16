@@ -17,6 +17,7 @@ import { extractReleaseNotes } from "./changelog";
 const appName = "Waku";
 const executableName = "Waku";
 const jsReplExecutableName = "waku_js_repl";
+const daemonExecutableName = "waku-daemon";
 const computerUseHelperName = "Waku Computer Use";
 const packageName = "waku";
 const defaultNotaryProfile = "NOTARY";
@@ -45,7 +46,8 @@ Options:
                                 default derives a monotonic number from the
                                 Cargo version)
   --volume-name <name>          Mounted DMG name (default: Waku)
-  --skip-build                  Reuse target/release/waku and waku_js_repl
+  --skip-build                  Reuse target/release/waku, waku_js_repl, and
+                                waku-daemon
   --skip-notarize               Unnotarized signed DMG (implies --local)
   --adhoc                       Ad-hoc sign, no notarization (implies --local)
   --help                        Show this help
@@ -272,12 +274,18 @@ const releaseJsReplExecutable = join(
   releaseDirectory,
   jsReplExecutableName,
 );
+const releaseDaemonExecutable = join(releaseDirectory, daemonExecutableName);
 const appBundle = join(releaseDirectory, `${appName}.app`);
 const contentsDirectory = join(appBundle, "Contents");
 const bundledJsReplExecutable = join(
   contentsDirectory,
   "Resources",
   jsReplExecutableName,
+);
+const bundledDaemonExecutable = join(
+  contentsDirectory,
+  "MacOS",
+  daemonExecutableName,
 );
 const bundledComputerUseSkill = join(
   contentsDirectory,
@@ -382,7 +390,11 @@ const identity = adhoc ? "-" : configuredSigningIdentity!;
 
 try {
   if (values["skip-build"]) {
-    for (const executable of [releaseExecutable, releaseJsReplExecutable]) {
+    for (const executable of [
+      releaseExecutable,
+      releaseJsReplExecutable,
+      releaseDaemonExecutable,
+    ]) {
       try {
         await access(executable);
       } catch {
@@ -402,6 +414,7 @@ try {
   await $`env WAKU_CODESIGN_IDENTITY=${identity} WAKU_ANALYTICS_ENDPOINT=${analyticsEndpoint ?? ""} WAKU_ANALYTICS_WEBSITE_ID=${analyticsWebsiteId ?? ""} WAKU_SKIP_CARGO_BUILD=${values["skip-build"] ? "1" : "0"} ${join(projectRoot, "scripts", "bundle.sh")} release`;
   for (const artifact of [
     join(contentsDirectory, "MacOS", executableName),
+    bundledDaemonExecutable,
     bundledJsReplExecutable,
     bundledComputerUseSkill,
     bundledPiComputerUseExtension,
@@ -415,6 +428,7 @@ try {
   await $`xattr -cr ${appBundle}`;
 
   await $`codesign --verify --strict --verbose=2 ${bundledJsReplExecutable}`;
+  await $`codesign --verify --strict --verbose=2 ${bundledDaemonExecutable}`;
   await $`codesign --verify --deep --strict --verbose=2 ${bundledComputerUseHelper}`;
   await verifyJavaScriptRepl(bundledJsReplExecutable);
   logStep(
@@ -465,6 +479,11 @@ try {
     "Resources",
     jsReplExecutableName,
   );
+  const mountedDaemon = join(
+    mountedContents,
+    "MacOS",
+    daemonExecutableName,
+  );
   const mountedComputerUseHelper = join(
     mountedContents,
     "Helpers",
@@ -477,6 +496,7 @@ try {
   );
   for (const artifact of [
     join(mountedContents, "MacOS", executableName),
+    mountedDaemon,
     mountedJsRepl,
     join(
       mountedContents,
@@ -506,6 +526,7 @@ try {
     );
   }
   await $`codesign --verify --strict --verbose=2 ${mountedJsRepl}`;
+  await $`codesign --verify --strict --verbose=2 ${mountedDaemon}`;
   await $`codesign --verify --deep --strict --verbose=2 ${mountedComputerUseHelper}`;
   await $`codesign --verify --strict --verbose=2 ${mountedSparkleFramework}`;
   await $`codesign --verify --deep --strict --verbose=2 ${mountedApp}`;
@@ -612,22 +633,21 @@ try {
   // archive as Waku-<version>.md; generate_appcast links it as the update's
   // release notes, which Sparkle renders in the prompt.
   const changelogFile = Bun.file(join(projectRoot, "CHANGELOG.md"));
-  if (await changelogFile.exists()) {
-    const notes = extractReleaseNotes(await changelogFile.text(), version);
-    if (notes) {
-      await Bun.write(
-        join(updatesDirectory, `${appName}-${version}.md`),
-        `${notes}\n`,
-      );
-      console.log(`Attached release notes for ${version}.`);
-    } else {
-      console.log(
-        `No "${version}" section in CHANGELOG.md — releasing without notes.`,
-      );
-    }
-  } else {
-    console.log("No CHANGELOG.md — releasing without notes.");
-  }
+  const notes = (await changelogFile.exists())
+    ? extractReleaseNotes(await changelogFile.text(), version)
+    : null;
+  const notesName = `${appName}-${version}.md`;
+  const notesContents = `${notes ?? "See CHANGELOG.md for details."}\n`;
+  await Bun.write(join(updatesDirectory, notesName), notesContents);
+  // The tag workflow publishes files from dist/ as GitHub release assets;
+  // sync-release then mirrors those assets to R2. Keep the notes beside the
+  // appcast there as well so Sparkle's release-notes URL cannot 404.
+  await Bun.write(join(projectRoot, "dist", notesName), notesContents);
+  console.log(
+    notes
+      ? `Attached release notes for ${version}.`
+      : `No "${version}" section in CHANGELOG.md — attached fallback notes.`,
+  );
 
   logStep("Generating the signed appcast");
   await generateAppcast(updatesDirectory, downloadUrlPrefix);

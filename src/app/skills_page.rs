@@ -14,7 +14,7 @@ use std::path::Path;
 use gpui::{KeyBinding, actions};
 
 use super::composer::next_picker_highlight;
-use crate::skills::{SkillEntry, SkillSource, SkillsCatalog, skill_locations};
+use crate::skills::{SkillEntry, SkillSource, SkillsCatalog};
 
 use super::*;
 
@@ -29,6 +29,21 @@ const SKILLS_PANE_CONTEXT: &str = "SkillsPane";
 const SKILLS_SEARCH_CONTEXT: &str = "SkillsPane > ComposerInput";
 
 const SKILLS_LIST_WIDTH: f32 = 264.0;
+
+fn skill_source_icon(source: SkillSource) -> &'static str {
+    match source {
+        SkillSource::Shared => "icons/package.svg",
+        SkillSource::Provider(provider) => crate::ui::provider_icon(provider),
+    }
+}
+
+fn skill_icon(skill: &SkillEntry) -> &'static str {
+    if skill.installs.len() > 1 {
+        "icons/package.svg"
+    } else {
+        skill_source_icon(skill.primary().source)
+    }
+}
 
 /// A landed catalog older than this is rescanned when the page opens.
 const SKILLS_RESCAN_AFTER: Duration = Duration::from_secs(60);
@@ -79,11 +94,21 @@ impl Waku {
         self.skills_scan_pending = true;
         self.skills_scan_generation += 1;
         let generation = self.skills_scan_generation;
-        let locations = skill_locations(&self.skill_scan_projects());
+        let projects = self.skill_scan_projects();
+        let daemon = self.daemon.client();
         cx.spawn(async move |this, cx| {
             let catalog = cx
                 .background_executor()
-                .spawn(async move { crate::skills::scan_skills(&locations) })
+                .spawn(async move {
+                    match daemon.request(
+                        Uuid::nil(),
+                        Uuid::nil(),
+                        waku_client::Command::LoadSkills { projects },
+                    )? {
+                        waku_client::ResponsePayload::SkillsCatalog { catalog } => Ok(catalog),
+                        _ => anyhow::bail!("the daemon returned an invalid skills response"),
+                    }
+                })
                 .await;
             let _ = this.update(cx, |this, cx| {
                 if this.skills_scan_generation != generation {
@@ -92,8 +117,13 @@ impl Waku {
                     return;
                 }
                 this.skills_scan_pending = false;
-                this.skills_catalog = Some(Rc::new(catalog));
-                this.skills_scanned_at = Some(Instant::now());
+                match catalog {
+                    Ok(catalog) => {
+                        this.skills_catalog = Some(Rc::new(catalog));
+                        this.skills_scanned_at = Some(Instant::now());
+                    }
+                    Err(error) => this.show_toast(error.to_string()),
+                }
                 cx.notify();
             });
         })
@@ -147,14 +177,6 @@ impl Waku {
                     .collect::<Vec<_>>()
             })
             .unwrap_or_else(|| vec![primary_dir.clone()]);
-        for dir in &dirs {
-            if let Err(error) = crate::skills::set_skill_enabled(dir, enabled) {
-                self.show_toast(tr!("skills.toggle_failed", error = error));
-                self.invalidate_skills_catalog(cx);
-                cx.notify();
-                return;
-            }
-        }
         // The switch answers immediately; the rescan confirms from disk.
         if let Some(catalog) = self.skills_catalog.as_ref() {
             let mut updated = catalog.as_ref().clone();
@@ -174,7 +196,28 @@ impl Waku {
             }
             self.skills_catalog = Some(Rc::new(updated));
         }
-        self.invalidate_skills_catalog(cx);
+        self.skills_scan_generation += 1;
+        self.skills_scan_pending = false;
+        let daemon = self.daemon.client();
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move {
+                    daemon.request(
+                        Uuid::nil(),
+                        Uuid::nil(),
+                        waku_client::Command::SetSkillsEnabled { dirs, enabled },
+                    )
+                })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                if let Err(error) = result {
+                    this.show_toast(tr!("skills.toggle_failed", error = error));
+                }
+                this.invalidate_skills_catalog(cx);
+            });
+        })
+        .detach();
         cx.notify();
     }
 
@@ -206,31 +249,42 @@ impl Waku {
                     .collect::<Vec<_>>()
             })
             .unwrap_or_else(|| vec![primary_dir.clone()]);
-        let mut failure = None;
-        for dir in &dirs {
-            if let Err(error) = crate::platform::trash_item(dir) {
-                failure = Some(error);
-                break;
-            }
+        if self.skills_selected.as_ref() == Some(&primary_dir) {
+            self.skills_selected = None;
         }
-        match failure {
-            None => {
-                if self.skills_selected.as_ref() == Some(&primary_dir) {
-                    self.skills_selected = None;
-                }
-                if let Some(catalog) = self.skills_catalog.as_ref() {
-                    let mut updated = catalog.as_ref().clone();
-                    updated
-                        .skills
-                        .retain(|skill| skill.primary().dir != primary_dir);
-                    self.skills_catalog = Some(Rc::new(updated));
-                }
-                self.show_success_toast(tr!("skills.deleted_toast", name = name));
-            }
-            Some(error) => self.show_toast(tr!("skills.delete_failed", error = error)),
+        if let Some(catalog) = self.skills_catalog.as_ref() {
+            let mut updated = catalog.as_ref().clone();
+            updated
+                .skills
+                .retain(|skill| skill.primary().dir != primary_dir);
+            self.skills_catalog = Some(Rc::new(updated));
         }
         self.skills_delete_arming = None;
-        self.invalidate_skills_catalog(cx);
+        self.skills_scan_generation += 1;
+        self.skills_scan_pending = false;
+        let daemon = self.daemon.client();
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move {
+                    daemon.request(
+                        Uuid::nil(),
+                        Uuid::nil(),
+                        waku_client::Command::TrashSkills { dirs },
+                    )
+                })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                match result {
+                    Ok(_) => this.show_success_toast(tr!("skills.deleted_toast", name = name)),
+                    Err(error) => {
+                        this.show_toast(tr!("skills.delete_failed", error = error));
+                    }
+                }
+                this.invalidate_skills_catalog(cx);
+            });
+        })
+        .detach();
         cx.notify();
     }
 
@@ -510,7 +564,7 @@ impl Waku {
                 .icon(
                     match current {
                         None => "icons/package.svg",
-                        Some(source) => source.icon(),
+                        Some(source) => skill_source_icon(source),
                     },
                     theme.text_tertiary,
                 )
@@ -554,7 +608,7 @@ impl Waku {
                                 cx.notify();
                             });
                         })
-                        .icon(source.icon())
+                        .icon(skill_source_icon(source))
                         .selected(current == Some(source)),
                     );
                 }
@@ -741,7 +795,7 @@ impl Waku {
                             .items_center()
                             .justify_center()
                             .child(icon(
-                                skill.icon(),
+                                skill_icon(skill),
                                 13.0,
                                 theme
                                     .text_secondary
@@ -944,8 +998,13 @@ impl Waku {
         )
         .on_click(cx.listener({
             let skill_file = skill_file.clone();
-            move |_, _, _, cx| {
-                crate::platform::open_with_default_app(&skill_file, cx);
+            move |this, _, _, cx| {
+                if this.daemon.is_remote() {
+                    this.show_toast(tr!("errors.remote_host_path"));
+                    cx.notify();
+                } else {
+                    crate::platform::open_with_default_app(&skill_file, cx);
+                }
             }
         }));
 
@@ -956,22 +1015,37 @@ impl Waku {
         )
         .on_click(cx.listener({
             let skill_file = skill_file.clone();
-            move |_, _, _, cx| {
-                crate::platform::reveal_in_file_manager(&skill_file, cx);
+            move |this, _, _, cx| {
+                if this.daemon.is_remote() {
+                    this.show_toast(tr!("errors.remote_host_path"));
+                    cx.notify();
+                } else {
+                    crate::platform::reveal_in_file_manager(&skill_file, cx);
+                }
             }
         }));
 
+        let copy_feedback_id = format!("skill-copy-{}", skill.row_key);
+        let copied = self.control_was_copied(&copy_feedback_id);
         let copy_button = action_button(
-            SharedString::from(format!("skill-copy-{}", skill.row_key)),
-            "icons/copy.svg",
-            tr!("skills.copy_path"),
+            SharedString::from(copy_feedback_id.clone()),
+            if copied {
+                "icons/check.svg"
+            } else {
+                "icons/copy.svg"
+            },
+            if copied {
+                tr!("common.copied")
+            } else {
+                tr!("skills.copy_path")
+            },
         )
         .on_click(cx.listener({
             let dir = dir.clone();
+            let copy_feedback_id = copy_feedback_id.clone();
             move |this, _, _, cx| {
                 cx.write_to_clipboard(ClipboardItem::new_string(dir.display().to_string()));
-                this.show_success_toast(tr!("skills.path_copied"));
-                cx.notify();
+                this.show_control_copied(copy_feedback_id.clone(), cx);
             }
         }));
 
@@ -1111,7 +1185,7 @@ impl Waku {
                             .items_center()
                             .justify_center()
                             .child(icon(
-                                skill.icon(),
+                                skill_icon(skill),
                                 18.0,
                                 theme
                                     .text_secondary
