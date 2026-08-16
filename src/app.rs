@@ -9,32 +9,34 @@ use std::time::{Duration, Instant};
 use chrono::{DateTime, Local, Utc};
 use crossbeam_channel::{Receiver, Sender, unbounded};
 use gpui::{
-    Animation, AnimationExt, AnyElement, App, ClipboardEntry, ClipboardItem, Context, Div, Entity,
-    ExternalPaths, FocusHandle, Focusable, FontWeight, Hsla, IntoElement, KeyDownEvent,
+    Animation, AnimationExt, AnyElement, App, Bounds, ClipboardEntry, ClipboardItem, Context, Div,
+    Entity, ExternalPaths, FocusHandle, Focusable, FontWeight, Hsla, IntoElement, KeyDownEvent,
     ListAlignment, ListOffset, ListState, MouseButton, MouseDownEvent, MouseMoveEvent,
     MouseUpEvent, NavigationDirection, ObjectFit, PathPromptOptions, Pixels, Render, ScrollHandle,
-    SharedString, Stateful, StyleRefinement, TextRun, WeakEntity, Window, canvas, div,
-    ease_out_quint, fill, font, img, linear_color_stop, linear_gradient, list, point, prelude::*,
-    pulsating_between, px, rgb,
+    SharedString, Stateful, StyleRefinement, TextRun, WeakEntity, Window, WindowBounds, canvas,
+    div, ease_out_quint, fill, font, img, linear_color_stop, linear_gradient, list, point,
+    prelude::*, pulsating_between, px, rgb,
 };
 use uuid::Uuid;
 
 use crate::checkpoint;
 use crate::composer_complete::{FileEntry, SlashCommand};
 use crate::computer_use::{
-    ComputerPermissions, ComputerUsePhase, ComputerUseState, PendingComputerApproval,
+    ComputerPermissions, ComputerTarget, ComputerUsePhase, ComputerUseState,
+    PendingComputerApproval,
 };
 use crate::driver::{self, DriverHandle, DriverStartOptions, SessionOptions};
 use crate::git_branch::BranchSnapshot;
 use crate::input::{ComposerAttachmentPaste, ComposerEvent, ComposerInput};
 use crate::md;
 use crate::model::{
-    ActivityItem, AgentSession, BackgroundWorkEvent, BackgroundWorkItem, BackgroundWorkKey,
-    BackgroundWorkKind, BackgroundWorkStatus, Checkpoint, CheckpointStatus, ContextUsage,
-    DriverEvent, FavoriteModel, InteractionMode, Message, MessageAttachment, MessageRole,
-    PendingPermission, Project, ProviderKind, ProviderModel, ProviderProbe, ProviderResumeCursor,
-    QueuedMessage, ReasoningBlock, RuntimeMode, SessionStatus, SessionWorkspace, TranscriptBlock,
-    TurnStatus, compact_path, unix_time, unix_time_millis,
+    ActivityItem, ActivityKind, AgentSession, BackgroundWorkEvent, BackgroundWorkItem,
+    BackgroundWorkKey, BackgroundWorkKind, BackgroundWorkStatus, Checkpoint, CheckpointStatus,
+    ContextUsage, DriverEvent, FavoriteModel, InteractionMode, Message, MessageAttachment,
+    MessageRole, PendingPermission, Project, ProviderKind, ProviderModel, ProviderProbe,
+    ProviderResumeCursor, QueuedMessage, ReasoningBlock, RuntimeMode, SessionStatus,
+    SessionWorkspace, TranscriptBlock, TurnStatus, UserInputAnswer, UserInputQuestion,
+    compact_path, unix_time, unix_time_millis,
 };
 use unicode_segmentation::UnicodeSegmentation;
 
@@ -52,7 +54,7 @@ use crate::ui::tooltip::Tooltip;
 use crate::browser::BrowserView;
 use crate::persistence::{
     ComposerDraftStore, ComposerDrafts, DEFAULT_RIGHT_PANEL_WIDTH, DEFAULT_SIDEBAR_WIDTH,
-    PersistedState, StateStore,
+    PersistedState, PersistedWindowState, StateStore,
 };
 use crate::query::{Query, QueryCache};
 use crate::review_diff::{Snapshot as ReviewDiffSnapshot, Source as ReviewDiffSource};
@@ -60,8 +62,8 @@ use crate::terminal::TerminalView;
 use crate::theme::{Theme, ThemePreference};
 use crate::ui::text_field::TextField;
 use crate::ui::{
-    MenuChip, ProjectNameSelector, activity_icon, activity_noun, file_icon, icon, icon_button,
-    provider_color, provider_icon, status_color,
+    MenuChip, ProjectNameSelector, activity_icon, activity_noun, contain_scroll, file_icon, icon,
+    icon_button, motion, provider_color, provider_icon, status_color,
 };
 use crate::{
     CancelTurn, CloseFind, CloseWindow, CopySelection, FindNext, FindPrevious, FocusComposer,
@@ -104,11 +106,17 @@ const NAVIGATION_RAIL_TICK_HEIGHT: f32 = 2.0;
 const NAVIGATION_RAIL_TICK_GAP: f32 = 10.0;
 const NAVIGATION_RAIL_INACTIVE_OPACITY: f32 = 0.45;
 const NAVIGATION_RAIL_TURN_HEIGHT: f32 = NAVIGATION_RAIL_TICK_HEIGHT + NAVIGATION_RAIL_TICK_GAP;
+const NAVIGATION_RAIL_FADE_HEIGHT: f32 = 20.0;
 const NAVIGATION_RAIL_ANIMATION_DURATION: Duration = Duration::from_millis(300);
 const ESCAPE_STOP_CONFIRMATION_TIMEOUT: Duration = Duration::from_secs(3);
 /// Presentation pacing only. The app sleeps until a provider or background
 /// result wakes it, then uses this cadence while streamed chunks remain.
-const STREAM_FRAME_INTERVAL: Duration = Duration::from_millis(24);
+/// 120 ms matches Zeron's `STREAM_COMMIT_MS`: chunks queue for a full
+/// interval and fold into one drain → one notify → one remeasure, so the
+/// per-commit parse/flatten/highlight work runs at ~8 Hz regardless of the
+/// provider's chunk rate, and the veil dissolve spans the gap so streamed
+/// text still reads as continuous.
+const STREAM_FRAME_INTERVAL: Duration = Duration::from_millis(120);
 /// How long a session may sit untouched before its provider process is released.
 /// Codex and Pi stay resident between turns, so without this an afternoon of
 /// abandoned tasks is an afternoon of idle agent processes.
@@ -150,10 +158,25 @@ const MAX_CACHED_MESSAGE_SOURCE_BYTES: usize = 512 * 1024;
 /// practice. 8 is generous and caps the tree cache, the only large one, at a
 /// few hundred KB.
 const MAX_CACHED_WORKSPACES: usize = 8;
-const STREAM_CATCH_UP_FRAMES: usize = 18;
-const STREAM_MIN_GRAPHEMES_PER_FRAME: usize = 12;
-const STREAM_MAX_GRAPHEMES_PER_FRAME: usize = 256;
 const STREAM_REMEASURE_TAIL_ROWS: usize = 3;
+/// Top-level markdown blocks the live reasoning peek renders, counted from
+/// the tail. The peek is a 400 px viewport pinned to the newest thought, so
+/// this only bounds how far a mid-stream scrollback reaches — the full trace
+/// renders once the turn settles. 48 blocks is far more than the viewport
+/// shows and keeps a long think from costing O(document) per pulse tick.
+const LIVE_REASONING_TAIL_BLOCKS: usize = 48;
+/// Source bytes the live reasoning peek keeps parsed, counted from the tail.
+/// Markdown cost is O(rendered source) per pulse tick regardless of block
+/// shape — a wall-of-text think is one giant paragraph and a bulleted think
+/// one giant list, so the block cap above bounds neither. Six KB is several
+/// viewports of scrollback; the full trace renders once the turn settles.
+const LIVE_REASONING_WINDOW_TARGET: usize = 6 * 1024;
+/// Slide hysteresis: the window re-anchors (and the peek reparses from a
+/// fresh view) only once the tail outgrows this. Fast reasoning can append
+/// several KB per commit, so the gap to the target is deliberately wide —
+/// a slide costs a full window rebuild, and sliding every commit would pay
+/// it at commit rate.
+const LIVE_REASONING_WINDOW_MAX: usize = 18 * 1024;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum StreamPhase {
@@ -193,6 +216,7 @@ enum SettingsPage {
     Providers,
     Skills,
     Usage,
+    Daemon,
     ComputerUse,
     Appearance,
 }
@@ -270,8 +294,12 @@ fn paused_toast_duration(remaining: Duration, elapsed: Duration) -> Duration {
 /// submission carries it as an `@` mention.
 #[derive(Clone, Debug)]
 struct ComposerAttachment {
-    /// Absolute path as dropped — the thumbnail reads this.
+    /// Materialized path on the daemon host. This is the only path sent to a
+    /// provider or persisted with a task.
     path: PathBuf,
+    /// Ephemeral decoded client image used only for an immediate preview after
+    /// upload. It is never persisted or sent to the daemon.
+    client_preview_image: Option<Arc<gpui::Image>>,
     /// What the submission sends: relative to the project root when the file
     /// is inside it, absolute otherwise, directories with a trailing slash.
     mention: String,
@@ -281,9 +309,15 @@ struct ComposerAttachment {
     /// Whether the chip shows a thumbnail. Decided by extension at drop time
     /// so render never touches the filesystem.
     is_image: bool,
-    /// Present for images copied out of the clipboard into Waku's blob store.
-    /// Sent-message persistence retains the blob by this reference.
+    /// Daemon-issued durable reference retained by task persistence.
     blob_reference: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+enum RemoteImageState {
+    Loading,
+    Ready(Arc<gpui::Image>),
+    Unavailable,
 }
 
 /// One accepted composer submission. `prompt` is the exact provider-facing
@@ -364,6 +398,21 @@ fn sanitize_panel_width(width: f32, default: f32, min: f32, max: f32) -> f32 {
         width.clamp(min, max)
     } else {
         default
+    }
+}
+
+fn persisted_window_state(
+    bounds: Bounds<Pixels>,
+    maximized: bool,
+    display: Option<Uuid>,
+) -> PersistedWindowState {
+    PersistedWindowState {
+        x: f32::from(bounds.origin.x),
+        y: f32::from(bounds.origin.y),
+        width: f32::from(bounds.size.width),
+        height: f32::from(bounds.size.height),
+        maximized,
+        display,
     }
 }
 
@@ -505,9 +554,11 @@ struct PreparedSubmission {
 /// is still on the UI thread. `cwd` is replaced with the materialized
 /// worktree path by the background preparation task.
 struct DriverStartRequest {
+    session_id: Uuid,
     provider: ProviderKind,
     options: DriverStartOptions,
     event_wake: smol::channel::Sender<()>,
+    daemon_client: waku_client::DaemonClient,
 }
 
 /// A provider process that has started off-thread but is not installed into
@@ -515,6 +566,11 @@ struct DriverStartRequest {
 struct PreparedDriver {
     handle: DriverHandle,
     events: Receiver<DriverEvent>,
+}
+
+struct RemoteTaskStateSnapshot {
+    projects: Vec<Project>,
+    sessions: Vec<AgentSession>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -590,6 +646,46 @@ enum EventPumpSchedule {
     Idle,
     StreamFrame,
     BackgroundOutput(Duration),
+}
+
+/// One cached island of the root view: a region rendered by delegating back
+/// into [`Waku`] under its own view identity.
+///
+/// All state stays on the root entity; what the island buys is scope for
+/// gpui's cached-view machinery. The pulse clock and the streaming veil lease
+/// `window.current_view()`, so their ~30 fps ticks dirty only the island
+/// hosting the animation while every sibling island replays its cached
+/// subtree instead of rebuilding. Observing the root preserves the old
+/// invalidation semantics exactly — any root notify still re-renders every
+/// island — so caching cannot show state the single-view architecture would
+/// have repainted.
+struct WakuPane {
+    waku: Option<WeakEntity<Waku>>,
+    content: fn(&mut Waku, &mut Window, &mut Context<Waku>) -> AnyElement,
+}
+
+impl WakuPane {
+    fn new(
+        content: fn(&mut Waku, &mut Window, &mut Context<Waku>) -> AnyElement,
+        cx: &mut App,
+    ) -> Entity<Self> {
+        cx.new(|_| Self { waku: None, content })
+    }
+
+    fn bind(&mut self, waku: &Entity<Waku>, cx: &mut Context<Self>) {
+        self.waku = Some(waku.downgrade());
+        cx.observe(waku, |_, _, cx| cx.notify()).detach();
+    }
+}
+
+impl Render for WakuPane {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let Some(waku) = self.waku.as_ref().and_then(WeakEntity::upgrade) else {
+            return gpui::div().into_any_element();
+        };
+        let content = self.content;
+        waku.update(cx, |waku, cx| content(waku, window, cx))
+    }
 }
 
 struct RightPanelFileEditor {
@@ -728,6 +824,9 @@ struct NavigationRailVisualState {
 
 struct SessionRuntime {
     driver: DriverHandle,
+    /// Invalidates stale ApplyOptions responses when settings change again or
+    /// this runtime is replaced while the RPC is in flight.
+    options_generation: u64,
     events: Receiver<DriverEvent>,
     pending_events: VecDeque<DriverEvent>,
     /// Presentation metadata for steering messages awaiting the provider's
@@ -736,9 +835,10 @@ struct SessionRuntime {
     stream_phase: Option<StreamPhase>,
     stream_remeasure_pending: bool,
     pending_permission: Option<PendingPermission>,
+    pending_user_input: Option<PendingUserInput>,
     pending_computer_approval: Option<PendingComputerApproval>,
     /// Back-to-front stack of window previews captured during the active turn.
-    computer_use_previews: Vec<ComputerUseState>,
+    computer_use_previews: Vec<ComputerUsePreview>,
     computer_session_grants: HashSet<String>,
     last_driver_error: Option<String>,
     /// When this session last sent or received anything, for idle reaping.
@@ -746,6 +846,63 @@ struct SessionRuntime {
     /// Background-process snapshots are provider IPC. Keep the polling clock
     /// on the runtime so switching tasks never creates duplicate probes.
     last_background_refresh_at: Instant,
+}
+
+#[derive(Clone)]
+struct PendingUserInput {
+    request_id: String,
+    questions: Vec<UserInputQuestion>,
+    question_index: usize,
+    selections: HashMap<String, Vec<String>>,
+    custom_answers: HashMap<String, String>,
+}
+
+impl PendingUserInput {
+    fn new(request_id: String, questions: Vec<UserInputQuestion>) -> Self {
+        Self {
+            request_id,
+            questions,
+            question_index: 0,
+            selections: HashMap::new(),
+            custom_answers: HashMap::new(),
+        }
+    }
+
+    fn current_question(&self) -> Option<&UserInputQuestion> {
+        self.questions.get(self.question_index)
+    }
+
+    fn answers(&self) -> Vec<UserInputAnswer> {
+        self.questions
+            .iter()
+            .map(|question| {
+                let custom = self
+                    .custom_answers
+                    .get(&question.id)
+                    .map(|answer| answer.trim())
+                    .filter(|answer| !answer.is_empty());
+                UserInputAnswer {
+                    question_id: question.id.clone(),
+                    answers: custom.map_or_else(
+                        || {
+                            self.selections
+                                .get(&question.id)
+                                .cloned()
+                                .unwrap_or_default()
+                        },
+                        |answer| vec![answer.to_owned()],
+                    ),
+                }
+            })
+            .collect()
+    }
+}
+
+struct ComputerUsePreview {
+    target: Option<ComputerTarget>,
+    phase: ComputerUsePhase,
+    visible: bool,
+    screenshot: Option<Arc<gpui::Image>>,
 }
 
 #[derive(Debug, Default)]
@@ -771,10 +928,18 @@ impl SessionNavigation {
         Some(target)
     }
 
+    fn back_target(&self) -> Option<Uuid> {
+        self.back.last().copied()
+    }
+
     fn go_forward(&mut self, current: Uuid) -> Option<Uuid> {
         let target = self.forward.pop()?;
         self.back.push(current);
         Some(target)
+    }
+
+    fn forward_target(&self) -> Option<Uuid> {
+        self.forward.last().copied()
     }
 
     fn remove(&mut self, session_id: Uuid) {
@@ -798,7 +963,54 @@ impl SessionNavigation {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SessionActivationTransition {
+    Visit,
+    Back { from: Uuid },
+    Forward { from: Uuid },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct PendingSessionActivation {
+    session_id: Uuid,
+    transition: SessionActivationTransition,
+}
+
+#[derive(Clone)]
+struct ActivityScrollViewport {
+    scroll_handle: ScrollHandle,
+    scrollbar: Rc<ScrollbarState>,
+    follow_tail: Rc<Cell<bool>>,
+    last_scrolled: Rc<Cell<Option<Pixels>>>,
+    last_max_offset: Rc<Cell<Option<Pixels>>>,
+}
+
+impl Default for ActivityScrollViewport {
+    fn default() -> Self {
+        Self {
+            scroll_handle: ScrollHandle::new(),
+            scrollbar: ScrollbarState::new(),
+            follow_tail: Rc::new(Cell::new(true)),
+            last_scrolled: Rc::new(Cell::new(None)),
+            last_max_offset: Rc::new(Cell::new(None)),
+        }
+    }
+}
+
 pub struct Waku {
+    /// Owns the headless provider process for exactly as long as the desktop
+    /// app entity. Debug builds can replace it independently after a rebuild;
+    /// all live driver handles below are lightweight RPC proxies.
+    daemon: waku_client::DaemonSupervisor,
+    /// Cached once at construction for the Daemon settings connection URL;
+    /// rendering must not query account or network configuration.
+    daemon_hostname: String,
+    /// Session details currently being fetched from the daemon. Sidebar rows
+    /// stay usable while the selected transcript hydrates asynchronously.
+    session_hydrations: HashSet<Uuid>,
+    /// Selection is committed only after this target's transcript arrives, so
+    /// the currently visible task stays intact during daemon latency.
+    pending_session_activation: Option<PendingSessionActivation>,
     analytics: crate::analytics::Analytics,
     state: PersistedState,
     store: StateStore,
@@ -806,6 +1018,7 @@ pub struct Waku {
     /// without consulting the environment or account database in a frame.
     home_directory: Option<PathBuf>,
     composer: Entity<ComposerInput>,
+    user_input_answer: Entity<ComposerInput>,
     /// Drafts are independent of transcript persistence: started tasks key by
     /// session id, while blank New Task pages key by project id.
     composer_drafts: ComposerDrafts,
@@ -814,6 +1027,10 @@ pub struct Waku {
     command_palette: command_palette::CommandPaletteUi,
     model_search: Entity<ComposerInput>,
     settings_search: Entity<ComposerInput>,
+    daemon_port_input: Entity<ComposerInput>,
+    daemon_origins_input: Entity<ComposerInput>,
+    daemon_reconfigure_pending: bool,
+    daemon_token_revealed: bool,
     settings_focus: FocusHandle,
     onboarding_add_project_focus: FocusHandle,
     onboarding_projectless_focus: FocusHandle,
@@ -843,10 +1060,10 @@ pub struct Waku {
     /// Providers with a version probe in flight, so a re-detect cannot stack
     /// a second subprocess on one that has not answered.
     provider_version_probes_pending: HashSet<ProviderKind>,
-    /// PATH re-detection results from the Providers page's refresh, merged
-    /// into `probes` without touching their model catalogs.
-    provider_detection_tx: Sender<(ProviderKind, bool, Option<PathBuf>)>,
-    provider_detection_events: Receiver<(ProviderKind, bool, Option<PathBuf>)>,
+    /// Fast provider detection results from the daemon, including its cached
+    /// model catalog. Live discovery revalidates these probes afterward.
+    provider_detection_tx: Sender<ProviderProbe>,
+    provider_detection_events: Receiver<ProviderProbe>,
     /// Providers the running re-detection has not answered for yet; empty
     /// means no re-detection is in flight.
     provider_detection_remaining: usize,
@@ -896,14 +1113,6 @@ pub struct Waku {
     usage_history_generation: u64,
     /// When the current snapshot landed, for the reopen-staleness check.
     usage_history_scanned_at: Option<Instant>,
-    /// Per-file parsed-record cache, locked only on the background executor.
-    usage_scan_cache: std::sync::Arc<std::sync::Mutex<crate::usage_history::ScanCache>>,
-    /// The LiteLLM rate table plus when it was loaded, shared with scans the
-    /// same way; the TTL re-check happens inside the scan task.
-    usage_rate_table:
-        std::sync::Arc<std::sync::Mutex<Option<(Instant, crate::usage_history::RateTable)>>>,
-    /// Directory holding the rate-table disk cache, beside the app database.
-    usage_rates_dir: PathBuf,
     usage_view: UsageViewMode,
     /// The selected window for the daily and project views; the statement
     /// view fixes its own.
@@ -984,10 +1193,18 @@ pub struct Waku {
     /// cached attachment metadata; render never probes the filesystem.
     image_preview: Option<image_preview::ImagePreviewState>,
     image_preview_generation: u64,
+    /// In-memory GPUI images for daemon-owned bytes. A missing entry schedules
+    /// one background fetch only when a visible row asks to render it; the
+    /// desktop never creates another attachment file.
+    remote_images: RefCell<HashMap<String, RemoteImageState>>,
     /// Coalesced edge trigger for provider and background result queues. The
     /// payloads stay in their typed channels; this channel only wakes the UI.
     event_wake_tx: smol::channel::Sender<()>,
+    task_state_sync_tx: Sender<Result<RemoteTaskStateSnapshot, String>>,
+    task_state_sync_events: Receiver<Result<RemoteTaskStateSnapshot, String>>,
     runtimes: HashMap<Uuid, SessionRuntime>,
+    runtime_attach_pending: HashSet<Uuid>,
+    runtime_attach_misses: HashMap<Uuid, u8>,
     /// Provider-neutral session work which may remain live after a turn ends.
     /// Runtime-only by design: providers reconcile their authoritative state
     /// when the resident transport reconnects.
@@ -1145,6 +1362,8 @@ pub struct Waku {
     header_drag_armed: bool,
     toast: Option<ToastState>,
     toast_generation: u64,
+    copied_control_feedback: HashMap<String, u64>,
+    copied_control_generation: u64,
     copied_message_feedback: HashMap<Uuid, u64>,
     copied_message_generation: u64,
     copied_activity_feedback: HashMap<(Uuid, ActivityDisclosureSectionKind), u64>,
@@ -1160,6 +1379,9 @@ pub struct Waku {
     sidebar_scrollbar: Rc<ScrollbarState>,
     /// Snapshot of the sidebar rows the list state currently corresponds to.
     sidebar_row_cache: RefCell<Vec<SidebarRow>>,
+    /// Fingerprint + snapshot pair backing `sidebar_rows_cached`.
+    sidebar_rows_fingerprint: Cell<Option<u64>>,
+    sidebar_rows_snapshot: RefCell<Rc<Vec<SidebarRow>>>,
     transcript_row_kinds: RefCell<Vec<TranscriptRowKind>>,
     /// Fingerprint of the transcript inputs `transcript_row_kinds` was folded
     /// from, so an unchanged transcript costs nothing on a frame. `None` until
@@ -1171,6 +1393,14 @@ pub struct Waku {
     transcript_navigation_turns: RefCell<Rc<Vec<TranscriptNavigationTurn>>>,
     /// The row-kinds fingerprint `transcript_navigation_turns` was built from.
     transcript_navigation_turns_fingerprint: Cell<Option<u64>>,
+    /// Response-footer copy content and completion time per message index,
+    /// rebuilt when the row-kinds fingerprint moves. The row builder asks for
+    /// every visible row on every frame, and the underlying turn walk and
+    /// answer join are O(session). Footers exist only for settled turns,
+    /// whose parts are immutable, and settling moves the fingerprint.
+    assistant_footer_cache: RefCell<HashMap<usize, (Option<SharedString>, Option<u64>)>>,
+    /// The row-kinds fingerprint `assistant_footer_cache` was built under.
+    assistant_footer_fingerprint: Cell<Option<u64>>,
     /// Checkpoint-ref existence per (session, retained turn count), filled by
     /// `prefetch_checkpoint_refs` on the background executor. Rows read only
     /// this cache: resolving a ref forks a `git` subprocess, which must stay
@@ -1205,6 +1435,12 @@ pub struct Waku {
     message_markdown: RefCell<HashMap<Uuid, MarkdownView>>,
     /// Parsed markdown for reasoning activities, keyed by stable activity id.
     activity_markdown: RefCell<HashMap<Uuid, MarkdownView>>,
+    /// Byte offsets live reasoning peeks render from, slid forward as the
+    /// thought grows; see `live_reasoning_window_start`.
+    reasoning_window_starts: RefCell<HashMap<Uuid, usize>>,
+    /// Independent capped viewports for expanded thoughts and command output.
+    /// Keeping these stable preserves scroll position through virtualization.
+    activity_scroll_viewports: RefCell<HashMap<Uuid, ActivityScrollViewport>>,
     /// One allocation for every transcript markdown context to share. The
     /// callback knows about the active workspace; the renderer deliberately
     /// does not.
@@ -1221,6 +1457,10 @@ pub struct Waku {
     menus: RefCell<HashMap<SharedString, ContextMenuHandle>>,
     navigation_rail: Entity<ConversationNavigationRail>,
     navigation_rail_reset_generation: Cell<u64>,
+    /// Cached islands of the root view; see [`WakuPane`].
+    sidebar_pane: Entity<WakuPane>,
+    transcript_pane: Entity<WakuPane>,
+    right_panel_pane: Entity<WakuPane>,
     /// The unix second the pending time-label wake-up targets, or `None` when
     /// none is armed. See `schedule_time_label_wake`.
     time_label_wake: Cell<Option<u64>>,
@@ -1301,30 +1541,44 @@ pub(super) fn next_time_label_change(sessions: &[AgentSession], now: u64) -> Opt
     next
 }
 
-fn migrate_legacy_projectless_projects(state: &mut PersistedState) -> std::io::Result<bool> {
+fn migrate_legacy_projectless_projects(
+    state: &mut PersistedState,
+    workspace: &waku_client::WorkspaceClient,
+) -> (bool, Option<anyhow::Error>) {
     let legacy_indices = state
         .projects
         .iter()
         .enumerate()
         .filter_map(|(index, project)| {
-            crate::projectless::is_legacy_root_path(&project.path).then_some(index)
+            crate::projectless::needs_migration(&project.path).then_some(index)
         })
         .collect::<Vec<_>>();
     if legacy_indices.is_empty() {
-        return Ok(false);
+        return (false, None);
     }
 
-    // Allocate everything first so a later failure never leaves only part of
-    // the in-memory project list rewritten.
-    let workspaces = legacy_indices
-        .iter()
-        .map(|_| crate::projectless::create_workspace(None))
-        .collect::<std::io::Result<Vec<_>>>()?;
-    for (index, workspace) in legacy_indices.into_iter().zip(workspaces) {
+    let mut changed = false;
+    for index in legacy_indices {
+        let path = state.projects[index].path.clone();
+        let response = workspace
+            .request(waku_client::WorkspaceOperation::MigrateProjectlessWorkspace { path });
+        let cwd = match response {
+            Ok(waku_client::WorkspaceResult::ProjectlessWorkspace { cwd }) => cwd,
+            Ok(_) => {
+                return (
+                    changed,
+                    Some(anyhow::anyhow!(
+                        "the daemon returned an invalid projectless response"
+                    )),
+                );
+            }
+            Err(error) => return (changed, Some(error)),
+        };
         state.projects[index].name = Project::PROJECTLESS_NAME.to_owned();
-        state.projects[index].path = workspace.cwd;
+        state.projects[index].path = cwd;
+        changed = true;
     }
-    Ok(true)
+    (changed, None)
 }
 
 impl Waku {
@@ -1527,14 +1781,22 @@ impl Waku {
         }
     }
 
-    pub fn new(window: &mut Window, cx: &mut App) -> Entity<Self> {
+    pub fn new(
+        window: &mut Window,
+        cx: &mut App,
+        daemon: waku_client::DaemonSupervisor,
+    ) -> Entity<Self> {
         let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-        let home_directory = dirs::home_dir();
-        let state_path = StateStore::default_path();
-        let store = StateStore::new(state_path.clone());
-        let composer_draft_store = ComposerDraftStore::for_state_path(&state_path);
+        let store = StateStore::remote(daemon.clone());
+        let daemon_hostname = crate::daemon::local_hostname().unwrap_or_else(|| "this-mac".into());
+        let composer_draft_store = ComposerDraftStore::remote(daemon.clone());
         let composer_drafts = composer_draft_store.load().unwrap_or_default();
         let mut state = store.load_or_fresh(cwd);
+        let home_directory = crate::projectless::home_directory();
+        state.apply_daemon_settings(daemon.settings());
+        if let Err(error) = daemon.update_settings(state.daemon_settings()) {
+            eprintln!("could not normalize daemon settings after migration: {error:#}");
+        }
         crate::i18n::set_language(state.language);
         let analytics = crate::analytics::Analytics::new(
             state.language.locale(),
@@ -1554,7 +1816,12 @@ impl Waku {
                 .count(),
         });
 
-        let composer = cx.new(|cx| ComposerInput::new(window, cx));
+        let composer = cx.new(|cx| ComposerInput::new(window, cx).padding_x(px(14.0)));
+        let user_input_answer = cx.new(|cx| {
+            ComposerInput::new(window, cx)
+                .search_field()
+                .placeholder(tr!("user_input.other_placeholder"))
+        });
         let command_palette_search = cx.new(|cx| {
             ComposerInput::new(window, cx)
                 .search_field()
@@ -1580,6 +1847,24 @@ impl Waku {
                 .search_field()
                 .placeholder(tr!("settings.search"))
         });
+        let daemon_port = state.daemon_exposure.port.to_string();
+        let daemon_origins = state.daemon_exposure.allowed_origins_text();
+        let daemon_port_input = cx.new(|cx| {
+            let mut input = ComposerInput::new(window, cx)
+                .search_field()
+                .select_all_on_focus_click()
+                .placeholder(tr!("daemon.port_placeholder"));
+            input.set_content(daemon_port, cx);
+            input
+        });
+        let daemon_origins_input = cx.new(|cx| {
+            let mut input = ComposerInput::new(window, cx)
+                .search_field()
+                .select_all_on_focus_click()
+                .placeholder(tr!("daemon.allowed_origins_placeholder"));
+            input.set_content(daemon_origins, cx);
+            input
+        });
         let skills_search = cx.new(|cx| {
             ComposerInput::new(window, cx)
                 .search_field()
@@ -1603,14 +1888,21 @@ impl Waku {
                 .placeholder(tr!("diff.filter_files"))
         });
         let navigation_rail = cx.new(|_| ConversationNavigationRail::new());
-        let startup_toast = match migrate_legacy_projectless_projects(&mut state) {
-            Ok(false) => None,
-            Ok(true) => store
-                .save(&mut state)
-                .err()
-                .map(|error| tr!("errors.save_projectless_migration", error = error)),
-            Err(error) => Some(tr!("errors.move_projectless_task", error = error)),
-        };
+        let sidebar_pane = WakuPane::new(Waku::sidebar_pane_content, cx);
+        let transcript_pane = WakuPane::new(Waku::transcript_pane_content, cx);
+        let right_panel_pane = WakuPane::new(Waku::right_panel_pane_content, cx);
+        let workspace_client = waku_client::WorkspaceClient::new(daemon.client());
+        let (projectless_migrated, projectless_migration_error) =
+            migrate_legacy_projectless_projects(&mut state, &workspace_client);
+        let projectless_save_error = projectless_migrated
+            .then(|| store.save(&mut state).err())
+            .flatten();
+        let startup_toast = projectless_migration_error
+            .map(|error| tr!("errors.move_projectless_task", error = error))
+            .or_else(|| {
+                projectless_save_error
+                    .map(|error| tr!("errors.save_projectless_migration", error = error))
+            });
         let sidebar_visible = state.sidebar_visible;
         let right_panel_visible = state.right_panel_visible;
         let sidebar_width = sanitize_panel_width(
@@ -1627,6 +1919,17 @@ impl Waku {
         );
         state.sidebar_width = sidebar_width;
         state.right_panel_width = right_panel_width;
+        // First launch has no persisted frame yet; seed from the freshly
+        // opened window so an immediate zoom or fullscreen still has a
+        // floating frame to restore to. The bounds observer keeps it current
+        // from here.
+        if state.window_state.is_none() {
+            state.window_state = Some(persisted_window_state(
+                window.bounds(),
+                false,
+                window.display(cx).and_then(|display| display.uuid().ok()),
+            ));
+        }
         crate::theme::apply_theme_preference(state.theme, window, cx);
         crate::platform::set_sidebar_material_width(window, sidebar_width);
         let project_paths = state
@@ -1634,9 +1937,32 @@ impl Waku {
             .iter()
             .map(|project| (project.id, project.path.clone()))
             .collect::<HashMap<_, _>>();
+        let mut startup_live_session_ids = state
+            .sessions
+            .iter()
+            .filter(|session| session.status.is_busy())
+            .map(|session| session.id)
+            .collect::<Vec<_>>();
+        if let Some(selected) = state.selected_session
+            && state
+                .sessions
+                .iter()
+                .find(|session| session.id == selected)
+                .is_some_and(AgentSession::has_started)
+            && !startup_live_session_ids.contains(&selected)
+        {
+            startup_live_session_ids.push(selected);
+        }
         let mut interrupted_turn_checkpoints = Vec::new();
         for session in &mut state.sessions {
             session.migrate_legacy_state();
+            // A provider runtime belongs to the daemon and may still be
+            // streaming after this desktop process restarted. Leave its
+            // persisted projection intact until the background attachment
+            // check proves there is no live runtime to resume.
+            if session.status.is_busy() {
+                continue;
+            }
             if session.status != SessionStatus::Idle {
                 session.status = SessionStatus::Idle;
             }
@@ -1705,12 +2031,13 @@ impl Waku {
             .collect();
         let probes = ProviderKind::ALL
             .into_iter()
-            .map(
-                |provider| match state.provider_binary_overrides.get(&provider) {
-                    Some(binary) => ProviderProbe::with_binary_override(provider, binary),
-                    None => ProviderProbe::pending(provider),
-                },
-            )
+            .map(|provider| ProviderProbe {
+                provider,
+                installed: false,
+                path: None,
+                models: crate::model_catalog::fallback_models(provider),
+                agent_presets: crate::model_catalog::fallback_agent_presets(provider),
+            })
             .collect::<Vec<_>>();
         let (provider_probe_tx, provider_probe_events) = unbounded();
         let (provider_version_tx, provider_version_events) = unbounded();
@@ -1718,15 +2045,26 @@ impl Waku {
         let (computer_permission_tx, computer_permission_events) = unbounded();
         let (plan_usage_tx, plan_usage_events) = unbounded();
         let (event_wake_tx, event_wake_events) = smol::channel::bounded(1);
+        let (task_state_sync_tx, task_state_sync_events) = unbounded();
         #[cfg(target_os = "macos")]
         {
             let computer_permission_tx = computer_permission_tx.clone();
             let event_wake = event_wake_tx.clone();
+            let daemon = daemon.client();
             std::thread::Builder::new()
                 .name("waku-computer-permission-probe".into())
                 .spawn(move || {
-                    let result = crate::computer_use::probe_permissions(false)
-                        .map_err(|error| error.to_string());
+                    let result = match daemon.request(
+                        Uuid::nil(),
+                        Uuid::nil(),
+                        waku_client::Command::ProbeComputerPermissions { prompt: false },
+                    ) {
+                        Ok(waku_client::ResponsePayload::ComputerPermissions { permissions }) => {
+                            Ok(permissions)
+                        }
+                        Ok(_) => Err("the daemon returned an invalid permission response".into()),
+                        Err(error) => Err(error.to_string()),
+                    };
                     if computer_permission_tx.send(result).is_ok() {
                         signal_event_pump(&event_wake);
                     }
@@ -1826,6 +2164,11 @@ impl Waku {
             })
             .detach();
 
+            cx.observe_window_bounds(window, |this: &mut Self, window, cx| {
+                this.capture_window_state(window, cx);
+            })
+            .detach();
+
             cx.observe_window_activation(window, |this: &mut Self, window, cx| {
                 if window.is_window_active() {
                     this.reload_clean_right_panel_file_editors(cx);
@@ -1905,6 +2248,21 @@ impl Waku {
             )
             .detach();
 
+            cx.subscribe(
+                &user_input_answer,
+                |this: &mut Self, input, event: &ComposerEvent, cx| match event {
+                    ComposerEvent::Submit(answer) | ComposerEvent::SubmitSteer(answer) => {
+                        this.submit_user_input_custom_answer(answer.clone(), cx);
+                    }
+                    ComposerEvent::Edited => {
+                        let answer = input.read(cx).content().to_owned();
+                        this.update_user_input_custom_answer(answer, cx);
+                    }
+                    ComposerEvent::Focus | ComposerEvent::BackspaceOnEmpty => {}
+                },
+            )
+            .detach();
+
             // Clipboard images and Finder file copies are attachment payloads,
             // not text paths. The input owns representation priority; Waku
             // owns durable staging and composer/session state.
@@ -1932,6 +2290,14 @@ impl Waku {
                 async move {
                     let _ = save.await;
                 }
+            })
+            .detach();
+
+            // Window-frame changes are only mirrored in memory; the quit save
+            // is what lands the final position and size on disk.
+            cx.on_app_quit(|this, _| {
+                this.save();
+                async {}
             })
             .detach();
 
@@ -2001,6 +2367,17 @@ impl Waku {
                 },
             )
             .detach();
+            for input in [&daemon_port_input, &daemon_origins_input] {
+                cx.subscribe(
+                    input,
+                    |this: &mut Self, _, event: &ComposerEvent, cx| match event {
+                        ComposerEvent::Submit(_) => this.apply_daemon_exposure_fields(cx),
+                        ComposerEvent::Edited => cx.notify(),
+                        _ => {}
+                    },
+                )
+                .detach();
+            }
             cx.subscribe(
                 &skills_search,
                 |_: &mut Self, _, event: &ComposerEvent, cx| {
@@ -2050,8 +2427,8 @@ impl Waku {
 
             // Like T3 Code's adapter subscriptions feeding its ingestion
             // worker, provider threads push an edge into this bounded wake
-            // channel. The UI does no standing scan: 24 ms pacing exists only
-            // while a streamed response still has presentation work queued.
+            // channel. The UI does no standing scan: the short follow-up tick
+            // exists only to remeasure Markdown after a changed text frame.
             cx.spawn(async move |this, cx| {
                 while event_wake_events.recv().await.is_ok() {
                     loop {
@@ -2065,6 +2442,12 @@ impl Waku {
                         match schedule {
                             EventPumpSchedule::Idle => break,
                             EventPumpSchedule::StreamFrame => {
+                                // Deliberately not raced against the wake
+                                // channel: waking per chunk made the notify
+                                // rate equal the provider's chunk rate, and
+                                // every notify is a full re-render. Chunks
+                                // queue during the sleep and fold into the
+                                // next drain's single batch.
                                 cx.background_executor().timer(STREAM_FRAME_INTERVAL).await;
                             }
                             EventPumpSchedule::BackgroundOutput(delay) => {
@@ -2147,11 +2530,16 @@ impl Waku {
             };
 
             Self {
+                daemon,
+                daemon_hostname,
+                session_hydrations: HashSet::new(),
+                pending_session_activation: None,
                 analytics,
                 state,
                 store,
                 home_directory,
                 composer,
+                user_input_answer,
                 composer_drafts,
                 composer_draft_store,
                 composer_draft_save_generation: 0,
@@ -2160,6 +2548,10 @@ impl Waku {
                 branch_search,
                 branch_create_input,
                 settings_search,
+                daemon_port_input,
+                daemon_origins_input,
+                daemon_reconfigure_pending: false,
+                daemon_token_revealed: false,
                 settings_focus,
                 onboarding_add_project_focus,
                 onboarding_projectless_focus,
@@ -2207,12 +2599,6 @@ impl Waku {
                 usage_history_pending_for: None,
                 usage_history_generation: 0,
                 usage_history_scanned_at: None,
-                usage_scan_cache: std::sync::Arc::default(),
-                usage_rate_table: std::sync::Arc::default(),
-                usage_rates_dir: StateStore::default_path()
-                    .parent()
-                    .map(|directory| directory.to_owned())
-                    .unwrap_or_else(std::env::temp_dir),
                 usage_view: UsageViewMode::Daily,
                 usage_window: crate::usage_history::UsageWindow::TrailingDays(30),
                 usage_metric: UsageMetric::Cost,
@@ -2254,8 +2640,13 @@ impl Waku {
                 composer_attachments,
                 image_preview: None,
                 image_preview_generation: 0,
+                remote_images: RefCell::new(HashMap::new()),
                 event_wake_tx,
+                task_state_sync_tx,
+                task_state_sync_events,
                 runtimes: HashMap::new(),
+                runtime_attach_pending: HashSet::new(),
+                runtime_attach_misses: HashMap::new(),
                 background_work: HashMap::new(),
                 last_background_work_tick: Instant::now(),
                 submission_preparations: HashSet::new(),
@@ -2346,6 +2737,8 @@ impl Waku {
                     hovered: false,
                 }),
                 toast_generation: 0,
+                copied_control_feedback: HashMap::new(),
+                copied_control_generation: 0,
                 copied_message_feedback: HashMap::new(),
                 copied_message_generation: 0,
                 copied_activity_feedback: HashMap::new(),
@@ -2356,10 +2749,14 @@ impl Waku {
                 sidebar_list_state,
                 sidebar_scrollbar: ScrollbarState::new(),
                 sidebar_row_cache: RefCell::new(Vec::new()),
+                sidebar_rows_fingerprint: Cell::new(None),
+                sidebar_rows_snapshot: RefCell::new(Rc::new(Vec::new())),
                 transcript_row_kinds: RefCell::new(Vec::new()),
                 transcript_row_kinds_fingerprint: Cell::new(None),
                 transcript_navigation_turns: RefCell::new(Rc::new(Vec::new())),
                 transcript_navigation_turns_fingerprint: Cell::new(None),
+                assistant_footer_cache: RefCell::new(HashMap::new()),
+                assistant_footer_fingerprint: Cell::new(None),
                 checkpoint_ref_cache: RefCell::new(HashMap::new()),
                 checkpoint_ref_generation: Cell::new(0),
                 checkpoint_ref_prefetch: Cell::new(None),
@@ -2373,6 +2770,8 @@ impl Waku {
                 transcript_layout_width: Cell::new(Pixels::ZERO),
                 message_markdown: RefCell::new(HashMap::new()),
                 activity_markdown: RefCell::new(HashMap::new()),
+                reasoning_window_starts: RefCell::new(HashMap::new()),
+                activity_scroll_viewports: RefCell::new(HashMap::new()),
                 markdown_link_handler,
                 transcript_selection: TranscriptSelection::default(),
                 toast_selection: TranscriptSelection::default(),
@@ -2380,6 +2779,9 @@ impl Waku {
                 menus: RefCell::new(HashMap::new()),
                 navigation_rail: navigation_rail.clone(),
                 navigation_rail_reset_generation: Cell::new(0),
+                sidebar_pane: sidebar_pane.clone(),
+                transcript_pane: transcript_pane.clone(),
+                right_panel_pane: right_panel_pane.clone(),
                 time_label_wake: Cell::new(None),
                 time_label_wake_generation: Cell::new(0),
                 fps_last_frame: Instant::now(),
@@ -2388,12 +2790,19 @@ impl Waku {
             }
         });
         navigation_rail.update(cx, |rail, _| rail.set_waku(entity.downgrade()));
+        for pane in [&sidebar_pane, &transcript_pane, &right_panel_pane] {
+            pane.update(cx, |pane, cx| pane.bind(&entity, cx));
+        }
         let initial_row_count = entity.read(cx).transcript_row_count();
         entity.read(cx).reset_transcript_rows(initial_row_count);
         // Everything launch needs from `git` or the filesystem, started now
         // that there is an entity to notify and deliberately not before the
         // first frame.
         entity.update(cx, |this, cx| {
+            this.restart_task_state_sync();
+            for session_id in startup_live_session_ids {
+                this.start_runtime_attachment(session_id, cx);
+            }
             this.start_pending_checkpoint_captures(cx);
             // The autocomplete indexes prefetch alongside, so typing `/` or
             // `@` into the very first prompt already has data to draw.

@@ -1,5 +1,8 @@
 use super::*;
 
+use anyhow::Context as _;
+use base64::Engine as _;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum ComposerSubmitAction {
     Send,
@@ -24,6 +27,9 @@ impl Waku {
     // ── Permission ─────────────────────────────────────────────────────────
 
     pub(super) fn render_permission(&self, cx: &mut Context<Self>) -> Option<Div> {
+        if let Some(input) = self.selected_runtime()?.pending_user_input.clone() {
+            return Some(self.render_user_input(input, cx));
+        }
         if let Some(permission) = self.selected_runtime()?.pending_computer_approval.as_ref() {
             return Some(self.render_computer_permission(permission, cx));
         }
@@ -113,6 +119,290 @@ impl Waku {
                     )
                     .child(buttons),
             ),
+        )
+    }
+
+    fn render_user_input(&self, pending: PendingUserInput, cx: &mut Context<Self>) -> Div {
+        let theme = Theme::current(cx);
+        let Some(question) = pending.current_question().cloned() else {
+            return div();
+        };
+        let selected = pending
+            .selections
+            .get(&question.id)
+            .cloned()
+            .unwrap_or_default();
+        let has_custom = pending
+            .custom_answers
+            .get(&question.id)
+            .is_some_and(|answer| !answer.trim().is_empty());
+        let can_continue = has_custom || !selected.is_empty();
+        let is_last = pending.question_index + 1 == pending.questions.len();
+        let request_id = pending.request_id.clone();
+        let question_index = pending.question_index;
+        let mut options = div().mt(px(9.0)).flex().flex_col().gap(px(4.0));
+        for (index, option) in question.options.iter().enumerate() {
+            let is_selected = selected.iter().any(|answer| answer == &option.label);
+            let click_label = option.label.clone();
+            let key_label = option.label.clone();
+            let focus = self.transcript_control_focus(
+                format!("user-input-{request_id}-{question_index}-option-{index}"),
+                cx,
+            );
+            options = options.child(
+                div()
+                    .id(SharedString::from(format!(
+                        "user-input-{request_id}-{question_index}-option-{index}"
+                    )))
+                    .track_focus(&focus)
+                    .tab_index(0)
+                    .tab_stop(true)
+                    .min_h(px(36.0))
+                    .px(px(10.0))
+                    .py(px(5.0))
+                    .rounded(px(8.0))
+                    .border_1()
+                    .border_color(if is_selected {
+                        theme.accent.opacity(0.34)
+                    } else {
+                        theme.border.opacity(0.0)
+                    })
+                    .bg(if is_selected {
+                        theme.accent.opacity(0.08)
+                    } else {
+                        theme.overlay
+                    })
+                    .flex()
+                    .items_center()
+                    .gap(px(8.0))
+                    .cursor_default()
+                    .focus_visible(|style| style.border_color(theme.accent))
+                    .when(!is_selected, |row| {
+                        row.hover(|style| style.border_color(theme.border).bg(theme.overlay_strong))
+                    })
+                    .active(|style| style.opacity(0.85))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .child(
+                                div()
+                                    .text_size(px(11.5))
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .text_color(theme.text)
+                                    .child(SharedString::from(option.label.clone())),
+                            )
+                            .children(option.description.as_ref().map(|description| {
+                                div()
+                                    .mt(px(1.0))
+                                    .text_size(px(10.0))
+                                    .line_height(px(13.0))
+                                    .text_color(theme.text_secondary)
+                                    .whitespace_normal()
+                                    .child(SharedString::from(description.clone()))
+                            })),
+                    )
+                    .when(is_selected, |row| {
+                        row.child(icon("icons/check.svg", 12.0, theme.accent))
+                    })
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.select_user_input_option(click_label.clone(), cx);
+                    }))
+                    .on_key_down(cx.listener(move |this, event: &KeyDownEvent, _, cx| {
+                        if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                            this.select_user_input_option(key_label.clone(), cx);
+                            cx.stop_propagation();
+                        }
+                    })),
+            );
+        }
+
+        let next_focus = self.transcript_control_focus(
+            format!("user-input-{request_id}-{question_index}-continue"),
+            cx,
+        );
+        let back = (question_index > 0).then(|| {
+            let focus = self.transcript_control_focus(
+                format!("user-input-{request_id}-{question_index}-back"),
+                cx,
+            );
+            div()
+                .id(SharedString::from(format!(
+                    "user-input-{request_id}-{question_index}-back"
+                )))
+                .track_focus(&focus)
+                .tab_index(0)
+                .tab_stop(true)
+                .h(px(26.0))
+                .px(px(8.0))
+                .rounded(px(6.0))
+                .flex()
+                .items_center()
+                .cursor_default()
+                .text_size(px(10.5))
+                .font_weight(FontWeight::MEDIUM)
+                .text_color(theme.text_tertiary)
+                .focus_visible(|style| style.border_1().border_color(theme.accent))
+                .hover(|style| style.bg(theme.overlay).text_color(theme.text_secondary))
+                .active(|style| style.opacity(0.8))
+                .child(tr!("user_input.back"))
+                .on_click(cx.listener(|this, _, _, cx| this.previous_user_input(cx)))
+                .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
+                    if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                        this.previous_user_input(cx);
+                        cx.stop_propagation();
+                    }
+                }))
+        });
+        let continue_button = div()
+            .id(SharedString::from(format!(
+                "user-input-{request_id}-{question_index}-continue"
+            )))
+            .track_focus(&next_focus)
+            .tab_index(0)
+            .tab_stop(can_continue)
+            .h(px(26.0))
+            .px(px(10.0))
+            .rounded(px(6.0))
+            .flex()
+            .items_center()
+            .cursor_default()
+            .text_size(px(10.5))
+            .font_weight(FontWeight::SEMIBOLD)
+            .bg(if can_continue {
+                theme.inverse
+            } else {
+                theme.overlay
+            })
+            .text_color(if can_continue {
+                theme.on_inverse
+            } else {
+                theme.text_ghost
+            })
+            .when(can_continue, |button| {
+                button
+                    .focus_visible(|style| style.border_1().border_color(theme.accent))
+                    .hover(|style| style.opacity(0.9))
+                    .active(|style| style.opacity(0.8))
+                    .on_click(cx.listener(|this, _, _, cx| this.advance_user_input(cx)))
+                    .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
+                        if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                            this.advance_user_input(cx);
+                            cx.stop_propagation();
+                        }
+                    }))
+            })
+            .child(if is_last {
+                tr!("user_input.submit")
+            } else {
+                tr!("user_input.next")
+            });
+
+        let progress = (pending.questions.len() > 1).then(|| {
+            div()
+                .h(px(18.0))
+                .px(px(6.0))
+                .rounded(px(5.0))
+                .bg(theme.overlay)
+                .flex()
+                .items_center()
+                .text_size(px(9.5))
+                .font_weight(FontWeight::MEDIUM)
+                .text_color(theme.text_tertiary)
+                .child(tr!(
+                    "user_input.progress",
+                    current = question_index + 1,
+                    total = pending.questions.len()
+                ))
+        });
+
+        div().flex_none().px(px(20.0)).pb(px(8.0)).child(
+            div()
+                .id(SharedString::from(format!("user-input-{request_id}")))
+                .w_full()
+                .max_w(px(CONTENT_MAX_WIDTH))
+                .mx_auto()
+                .px(px(14.0))
+                .pt(px(12.0))
+                .pb(px(10.0))
+                .rounded(px(13.0))
+                .border_1()
+                .border_color(theme.border)
+                .bg(theme.composer)
+                .tab_index(0)
+                .tab_group()
+                .tab_stop(false)
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(8.0))
+                        .child(
+                            div()
+                                .text_size(px(10.5))
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(theme.text_tertiary)
+                                .child(SharedString::from(question.header.clone())),
+                        )
+                        .children(progress),
+                )
+                .child(
+                    div()
+                        .mt(px(5.0))
+                        .text_size(px(13.0))
+                        .line_height(px(18.0))
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(theme.text)
+                        .whitespace_normal()
+                        .child(SharedString::from(question.question.clone())),
+                )
+                .children((!question.options.is_empty()).then_some(options))
+                .child(
+                    div()
+                        .mt(px(if question.options.is_empty() {
+                            9.0
+                        } else {
+                            4.0
+                        }))
+                        .h(px(34.0))
+                        .px(px(10.0))
+                        .rounded(px(8.0))
+                        .border_1()
+                        .border_color(if has_custom {
+                            theme.accent.opacity(0.34)
+                        } else {
+                            theme.border.opacity(0.0)
+                        })
+                        .bg(if has_custom {
+                            theme.accent.opacity(0.06)
+                        } else {
+                            theme.overlay
+                        })
+                        .flex()
+                        .items_center()
+                        .gap(px(7.0))
+                        .text_size(px(11.5))
+                        .line_height(px(16.0))
+                        .child(icon(
+                            "icons/pencil.svg",
+                            11.0,
+                            if has_custom {
+                                theme.accent
+                            } else {
+                                theme.text_ghost
+                            },
+                        ))
+                        .child(self.user_input_answer.clone()),
+                )
+                .child(
+                    div()
+                        .mt(px(8.0))
+                        .flex()
+                        .items_center()
+                        .children(back)
+                        .child(div().flex_1())
+                        .child(continue_button),
+                ),
         )
     }
 
@@ -571,6 +861,10 @@ impl Waku {
                                 provider
                             };
                         this.model_picker_tab = ModelPickerTab::Provider(provider);
+                        // Opening re-runs the tab's catalog discovery so models
+                        // authored since launch appear without a restart; the
+                        // other rails refresh when selected, not all at once.
+                        this.refresh_provider_model_discovery(provider);
                         this.model_picker_highlight = None;
                         reset_search.update(cx, |search, cx| search.clear(cx));
                         this.reveal_selected_picker_model();
@@ -1074,7 +1368,10 @@ impl Waku {
         let theme = Theme::current(cx);
         let session = self.selected_session()?;
         let model = self.model_metadata_for_session(session)?;
-        if model.reasoning_efforts.is_empty() && model.service_tiers.is_empty() {
+        if model.reasoning_efforts.is_empty()
+            && model.service_tiers.is_empty()
+            && model.context_windows.is_empty()
+        {
             return None;
         }
 
@@ -1126,11 +1423,47 @@ impl Waku {
                 .map(|option| option.label.clone())
                 .unwrap_or_else(|| selected_tier.clone())
         };
+        let selected_window = session
+            .context_window
+            .as_deref()
+            .filter(|selected| {
+                model
+                    .context_windows
+                    .iter()
+                    .any(|option| option.id == *selected)
+            })
+            .or(model.default_context_window.as_deref())
+            .or_else(|| {
+                model
+                    .context_windows
+                    .first()
+                    .map(|option| option.id.as_str())
+            })
+            .map(str::to_owned);
+        // A non-default window changes what the session costs and how much it
+        // can hold, so it reads on the chip rather than only inside the menu.
+        let window_label = selected_window
+            .as_deref()
+            .filter(|selected| model.default_context_window.as_deref() != Some(selected))
+            .and_then(|selected| {
+                model
+                    .context_windows
+                    .iter()
+                    .find(|option| option.id == selected)
+                    .map(|option| option.label.clone())
+            });
+
         let fast = selected_tier == "fast" || tier_label.eq_ignore_ascii_case("fast");
-        let trigger_label = effort_label.unwrap_or_else(|| tier_label.clone());
+        let trigger_label = match (effort_label.unwrap_or_else(|| tier_label.clone()), window_label)
+        {
+            (label, Some(window)) => format!("{label} · {window}"),
+            (label, None) => label,
+        };
         let reasoning_efforts = model.reasoning_efforts.clone();
         let default_effort = model.default_reasoning_effort.clone();
         let service_tiers = model.service_tiers.clone();
+        let context_windows = model.context_windows.clone();
+        let default_window = model.default_context_window.clone();
         let default_tier = model
             .default_service_tier
             .clone()
@@ -1197,6 +1530,27 @@ impl Waku {
                                 move |_, cx| {
                                     let _ = weak.update(cx, |this, cx| {
                                         this.set_service_tier(tier.clone(), cx);
+                                    });
+                                },
+                            ),
+                        );
+                    }
+                }
+                if !context_windows.is_empty() {
+                    if !reasoning_efforts.is_empty() || !service_tiers.is_empty() {
+                        items.push(MenuItem::Separator);
+                    }
+                    items.push(MenuItem::Header(tr!("models.context_window").into()));
+                    for option in context_windows.clone() {
+                        let weak = weak.clone();
+                        let window = option.id;
+                        let is_default = default_window.as_deref() == Some(window.as_str());
+                        let selected = selected_window.as_deref() == Some(window.as_str());
+                        items.push(
+                            traits_choice(theme, option.label, is_default, selected).on_click(
+                                move |_, cx| {
+                                    let _ = weak.update(cx, |this, cx| {
+                                        this.set_context_window(window.clone(), cx);
                                     });
                                 },
                             ),
@@ -1303,13 +1657,21 @@ impl Waku {
         let selected_id = self.agent_preset_for_session(session)?;
         let selected_label = self.agent_preset_label_for_session(session)?;
         let theme = Theme::current(cx);
-        let handle = self.menu_handle("agent-preset", cx);
+        let weak = cx.entity().downgrade();
+        let refresh_weak = weak.clone();
+        let handle = self.menu_handle_with("agent-preset", cx, move |open, _, cx| {
+            if open {
+                let _ = refresh_weak.update(cx, |this, _| {
+                    this.refresh_provider_model_discovery(ProviderKind::DeepSeek);
+                });
+            }
+        });
         let trigger = MenuChip::new("agent-preset")
             .icon("icons/bot.svg", theme.text_tertiary)
             .label(selected_label)
+            .caret(false)
             .selected(handle.is_open());
 
-        let weak = cx.entity().downgrade();
         Some(dropdown_menu(
             trigger,
             "agent-preset-menu",
@@ -1478,49 +1840,98 @@ impl Waku {
     }
 
     fn stage_attachment_paths(&mut self, paths: &[PathBuf], cx: &mut Context<Self>) -> bool {
-        let root = self
-            .selected_workspace_path()
-            .map(std::path::Path::to_path_buf);
-        let mut staged = false;
-        for path in paths {
-            staged |= self.stage_attachment_path(root.as_deref(), path.clone(), None, None);
-        }
-        if staged {
-            self.schedule_composer_draft_save(cx);
-            cx.notify();
-        }
-        staged
-    }
-
-    fn stage_attachment_path(
-        &mut self,
-        root: Option<&Path>,
-        path: PathBuf,
-        name_override: Option<String>,
-        blob_reference: Option<String>,
-    ) -> bool {
-        if self
-            .composer_attachments
-            .iter()
-            .any(|attachment| attachment.path == path)
-        {
+        if paths.is_empty() {
             return false;
         }
-        let is_dir = path.is_dir();
-        let mention = dropped_file_mention(root, &path, is_dir);
-        let name = name_override.unwrap_or_else(|| {
-            path.file_name()
-                .map(|name| name.to_string_lossy().into_owned())
-                .unwrap_or_else(|| mention.clone())
-        });
-        let is_image = !is_dir && is_image_attachment_path(&path);
+        let paths = paths.to_vec();
+        let daemon = self.daemon.clone();
+        let draft_owner = self.selected_composer_draft_key();
+        cx.spawn(async move |waku, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move {
+                    let mut stored = Vec::with_capacity(paths.len());
+                    for source_path in paths {
+                        let (name, upload, image_bytes) =
+                            attachment_upload_from_path(&source_path)?;
+                        let is_image = image_bytes.is_some();
+                        let preview_image = image_bytes.and_then(|bytes| {
+                            image_preview::image_format_for_name(&name)
+                                .map(|format| Arc::new(gpui::Image::from_bytes(format, bytes)))
+                        });
+                        let response = daemon.client().request(
+                            Uuid::nil(),
+                            Uuid::nil(),
+                            waku_client::Command::ImportAttachment { name, upload },
+                        )?;
+                        let waku_client::ResponsePayload::AttachmentStored { attachment } =
+                            response
+                        else {
+                            anyhow::bail!("the daemon returned an invalid attachment response");
+                        };
+                        stored.push((attachment, preview_image, is_image));
+                    }
+                    Ok::<_, anyhow::Error>(stored)
+                })
+                .await;
+            let _ = waku.update(cx, |waku, cx| match result {
+                Ok(stored) => {
+                    if waku.selected_composer_draft_key() != draft_owner {
+                        return;
+                    }
+                    let mut changed = false;
+                    for (attachment, preview_image, is_image) in stored {
+                        changed |= waku.stage_daemon_attachment(
+                            attachment.path,
+                            attachment.name,
+                            attachment.is_dir,
+                            is_image,
+                            attachment.reference,
+                            preview_image,
+                        );
+                    }
+                    if changed {
+                        waku.schedule_composer_draft_save(cx);
+                        cx.notify();
+                    }
+                }
+                Err(error) => {
+                    waku.show_toast(error.to_string());
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+        true
+    }
+
+    fn stage_daemon_attachment(
+        &mut self,
+        path: PathBuf,
+        name: String,
+        is_dir: bool,
+        is_image: bool,
+        reference: String,
+        client_preview_image: Option<Arc<gpui::Image>>,
+    ) -> bool {
+        if self.composer_attachments.iter().any(|attachment| {
+            attachment.path == path
+                || attachment.blob_reference.as_deref() == Some(reference.as_str())
+        }) {
+            return false;
+        }
+        let mut mention = path.display().to_string();
+        if is_dir && !mention.ends_with('/') {
+            mention.push('/');
+        }
         self.composer_attachments.push(ComposerAttachment {
             path,
+            client_preview_image,
             mention,
             name: SharedString::from(name),
             is_dir,
             is_image,
-            blob_reference,
+            blob_reference: Some(reference),
         });
         true
     }
@@ -1549,7 +1960,7 @@ impl Waku {
             return;
         }
 
-        let blobs = self.store.blobs();
+        let daemon = self.daemon.clone();
         let draft_owner = self.selected_composer_draft_key();
         cx.spawn(async move |waku, cx| {
             let stored = cx
@@ -1560,12 +1971,24 @@ impl Waku {
                         .into_iter()
                         .enumerate()
                         .map(|(index, image)| {
-                            let reference = blobs
-                                .store_image_bytes(image.format.mime_type(), &image.bytes)
+                            let preview_image = Arc::new(image);
+                            let bytes = preview_image.bytes.clone();
+                            let response = daemon
+                                .client()
+                                .request(
+                                    Uuid::nil(),
+                                    Uuid::nil(),
+                                    waku_client::Command::StoreBlob {
+                                        mime_type: preview_image.format.mime_type().to_owned(),
+                                        bytes,
+                                    },
+                                )
                                 .map_err(|error| error.to_string())?;
-                            let path = blobs.path_for(&reference).ok_or_else(|| {
-                                "stored clipboard image had no local path".to_owned()
-                            })?;
+                            let waku_client::ResponsePayload::BlobStored { reference, path } =
+                                response
+                            else {
+                                return Err("the daemon returned an invalid blob response".into());
+                            };
                             let extension = path
                                 .extension()
                                 .and_then(|extension| extension.to_str())
@@ -1575,7 +1998,7 @@ impl Waku {
                             } else {
                                 format!("image-{}.{extension}", index + 1)
                             };
-                            Ok::<_, String>((path, name, reference))
+                            Ok::<_, String>((path, name, reference, preview_image))
                         })
                         .collect::<Result<Vec<_>, _>>()
                 })
@@ -1585,16 +2008,15 @@ impl Waku {
                     if waku.selected_composer_draft_key() != draft_owner {
                         return;
                     }
-                    let root = waku
-                        .selected_workspace_path()
-                        .map(std::path::Path::to_path_buf);
                     let mut staged = false;
-                    for (path, name, reference) in stored {
-                        staged |= waku.stage_attachment_path(
-                            root.as_deref(),
+                    for (path, name, reference, preview_image) in stored {
+                        staged |= waku.stage_daemon_attachment(
                             path,
-                            Some(name),
-                            Some(reference),
+                            name,
+                            false,
+                            true,
+                            reference,
+                            Some(preview_image),
                         );
                     }
                     if staged {
@@ -1619,6 +2041,19 @@ impl Waku {
         prompt: &str,
         cx: &mut Context<Self>,
     ) -> Option<ComposerSubmission> {
+        if self.execute_local_composer_command(prompt, cx) {
+            return None;
+        }
+        for attachment in &self.composer_attachments {
+            if let (Some(reference), Some(image)) = (
+                attachment.blob_reference.as_ref(),
+                attachment.client_preview_image.as_ref(),
+            ) {
+                self.remote_images
+                    .borrow_mut()
+                    .insert(reference.clone(), RemoteImageState::Ready(image.clone()));
+            }
+        }
         let attachments = self
             .composer_attachments
             .drain(..)
@@ -1636,6 +2071,40 @@ impl Waku {
             display_content,
             attachments,
         })
+    }
+
+    pub(super) fn execute_local_composer_command(
+        &mut self,
+        prompt: &str,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(next_tier) = self.selected_session().and_then(|session| {
+            if !crate::composer_complete::is_fast_mode_toggle_submission(
+                session.provider,
+                prompt,
+                &self.slash_command_index,
+            ) {
+                return None;
+            }
+            let model = self.model_metadata_for_session(session)?;
+            crate::composer_complete::toggled_fast_service_tier(
+                session.service_tier.as_deref(),
+                &model.service_tiers,
+            )
+        }) else {
+            return false;
+        };
+        let enabled = next_tier != "default";
+        // Clearing emits an Edited event. Apply the tier afterward so any
+        // draft refresh caused by that event cannot repaint the old choice.
+        self.composer.update(cx, |input, cx| input.clear(cx));
+        self.set_service_tier(next_tier, cx);
+        self.show_success_toast(tr!(if enabled {
+            "commands.fast_enabled"
+        } else {
+            "commands.fast_disabled"
+        }));
+        true
     }
 
     pub(super) fn restore_composer_submission(
@@ -1661,7 +2130,7 @@ impl Waku {
     fn render_composer_attachments(&self, cx: &mut Context<Self>) -> Div {
         let theme = Theme::current(cx);
         let mut row = div()
-            .px(px(4.0))
+            .px(px(14.0))
             .pt(px(2.0))
             .pb(px(8.0))
             .flex()
@@ -1688,31 +2157,58 @@ impl Waku {
                 .tab_index(0)
                 .focus_visible(|style| style.border_color(theme.accent))
                 .tooltip(Tooltip::text(format!("@{}", attachment.mention)));
-            if attachment.is_image {
-                let preview_path = attachment.path.clone();
-                let preview_name = attachment.name.clone();
-                tile = tile.child(
-                    div()
-                        .id(SharedString::from(format!(
-                            "composer-attachment-{index}-preview"
-                        )))
-                        .size_full()
-                        .cursor_default()
-                        .on_click(cx.listener(move |this, _, window, cx| {
-                            this.open_image_preview(
-                                preview_path.clone(),
-                                preview_name.clone(),
-                                window,
+            let attachment_image = attachment.client_preview_image.clone().or_else(|| {
+                attachment
+                    .is_image
+                    .then(|| {
+                        attachment.blob_reference.as_deref().and_then(|reference| {
+                            self.image_for_reference(
+                                reference,
+                                Some(&attachment.path),
+                                Some(attachment.name.as_ref()),
                                 cx,
-                            );
-                            cx.stop_propagation();
-                        }))
-                        .child(
-                            img(attachment.path.clone())
-                                .size_full()
-                                .object_fit(ObjectFit::Cover),
-                        ),
-                );
+                            )
+                        })
+                    })
+                    .flatten()
+            });
+            let can_reveal = !self.daemon.is_remote();
+            if attachment.is_image {
+                if let Some(attachment_image) = attachment_image.as_ref() {
+                    let preview_image = attachment_image.clone();
+                    let preview_name = attachment.name.clone();
+                    tile = tile.child(
+                        div()
+                            .id(SharedString::from(format!(
+                                "composer-attachment-{index}-preview"
+                            )))
+                            .size_full()
+                            .cursor_default()
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.open_image_preview(
+                                    preview_image.clone(),
+                                    preview_name.clone(),
+                                    window,
+                                    cx,
+                                );
+                                cx.stop_propagation();
+                            }))
+                            .child(
+                                img(attachment_image.clone())
+                                    .size_full()
+                                    .object_fit(ObjectFit::Cover),
+                            ),
+                    );
+                } else {
+                    tile = tile.child(
+                        div()
+                            .size_full()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .child(icon("icons/file-types/image.svg", 16.0, theme.text_ghost)),
+                    );
+                }
             } else {
                 tile = tile.child(
                     div()
@@ -1737,13 +2233,16 @@ impl Waku {
                 );
             }
             let key_menu = menu.clone();
-            let key_path = attachment.path.clone();
+            let key_image = attachment_image.clone();
             let key_name = attachment.name.clone();
             let is_image = attachment.is_image;
             tile = tile.on_key_down(cx.listener(move |this, event: &KeyDownEvent, window, cx| {
                 let key = event.keystroke.key.as_str();
-                if is_image && matches!(key, "enter" | "space") {
-                    this.open_image_preview(key_path.clone(), key_name.clone(), window, cx);
+                if is_image
+                    && matches!(key, "enter" | "space")
+                    && let Some(key_image) = key_image.as_ref()
+                {
+                    this.open_image_preview(key_image.clone(), key_name.clone(), window, cx);
                     cx.stop_propagation();
                 } else if key == "f10" && event.keystroke.modifiers.shift {
                     key_menu.open_context_menu(window, cx);
@@ -1795,15 +2294,16 @@ impl Waku {
                 tile,
                 SharedString::from(format!("composer-attachment-{index}-context-menu")),
                 &menu,
-                move |_| image_preview::attachment_menu_items(reveal_path.clone()),
+                move |_| image_preview::attachment_menu_items(reveal_path.clone(), can_reveal),
             ));
         }
         row
     }
 
-    /// The pending follow-up chips between the transcript and the composer:
-    /// one row per queued message, clickable to pull the text back into the
-    /// composer, with a remove affordance per row.
+    /// The pending follow-up queue between the transcript and the composer: a
+    /// single card tucked against the composer's top edge, one row per queued
+    /// message. A row pulls its text back into the composer on click and
+    /// carries steer/remove/more controls on the right.
     pub(super) fn render_queued_messages(&self, cx: &mut Context<Self>) -> Option<Div> {
         let session_id = self.state.selected_session?;
         let session = self.selected_session()?;
@@ -1811,8 +2311,13 @@ impl Waku {
             return None;
         }
         let theme = Theme::current(cx);
-        let busy = session.is_busy();
-        let mut list = div().flex().flex_col().gap(px(6.0));
+        let steerable = session.is_busy()
+            && session.status != SessionStatus::Connecting
+            && self
+                .runtimes
+                .get(&session.id)
+                .is_some_and(|runtime| runtime.driver.supports_steer());
+        let mut list = div().flex().flex_col().py(px(4.0));
         for message in &session.queued_messages {
             let message_id = message.id;
             let content = if message.visible_content().trim().is_empty() {
@@ -1825,82 +2330,186 @@ impl Waku {
             } else {
                 message.visible_content().to_owned()
             };
+            let steer_control = steerable.then(|| {
+                div()
+                    .id(SharedString::from(format!(
+                        "queued-message-steer-{message_id}"
+                    )))
+                    .h(px(24.0))
+                    .px(px(7.0))
+                    .rounded(px(6.0))
+                    .flex()
+                    .items_center()
+                    .gap(px(5.0))
+                    .cursor_default()
+                    .tab_index(0)
+                    .focus_visible(|style| style.border_1().border_color(theme.accent))
+                    .hover(|element| element.bg(theme.overlay_strong))
+                    .active(|element| element.opacity(0.8))
+                    .text_size(px(11.5))
+                    .text_color(theme.text_secondary)
+                    .child(icon(
+                        "icons/corner-down-right.svg",
+                        11.0,
+                        theme.text_secondary,
+                    ))
+                    .child(tr!("composer.steer"))
+                    .tooltip(Tooltip::text(tr!("composer.steer_current")))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        cx.stop_propagation();
+                        this.steer_queued_message(session_id, message_id, cx);
+                    }))
+                    .on_key_down(cx.listener(move |this, event: &KeyDownEvent, _, cx| {
+                        if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                            this.steer_queued_message(session_id, message_id, cx);
+                            cx.stop_propagation();
+                        }
+                    }))
+            });
+            let menu_handle = self.menu_handle(format!("queued-message-menu-{message_id}"), cx);
+            let menu_open = menu_handle.is_open();
+            let weak = cx.entity().downgrade();
+            let more_control = dropdown_menu(
+                div()
+                    .id(SharedString::from(format!(
+                        "queued-message-more-{message_id}"
+                    )))
+                    .w(px(24.0))
+                    .h(px(24.0))
+                    .rounded(px(6.0))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .cursor_default()
+                    .focus_visible(|style| style.border_1().border_color(theme.accent))
+                    .when(menu_open, |element| element.bg(theme.overlay_strong))
+                    .hover(|element| element.bg(theme.overlay_strong))
+                    .active(|element| element.opacity(0.8))
+                    .child(icon("icons/ellipsis.svg", 12.5, theme.text_secondary)),
+                SharedString::from(format!("queued-message-more-menu-{message_id}")),
+                &menu_handle,
+                MenuAlign::BelowRight,
+                move |_| {
+                    let edit_weak = weak.clone();
+                    let remove_weak = weak.clone();
+                    vec![
+                        MenuItem::new(tr!("composer.edit_in_composer"), move |window, cx| {
+                            let _ = edit_weak.update(cx, |this, cx| {
+                                this.edit_queued_message(session_id, message_id, window, cx);
+                            });
+                        })
+                        .icon("icons/pencil.svg"),
+                        MenuItem::new(tr!("composer.remove_followup"), move |_, cx| {
+                            let _ = remove_weak.update(cx, |this, cx| {
+                                this.remove_queued_message(session_id, message_id, cx);
+                            });
+                        })
+                        .icon("icons/trash.svg"),
+                    ]
+                },
+            );
             list = list.child(
                 div()
                     .id(SharedString::from(format!("queued-message-{message_id}")))
-                    .h(px(34.0))
-                    .px(px(11.0))
-                    .rounded(px(9.0))
-                    .border_1()
-                    .border_color(theme.border)
-                    .bg(theme.composer)
+                    .h(px(30.0))
+                    .pl(px(12.0))
+                    .pr(px(6.0))
                     .flex()
                     .items_center()
                     .gap(px(9.0))
                     .cursor_default()
+                    .tab_index(0)
+                    .focus_visible(|style| style.border_1().border_color(theme.accent))
                     .hover(|element| element.bg(theme.overlay))
                     .tooltip(Tooltip::text(tr!("composer.edit_in_composer")))
-                    .child(icon("icons/arrow-up.svg", 10.5, theme.text_tertiary))
+                    .child(icon("icons/queue.svg", 12.0, theme.text_tertiary))
                     .child(
                         div()
                             .flex_1()
                             .min_w_0()
                             .truncate()
-                            .text_size(px(11.5))
-                            .text_color(theme.text_secondary)
+                            .text_size(px(12.5))
+                            .text_color(theme.text)
                             .child(SharedString::from(content)),
                     )
                     .child(
                         div()
-                            .id(SharedString::from(format!(
-                                "queued-message-remove-{message_id}"
-                            )))
-                            .w(px(22.0))
-                            .h(px(22.0))
-                            .rounded_full()
                             .flex()
                             .items_center()
-                            .justify_center()
-                            .cursor_default()
-                            .hover(|element| element.bg(theme.overlay_strong))
-                            .active(|element| element.opacity(0.8))
-                            .child(icon("icons/x.svg", 9.5, theme.text_ghost))
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                cx.stop_propagation();
-                                this.remove_queued_message(session_id, message_id, cx);
-                            })),
+                            .gap(px(2.0))
+                            .children(steer_control)
+                            .child(
+                                div()
+                                    .id(SharedString::from(format!(
+                                        "queued-message-remove-{message_id}"
+                                    )))
+                                    .w(px(24.0))
+                                    .h(px(24.0))
+                                    .rounded(px(6.0))
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .cursor_default()
+                                    .tab_index(0)
+                                    .focus_visible(|style| {
+                                        style.border_1().border_color(theme.accent)
+                                    })
+                                    .hover(|element| element.bg(theme.overlay_strong))
+                                    .active(|element| element.opacity(0.8))
+                                    .child(icon("icons/trash.svg", 12.0, theme.text_secondary))
+                                    .tooltip(Tooltip::text(tr!("composer.remove_followup")))
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        cx.stop_propagation();
+                                        this.remove_queued_message(session_id, message_id, cx);
+                                    }))
+                                    .on_key_down(cx.listener(
+                                        move |this, event: &KeyDownEvent, _, cx| {
+                                            if matches!(
+                                                event.keystroke.key.as_str(),
+                                                "enter" | "space"
+                                            ) {
+                                                this.remove_queued_message(
+                                                    session_id, message_id, cx,
+                                                );
+                                                cx.stop_propagation();
+                                            }
+                                        },
+                                    )),
+                            )
+                            .child(more_control),
                     )
                     .on_click(cx.listener(move |this, _, window, cx| {
                         this.edit_queued_message(session_id, message_id, window, cx);
+                    }))
+                    .on_key_down(cx.listener(move |this, event: &KeyDownEvent, window, cx| {
+                        if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                            this.edit_queued_message(session_id, message_id, window, cx);
+                            cx.stop_propagation();
+                        }
                     })),
             );
         }
         Some(
-            div().flex_none().px(px(20.0)).pb(px(6.0)).child(
+            div().flex_none().px(px(20.0)).child(
                 div()
                     .w_full()
                     .max_w(px(CONTENT_MAX_WIDTH))
                     .mx_auto()
+                    .px(px(14.0))
                     .child(
                         div()
-                            .mb(px(5.0))
-                            .flex()
-                            .items_center()
-                            .gap(px(6.0))
-                            .child(icon("icons/list.svg", 10.5, theme.text_tertiary))
-                            .child(
-                                div()
-                                    .text_size(px(10.0))
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .text_color(theme.text_tertiary)
-                                    .child(if busy {
-                                        tr!("composer.queued_followups_description")
-                                    } else {
-                                        tr!("composer.queued_followups")
-                                    }),
-                            ),
-                    )
-                    .child(list),
+                            .rounded_tl(px(12.0))
+                            .rounded_tr(px(12.0))
+                            .border_t_1()
+                            .border_l_1()
+                            .border_r_1()
+                            .border_color(theme.border)
+                            .bg(theme.composer)
+                            // Row hover fills are full-width rectangles; clip
+                            // them to the card's rounded corners.
+                            .overflow_hidden()
+                            .child(list),
+                    ),
             ),
         )
     }
@@ -1920,14 +2529,6 @@ impl Waku {
         });
         let has_draft = !self.composer.read(cx).content().trim().is_empty()
             || !self.composer_attachments.is_empty();
-        let steerable = session.is_some_and(|session| {
-            session.is_busy()
-                && session.status != SessionStatus::Connecting
-                && self
-                    .runtimes
-                    .get(&session.id)
-                    .is_some_and(|runtime| runtime.driver.supports_steer())
-        });
         let autocomplete = self.render_composer_autocomplete(window, cx);
         let autocomplete_open = autocomplete.is_some();
         // Files dragged in from the OS light the card up as a drop target and
@@ -1945,7 +2546,10 @@ impl Waku {
                 .border_1()
                 .border_color(theme.border)
                 .bg(theme.composer)
-                .p(px(10.0))
+                // Horizontal insets live on each row (and inside the field's
+                // scroll viewport, via `padding_x`) rather than on the card,
+                // so the field's overlay scrollbar can hug the card's edge.
+                .py(px(10.0))
                 .drag_over::<ExternalPaths>(move |style, _, _, _| {
                     style.bg(drop_wash).border_color(drop_ring)
                 })
@@ -1980,10 +2584,11 @@ impl Waku {
                 .when(!self.composer_attachments.is_empty(), |card| {
                     card.child(self.render_composer_attachments(cx))
                 })
-                .child(div().px(px(4.0)).pt(px(2.0)).child(self.composer.clone()))
+                .child(div().pt(px(2.0)).child(self.composer.clone()))
                 .child(
                     div()
                         .mt(px(8.0))
+                        .px(px(10.0))
                         .flex()
                         .items_center()
                         .gap(px(4.0))
@@ -2006,22 +2611,11 @@ impl Waku {
                                 .justify_center()
                                 .cursor_default()
                                 .bg(theme.overlay_strong)
-                                .child(
-                                    icon("icons/loader-circle.svg", 15.0, theme.text_secondary)
-                                        .with_animation(
-                                            "submission-preparation-spinner",
-                                            Animation::new(Duration::from_millis(900))
-                                                .repeat()
-                                                .with_easing(gpui::linear),
-                                            |icon, delta| {
-                                                icon.with_transformation(
-                                                    gpui::Transformation::rotate(gpui::percentage(
-                                                        delta,
-                                                    )),
-                                                )
-                                            },
-                                        ),
-                                )
+                                .child(motion::spin(icon(
+                                    "icons/loader-circle.svg",
+                                    15.0,
+                                    theme.text_secondary,
+                                )))
                                 .tooltip(Tooltip::text(tr!("composer.preparing_task"))),
                             ComposerSubmitAction::Stop => div()
                                 .id("working-actions")
@@ -2057,41 +2651,6 @@ impl Waku {
                                             this.cancel_turn(cx);
                                         })),
                                 )
-                                .when(steerable && has_draft, |element| {
-                                    element.child(
-                                        div()
-                                            .id("steer-turn")
-                                            .w(px(26.0))
-                                            .h(px(26.0))
-                                            .rounded_full()
-                                            .flex()
-                                            .items_center()
-                                            .justify_center()
-                                            .cursor_default()
-                                            .bg(theme.overlay_strong)
-                                            .hover(|element| element.bg(theme.overlay))
-                                            .active(|element| element.opacity(0.8))
-                                            .child(icon("icons/zap.svg", 13.0, theme.warning))
-                                            .tooltip(Tooltip::text(tr!(
-                                                "composer.steer_turn",
-                                                shortcut = crate::platform::primary_shortcut(
-                                                    "⌘↩",
-                                                    "Ctrl+Enter"
-                                                )
-                                            )))
-                                            .on_click(cx.listener(|this, _, _, cx| {
-                                                let prompt =
-                                                    this.composer.read(cx).content().to_owned();
-                                                if let Some(submission) =
-                                                    this.submission_with_attachments(&prompt, cx)
-                                                {
-                                                    this.composer
-                                                        .update(cx, |input, cx| input.clear(cx));
-                                                    this.steer_composer_submission(submission, cx);
-                                                }
-                                            })),
-                                    )
-                                })
                                 .when(has_draft, |element| {
                                     element.child(
                                         div()
@@ -2788,6 +3347,110 @@ pub(super) fn visible_branch_entries(
 /// file is inside it, absolute otherwise, directories with a trailing slash —
 /// the same form the `@` autocomplete inserts. Dropping the root itself keeps
 /// the absolute path rather than producing an empty mention.
+// Base64 keeps the authenticated JSON transport browser-compatible but adds
+// one third of wire overhead. Stay comfortably below tungstenite's default
+// message limit until uploads move to a streaming content endpoint.
+const MAX_ATTACHMENT_BYTES: u64 = waku_client::attachments::MAX_ATTACHMENT_BYTES as u64;
+
+/// Reads a client-local drop into an upload payload. This is the explicit
+/// client/daemon boundary: none of these source paths are persisted or handed
+/// to a provider.
+fn attachment_upload_from_path(
+    source: &Path,
+) -> anyhow::Result<(
+    String,
+    waku_client::attachments::AttachmentUpload,
+    Option<Vec<u8>>,
+)> {
+    let metadata = std::fs::symlink_metadata(source)
+        .with_context(|| format!("could not read attachment {}", source.display()))?;
+    if metadata.file_type().is_symlink() {
+        anyhow::bail!(
+            "symbolic-link attachments are not supported: {}",
+            source.display()
+        );
+    }
+    let name = source
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty())
+        .ok_or_else(|| anyhow::anyhow!("attachment has no file name: {}", source.display()))?
+        .to_owned();
+    if metadata.is_file() {
+        if metadata.len() > MAX_ATTACHMENT_BYTES {
+            anyhow::bail!("attachment is larger than 32 MB: {}", source.display());
+        }
+        let bytes = std::fs::read(source)
+            .with_context(|| format!("could not read attachment {}", source.display()))?;
+        let is_image = is_image_attachment_path(source);
+        return Ok((
+            name,
+            waku_client::attachments::AttachmentUpload::File {
+                data_base64: base64::engine::general_purpose::STANDARD.encode(&bytes),
+            },
+            is_image.then_some(bytes),
+        ));
+    }
+    if !metadata.is_dir() {
+        anyhow::bail!(
+            "attachment is not a file or directory: {}",
+            source.display()
+        );
+    }
+
+    let mut pending = vec![source.to_path_buf()];
+    let mut entries = Vec::new();
+    let mut total_bytes = 0u64;
+    while let Some(directory) = pending.pop() {
+        for entry in std::fs::read_dir(&directory).with_context(|| {
+            format!(
+                "could not read attachment directory {}",
+                directory.display()
+            )
+        })? {
+            let entry = entry?;
+            let path = entry.path();
+            let metadata = std::fs::symlink_metadata(&path)?;
+            if metadata.file_type().is_symlink() {
+                continue;
+            }
+            if metadata.is_dir() {
+                pending.push(path);
+                continue;
+            }
+            if !metadata.is_file() {
+                continue;
+            }
+            if entries.len() >= waku_client::attachments::MAX_ATTACHMENT_FILES {
+                anyhow::bail!(
+                    "attachment directory contains more than {} files",
+                    waku_client::attachments::MAX_ATTACHMENT_FILES
+                );
+            }
+            total_bytes = total_bytes.saturating_add(metadata.len());
+            if total_bytes > MAX_ATTACHMENT_BYTES {
+                anyhow::bail!("attachment directory is larger than 32 MB");
+            }
+            let relative_path = path
+                .strip_prefix(source)
+                .context("attachment entry escaped its source directory")?
+                .to_path_buf();
+            let bytes = std::fs::read(&path)
+                .with_context(|| format!("could not read attachment {}", path.display()))?;
+            entries.push(waku_client::attachments::AttachmentUploadEntry {
+                relative_path,
+                data_base64: base64::engine::general_purpose::STANDARD.encode(bytes),
+            });
+        }
+    }
+    Ok((
+        name,
+        waku_client::attachments::AttachmentUpload::Directory { entries },
+        None,
+    ))
+}
+
+#[cfg(test)]
 pub(super) fn dropped_file_mention(
     root: Option<&std::path::Path>,
     path: &std::path::Path,

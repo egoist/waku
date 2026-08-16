@@ -71,26 +71,24 @@ impl Waku {
                 .get(&ProviderKind::Claude)
                 .cloned()
                 .flatten();
-            let grok_binary = self
-                .provider_probe(ProviderKind::Grok)
-                .and_then(|probe| probe.path.clone());
+            let binary_override = self.state.provider_binary_overrides.get(&provider).cloned();
+            let daemon = self.daemon.client();
             cx.background_executor()
                 .spawn(async move {
-                    let result = match provider {
-                        ProviderKind::Claude => {
-                            crate::usage::fetch_claude_plan_usage(claude_version.as_deref())
-                                .map(Some)
-                        }
-                        ProviderKind::Codex => crate::usage::fetch_codex_plan_usage().map(Some),
-                        ProviderKind::OpenCode => crate::usage::fetch_opencode_go_plan_usage(),
-                        ProviderKind::Grok => match grok_binary {
-                            Some(binary) => crate::usage::fetch_grok_plan_usage(&binary).map(Some),
-                            None => Err(anyhow::anyhow!("grok is not installed")),
+                    let result = match daemon.request(
+                        Uuid::nil(),
+                        Uuid::nil(),
+                        waku_client::Command::FetchPlanUsage {
+                            provider,
+                            binary_override,
+                            cli_version: claude_version,
                         },
-                        // A result must always come back: an early return here
-                        // would leave the provider pending forever and freeze
-                        // its panel section on the loading skeleton.
-                        _ => Err(anyhow::anyhow!("no plan usage fetcher")),
+                    ) {
+                        Ok(waku_client::ResponsePayload::PlanUsage { usage }) => Ok(usage),
+                        Ok(_) => Err(anyhow::anyhow!(
+                            "the daemon returned an invalid plan usage response"
+                        )),
+                        Err(error) => Err(error),
                     };
                     if tx
                         .send((provider, result.map_err(|error| format!("{error:#}"))))
@@ -537,7 +535,8 @@ fn usage_panel(
 /// a header bar and two quota rows, pulsing gently. `with_animation` honors
 /// the system's reduce-motion setting on its own.
 fn plan_skeleton(theme: &Theme) -> AnyElement {
-    let bar = |width: f32| {
+    let theme = *theme;
+    let bar = move |width: f32| {
         div()
             .h(px(9.0))
             .w(px(width))
@@ -545,7 +544,7 @@ fn plan_skeleton(theme: &Theme) -> AnyElement {
             .rounded(px(4.5))
             .bg(theme.overlay_strong)
     };
-    let row = |label_width: f32, value_width: f32| {
+    let row = move |label_width: f32, value_width: f32| {
         div()
             .flex()
             .flex_col()
@@ -567,21 +566,19 @@ fn plan_skeleton(theme: &Theme) -> AnyElement {
                     .bg(theme.overlay_strong),
             )
     };
-    div()
-        .flex()
-        .flex_col()
-        .gap(px(12.0))
-        .child(bar(132.0))
-        .child(row(96.0, 64.0))
-        .child(row(120.0, 64.0))
-        .with_animation(
-            "plan-usage-skeleton",
-            Animation::new(Duration::from_millis(1400))
-                .repeat()
-                .with_easing(pulsating_between(0.45, 0.9)),
-            |element, delta| element.opacity(delta),
-        )
-        .into_any_element()
+    motion::pulse(Duration::from_millis(1400), move |phase| {
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(12.0))
+            .child(bar(132.0))
+            .child(row(96.0, 64.0))
+            .child(row(120.0, 64.0))
+            .opacity(pulsating_between(0.45, 0.9)(phase))
+            .into_any_element()
+    })
+    .every(2)
+    .into_any_element()
 }
 
 /// A quota bar: full-width track, fill proportional to `percent`. A lane in

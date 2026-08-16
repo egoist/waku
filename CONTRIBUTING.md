@@ -33,10 +33,12 @@ bun run dev
 ```
 
 On macOS the watcher builds and signs `target/debug/Waku Debug.app`; on Linux
-it builds `target/debug/waku`. It launches the result and rebuilds and
-relaunches it after source changes. Keep that watcher running while you work.
-Do not start a second watcher or manually relaunch the debug app. Press
-`Ctrl-C`, or quit the app, to stop it.
+it builds `target/debug/waku`. In both cases the provider daemon remains an
+external `target/debug/waku-debug-daemon`: provider-only edits rebuild and
+hot-swap that process without relaunching the app, while desktop edits rebuild
+and relaunch the app normally. Keep that watcher running while you work. Do
+not start a second watcher or manually relaunch the debug app. Press `Ctrl-C`,
+or quit the app, to stop it.
 
 The embedded browser and experimental computer-use integration are currently
 macOS-only. On Linux the browser reports that it is unavailable, while the
@@ -44,8 +46,8 @@ computer-use UI and runtime stay disabled.
 
 ## Linux bundle
 
-To produce a distro-compatible release archive with the binary, desktop entry,
-icon, and license:
+To produce a distro-compatible release archive with the desktop and daemon
+binaries, desktop entry, icon, and license:
 
 ```sh
 ./scripts/bundle-linux.sh
@@ -77,10 +79,16 @@ Run the focused checks relevant to your change, then run the full baseline
 before opening a pull request:
 
 ```sh
-cargo fmt --package waku -- --check
+cargo fmt --package waku --package waku-protocol --package waku-client --package waku-core --package waku-daemon -- --check
 cargo check
 cargo test
+bun run protocol:check
+bun run --filter @waku/client check
+bun run --filter @waku/client test
 ```
+
+When a Rust wire type changes, run `bun run protocol:generate` and commit the
+updated files under `packages/waku-client/src/generated`.
 
 For user-visible changes, wait for the watcher to report a successful rebuild
 and validate the freshly relaunched app. Include screenshots or a short

@@ -144,6 +144,11 @@ impl Waku {
                     {
                         activity.display_target = item.display_target;
                     }
+                    if item.display_description.is_some()
+                        && (activity.display_description.is_none() || has_arguments)
+                    {
+                        activity.display_description = item.display_description;
+                    }
                     if item.reasoning.is_some() {
                         activity.reasoning = item.reasoning;
                     }
@@ -222,6 +227,11 @@ impl Waku {
     ) -> bool {
         runtime.last_active_at = Instant::now();
         match event {
+            DriverEvent::RuntimeEventCursorAdvanced(cursor) => {
+                if let Some(session) = self.state.session_mut(session_id) {
+                    session.runtime_event_cursor = Some(cursor);
+                }
+            }
             DriverEvent::Connected { provider_cursor } => {
                 runtime.last_driver_error = None;
                 runtime.last_background_refresh_at = Instant::now();
@@ -330,6 +340,21 @@ impl Waku {
                         detail,
                         options,
                     });
+                    if let Some(session) = self.state.session_mut(session_id) {
+                        session.status = SessionStatus::Waiting;
+                    }
+                }
+            }
+            DriverEvent::UserInputRequested {
+                request_id,
+                questions,
+            } => {
+                if self.accepts_turn_output(session_id) && !questions.is_empty() {
+                    runtime.pending_user_input = Some(PendingUserInput::new(request_id, questions));
+                    if self.state.selected_session == Some(session_id) {
+                        self.user_input_answer
+                            .update(cx, |input, cx| input.clear(cx));
+                    }
                     if let Some(session) = self.state.session_mut(session_id) {
                         session.status = SessionStatus::Waiting;
                     }
@@ -533,6 +558,7 @@ impl Waku {
                     },
                 );
                 runtime.pending_permission = None;
+                runtime.pending_user_input = None;
                 runtime.pending_computer_approval = None;
                 runtime.driver.cancel_computer_use();
                 // The agent may have edited files or switched branches, so the
@@ -600,6 +626,7 @@ impl Waku {
                 self.complete_turn_blocks(session_id);
                 runtime.stream_phase = None;
                 runtime.pending_permission = None;
+                runtime.pending_user_input = None;
                 runtime.pending_computer_approval = None;
                 runtime.driver.cancel_computer_use();
                 runtime.computer_use_previews.clear();
@@ -642,12 +669,20 @@ impl Waku {
         true
     }
 
-    fn upsert_computer_use_preview(runtime: &mut SessionRuntime, mut state: ComputerUseState) {
+    fn upsert_computer_use_preview(runtime: &mut SessionRuntime, state: ComputerUseState) {
         if !state.visible {
             return;
         }
         let Some(window_id) = state.target.as_ref().map(|target| target.window_id) else {
             return;
+        };
+        let mut preview = ComputerUsePreview {
+            target: state.target,
+            phase: state.phase,
+            visible: state.visible,
+            screenshot: state.image_url.as_deref().and_then(|image_url| {
+                crate::computer_use::decode_preview_image_url(image_url).ok()
+            }),
         };
         if let Some(index) = runtime.computer_use_previews.iter().position(|preview| {
             preview
@@ -656,11 +691,11 @@ impl Waku {
                 .is_some_and(|target| target.window_id == window_id)
         }) {
             let previous = runtime.computer_use_previews.remove(index);
-            if state.screenshot.is_none() {
-                state.screenshot = previous.screenshot;
+            if preview.screenshot.is_none() {
+                preview.screenshot = previous.screenshot;
             }
         }
-        runtime.computer_use_previews.push(state);
+        runtime.computer_use_previews.push(preview);
     }
 }
 
@@ -737,80 +772,41 @@ pub(super) fn compact_driver_error(error: &str) -> String {
     compact
 }
 
-pub(super) fn stream_frame_budget(backlog: usize) -> usize {
-    backlog
-        .div_ceil(STREAM_CATCH_UP_FRAMES)
-        .clamp(
-            STREAM_MIN_GRAPHEMES_PER_FRAME,
-            STREAM_MAX_GRAPHEMES_PER_FRAME,
-        )
-        .min(backlog)
-}
-
-/// Pop one display-sized chunk while retaining the provider's event order.
-///
-/// Adjacent deltas of the same kind are coalesced. Large deltas are split on
-/// grapheme and line boundaries, so a provider that emits its whole answer in
-/// one event still gets the same progressive presentation as token streams.
-pub(super) fn pop_stream_chunk(
+/// Coalesce every adjacent delta of one kind while retaining provider order.
+/// Runtime cursors are acknowledgements rather than visible boundaries, so the
+/// newest cursor follows the combined delta. The full text enters layout in
+/// this pass; Markdown's paint-only veil provides the progressive dissolve.
+pub(super) fn pop_stream_batch(
     events: &mut VecDeque<DriverEvent>,
     kind: StreamDeltaKind,
 ) -> Option<DriverEvent> {
-    let backlog = events
-        .iter()
-        .map_while(|event| stream_delta_text(event, kind))
-        .map(|text| text.graphemes(true).count())
-        .sum();
-    if backlog == 0 {
-        return events.pop_front();
-    }
-
-    let mut remaining_budget = stream_frame_budget(backlog);
     let mut chunk = String::new();
-    while remaining_budget > 0 {
-        let Some(text) = events.front_mut().and_then(|event| match (kind, event) {
-            (StreamDeltaKind::Text, DriverEvent::TextDelta(text))
-            | (StreamDeltaKind::Reasoning, DriverEvent::ReasoningDelta(text)) => Some(text),
-            _ => None,
-        }) else {
-            break;
-        };
-
-        let (prefix, graphemes) = take_stream_prefix(text, remaining_budget);
-        let reached_line_boundary = prefix.ends_with('\n');
-        chunk.push_str(&prefix);
-        remaining_budget = remaining_budget.saturating_sub(graphemes);
-        if text.is_empty() {
-            events.pop_front();
-        }
-        if reached_line_boundary {
-            break;
+    let mut latest_cursor = None;
+    loop {
+        match events.front() {
+            Some(DriverEvent::RuntimeEventCursorAdvanced(_)) => {
+                latest_cursor = events.pop_front();
+            }
+            Some(event) if stream_delta_text(event, kind).is_some() => {
+                let event = events.pop_front()?;
+                match (kind, event) {
+                    (StreamDeltaKind::Text, DriverEvent::TextDelta(text))
+                    | (StreamDeltaKind::Reasoning, DriverEvent::ReasoningDelta(text)) => {
+                        chunk.push_str(&text);
+                    }
+                    _ => unreachable!("the stream kind was checked before removing the event"),
+                }
+            }
+            _ => break,
         }
     }
-
+    if let Some(cursor) = latest_cursor {
+        events.push_front(cursor);
+    }
     match kind {
         StreamDeltaKind::Text => Some(DriverEvent::TextDelta(chunk)),
         StreamDeltaKind::Reasoning => Some(DriverEvent::ReasoningDelta(chunk)),
     }
-}
-
-pub(super) fn take_stream_prefix(text: &mut String, budget: usize) -> (String, usize) {
-    if text.is_empty() || budget == 0 {
-        return (String::new(), 0);
-    }
-
-    let mut count = 0;
-    let mut end = text.len();
-    for (start, grapheme) in text.grapheme_indices(true) {
-        count += 1;
-        end = start + grapheme.len();
-        if grapheme == "\n" || count == budget {
-            break;
-        }
-    }
-
-    let remainder = text.split_off(end);
-    (std::mem::replace(text, remainder), count)
 }
 
 pub(super) fn append_text_delta_to_session(

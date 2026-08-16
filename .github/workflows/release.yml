@@ -200,6 +200,7 @@ jobs:
           name: macos
           path: |
             dist/Waku-*.dmg
+            dist/Waku-*.md
             dist/Waku-*.zip
             dist/appcast.xml
           if-no-files-found: error
@@ -245,5 +246,6 @@ jobs:
           files: |
             artifacts/*.tar.gz
             artifacts/*.dmg
+            artifacts/*.md
             artifacts/*.zip
             artifacts/appcast.xml

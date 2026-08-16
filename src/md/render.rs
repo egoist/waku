@@ -20,13 +20,14 @@ use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::ops::Range;
 use std::rc::Rc;
+use std::time::{Duration, Instant};
 
 use gpui::{
-    AnyElement, BorderStyle, Bounds, CursorStyle, DispatchPhase, Font, FontStyle, FontWeight, Hsla,
-    InteractiveText, IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
-    ParentElement, Pixels, Point, SharedString, StrikethroughStyle, StyledText, TextLayout,
-    TextRun, UnderlineStyle, Window, canvas, div, font, img, point, prelude::*, px, quad, relative,
-    size,
+    AnyElement, BorderStyle, Bounds, ClipboardItem, CursorStyle, DispatchPhase, Font, FontStyle,
+    FontWeight, Hsla, InteractiveText, IntoElement, KeyDownEvent, MouseButton, MouseDownEvent,
+    MouseMoveEvent, MouseUpEvent, ParentElement, Pixels, Point, SharedString, StrikethroughStyle,
+    StyledText, TextLayout, TextRun, UnderlineStyle, Window, canvas, div, font, img, point,
+    prelude::*, px, quad, relative, size,
 };
 
 use super::highlight::{self, Lang, TokenClass};
@@ -35,7 +36,9 @@ use super::parser::{Block, IncrementalParser, InlineRun, ListItem, TableAlign, T
 use super::selection::{
     RegisteredText, SelectionRegistry, SelectionState, TextKey, line_range, word_range,
 };
+use super::veil::{RowVeil, apply_veil};
 use crate::theme::Theme;
+use crate::ui::tooltip::Tooltip;
 
 /// Selection geometry: the laid-out text handle for one painted element.
 pub type TextGeometry = TextLayout;
@@ -333,6 +336,14 @@ pub struct MarkdownView {
     /// a theme switch has to drop them or the transcript keeps painting the old
     /// palette.
     style: Cell<Option<(Palette, Metrics)>>,
+    /// Per-element opacity spans for the live response. Text is committed to
+    /// layout immediately; only these paint colors animate.
+    veil: RefCell<RowVeil>,
+    /// Code-block ordinals currently showing successful copy feedback. Kept
+    /// outside the parsed/flattened caches so a three-second icon change never
+    /// invalidates text shaping.
+    copied_code_blocks: Rc<RefCell<HashMap<usize, u64>>>,
+    streaming: Cell<bool>,
 }
 
 impl Default for MarkdownView {
@@ -349,7 +360,24 @@ impl MarkdownView {
             flats: RefCell::new(HashMap::new()),
             volatile_from: Cell::new(0),
             style: Cell::new(None),
+            veil: RefCell::new(RowVeil::default()),
+            copied_code_blocks: Rc::new(RefCell::new(HashMap::new())),
+            streaming: Cell::new(false),
         }
+    }
+
+    /// A view attached to an already-streaming body. Its first rendered text
+    /// becomes the full-opacity baseline; later appends fade normally.
+    pub fn seeded() -> Self {
+        let view = Self::new();
+        *view.veil.borrow_mut() = RowVeil::seeded();
+        view
+    }
+
+    /// Reattach an existing parsed view without animating text that arrived
+    /// while its session was off screen.
+    pub fn seed_streaming_baseline(&self) {
+        *self.veil.borrow_mut() = RowVeil::seeded();
     }
 
     /// Point the view at `text`. `mend` closes hanging inline markers, which is
@@ -361,25 +389,44 @@ impl MarkdownView {
     }
 
     pub fn set_text(&mut self, text: &str, mend: bool) {
+        let was_streaming = self.streaming.replace(mend);
+        if !mend && was_streaming {
+            *self.veil.borrow_mut() = RowVeil::default();
+        } else if mend && !was_streaming && !self.parser.text().is_empty() {
+            // A completed body that starts streaming again already has a
+            // rendered baseline. Do not make that history dissolve again.
+            *self.veil.borrow_mut() = RowVeil::seeded();
+        }
         let changed = self.parser.text() != text;
         if changed {
             self.parser.set_text(text);
         }
-        let tail = if mend {
-            self.parser.display_tail().unwrap_or_default()
-        } else {
-            Vec::new()
-        };
-        if changed || tail != self.tail {
-            self.tail = tail;
-            // Markdown block structure only ever extends the final block, so
-            // every element before it is still valid. A streamed delta thus
-            // re-flattens one block instead of the whole response.
-            let boundary = self.volatile_from.get();
-            self.flats
-                .borrow_mut()
-                .retain(|ordinal, _| *ordinal < boundary);
+        // The mended display tail depends only on the source and the
+        // streaming flag. Deriving it re-mends — and, with a hanging marker,
+        // re-parses — the final block, and `set_text` runs for every visible
+        // row on every frame, so a frame that changed neither input must not
+        // pay for it.
+        if changed || mend != was_streaming {
+            let tail = if mend {
+                self.parser.display_tail().unwrap_or_default()
+            } else {
+                Vec::new()
+            };
+            if changed || tail != self.tail {
+                self.tail = tail;
+                // Markdown block structure only ever extends the final block,
+                // so every element before it is still valid. A streamed delta
+                // thus re-flattens one block instead of the whole response.
+                let boundary = self.volatile_from.get();
+                self.flats
+                    .borrow_mut()
+                    .retain(|ordinal, _| *ordinal < boundary);
+            }
         }
+    }
+
+    pub fn is_fading(&self) -> bool {
+        self.streaming.get() && self.veil.borrow().is_fading()
     }
 
     /// Drop cached flats if the style they were built for no longer applies.
@@ -432,6 +479,8 @@ pub struct Ctx<'a> {
     next_ordinal: Cell<usize>,
     /// Set while rendering the first element of a block, for copy spacing.
     starts_block: Cell<bool>,
+    animate_streaming: bool,
+    now: Instant,
 }
 
 impl<'a> Ctx<'a> {
@@ -450,6 +499,8 @@ impl<'a> Ctx<'a> {
             cache: None,
             next_ordinal: Cell::new(0),
             starts_block: Cell::new(true),
+            animate_streaming: true,
+            now: Instant::now(),
         }
     }
 
@@ -459,6 +510,11 @@ impl<'a> Ctx<'a> {
 
     pub fn with_link_handler(mut self, handler: LinkHandler) -> Self {
         self.link_handler = Some(handler);
+        self
+    }
+
+    pub fn with_streaming_animation(mut self, animate: bool) -> Self {
+        self.animate_streaming = animate;
         self
     }
 
@@ -472,6 +528,8 @@ impl<'a> Ctx<'a> {
             cache: Some(view),
             next_ordinal: Cell::new(self.next_ordinal.get()),
             starts_block: Cell::new(self.starts_block.get()),
+            animate_streaming: self.animate_streaming,
+            now: Instant::now(),
         }
     }
 
@@ -506,6 +564,7 @@ impl<'a> Ctx<'a> {
 /// pass read real glyph geometry without a second layout pass.
 fn text_element_with_selection(
     flat: &FlatText,
+    runs: Vec<TextRun>,
     key: TextKey,
     selection: TranscriptSelection,
     link_handler: Option<LinkHandler>,
@@ -513,7 +572,7 @@ fn text_element_with_selection(
     selection_wash: Hsla,
     block_break: bool,
 ) -> AnyElement {
-    let styled = StyledText::new(flat.text.clone()).with_runs(flat.runs.clone());
+    let styled = StyledText::new(flat.text.clone()).with_runs(runs);
     let layout = styled.layout().clone();
 
     let body: AnyElement = if flat.links.is_empty() {
@@ -588,8 +647,22 @@ fn text_element_with_selection(
 }
 
 fn text_element(flat: &FlatText, key: TextKey, ctx: &Ctx) -> AnyElement {
+    let runs = match ctx
+        .cache
+        .filter(|view| ctx.animate_streaming && view.streaming.get())
+    {
+        Some(view) => {
+            let spans = view
+                .veil
+                .borrow_mut()
+                .advance(key.index, flat.text.as_ref(), ctx.now);
+            apply_veil(flat.runs.clone(), &spans)
+        }
+        None => flat.runs.clone(),
+    };
     text_element_with_selection(
         flat,
+        runs,
         key,
         ctx.selection.clone(),
         ctx.link_handler.clone(),
@@ -615,6 +688,7 @@ pub fn selectable_flat_text(
 ) -> AnyElement {
     text_element_with_selection(
         flat,
+        flat.runs.clone(),
         key,
         selection,
         None,
@@ -869,21 +943,77 @@ pub fn install_selection_input(window: &mut Window, state: &TranscriptSelection)
 
 // ── Blocks ─────────────────────────────────────────────────────────────────
 
+/// Per-top-level-block ordinal stride: an element's ordinal is
+/// `block_index << 16 | position_within_block`. Deriving keys from the
+/// block's document index rather than a running document counter means a
+/// walk that skips leading blocks ([`markdown_tail`]) hands every rendered
+/// block exactly the flatten-cache and veil keys a full walk would, so the
+/// two can alternate without thrashing either.
+const BLOCK_ORDINAL_STRIDE_BITS: u32 = 16;
+
+fn block_ordinal_base(block_ix: usize) -> usize {
+    block_ix << BLOCK_ORDINAL_STRIDE_BITS
+}
+
 /// Render a markdown body. Returns `None` when it has no content.
 pub fn markdown<'a>(view: &'a MarkdownView, ctx: &Ctx<'a>) -> Option<AnyElement> {
+    markdown_capped(view, ctx, usize::MAX)
+}
+
+/// Like [`markdown`], but builds only the trailing `max_blocks` top-level
+/// blocks. The live reasoning peek shows a tail-pinned viewport while a
+/// thought streams, and building the whole growing document every pulse tick
+/// made a long think O(document) per frame; the cap makes it O(window).
+pub fn markdown_tail<'a>(
+    view: &'a MarkdownView,
+    ctx: &Ctx<'a>,
+    max_blocks: usize,
+) -> Option<AnyElement> {
+    markdown_capped(view, ctx, max_blocks.max(1))
+}
+
+fn markdown_capped<'a>(
+    view: &'a MarkdownView,
+    ctx: &Ctx<'a>,
+    max_blocks: usize,
+) -> Option<AnyElement> {
     let blocks = view.blocks().collect::<Vec<_>>();
-    let (&last, leading) = blocks.split_last()?;
+    let Some((&last, leading)) = blocks.split_last() else {
+        if ctx.animate_streaming && view.streaming.get() {
+            let mut veil = view.veil.borrow_mut();
+            veil.begin_frame();
+            veil.finish_frame();
+        }
+        return None;
+    };
 
     view.sync_style(ctx.palette, &ctx.metrics);
     let ctx = ctx.with_cache(view);
-    let mut children = Vec::with_capacity(blocks.len());
-    for block in leading {
+    if ctx.animate_streaming && view.streaming.get() {
+        view.veil.borrow_mut().begin_frame();
+    }
+    let first = blocks.len().saturating_sub(max_blocks);
+    let mut children = Vec::with_capacity(blocks.len() - first);
+    for (block_ix, block) in leading.iter().enumerate().skip(first) {
+        ctx.next_ordinal.set(block_ordinal_base(block_ix));
         children.push(render_block(block, &ctx));
+        debug_assert!(
+            ctx.next_ordinal.get() - block_ordinal_base(block_ix)
+                < 1 << BLOCK_ORDINAL_STRIDE_BITS,
+            "a single block overflowed its ordinal stride"
+        );
     }
     // Everything before the final block is settled, so its flattened elements
     // stay cacheable across appends.
-    view.volatile_from.set(ctx.next_ordinal.get());
+    let last_base = block_ordinal_base(blocks.len() - 1);
+    ctx.next_ordinal.set(last_base);
+    view.volatile_from.set(last_base);
     children.push(render_block(last, &ctx));
+    if ctx.animate_streaming && view.streaming.get() {
+        // Every element visible on the attach pass has synchronously adopted
+        // its baseline. Elements introduced by later appends should now fade.
+        view.veil.borrow_mut().finish_frame();
+    }
 
     Some(
         div()
@@ -949,7 +1079,10 @@ fn render_block(block: &Block, ctx: &Ctx) -> AnyElement {
                 )
                 .child(
                     div()
-                        .flex_1()
+                        // flex_auto, not flex_1: a zero flex-basis erases the
+                        // content's intrinsic width, collapsing shrink-wrapped
+                        // user bubbles to the quote bar.
+                        .flex_auto()
                         .min_w_0()
                         .flex()
                         .flex_col()
@@ -1008,7 +1141,10 @@ fn render_list(ordered_start: Option<u64>, items: &[ListItem], ctx: &Ctx) -> Any
                 .child(marker)
                 .child(
                     div()
-                        .flex_1()
+                        // flex_auto, not flex_1: a zero flex-basis erases the
+                        // content's intrinsic width, collapsing shrink-wrapped
+                        // user bubbles to the marker column.
+                        .flex_auto()
                         .min_w_0()
                         .flex()
                         .flex_col()
@@ -1106,6 +1242,43 @@ fn render_image(url: &str, alt: &str, ctx: &Ctx) -> AnyElement {
         .into_any_element()
 }
 
+const CODE_COPY_FEEDBACK_DURATION: Duration = Duration::from_secs(3);
+type CodeCopyFeedback = Rc<RefCell<HashMap<usize, u64>>>;
+
+fn begin_code_copy_feedback(feedback: &CodeCopyFeedback, ordinal: usize) -> u64 {
+    let mut feedback = feedback.borrow_mut();
+    let generation = feedback
+        .get(&ordinal)
+        .copied()
+        .unwrap_or_default()
+        .wrapping_add(1);
+    feedback.insert(ordinal, generation);
+    generation
+}
+
+fn clear_code_copy_feedback(feedback: &CodeCopyFeedback, ordinal: usize, generation: u64) -> bool {
+    let mut feedback = feedback.borrow_mut();
+    if feedback.get(&ordinal) != Some(&generation) {
+        return false;
+    }
+    feedback.remove(&ordinal);
+    true
+}
+
+fn show_code_copied(feedback: CodeCopyFeedback, ordinal: usize, cx: &mut gpui::App) {
+    let generation = begin_code_copy_feedback(&feedback, ordinal);
+    cx.refresh_windows();
+    cx.spawn(async move |cx| {
+        cx.background_executor()
+            .timer(CODE_COPY_FEEDBACK_DURATION)
+            .await;
+        if clear_code_copy_feedback(&feedback, ordinal, generation) {
+            cx.refresh();
+        }
+    })
+    .detach();
+}
+
 /// Decode a `data:` image URL. Shared with the transcript's tool-output images.
 pub fn decode_data_url(url: &str) -> Option<std::sync::Arc<gpui::Image>> {
     use base64::Engine as _;
@@ -1137,8 +1310,69 @@ fn render_code_block(language: Option<&str>, code: &str, ctx: &Ctx) -> AnyElemen
     let label = language
         .filter(|language| !language.is_empty())
         .map(|language| language.to_ascii_lowercase());
+    // Reuse the cached shaped string. Settled code blocks render every frame,
+    // so cloning the whole source here would turn the copy affordance into a
+    // permanent O(code length) render cost; allocate only when it is invoked.
+    let copy_content = flat.text.clone();
+    let keyboard_copy_content = copy_content.clone();
+    let copy_feedback = ctx.cache.map(|view| view.copied_code_blocks.clone());
+    let copied = copy_feedback
+        .as_ref()
+        .is_some_and(|feedback| feedback.borrow().contains_key(&key.index));
+    let keyboard_copy_feedback = copy_feedback.clone();
+    let ordinal = key.index;
+    let copy_button = div()
+        .id(SharedString::from(format!(
+            "copy-code-{}-{}",
+            key.row, key.index
+        )))
+        .tab_index(0)
+        .size(px(24.0))
+        .flex_none()
+        .rounded(px(5.0))
+        .flex()
+        .items_center()
+        .justify_center()
+        .cursor_default()
+        .focus_visible(|style| style.border_1().border_color(ctx.palette.accent))
+        .hover(|style| style.bg(ctx.palette.overlay))
+        .child(crate::ui::icon(
+            if copied {
+                "icons/check.svg"
+            } else {
+                "icons/copy.svg"
+            },
+            11.0,
+            ctx.palette.ghost,
+        ))
+        .tooltip(Tooltip::text(if copied {
+            tr!("common.copied")
+        } else {
+            tr!("common.copy_code")
+        }))
+        .on_click(move |_, _, cx| {
+            cx.write_to_clipboard(ClipboardItem::new_string(copy_content.to_string()));
+            if let Some(feedback) = copy_feedback.clone() {
+                show_code_copied(feedback, ordinal, cx);
+            }
+        })
+        .on_key_down(move |event: &KeyDownEvent, _, cx| {
+            if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                cx.write_to_clipboard(ClipboardItem::new_string(keyboard_copy_content.to_string()));
+                if let Some(feedback) = keyboard_copy_feedback.clone() {
+                    show_code_copied(feedback, ordinal, cx);
+                }
+                cx.stop_propagation();
+            }
+        });
 
     div()
+        .id(SharedString::from(format!(
+            "code-block-{}-{}",
+            key.row, key.index
+        )))
+        .tab_group()
+        .tab_stop(false)
         .w_full()
         .min_w_0()
         .rounded(px(8.0))
@@ -1146,23 +1380,31 @@ fn render_code_block(language: Option<&str>, code: &str, ctx: &Ctx) -> AnyElemen
         .border_color(ctx.palette.border)
         .bg(ctx.palette.inset)
         .overflow_hidden()
-        .when_some(label, |element, label| {
-            element.child(
-                div()
-                    .w_full()
-                    .h(px(24.0))
-                    .px(px(10.0))
-                    .flex()
-                    .items_center()
-                    .border_b_1()
-                    .border_color(ctx.palette.border)
-                    .text_size(px(10.0))
-                    .line_height(px(14.0))
-                    .font_weight(FontWeight::MEDIUM)
-                    .text_color(ctx.palette.ghost)
-                    .child(SharedString::from(label)),
-            )
-        })
+        .child(
+            div()
+                .w_full()
+                .h(px(28.0))
+                .pl(px(10.0))
+                .pr(px(2.0))
+                .flex()
+                .items_center()
+                .border_b_1()
+                .border_color(ctx.palette.border)
+                .child(
+                    div()
+                        .min_w_0()
+                        .flex_1()
+                        .truncate()
+                        .text_size(px(10.0))
+                        .line_height(px(14.0))
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(ctx.palette.ghost)
+                        .when_some(label, |element, label| {
+                            element.child(SharedString::from(label))
+                        }),
+                )
+                .child(copy_button),
+        )
         .child(
             div()
                 .id(SharedString::from(format!(
@@ -1170,13 +1412,14 @@ fn render_code_block(language: Option<&str>, code: &str, ctx: &Ctx) -> AnyElemen
                     key.row, key.index
                 )))
                 .w_full()
+                .min_w_0()
                 .px(px(10.0))
                 .py(px(8.0))
-                .overflow_x_scroll()
                 .child(
                     div()
-                        .flex_none()
-                        .whitespace_nowrap()
+                        .w_full()
+                        .min_w_0()
+                        .whitespace_normal()
                         .text_size(px(ctx.metrics.code_text_size))
                         .line_height(px(ctx.metrics.code_line_height))
                         .text_color(ctx.palette.secondary)
@@ -1501,6 +1744,43 @@ mod tests {
         let plain = code_runs(code, None, &code_font, &palette());
         assert_eq!(plain.iter().map(|run| run.len).sum::<usize>(), code.len());
         assert_eq!(plain.len(), 1);
+    }
+
+    #[test]
+    fn code_block_rendering_wraps_and_exposes_a_keyboard_copy_control() {
+        let source = include_str!("render.rs");
+        let start = source
+            .find("\nfn render_code_block(")
+            .expect("code block renderer");
+        let body = &source[start + 1..];
+        let end = body
+            .find("\nfn code_runs(")
+            .expect("code block renderer end");
+        let body = &body[..end];
+
+        assert!(body.contains(".whitespace_normal()"));
+        assert!(!body.contains(".overflow_x_scroll()"));
+        assert!(!body.contains(".whitespace_nowrap()"));
+        assert!(body.contains("\"icons/copy.svg\""));
+        assert!(body.contains("\"icons/check.svg\""));
+        assert!(body.contains("ClipboardItem::new_string"));
+        assert!(body.contains("show_code_copied"));
+        assert!(body.contains(".tab_index(0)"));
+        assert!(body.contains(".on_key_down"));
+    }
+
+    #[test]
+    fn copied_code_feedback_resets_after_three_seconds_and_ignores_stale_timers() {
+        assert_eq!(CODE_COPY_FEEDBACK_DURATION, Duration::from_secs(3));
+
+        let feedback = Rc::new(RefCell::new(HashMap::new()));
+        let first = begin_code_copy_feedback(&feedback, 4);
+        let second = begin_code_copy_feedback(&feedback, 4);
+
+        assert!(!clear_code_copy_feedback(&feedback, 4, first));
+        assert!(feedback.borrow().contains_key(&4));
+        assert!(clear_code_copy_feedback(&feedback, 4, second));
+        assert!(!feedback.borrow().contains_key(&4));
     }
 
     /// A soft-wrap boundary has two caret affinities. GPUI's generic

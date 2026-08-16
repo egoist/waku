@@ -1,8 +1,8 @@
 //! Window-modal preview for image attachments.
 //!
-//! Attachment tiles already render through GPUI's asynchronous image cache.
-//! Opening a preview therefore only changes in-memory UI state; the frame path
-//! never probes the filesystem. The same path also powers the file-manager action.
+//! Daemon-owned image bytes are retained as GPUI images only while the desktop
+//! needs them. Opening a preview therefore changes only in-memory UI state;
+//! the frame path never probes the filesystem or performs RPC.
 
 use gpui::{KeyBinding, actions};
 
@@ -22,7 +22,7 @@ pub fn init(cx: &mut App) {
 }
 
 pub(super) struct ImagePreviewState {
-    path: PathBuf,
+    image: Arc<gpui::Image>,
     name: SharedString,
     focus: FocusHandle,
     close_focus: FocusHandle,
@@ -30,19 +30,83 @@ pub(super) struct ImagePreviewState {
     generation: u64,
 }
 
-pub(super) fn attachment_menu_items(path: PathBuf) -> Vec<MenuItem> {
+pub(super) fn attachment_menu_items(path: PathBuf, can_reveal: bool) -> Vec<MenuItem> {
     vec![
         MenuItem::new(tr!("common.reveal_in_finder"), move |_, cx| {
             crate::platform::reveal_in_file_manager(&path, cx);
         })
-        .icon("icons/folder.svg"),
+        .icon("icons/folder.svg")
+        .disabled(!can_reveal),
     ]
 }
 
 impl Waku {
+    /// Resolve one daemon-owned image for a visible row. Frames consult only
+    /// in-memory state; the first miss starts a deduplicated background RPC and
+    /// a later notification lets GPUI render the returned bytes from memory.
+    pub(super) fn image_for_reference(
+        &self,
+        reference: &str,
+        daemon_path: Option<&Path>,
+        name: Option<&str>,
+        cx: &mut Context<Self>,
+    ) -> Option<Arc<gpui::Image>> {
+        let attachment_reference =
+            reference.starts_with(waku_protocol::attachments::ATTACHMENT_SCHEME);
+        if !waku_protocol::blob::is_reference(reference) && !attachment_reference {
+            return None;
+        }
+        if let Some(state) = self.remote_images.borrow().get(reference) {
+            return match state {
+                RemoteImageState::Ready(image) => Some(image.clone()),
+                RemoteImageState::Loading | RemoteImageState::Unavailable => None,
+            };
+        }
+
+        let Some(format) = name
+            .and_then(image_format_for_name)
+            .or_else(|| image_format_for_name(reference))
+        else {
+            self.remote_images
+                .borrow_mut()
+                .insert(reference.to_owned(), RemoteImageState::Unavailable);
+            return None;
+        };
+
+        self.remote_images
+            .borrow_mut()
+            .insert(reference.to_owned(), RemoteImageState::Loading);
+        let cache_key = reference.to_owned();
+        let fetch_reference = cache_key.clone();
+        let daemon_path = daemon_path.map(Path::to_path_buf);
+        let daemon = self.daemon.clone();
+        cx.spawn(async move |waku, cx| {
+            let image = cx
+                .background_executor()
+                .spawn(async move {
+                    waku_client::persistence::read_remote_reference(
+                        &fetch_reference,
+                        daemon_path.as_deref(),
+                        &daemon,
+                    )
+                    .map(|bytes| Arc::new(gpui::Image::from_bytes(format, bytes)))
+                })
+                .await;
+            let _ = waku.update(cx, |waku, cx| {
+                waku.remote_images.borrow_mut().insert(
+                    cache_key,
+                    image.map_or(RemoteImageState::Unavailable, RemoteImageState::Ready),
+                );
+                cx.notify();
+            });
+        })
+        .detach();
+        None
+    }
+
     pub(super) fn open_image_preview(
         &mut self,
-        path: PathBuf,
+        image: Arc<gpui::Image>,
         name: SharedString,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -51,7 +115,7 @@ impl Waku {
         let generation = self.image_preview_generation;
         let focus = cx.focus_handle();
         self.image_preview = Some(ImagePreviewState {
-            path,
+            image,
             name,
             focus: focus.clone(),
             close_focus: cx.focus_handle(),
@@ -97,7 +161,7 @@ impl Waku {
     pub(super) fn render_image_preview(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let preview = self.image_preview.as_ref()?;
         let theme = Theme::current(cx);
-        let path = preview.path.clone();
+        let image_source = preview.image.clone();
         let name = preview.name.clone();
         let focus = preview.focus.clone();
         let close_focus = preview.close_focus.clone();
@@ -142,7 +206,7 @@ impl Waku {
             .justify_center()
             .cursor_default()
             .child(
-                img(path)
+                img(image_source)
                     .size_full()
                     .object_fit(ObjectFit::Contain)
                     .with_fallback(move || {
@@ -214,5 +278,24 @@ impl Waku {
             );
 
         Some(gpui::deferred(layer).with_priority(5).into_any_element())
+    }
+}
+
+pub(super) fn image_format_for_name(name: &str) -> Option<gpui::ImageFormat> {
+    let extension = Path::new(name)
+        .extension()
+        .and_then(|extension| extension.to_str())?
+        .to_ascii_lowercase();
+    match extension.as_str() {
+        "png" => Some(gpui::ImageFormat::Png),
+        "jpg" | "jpeg" => Some(gpui::ImageFormat::Jpeg),
+        "webp" => Some(gpui::ImageFormat::Webp),
+        "gif" => Some(gpui::ImageFormat::Gif),
+        "svg" => Some(gpui::ImageFormat::Svg),
+        "bmp" => Some(gpui::ImageFormat::Bmp),
+        "tif" | "tiff" => Some(gpui::ImageFormat::Tiff),
+        "ico" => Some(gpui::ImageFormat::Ico),
+        "pnm" | "pbm" | "pgm" | "ppm" => Some(gpui::ImageFormat::Pnm),
+        _ => None,
     }
 }

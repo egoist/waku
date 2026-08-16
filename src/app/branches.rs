@@ -53,14 +53,27 @@ impl Waku {
             Query::Pending => fallback,
             Query::Missing(token) => {
                 let fetch_path = workspace_path.clone();
+                let workspace = waku_client::WorkspaceClient::new(self.daemon.client());
                 cx.spawn(async move |waku, cx| {
                     let result = cx
                         .background_executor()
                         .spawn({
                             let fetch_path = fetch_path.clone();
                             async move {
-                                crate::git_branch::inspect(&fetch_path)
-                                    .map_err(|error| error.to_string())
+                                match workspace.request(
+                                    waku_client::WorkspaceOperation::InspectBranches {
+                                        cwd: fetch_path.clone(),
+                                    },
+                                ) {
+                                    Ok(waku_client::WorkspaceResult::Branches { snapshot }) => {
+                                        Ok(snapshot)
+                                    }
+                                    Ok(_) => {
+                                        Err("the daemon returned an invalid branch response"
+                                            .to_owned())
+                                    }
+                                    Err(error) => Err(error.to_string()),
+                                }
                             }
                         })
                         .await;
@@ -280,19 +293,28 @@ impl Waku {
         }
         self.branch_operation_pending = true;
         cx.notify();
+        let workspace = waku_client::WorkspaceClient::new(self.daemon.client());
         cx.spawn(async move |waku, cx| {
             let result = cx
                 .background_executor()
                 .spawn({
                     let path = path.clone();
                     async move {
-                        match operation {
-                            BranchOperation::Checkout(branch) => {
-                                crate::git_branch::checkout(&path, &branch)
+                        let (branch, create) = match operation {
+                            BranchOperation::Checkout(branch) => (branch, false),
+                            BranchOperation::Create(branch) => (branch, true),
+                        };
+                        match workspace.request(
+                            waku_client::WorkspaceOperation::CheckoutBranch {
+                                cwd: path,
+                                branch,
+                                create,
+                            },
+                        )? {
+                            waku_client::WorkspaceResult::BranchChanged { snapshot } => {
+                                Ok(snapshot)
                             }
-                            BranchOperation::Create(branch) => {
-                                crate::git_branch::create_and_checkout(&path, &branch)
-                            }
+                            _ => anyhow::bail!("the daemon returned an invalid branch response"),
                         }
                     }
                 })

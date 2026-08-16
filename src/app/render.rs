@@ -1,5 +1,11 @@
 use super::*;
 
+fn should_render_empty_state(session: Option<&AgentSession>) -> bool {
+    session
+        .map(|session| session.detail_loaded && session.messages.is_empty())
+        .unwrap_or(true)
+}
+
 impl Waku {
     pub(super) fn render_panel_resize_handle(
         &self,
@@ -55,6 +61,64 @@ impl Waku {
 }
 
 impl Waku {
+    /// Width left for the chat column once the visible panels take theirs.
+    fn chat_viewport_width(&self, window: &Window) -> f32 {
+        let (sidebar_width, right_panel_width) = self.effective_panel_widths(window);
+        f32::from(window.viewport_size().width)
+            - if self.sidebar_visible {
+                sidebar_width
+            } else {
+                0.0
+            }
+            - if self.right_panel_visible {
+                right_panel_width
+            } else {
+                0.0
+            }
+    }
+
+    /// [`WakuPane`] delegate for the sidebar island.
+    pub(super) fn sidebar_pane_content(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let (sidebar_width, _) = self.effective_panel_widths(window);
+        self.render_sidebar(sidebar_width, window, cx)
+            .into_any_element()
+    }
+
+    /// [`WakuPane`] delegate for the transcript island.
+    pub(super) fn transcript_pane_content(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let chat_viewport_width = self.chat_viewport_width(window);
+        // The transcript's own element sizes itself with `flex_1`, which only
+        // stretches inside a flex parent. A cached pane lays its content out
+        // as a root, so give it that parent here or its height collapses to
+        // the zero flex basis.
+        div()
+            .size_full()
+            .flex()
+            .flex_col()
+            .min_h_0()
+            .child(self.render_transcript(window, chat_viewport_width, cx))
+            .into_any_element()
+    }
+
+    /// [`WakuPane`] delegate for the right-panel island.
+    pub(super) fn right_panel_pane_content(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let (_, right_panel_width) = self.effective_panel_widths(window);
+        self.render_right_panel(right_panel_width, window, cx)
+            .into_any_element()
+    }
+
     /// Measure live frame rate by counting renders over a sliding one-second
     /// window and keep requesting animation frames so the counter stays current.
     fn tick_fps(&mut self, window: &Window) {
@@ -98,10 +162,7 @@ impl Render for Waku {
         self.schedule_time_label_wake(cx);
 
         let theme = Theme::current(cx);
-        let empty = self
-            .selected_session()
-            .map(|session| session.messages.is_empty())
-            .unwrap_or(true);
+        let empty = should_render_empty_state(self.selected_session());
         let permission = self.render_permission(cx);
         let computer_use = self.render_computer_use_overlay(cx);
         let command_palette = self.render_command_palette(window, cx);
@@ -116,17 +177,6 @@ impl Render for Waku {
                 .into_any_element()
         });
         let (sidebar_width, right_panel_width) = self.effective_panel_widths(window);
-        let chat_viewport_width = f32::from(window.viewport_size().width)
-            - if self.sidebar_visible {
-                sidebar_width
-            } else {
-                0.0
-            }
-            - if self.right_panel_visible {
-                right_panel_width
-            } else {
-                0.0
-            };
         let content = div()
             .key_context("Waku")
             .on_action(cx.listener(Self::close_window_or_right_panel_tab_action))
@@ -163,7 +213,12 @@ impl Render for Waku {
             .text_color(theme.text)
             .font_family(".SystemUIFont")
             .when(self.sidebar_visible, |root| {
-                root.child(self.render_sidebar(sidebar_width, window, cx))
+                root.child(self.sidebar_pane.clone().cached(
+                    StyleRefinement::default()
+                        .w(px(sidebar_width))
+                        .h_full()
+                        .flex_none(),
+                ))
             })
             .child(
                 div()
@@ -180,7 +235,12 @@ impl Render for Waku {
                     .child(if empty {
                         self.render_empty_state(cx).into_any_element()
                     } else {
-                        self.render_transcript(window, chat_viewport_width, cx)
+                        self.transcript_pane
+                            .clone()
+                            .cached(
+                                StyleRefinement::default().flex_1().min_h(px(0.0)).w_full(),
+                            )
+                            .into_any_element()
                     })
                     .children(permission)
                     .when(self.selected_project().is_some(), |element| {
@@ -201,7 +261,12 @@ impl Render for Waku {
                     }),
             )
             .when(self.right_panel_visible, |root| {
-                root.child(self.render_right_panel(right_panel_width, window, cx))
+                root.child(self.right_panel_pane.clone().cached(
+                    StyleRefinement::default()
+                        .w(px(right_panel_width))
+                        .h_full()
+                        .flex_none(),
+                ))
             })
             .children(command_palette)
             .children(commit_dialog)
@@ -209,6 +274,23 @@ impl Render for Waku {
             .into_any_element();
 
         self.render_window_frame(content, window, cx)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unloaded_history_never_renders_the_new_task_prompt() {
+        let mut stored = AgentSession::new(Uuid::new_v4(), ProviderKind::Codex);
+        stored.detail_loaded = false;
+
+        assert!(!should_render_empty_state(Some(&stored)));
+
+        let draft = AgentSession::new(Uuid::new_v4(), ProviderKind::Codex);
+        assert!(should_render_empty_state(Some(&draft)));
+        assert!(should_render_empty_state(None));
     }
 }
 

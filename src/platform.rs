@@ -218,28 +218,6 @@ pub fn open_with_default_app(path: &std::path::Path, cx: &gpui::App) {
     cx.open_with_system(path);
 }
 
-/// Move `path` to the Trash, recoverably. Errors surface to the caller so the
-/// UI can say why nothing moved.
-#[cfg(target_os = "macos")]
-pub fn trash_item(path: &std::path::Path) -> Result<(), String> {
-    use objc2_foundation::{NSFileManager, NSString, NSURL};
-
-    let url = NSURL::fileURLWithPath(&NSString::from_str(&path.to_string_lossy()));
-    NSFileManager::defaultManager()
-        .trashItemAtURL_resultingItemURL_error(&url, None)
-        .map_err(|error| error.localizedDescription().to_string())
-}
-
-#[cfg(target_os = "linux")]
-pub fn trash_item(path: &std::path::Path) -> Result<(), String> {
-    trash::delete(path).map_err(|error| error.to_string())
-}
-
-#[cfg(not(any(target_os = "macos", target_os = "linux")))]
-pub fn trash_item(_: &std::path::Path) -> Result<(), String> {
-    Err("moving items to Trash is not supported on this platform".to_owned())
-}
-
 /// Decode the embedded desktop icon once. X11 consumes the RGBA pixels from
 /// `WindowOptions`; Wayland associates the window through `app_id` and its
 /// installed desktop entry.
