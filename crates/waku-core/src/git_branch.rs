@@ -304,12 +304,7 @@ fn optional_stdout(cwd: &Path, args: &[&str]) -> anyhow::Result<Option<String>> 
 }
 
 fn command_error(output: &Output) -> String {
-    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
-    if stderr.is_empty() {
-        format!("git exited with {}", output.status)
-    } else {
-        stderr
-    }
+    crate::command_env::failure_detail(output)
 }
 
 #[cfg(test)]

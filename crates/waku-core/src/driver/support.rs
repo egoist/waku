@@ -3,8 +3,10 @@
 //! classification.
 
 use std::fs;
-
-use std::os::unix::fs::{PermissionsExt as _, symlink};
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt as _;
+#[cfg(unix)]
+use std::os::unix::fs::symlink;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context as _, anyhow};
@@ -13,6 +15,36 @@ use serde_json::Value;
 use super::computer_use as computer_use_runtime;
 use crate::driver::DriverEventSender;
 use crate::model::{ActivityKind, ProviderKind};
+
+/// Mirror a Grok runtime resource into the isolated home. Unix symlinks keep
+/// the source authoritative; Windows may lack the privilege to create them,
+/// so try a symlink first and fall back to a recursive copy.
+#[cfg(windows)]
+fn symlink(source: &Path, destination: &Path) -> std::io::Result<()> {
+    let copy = || {
+        if source.is_dir() {
+            fs::create_dir_all(destination)?;
+            for entry in fs::read_dir(source)? {
+                let entry = entry?;
+                let target = destination.join(entry.file_name());
+                if entry.file_type()?.is_dir() {
+                    symlink(&entry.path(), &target)?;
+                } else {
+                    fs::copy(entry.path(), target)?;
+                }
+            }
+            Ok(())
+        } else {
+            fs::copy(source, destination).map(|_| ())
+        }
+    };
+    let link = if source.is_dir() {
+        std::os::windows::fs::symlink_dir(source, destination)
+    } else {
+        std::os::windows::fs::symlink_file(source, destination)
+    };
+    link.or_else(|_| copy())
+}
 
 /// The context-window occupancy of one API call from a Claude-wire `usage`
 /// object (Claude Code and Amp share the format): prompt (fresh + cached) plus
@@ -181,6 +213,7 @@ fn build_grok_computer_use_config(
             grok_home.display()
         )
     })?;
+    #[cfg(unix)]
     fs::set_permissions(&grok_home, fs::Permissions::from_mode(0o700)).with_context(|| {
         format!(
             "could not secure isolated Grok home {}",
@@ -199,7 +232,7 @@ fn build_grok_computer_use_config(
             ) {
                 continue;
             }
-            symlink(entry.path(), grok_home.join(name)).with_context(|| {
+            symlink(&entry.path(), &grok_home.join(name)).with_context(|| {
                 format!(
                     "could not mirror Grok runtime resource {}",
                     entry.path().display()

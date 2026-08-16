@@ -198,6 +198,7 @@ fn sdk_agent(
     let binary = binary
         .to_str()
         .ok_or_else(|| anyhow!("the ACP executable path is not valid UTF-8"))?;
+    #[cfg(unix)]
     let cwd = cwd
         .to_str()
         .ok_or_else(|| anyhow!("the ACP working directory is not valid UTF-8"))?;
@@ -219,11 +220,20 @@ fn sdk_agent(
     // `AcpAgentConfig` deliberately contains only argv and environment. macOS
     // `env -C` supplies the session cwd without a shell, preserving exact
     // argument boundaries and the SDK's process-group lifecycle management.
-    let mut args = vec!["-C".to_owned(), cwd.to_owned(), binary.to_owned()];
-    args.extend(launch.args);
-    let config = AcpAgentConfig::new("/usr/bin/env")
-        .args(args)
-        .envs(environment);
+    // Windows has no `/usr/bin/env`; the ACP protocol itself carries the
+    // session cwd (`NewSessionRequest` / `ResumeSessionRequest`), so spawn the
+    // provider binary directly there.
+    #[cfg(unix)]
+    let config = {
+        let mut args = vec!["-C".to_owned(), cwd.to_owned(), binary.to_owned()];
+        args.extend(launch.args);
+        AcpAgentConfig::new("/usr/bin/env").args(args).envs(environment)
+    };
+    #[cfg(windows)]
+    let config = {
+        let _ = cwd; // session cwd is conveyed by the ACP protocol on Windows
+        AcpAgentConfig::new(binary).args(launch.args).envs(environment)
+    };
     Ok(AcpAgent::new(config).with_debug(move |line, direction| {
         if direction != LineDirection::Stderr || line.trim().is_empty() {
             return;

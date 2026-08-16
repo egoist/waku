@@ -761,17 +761,16 @@ where
 }
 
 fn command_error(output: &Output) -> String {
-    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
-    if stderr.is_empty() {
-        format!("git exited with {}", output.status)
-    } else {
-        stderr
-    }
+    crate::command_env::failure_detail(output)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
+    use std::os::unix::process::ExitStatusExt as _;
+    #[cfg(windows)]
+    use std::os::windows::process::ExitStatusExt as _;
 
     fn git_ok(cwd: &Path, args: &[&str]) {
         let status = Command::new("git")
@@ -796,6 +795,11 @@ mod tests {
         let directory = std::env::temp_dir().join(format!("waku-checkpoints-{}", Uuid::new_v4()));
         fs::create_dir_all(&directory).unwrap();
         git_ok(&directory, &["init", "--quiet", "--initial-branch=main"]);
+        // The system gitconfig may set `core.autocrlf` (Windows installs
+        // default to `true`), which would rewrite restored files to CRLF and
+        // break byte-for-byte assertions. Pin the repository's line-ending
+        // behavior so the test is deterministic on every machine.
+        git_ok(&directory, &["config", "core.autocrlf", "false"]);
         git_ok(&directory, &["config", "user.name", "Waku Test"]);
         git_ok(&directory, &["config", "user.email", "waku@example.com"]);
         fs::write(directory.join("shared.txt"), "shared\n").unwrap();
@@ -820,6 +824,7 @@ mod tests {
         let directory = std::env::temp_dir().join(format!("waku-checkpoints-{}", Uuid::new_v4()));
         fs::create_dir_all(&directory).unwrap();
         git_ok(&directory, &["init", "--quiet"]);
+        git_ok(&directory, &["config", "core.autocrlf", "false"]);
         fs::write(directory.join("tracked.txt"), "baseline\n").unwrap();
         git_ok(&directory, &["add", "tracked.txt"]);
         git_ok(
@@ -860,6 +865,7 @@ mod tests {
         let directory = std::env::temp_dir().join(format!("waku-checkpoints-{}", Uuid::new_v4()));
         fs::create_dir_all(&directory).unwrap();
         git_ok(&directory, &["init", "--quiet"]);
+        git_ok(&directory, &["config", "core.autocrlf", "false"]);
         fs::write(directory.join("tracked.txt"), "baseline\n").unwrap();
         git_ok(&directory, &["add", "tracked.txt"]);
         git_ok(
@@ -935,6 +941,7 @@ mod tests {
         let directory = std::env::temp_dir().join(format!("waku-checkpoints-{}", Uuid::new_v4()));
         fs::create_dir_all(&directory).unwrap();
         git_ok(&directory, &["init", "--quiet"]);
+        git_ok(&directory, &["config", "core.autocrlf", "false"]);
         fs::write(directory.join("tracked.txt"), "baseline\n").unwrap();
         git_ok(&directory, &["add", "tracked.txt"]);
         git_ok(
@@ -1120,5 +1127,36 @@ mod tests {
         assert_eq!(second.files.len(), 1);
         assert_eq!(second.files[0].path, "second-turn.txt");
         fs::remove_dir_all(directory).ok();
+    }
+
+    #[test]
+    fn command_error_leads_with_failure_lines_over_warnings() {
+        // Reproduces a surfaced Windows checkpoint failure: dozens of
+        // "LF will be replaced by CRLF" warnings burying the two `error:`
+        // lines that name the real problem.
+        let stderr = b"warning: in the working copy of 'src/lib.rs', LF will be replaced by CRLF the next time Git touches it\n\
+warning: in the working copy of 'src/main.rs', LF will be replaced by CRLF the next time Git touches it\n\
+error: invalid path 'nul'\n\
+error: unable to add 'nul' to index\n\
+fatal: adding files failed\n";
+        let output = Output {
+            status: std::process::ExitStatus::from_raw(128),
+            stdout: Vec::new(),
+            stderr: stderr.to_vec(),
+        };
+        assert_eq!(
+            command_error(&output),
+            "error: invalid path 'nul'\nerror: unable to add 'nul' to index\nfatal: adding files failed"
+        );
+    }
+
+    #[test]
+    fn command_error_falls_back_to_plain_stderr() {
+        let output = Output {
+            status: std::process::ExitStatus::from_raw(1),
+            stdout: Vec::new(),
+            stderr: b"some unexpected diagnostic\n".to_vec(),
+        };
+        assert_eq!(command_error(&output), "some unexpected diagnostic");
     }
 }

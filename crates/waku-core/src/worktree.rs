@@ -259,6 +259,10 @@ mod tests {
         let project = repository.join("packages/app");
         fs::create_dir_all(&project).unwrap();
         run_git(&repository, &["init", "-b", "main"]);
+        // A system-wide `core.autocrlf=true` (the Windows installer default)
+        // would rewrite checked-out files to CRLF and break byte-for-byte
+        // assertions; pin the repository's line-ending behavior.
+        run_git(&repository, &["config", "core.autocrlf", "false"]);
         fs::write(project.join("README.md"), "main\n").unwrap();
         run_git(&repository, &["add", "."]);
         run_git(

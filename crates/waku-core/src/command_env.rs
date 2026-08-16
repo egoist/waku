@@ -64,6 +64,43 @@ pub fn output(command: &mut Command) -> io::Result<Output> {
     spawn(command)?.wait_with_output()
 }
 
+/// Format a failed command's stderr for display, leading with the lines that
+/// name the actual failure.
+///
+/// Git mixes actionable failures in with unrelated warnings — most commonly
+/// the "LF will be replaced by CRLF" noise a system-wide `core.autocrlf=true`
+/// produces on Windows, which can bury the two `error:`/`fatal:` lines under
+/// dozens of warnings in a surfaced checkpoint or branch error. When failure
+/// lines are present they lead and the warnings drop away; otherwise the
+/// trimmed stderr keeps today's behavior.
+pub fn failure_detail(output: &Output) -> String {
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if let Some(failures) = failure_lines(&stderr) {
+        return failures;
+    }
+    let stderr = stderr.trim();
+    if stderr.is_empty() {
+        format!("process exited with {}", output.status)
+    } else {
+        stderr.to_owned()
+    }
+}
+
+/// The `error:`/`fatal:` lines of a command's stderr, joined, when there are
+/// any. See [`failure_detail`] for why warnings are dropped around them.
+pub fn failure_lines(stderr: &str) -> Option<String> {
+    let failure_lines: Vec<&str> = stderr
+        .lines()
+        .map(str::trim)
+        .filter(|line| line.starts_with("error:") || line.starts_with("fatal:"))
+        .collect();
+    if failure_lines.is_empty() {
+        None
+    } else {
+        Some(failure_lines.join("\n"))
+    }
+}
+
 /// Normalize a Waku-owned provider thread before a dependency spawns the child
 /// internally. The ACP SDK owns its `async_process::Command`, so its dedicated
 /// connection thread uses this once at startup instead of [`spawn`].
@@ -141,7 +178,61 @@ pub fn find_executable(name: &str) -> Option<PathBuf> {
     executable_search_paths()
         .into_iter()
         .map(|directory| directory.join(name))
+        .flat_map(executable_candidates)
         .find(|candidate| candidate.is_file())
+}
+
+/// Windows names executables with a `PATHEXT` suffix (`grok.exe`, `grok.cmd`);
+/// Unix ships a bare `grok` file. Expand a bare command name to the suffixes
+/// the platform would actually spawn.
+///
+/// On Windows the PATHEXT-suffixed names come first and the bare name is a
+/// last-resort fallback: npm's Windows installs drop an extensionless Unix
+/// launcher (`pi`) beside the `pi.cmd` Windows can actually spawn, and
+/// resolving the bare file first makes a provider look installed while every
+/// `Command::new` fails with `ERROR_BAD_EXE_FORMAT`. On Unix the extension
+/// list is empty, so the bare file stays the only candidate.
+fn executable_candidates(base: PathBuf) -> Vec<PathBuf> {
+    let mut candidates = executable_extensions()
+        .into_iter()
+        .map(|extension| base.with_extension(extension))
+        .collect::<Vec<_>>();
+    candidates.push(base);
+    candidates
+}
+
+#[cfg(windows)]
+fn executable_extensions() -> Vec<String> {
+    // `Command::new` also consults `PATHEXT` when spawning a bare name, so
+    // mirror the same suffixes for discovery. Fall back to the common set
+    // when the variable is absent.
+    std::env::var_os("PATHEXT")
+        .map(|extensions| {
+            std::env::split_paths(&extensions)
+                .filter_map(|extension| {
+                    extension
+                        .to_str()
+                        .map(str::trim)
+                        .filter(|extension| !extension.is_empty())
+                        .map(str::to_owned)
+                })
+                .collect::<Vec<_>>()
+        })
+        .filter(|extensions| !extensions.is_empty())
+        .unwrap_or_else(|| {
+            [".EXE", ".CMD", ".BAT"]
+                .into_iter()
+                .map(str::to_owned)
+                .collect()
+        })
+        .into_iter()
+        .map(|extension| extension.trim_start_matches('.').to_owned())
+        .collect()
+}
+
+#[cfg(not(windows))]
+fn executable_extensions() -> Vec<String> {
+    Vec::new()
 }
 
 /// Resolve a user-supplied binary override: `~` expands to the home
@@ -459,10 +550,32 @@ impl Drop for ShellEnvironmentCapture {
 mod tests {
     use super::*;
 
+    #[cfg(windows)]
+    #[test]
+    fn windows_prefers_pathext_candidates_over_the_bare_name() {
+        // npm's Windows installs ship an extensionless Unix launcher (`pi`)
+        // beside the `pi.cmd` that actually runs; resolving the bare file
+        // first marks the provider installed while every spawn fails.
+        let names = executable_candidates(PathBuf::from("pi"))
+            .iter()
+            .map(|candidate| candidate.to_string_lossy().to_ascii_lowercase())
+            .collect::<Vec<_>>();
+
+        let cmd = names.iter().position(|name| name == "pi.cmd");
+        let bare = names.iter().position(|name| name == "pi");
+        assert!(cmd.is_some(), "PATHEXT candidates must include pi.cmd: {names:?}");
+        assert!(bare.is_some(), "the bare name stays a fallback: {names:?}");
+        assert!(
+            cmd < bare,
+            "pi.cmd must be tried before the bare pi: {names:?}"
+        );
+    }
+
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
 
     #[test]
+    #[cfg(unix)]
     fn output_captures_stdout_and_stderr() {
         let mut command = Command::new("/bin/sh");
         command.args(["-c", "printf stdout; printf stderr >&2"]);
@@ -533,6 +646,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn launch_services_path_is_extended_for_script_based_clis() {
         let home = Path::new("/Users/example");
         let paths = search_paths_from(None, Some(OsStr::new("/usr/bin:/bin")), Some(home));
@@ -552,6 +666,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn login_shell_path_precedes_the_inherited_desktop_path() {
         let paths = search_paths_from(
             Some(OsStr::new(

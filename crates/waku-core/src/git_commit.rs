@@ -573,6 +573,9 @@ fn read_bounded(mut reader: impl Read, limit: usize) -> Vec<u8> {
 
 fn command_error(output: &CapturedOutput) -> String {
     let stderr = strip_ansi(&String::from_utf8_lossy(&output.stderr));
+    if let Some(failures) = crate::command_env::failure_lines(&stderr) {
+        return failures;
+    }
     let stderr = stderr.trim();
     if stderr.is_empty() {
         format!("process exited with {}", output.status)
