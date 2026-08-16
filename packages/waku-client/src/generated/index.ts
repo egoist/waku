@@ -10,6 +10,7 @@ export type { AttachmentUpload } from "./AttachmentUpload";
 export type { AttachmentUploadEntry } from "./AttachmentUploadEntry";
 export type { Automation } from "./Automation";
 export type { AutomationAgent } from "./AutomationAgent";
+export type { AutomationChange } from "./AutomationChange";
 export type { AutomationNotification } from "./AutomationNotification";
 export type { AutomationRun } from "./AutomationRun";
 export type { BranchEntry } from "./BranchEntry";

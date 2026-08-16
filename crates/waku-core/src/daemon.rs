@@ -366,11 +366,11 @@ impl Backend for WakuBackend {
                     bail!("automation {automation_id} is queued until its current run finishes")
                 }
             },
+            Command::ApplyAutomationChanges { changes } => self.apply_automation_changes(changes),
             Command::SaveTaskState {
                 projects,
                 live_session_ids: _,
                 sessions,
-                automations,
             } => {
                 let active_runtimes = self
                     .sessions
@@ -380,24 +380,6 @@ impl Backend for WakuBackend {
                     .collect::<HashMap<_, _>>();
                 let mut state = self.task_state.lock();
                 let removed_session_ids = self.removed_session_ids.lock();
-                if let Some(automations) = automations {
-                    let existing_automations = std::mem::take(&mut state.automations);
-                    state.automations = automations
-                        .into_iter()
-                        .map(|incoming| {
-                            if let Some(existing) = existing_automations
-                                .iter()
-                                .find(|existing| existing.id == incoming.id)
-                            {
-                                let mut merged = existing.clone();
-                                merge_automation_update(&mut merged, incoming);
-                                merged
-                            } else {
-                                incoming
-                            }
-                        })
-                        .collect();
-                }
                 for project in projects {
                     if let Some(existing) = state
                         .projects
@@ -776,6 +758,82 @@ impl WakuBackend {
             .find(|candidate| candidate.id == automation_id)
             .cloned()
             .unwrap_or(fallback)
+    }
+
+    fn apply_automation_changes(
+        &self,
+        changes: Vec<waku_protocol::automation::AutomationChange>,
+    ) -> anyhow::Result<ResponsePayload> {
+        for change in changes {
+            let automation_id = change.automation_id();
+            let lock = self.automation_lock(automation_id);
+            let mut removed_handles = Vec::new();
+            {
+                let _automation_guard = lock.lock();
+                match change {
+                    waku_protocol::automation::AutomationChange::Upsert { automation } => {
+                        let mut state = self.task_state.lock();
+                        if let Some(existing) = state
+                            .automations
+                            .iter_mut()
+                            .find(|existing| existing.id == automation.id)
+                        {
+                            merge_automation_update(existing, automation);
+                        } else {
+                            state.automations.push(automation);
+                        }
+                        self.task_store.save(&mut state)?;
+                    }
+                    waku_protocol::automation::AutomationChange::Remove {
+                        automation_id,
+                        cascade_sessions,
+                    } => {
+                        let mut state = self.task_state.lock();
+                        if cascade_sessions {
+                            let session_ids = state
+                                .sessions
+                                .iter()
+                                .filter(|session| {
+                                    session.originating_automation == Some(automation_id)
+                                })
+                                .map(|session| session.id)
+                                .collect::<HashSet<_>>();
+                            {
+                                let mut sessions = self.sessions.lock();
+                                removed_handles.extend(
+                                    session_ids
+                                        .iter()
+                                        .filter_map(|session_id| sessions.remove(session_id)),
+                                );
+                            }
+                            self.removed_session_ids
+                                .lock()
+                                .extend(session_ids.iter().copied());
+                            state
+                                .sessions
+                                .retain(|session| !session_ids.contains(&session.id));
+                            let used_project_ids = state
+                                .sessions
+                                .iter()
+                                .map(|session| session.project_id)
+                                .collect::<HashSet<_>>();
+                            state.projects.retain(|project| {
+                                !project.is_projectless() || used_project_ids.contains(&project.id)
+                            });
+                        }
+                        state
+                            .automations
+                            .retain(|automation| automation.id != automation_id);
+                        self.task_store.save(&mut state)?;
+                    }
+                }
+            }
+            // Runtime teardown may join its event forwarder, which also takes
+            // this automation lock. Drop handles only after releasing it.
+            drop(removed_handles);
+        }
+        let automations = self.task_state.lock().automations.clone();
+        Ok(ResponsePayload::AutomationChangesApplied { automations })
     }
 
     fn tick_automations(&self, events: EventSink) {
@@ -2365,6 +2423,7 @@ fn handle_driver_command(
         | Command::TrashSkills { .. }
         | Command::LoadTaskState
         | Command::RunAutomation { .. }
+        | Command::ApplyAutomationChanges { .. }
         | Command::SaveTaskState { .. }
         | Command::RemoveSession
         | Command::HydrateSession { .. }
@@ -2834,6 +2893,189 @@ mod tests {
         assert_eq!(existing.last_run_at, Some(20));
         assert_eq!(existing.history[0].id, run_id);
         assert_eq!(existing.history[0].session_id, Some(session_id));
+    }
+
+    #[test]
+    fn concurrent_deltas_for_different_automations_both_survive() {
+        let root = std::env::temp_dir().join(format!("waku-automation-deltas-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let store = StateStore::daemon(root.join("app.db"));
+        let mut state = PersistedState::empty();
+        let first = crate::automation::Automation::new("First", ProviderKind::Codex, 1);
+        let second = crate::automation::Automation::new("Second", ProviderKind::Codex, 1);
+        let first_id = first.id;
+        let second_id = second.id;
+        state.automations.extend([first.clone(), second.clone()]);
+        store.save(&mut state).unwrap();
+        drop(store);
+
+        let backend = Arc::new(
+            WakuBackend::new(
+                DaemonSettingsStore::open(root.join("settings.json")).unwrap(),
+                StateStore::daemon(root.join("app.db")),
+            )
+            .unwrap(),
+        );
+        let barrier = Arc::new(std::sync::Barrier::new(3));
+        let handles = [(first, "First renamed"), (second, "Second renamed")]
+            .into_iter()
+            .map(|(mut automation, name)| {
+                automation.name = name.to_owned();
+                let backend = backend.clone();
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    backend
+                        .apply_automation_changes(vec![
+                            waku_protocol::automation::AutomationChange::Upsert { automation },
+                        ])
+                        .unwrap();
+                })
+            })
+            .collect::<Vec<_>>();
+        barrier.wait();
+        for handle in handles {
+            handle.join().unwrap();
+        }
+
+        let state = backend.task_state.lock();
+        assert_eq!(state.automations.len(), 2);
+        assert_eq!(
+            state
+                .automations
+                .iter()
+                .find(|automation| automation.id == first_id)
+                .unwrap()
+                .name,
+            "First renamed"
+        );
+        assert_eq!(
+            state
+                .automations
+                .iter()
+                .find(|automation| automation.id == second_id)
+                .unwrap()
+                .name,
+            "Second renamed"
+        );
+        drop(state);
+        drop(backend);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn stale_delta_waits_for_daemon_history_and_preserves_it() {
+        let root = std::env::temp_dir().join(format!("waku-automation-history-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let store = StateStore::daemon(root.join("app.db"));
+        let mut state = PersistedState::empty();
+        let automation = crate::automation::Automation::new("Nightly", ProviderKind::Codex, 1);
+        let automation_id = automation.id;
+        let mut stale = automation.clone();
+        stale.name = "Renamed from stale client".to_owned();
+        state.automations.push(automation);
+        store.save(&mut state).unwrap();
+        drop(store);
+
+        let backend = Arc::new(
+            WakuBackend::new(
+                DaemonSettingsStore::open(root.join("settings.json")).unwrap(),
+                StateStore::daemon(root.join("app.db")),
+            )
+            .unwrap(),
+        );
+        let lock = backend.automation_lock(automation_id);
+        let guard = lock.lock();
+        let (finished_tx, finished_rx) = std::sync::mpsc::channel();
+        let worker = {
+            let backend = backend.clone();
+            std::thread::spawn(move || {
+                let result = backend.apply_automation_changes(vec![
+                    waku_protocol::automation::AutomationChange::Upsert { automation: stale },
+                ]);
+                finished_tx.send(result).unwrap();
+            })
+        };
+        assert!(matches!(
+            finished_rx.recv_timeout(std::time::Duration::from_millis(50)),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+        ));
+        let session_id = Uuid::new_v4();
+        let run_id = {
+            let mut state = backend.task_state.lock();
+            let automation = state
+                .automations
+                .iter_mut()
+                .find(|automation| automation.id == automation_id)
+                .unwrap();
+            automation.record_run(AutomationRun::spawned(session_id, 2, false));
+            let run_id = automation.history[0].id;
+            backend.task_store.save(&mut state).unwrap();
+            run_id
+        };
+        drop(guard);
+        finished_rx.recv().unwrap().unwrap();
+        worker.join().unwrap();
+
+        let state = backend.task_state.lock();
+        let automation = state
+            .automations
+            .iter()
+            .find(|automation| automation.id == automation_id)
+            .unwrap();
+        assert_eq!(automation.name, "Renamed from stale client");
+        assert_eq!(automation.history[0].id, run_id);
+        assert_eq!(automation.history[0].session_id, Some(session_id));
+        drop(state);
+        drop(backend);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn automation_removal_applies_its_cascade_choice() {
+        let root = std::env::temp_dir().join(format!("waku-automation-remove-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let store = StateStore::daemon(root.join("app.db"));
+        let mut state = PersistedState::empty();
+        let project = Project::from_path(root.join("project"));
+        let automation = crate::automation::Automation::new("Nightly", ProviderKind::Codex, 1);
+        let automation_id = automation.id;
+        let mut session = AgentSession::new(project.id, ProviderKind::Codex);
+        session.originating_automation = Some(automation_id);
+        let session_id = session.id;
+        state.projects.push(project);
+        state.automations.push(automation);
+        state.push_session(session);
+        store.save(&mut state).unwrap();
+        drop(store);
+
+        let backend = WakuBackend::new(
+            DaemonSettingsStore::open(root.join("settings.json")).unwrap(),
+            StateStore::daemon(root.join("app.db")),
+        )
+        .unwrap();
+        backend
+            .apply_automation_changes(vec![waku_protocol::automation::AutomationChange::Remove {
+                automation_id,
+                cascade_sessions: true,
+            }])
+            .unwrap();
+        let state = backend.task_state.lock();
+        assert!(
+            state
+                .automations
+                .iter()
+                .all(|automation| automation.id != automation_id)
+        );
+        assert!(
+            state
+                .sessions
+                .iter()
+                .all(|session| session.id != session_id)
+        );
+        drop(state);
+        drop(backend);
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

@@ -68,6 +68,28 @@ pub struct Automation {
     pub history: Vec<AutomationRun>,
 }
 
+/// A mutation targeting one automation without replacing any unrelated state.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize, TS)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum AutomationChange {
+    Upsert {
+        automation: Automation,
+    },
+    Remove {
+        automation_id: Uuid,
+        cascade_sessions: bool,
+    },
+}
+
+impl AutomationChange {
+    pub fn automation_id(&self) -> Uuid {
+        match self {
+            Self::Upsert { automation } => automation.id,
+            Self::Remove { automation_id, .. } => *automation_id,
+        }
+    }
+}
+
 impl Automation {
     /// A new automation with sensible defaults, stamped at `now` (unix seconds).
     pub fn new(name: impl Into<String>, provider: ProviderKind, now: u64) -> Self {

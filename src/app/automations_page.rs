@@ -493,8 +493,12 @@ impl Waku {
 
         let saved_id = match editor.id {
             Some(id) => {
-                if let Some(automation) = self.state.automation_mut(id) {
+                let updated = self.state.automation_mut(id).map(|automation| {
                     editor.apply_to(automation, name, prompt);
+                    automation.clone()
+                });
+                if let Some(updated) = updated {
+                    self.state.queue_automation_upsert(updated);
                 }
                 id
             }
@@ -506,7 +510,8 @@ impl Waku {
                 );
                 editor.apply_to(&mut automation, name, prompt);
                 let id = automation.id;
-                self.state.push_automation(automation);
+                self.state.push_automation(automation.clone());
+                self.state.queue_automation_upsert(automation);
                 id
             }
         };
@@ -603,6 +608,10 @@ impl Waku {
             finalize_automation_delete(&mut self.state, request, &session_ids, removal_results);
 
         if result.automation_deleted {
+            self.state.queue_automation_removal(
+                request.automation_id,
+                request.delete_sessions && result.refused_session_ids.is_empty(),
+            );
             self.automation_card_focuses
                 .borrow_mut()
                 .remove(&request.automation_id);
@@ -635,9 +644,13 @@ impl Waku {
 
     pub(super) fn toggle_automation_enabled(&mut self, id: Uuid, cx: &mut Context<Self>) {
         self.invalidate_automation_preparations(id);
-        if let Some(automation) = self.state.automation_mut(id) {
+        let updated = self.state.automation_mut(id).map(|automation| {
             automation.enabled = !automation.enabled;
             automation.updated_at = crate::model::unix_time();
+            automation.clone()
+        });
+        if let Some(updated) = updated {
+            self.state.queue_automation_upsert(updated);
             self.save();
             cx.notify();
         }
