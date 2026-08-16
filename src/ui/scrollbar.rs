@@ -202,12 +202,7 @@ fn scroll_to(surface: &impl Scrollable, offset: Pixels, max_offset: Pixels) {
 /// One in-flight wake for the end of the reveal hold. If the content keeps
 /// moving, the paint that this wake triggers finds the hold extended and arms
 /// the next wake — one timer alive at a time, one no-op frame per expiry.
-fn arm_fade_wake(
-    state: &Rc<ScrollbarState>,
-    view: gpui::EntityId,
-    delay: Duration,
-    cx: &mut App,
-) {
+fn arm_fade_wake(state: &Rc<ScrollbarState>, view: gpui::EntityId, delay: Duration, cx: &mut App) {
     if state.fade_wake_armed.replace(true) {
         return;
     }

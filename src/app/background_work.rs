@@ -974,7 +974,11 @@ impl Waku {
                                     .gap(px(5.0))
                                     .text_size(px(10.0))
                                     .text_color(theme.text_tertiary)
-                                    .child(rendered_work_status_icon(item.status, 9.0, status_color))
+                                    .child(rendered_work_status_icon(
+                                        item.status,
+                                        9.0,
+                                        status_color,
+                                    ))
                                     .child(work_status_label(item.status))
                                     .child("·")
                                     .child(work_elapsed(item)),

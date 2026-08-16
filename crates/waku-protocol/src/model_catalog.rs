@@ -49,7 +49,10 @@ pub fn fallback_models(provider: ProviderKind) -> Vec<ProviderModel> {
             claude_reasoning_model("claude-opus-4-5", "Claude Opus 4.5"),
             claude_long_context(claude_ultracode_model("claude-sonnet-5", "Claude Sonnet 5"))
                 .default(),
-            claude_long_context(claude_reasoning_model("claude-sonnet-4-6", "Claude Sonnet 4.6")),
+            claude_long_context(claude_reasoning_model(
+                "claude-sonnet-4-6",
+                "Claude Sonnet 4.6",
+            )),
             ProviderModel::new("claude-haiku-4-5", "Claude Haiku 4.5"),
         ],
         ProviderKind::Cursor => {
