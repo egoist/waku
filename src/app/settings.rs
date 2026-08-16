@@ -223,7 +223,7 @@ impl Waku {
                         .child(icon("icons/arrow-left.svg", 15.0, theme.text_tertiary))
                         .child(tr!("settings.back"))
                         .on_click(cx.listener(|this, _, window, cx| {
-                            this.active_page = None;
+                            this.set_active_page(None, cx);
                             let focus_handle = this.composer_focus(cx);
                             window.focus(&focus_handle, cx);
                             cx.notify();

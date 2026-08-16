@@ -518,6 +518,12 @@ automations.edit_title:
   en: Edit automation
 automations.save:
   en: Save
+automations.create:
+  en: Create
+automations.save_failed_missing:
+  en: This automation was deleted elsewhere. Create it again to keep your changes.
+automations.prompt_missing:
+  en: Add instructions — scheduled runs will not start without them.
 automations.cancel:
   en: Cancel
 automations.edit:
@@ -1480,6 +1486,12 @@ errors.store_pasted_image:
   en: "Could not attach the pasted image: %{error}"
 errors.create_worktree:
   en: "Could not create the worktree: %{error}"
+errors.prepare_automation_run:
+  en: "Could not prepare the automation run: %{error}"
+errors.prepare_task:
+  en: "Could not prepare the task: %{error}"
+errors.run_automation:
+  en: "Could not start the automation: %{error}"
 errors.prepared_runtime_unavailable:
   en: The prepared agent runtime is unavailable
 errors.start_agent:

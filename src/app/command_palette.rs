@@ -177,6 +177,17 @@ fn score_palette_candidates(
     scored
 }
 
+/// How much of an automation's prompt is worth indexing for search.
+const AUTOMATION_SEARCH_PROMPT_CHARS: usize = 160;
+
+/// The first `limit` characters of `text`, cut on a character boundary.
+fn search_prefix(text: &str, limit: usize) -> &str {
+    match text.char_indices().nth(limit) {
+        Some((end, _)) => &text[..end],
+        None => text,
+    }
+}
+
 fn next_selection_index(selected: usize, len: usize, delta: isize) -> Option<usize> {
     if len == 0 {
         return None;
@@ -817,7 +828,13 @@ impl Waku {
                     section: PaletteSection::Automations,
                     search_text: format!(
                         "{} {} automation scheduled recurring cron {summary}",
-                        automation.name, automation.prompt
+                        automation.name,
+                        // The whole prompt would be re-encoded to UTF-32 and
+                        // fuzzy-scored on every keystroke, and a long one
+                        // matches on words that say nothing about which
+                        // automation this is. The opening line is what a user
+                        // recognizes it by.
+                        search_prefix(&automation.prompt, AUTOMATION_SEARCH_PROMPT_CHARS),
                     ),
                     label: automation.name.clone(),
                     detail: Some(detail),
@@ -1015,7 +1032,7 @@ impl Waku {
                 self.open_settings_page(page, cx);
             }
             PaletteAction::SelectTask(session_id) => {
-                self.active_page = None;
+                self.set_active_page(None, cx);
                 self.select_session(session_id, cx);
                 let focus = self.composer_focus(cx);
                 window.focus(&focus, cx);
@@ -1027,7 +1044,7 @@ impl Waku {
                 // These popovers are rendered by the composer. If the command
                 // came from Settings, reveal one normal app frame first so its
                 // persistent menu handle and anchor bounds are current.
-                self.active_page = None;
+                self.set_active_page(None, cx);
                 let focus = self.composer_focus(cx);
                 window.focus(&focus, cx);
                 let weak = cx.entity().downgrade();
@@ -1349,6 +1366,18 @@ mod tests {
         let mut matcher = crate::composer_complete::matcher();
         let mut buf = Vec::new();
         pattern.score(Utf32Str::new(candidate, &mut buf), &mut matcher)
+    }
+
+    #[test]
+    fn search_prefix_truncates_on_character_boundaries() {
+        assert_eq!(search_prefix("short", 160), "short");
+        assert_eq!(search_prefix("abcdef", 3), "abc");
+        assert_eq!(search_prefix("", 3), "");
+        // Multi-byte input is the whole reason this is not `&text[..limit]`:
+        // slicing mid-character panics.
+        assert_eq!(search_prefix("日本語のプロンプト", 3), "日本語");
+        assert_eq!(search_prefix("日本語", 10), "日本語");
+        assert_eq!(search_prefix("🚀🚀🚀", 2), "🚀🚀");
     }
 
     #[test]

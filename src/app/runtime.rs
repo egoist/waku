@@ -3165,9 +3165,12 @@ impl Waku {
             && session.status == SessionStatus::Connecting
         {
             session.status = SessionStatus::Failed;
+            // Unlike the manual path's transient toast, this message is the
+            // durable record of why an unattended run never started, so it must
+            // not name a worktree for a failure that had nothing to do with one.
             session.push_message(
                 MessageRole::Assistant,
-                tr!("errors.create_worktree", error = error),
+                tr!("errors.prepare_automation_run", error = error),
             );
         }
         self.finish_active_turn_with_analytics(
@@ -3258,7 +3261,11 @@ impl Waku {
                     if restore_submission {
                         self.restore_composer_submission(submission, cx);
                     }
-                    self.show_toast(tr!("errors.create_worktree", error = error));
+                    // Preparation covers more than the worktree — allocating a
+                    // projectless workspace, and the daemon responses behind
+                    // both — so the toast names the step that failed rather
+                    // than one of the things it might have been.
+                    self.show_toast(tr!("errors.prepare_task", error = error));
                 }
                 cx.notify();
                 return;

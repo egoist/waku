@@ -91,7 +91,13 @@ impl ActivationExt for Stateful<Div> {
             cx.stop_propagation();
         }))
         .on_key_down(cx.listener(move |this, event: &KeyDownEvent, window, cx| {
-            if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+            // Bare Enter/Space only. A modified chord belongs to whatever
+            // command owns it, so a focused control must not swallow it —
+            // this is the guard the hand-rolled settings toggles carried
+            // before they moved onto this helper.
+            if !event.keystroke.modifiers.modified()
+                && matches!(event.keystroke.key.as_str(), "enter" | "space")
+            {
                 key_activate(this, window, cx);
                 cx.stop_propagation();
             }

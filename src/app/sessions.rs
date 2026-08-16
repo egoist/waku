@@ -191,7 +191,7 @@ impl Waku {
     fn activate_session(&mut self, session_id: Uuid, cx: &mut Context<Self>) {
         // Showing a session leaves the Automations page (unlike Settings, its
         // sidebar stays visible, so a session row can be clicked from it).
-        self.active_page = None;
+        self.set_active_page(None, cx);
         let session_changed = self.state.selected_session != Some(session_id);
         if session_changed {
             self.capture_and_save_current_composer_draft(cx);
@@ -446,7 +446,7 @@ impl Waku {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.active_page = None;
+        self.set_active_page(None, cx);
         if let Some(session_id) = self
             .session_navigation
             .remembered_new_task(&self.state.sessions)
@@ -478,7 +478,7 @@ impl Waku {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.active_page = Some(ActivePage::Settings(SettingsPage::General));
+        self.set_active_page(Some(ActivePage::Settings(SettingsPage::General)), cx);
         self.settings_scroll.set_offset(gpui::Point::default());
         // Sparkle owns this value and its consent prompt can flip it outside
         // the settings UI, so re-mirror it each time settings opens.
@@ -699,7 +699,7 @@ impl Waku {
         cx: &mut Context<Self>,
     ) {
         if matches!(self.active_page.as_ref(), Some(ActivePage::Settings(_))) {
-            self.active_page = None;
+            self.set_active_page(None, cx);
             let focus_handle = self.composer_focus(cx);
             window.focus(&focus_handle, cx);
             cx.notify();
@@ -710,7 +710,7 @@ impl Waku {
             return;
         };
         if let Some(target) = self.session_navigation.back_target() {
-            self.active_page = None;
+            self.set_active_page(None, cx);
             self.request_session_activation(
                 target,
                 SessionActivationTransition::Back { from: current },
@@ -733,7 +733,7 @@ impl Waku {
             return;
         };
         if let Some(target) = self.session_navigation.forward_target() {
-            self.active_page = None;
+            self.set_active_page(None, cx);
             self.request_session_activation(
                 target,
                 SessionActivationTransition::Forward { from: current },
@@ -767,7 +767,7 @@ impl Waku {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.active_page = None;
+        self.set_active_page(None, cx);
         let focus_handle = self.composer_focus(cx);
         window.focus(&focus_handle, cx);
         cx.notify();
@@ -779,21 +779,28 @@ impl Waku {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if let Some(page) = self.active_page.take() {
-            match page {
-                ActivePage::Settings(_)
-                | ActivePage::Automations(automations_page::AutomationsPage::List) => {
-                    let focus_handle = self.composer_focus(cx);
-                    window.focus(&focus_handle, cx);
-                }
-                // Escape backs the editor out to the list, then closes the page.
-                ActivePage::Automations(automations_page::AutomationsPage::Editor(_)) => {
-                    self.active_page = Some(ActivePage::Automations(
-                        automations_page::AutomationsPage::List,
-                    ));
-                    window.focus(&self.automations_focus, cx);
-                }
-            }
+        // Escape backs the editor out to the list, then closes the page. Route
+        // through `set_active_page` rather than taking the page apart here, so
+        // the editor is committed before its value is dropped.
+        if matches!(
+            self.active_page,
+            Some(ActivePage::Automations(
+                automations_page::AutomationsPage::Editor(_)
+            ))
+        ) {
+            self.set_active_page(
+                Some(ActivePage::Automations(
+                    automations_page::AutomationsPage::List,
+                )),
+                cx,
+            );
+            window.focus(&self.automations_focus, cx);
+            cx.notify();
+            return;
+        }
+        if self.active_page.take().is_some() {
+            let focus_handle = self.composer_focus(cx);
+            window.focus(&focus_handle, cx);
             cx.notify();
             return;
         }

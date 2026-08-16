@@ -600,6 +600,9 @@ errors.project_not_found: 找不到项目
 errors.prepare_task_project_not_found: 无法准备任务：找不到项目
 errors.store_pasted_image: "无法添加粘贴的图片：%{error}"
 errors.create_worktree: "无法创建工作树：%{error}"
+errors.prepare_automation_run: "无法准备自动化运行：%{error}"
+errors.prepare_task: "无法准备任务：%{error}"
+errors.run_automation: "无法启动自动化：%{error}"
 errors.prepared_runtime_unavailable: 已准备的智能体运行环境不可用
 errors.start_agent: "无法启动智能体：%{error}"
 errors.provider_no_active_turn: "%{provider} 当前没有可补充指示的任务"
@@ -1071,6 +1074,9 @@ automations.delete_irreversible: 此操作无法撤销。
 automations.delete_sessions_partial: 由于响应派生正在进行，无法删除 %{count} 个会话。
 automations.run_now: 立即运行
 automations.save: 保存
+automations.create: 创建
+automations.save_failed_missing: 该自动化已在别处被删除。请重新创建以保留你的更改。
+automations.prompt_missing: 请填写指令——没有指令时计划运行不会启动。
 automations.cancel: 取消
 automations.next_run: "下次运行 %{time}"
 automations.next_run_none: 未排期

@@ -636,6 +636,9 @@ errors.project_not_found: プロジェクトが見つかりません
 errors.prepare_task_project_not_found: タスクを準備できませんでした：プロジェクトが見つかりません
 errors.store_pasted_image: "ペーストした画像を添付できませんでした：%{error}"
 errors.create_worktree: "ワークツリーを作成できませんでした：%{error}"
+errors.prepare_automation_run: "自動化の実行を準備できませんでした：%{error}"
+errors.prepare_task: "タスクを準備できませんでした：%{error}"
+errors.run_automation: "自動化を開始できませんでした：%{error}"
 errors.prepared_runtime_unavailable: 準備したエージェントランタイムは利用できません
 errors.start_agent: "エージェントを起動できませんでした：%{error}"
 errors.provider_no_active_turn: "%{provider} には指示を追加できる実行中のターンがありません"
@@ -1123,6 +1126,9 @@ automations.delete_irreversible: この操作は取り消せません。
 automations.delete_sessions_partial: 応答のフォークが進行中のため、%{count} 件のセッションを削除できませんでした。
 automations.run_now: 今すぐ実行
 automations.save: 保存
+automations.create: 作成
+automations.save_failed_missing: この自動化は別の場所で削除されました。変更を保持するには作成し直してください。
+automations.prompt_missing: 指示を入力してください。指示がないとスケジュール実行は開始されません。
 automations.cancel: キャンセル
 automations.next_run: "次回の実行 %{time}"
 automations.next_run_none: スケジュールなし

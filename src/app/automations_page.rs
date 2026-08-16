@@ -348,8 +348,26 @@ impl Waku {
         *generation = generation.wrapping_add(1);
     }
 
+    /// Switch the full-page view, committing an open automation editor first.
+    ///
+    /// Every navigation away from the editor routes through here. Text fields
+    /// commit on blur, but a click that both blurs the field and changes the
+    /// page can deliver the blur after the editor is already gone — so the
+    /// commit has to happen before `active_page` moves, not as a side effect of
+    /// focus. This is what makes clicking the breadcrumb straight after typing
+    /// instructions keep them.
+    pub(super) fn set_active_page(&mut self, page: Option<ActivePage>, cx: &mut Context<Self>) {
+        if matches!(
+            self.active_page,
+            Some(ActivePage::Automations(AutomationsPage::Editor(_)))
+        ) {
+            self.commit_automation_editor(cx);
+        }
+        self.active_page = page;
+    }
+
     pub(super) fn open_automations(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.active_page = Some(ActivePage::Automations(AutomationsPage::List));
+        self.set_active_page(Some(ActivePage::Automations(AutomationsPage::List)), cx);
         self.automations_scroll.set_offset(gpui::Point::default());
         window.focus(&self.automations_focus, cx);
         cx.notify();
@@ -364,6 +382,11 @@ impl Waku {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // Commit any editor already open *before* the shared name and prompt
+        // fields are reloaded below. Committing afterwards — as routing this
+        // through `set_active_page` would — reads the incoming automation's text
+        // back onto the outgoing one.
+        self.commit_automation_editor(cx);
         let (editor, name, prompt) = match id.and_then(|id| self.state.automation(id)) {
             Some(automation) => {
                 let project_exists = automation.project_id.is_some_and(|project_id| {
@@ -394,6 +417,7 @@ impl Waku {
             .update(cx, |input, cx| input.set_content(hour_text, cx));
         self.automation_minute_input
             .update(cx, |input, cx| input.set_content(minute_text, cx));
+        // Assigned directly: the outgoing editor was already committed above.
         self.active_page = Some(ActivePage::Automations(AutomationsPage::Editor(editor)));
         self.automations_scroll.set_offset(gpui::Point::default());
         window.focus(&self.automations_focus, cx);
@@ -409,18 +433,105 @@ impl Waku {
         }
     }
 
-    /// Mutates the open editor, if any, then repaints.
+    /// Mutates the open editor, if any, writes it through, then repaints.
+    ///
+    /// The editor commits on change: an existing automation has no Save button,
+    /// so the control that moves the form is also the thing that persists it.
+    /// Text fields are the exception — they would otherwise write once per
+    /// keystroke, so they mutate through
+    /// [`Self::edit_automation_form_uncommitted`] and commit on blur.
     pub(super) fn edit_automation_form(
         &mut self,
         cx: &mut Context<Self>,
         change: impl FnOnce(&mut AutomationEditor),
     ) {
+        if !self.edit_automation_form_uncommitted(cx, change) {
+            return;
+        }
+        self.commit_automation_editor(cx);
+    }
+
+    /// Mutates the open editor without persisting it. Returns whether an editor
+    /// was actually open.
+    fn edit_automation_form_uncommitted(
+        &mut self,
+        cx: &mut Context<Self>,
+        change: impl FnOnce(&mut AutomationEditor),
+    ) -> bool {
+        let Some(ActivePage::Automations(AutomationsPage::Editor(editor))) =
+            self.active_page.as_mut()
+        else {
+            return false;
+        };
+        change(editor);
+        cx.notify();
+        true
+    }
+
+    /// The editor's live name and prompt text, trimmed. The name falls back to
+    /// a default so an automation is never nameless in the sidebar.
+    fn automation_editor_text(&self, cx: &Context<Self>) -> (String, String) {
+        let name = self
+            .automation_name_input
+            .read(cx)
+            .content()
+            .trim()
+            .to_owned();
+        let name = if name.is_empty() {
+            tr!("automations.default_name")
+        } else {
+            name
+        };
+        let prompt = self
+            .automation_prompt_input
+            .read(cx)
+            .content()
+            .trim()
+            .to_owned();
+        (name, prompt)
+    }
+
+    /// Write the open editor onto its automation and persist it.
+    ///
+    /// A no-op while creating — an automation that has never been saved is
+    /// materialized explicitly, so an incidental control change cannot conjure
+    /// a half-filled row. If the automation disappeared underneath the editor
+    /// (another client deleted it, and a task-state sync replaced the catalog),
+    /// the form reverts to a create and says so rather than dropping the edit.
+    pub(super) fn commit_automation_editor(&mut self, cx: &mut Context<Self>) {
+        let Some(ActivePage::Automations(AutomationsPage::Editor(editor))) =
+            self.active_page.as_ref()
+        else {
+            return;
+        };
+        let Some(id) = editor.id else {
+            return;
+        };
+        let editor = editor.clone();
+        let (name, prompt) = self.automation_editor_text(cx);
+        let Some(updated) = self.state.automation_mut(id).map(|automation| {
+            editor.apply_to(automation, name, prompt);
+            automation.clone()
+        }) else {
+            self.demote_automation_editor_to_create(cx);
+            return;
+        };
+        self.state.queue_automation_upsert(updated);
+        self.invalidate_automation_preparations(id);
+        self.save();
+        cx.notify();
+    }
+
+    /// Turn an editor whose automation no longer exists back into a create, so
+    /// the next Create keeps everything the user has typed so far.
+    fn demote_automation_editor_to_create(&mut self, cx: &mut Context<Self>) {
         if let Some(ActivePage::Automations(AutomationsPage::Editor(editor))) =
             self.active_page.as_mut()
         {
-            change(editor);
-            cx.notify();
+            editor.id = None;
         }
+        self.show_toast(tr!("automations.save_failed_missing"));
+        cx.notify();
     }
 
     /// Backs the freeform hour/minute schedule fields. Keeps only digits (at
@@ -439,7 +550,9 @@ impl Waku {
         let parsed = digits.parse::<u8>().ok();
         let clamped = parsed.map(|value| value.min(max));
         if let Some(value) = clamped {
-            self.edit_automation_form(cx, |editor| {
+            // Per-keystroke, so it must not write: these fields commit on blur
+            // like the rest of the editor's text.
+            self.edit_automation_form_uncommitted(cx, |editor| {
                 if minute_field {
                     editor.minute = value;
                 } else {
@@ -458,72 +571,50 @@ impl Waku {
         }
     }
 
-    fn save_automation_editor(&mut self, cx: &mut Context<Self>) {
+    /// Materialize the automation an editor in create mode is describing.
+    ///
+    /// This is the only explicit write the editor has. Once the row exists,
+    /// every later change commits on its own, so the button disappears rather
+    /// than becoming a Save the user has to remember to press.
+    fn create_automation_from_editor(&mut self, cx: &mut Context<Self>) {
         let Some(ActivePage::Automations(AutomationsPage::Editor(editor))) =
             self.active_page.as_ref()
         else {
             return;
         };
+        if editor.id.is_some() {
+            return;
+        }
         let editor = editor.clone();
-        let name = self
-            .automation_name_input
-            .read(cx)
-            .content()
-            .trim()
-            .to_owned();
-        let name = if name.is_empty() {
-            tr!("automations.default_name")
-        } else {
-            name
-        };
-        let prompt = self
-            .automation_prompt_input
-            .read(cx)
-            .content()
-            .trim()
-            .to_owned();
-        // A prompt-less automation can never do anything — the spawn path no-ops
-        // on empty input — so reject it at save time with a visible message
-        // rather than persist a run that silently does nothing forever.
+        let (name, prompt) = self.automation_editor_text(cx);
+        // A prompt-less automation can never do anything — the spawn path bails
+        // on empty input — so creating one is refused outright. An automation
+        // that already exists is not blocked the same way: its prompt is
+        // momentarily empty whenever the user clears the field to retype, and
+        // the editor says so inline instead.
         if prompt.is_empty() {
             self.show_toast(tr!("automations.prompt_required"));
             cx.notify();
             return;
         }
 
-        let saved_id = match editor.id {
-            Some(id) => {
-                let updated = self.state.automation_mut(id).map(|automation| {
-                    editor.apply_to(automation, name, prompt);
-                    automation.clone()
-                });
-                if let Some(updated) = updated {
-                    self.state.queue_automation_upsert(updated);
-                }
-                id
-            }
-            None => {
-                let mut automation = Automation::new(
-                    name.clone(),
-                    editor.agent.provider,
-                    crate::model::unix_time(),
-                );
-                editor.apply_to(&mut automation, name, prompt);
-                let id = automation.id;
-                self.state.push_automation(automation.clone());
-                self.state.queue_automation_upsert(automation);
-                id
-            }
-        };
-        self.invalidate_automation_preparations(saved_id);
+        let mut automation = Automation::new(
+            name.clone(),
+            editor.agent.provider,
+            crate::model::unix_time(),
+        );
+        editor.apply_to(&mut automation, name, prompt);
+        let id = automation.id;
+        self.state.push_automation(automation.clone());
+        self.state.queue_automation_upsert(automation);
+        self.invalidate_automation_preparations(id);
         self.save();
-        // Stay on the editor after saving. Promote a freshly created automation
-        // to an existing one so a second save updates it (and Run now becomes
-        // available) instead of pushing a duplicate.
+        // Stay on the editor, now bound to the row it just created, so the next
+        // change commits to it instead of pushing a duplicate.
         if let Some(ActivePage::Automations(AutomationsPage::Editor(editor))) =
             self.active_page.as_mut()
         {
-            editor.id = Some(saved_id);
+            editor.id = Some(id);
         }
         cx.notify();
     }
@@ -616,6 +707,9 @@ impl Waku {
                 .borrow_mut()
                 .remove(&request.automation_id);
             // Deleting the automation whose editor is open returns to the list.
+            // Assigned directly rather than through `set_active_page`: the row
+            // is gone on purpose, and committing the editor here would only
+            // report it as missing.
             if matches!(
                 &self.active_page,
                 Some(ActivePage::Automations(AutomationsPage::Editor(editor)))
@@ -637,7 +731,7 @@ impl Waku {
 
     /// Closes the editor and returns to the automations list.
     fn close_automation_editor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.active_page = Some(ActivePage::Automations(AutomationsPage::List));
+        self.set_active_page(Some(ActivePage::Automations(AutomationsPage::List)), cx);
         window.focus(&self.automations_focus, cx);
         cx.notify();
     }
@@ -677,11 +771,8 @@ impl Waku {
         else {
             return;
         };
-        let Some(automation) = self.state.automation_mut(automation_id) else {
-            return;
-        };
-        if !automation.settle_session_run(session_id, outcome) {
-            return;
+        if let Some(automation) = self.state.automation_mut(automation_id) {
+            automation.settle_session_run(session_id, outcome);
         }
     }
 
@@ -746,11 +837,15 @@ impl Waku {
                         waku.state.push_session(session.clone());
                     }
                     waku.install_prepared_driver(session.id, prepared);
-                    waku.active_page = None;
+                    waku.set_active_page(None, cx);
                     waku.select_session(session.id, cx);
                     cx.notify();
                 }
-                Err(error) => waku.show_toast(tr!("errors.save_local_state", error = error)),
+                // The daemon reports an overlap-policy refusal (already running,
+                // or queued behind the active run) through this same path, so
+                // the label has to describe starting the automation rather than
+                // saving state.
+                Err(error) => waku.show_toast(tr!("errors.run_automation", error = error)),
             });
         })
         .detach();
@@ -904,8 +999,20 @@ impl Waku {
                     ),
             );
         } else {
+            // Resolved once for the whole list, not per row: `Local::now` sits
+            // behind a cache that re-stats the host timezone, and this runs on
+            // every frame the page is up. `render` already schedules a
+            // time-label wake, so the next-run text still ticks forward.
+            let now = chrono::Local::now().naive_local();
+            // Rendered eagerly rather than through `list()`. Virtualization
+            // pays for itself on session history, which is unbounded; an
+            // automation is a hand-authored record and the realistic ceiling is
+            // a few dozen. Each row is a handful of divs over data already in
+            // memory — no I/O, no per-row clock — so the whole list costs less
+            // than the virtualized row builder's bookkeeping would. Revisit if
+            // automations ever become machine-generated.
             for automation in &self.state.automations {
-                list = list.child(self.render_automation_row(automation, &theme, cx));
+                list = list.child(self.render_automation_row(automation, now, &theme, cx));
             }
         }
 
@@ -915,12 +1022,13 @@ impl Waku {
     fn render_automation_row(
         &self,
         automation: &Automation,
+        now: NaiveDateTime,
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let id = automation.id;
         let enabled = automation.enabled;
-        let next_run = next_run_label(&automation.schedule);
+        let next_run = next_run_label(&automation.schedule, now);
         let summary = schedule_summary(&automation.schedule);
         let row_focus = self
             .automation_card_focuses
@@ -1311,32 +1419,38 @@ impl Waku {
                     .child(crumb_name),
             );
 
-        let save = div()
-            .id("automation-save")
-            .track_focus(&self.automation_save_focus)
-            .tab_index(0)
-            .flex_none()
-            .h(px(AUTOMATIONS_ACTION_HEIGHT))
-            .px(px(AUTOMATIONS_ACTION_PADDING))
-            .rounded(px(7.0))
-            // A border that is only transparent, not absent: Delete beside it
-            // carries one, so this keeps both boxes the same size and stops
-            // the button resizing when focus draws its ring.
-            .border_1()
-            .border_color(gpui::transparent_black())
-            .flex()
-            .items_center()
-            .justify_center()
-            .cursor_default()
-            .text_size(px(13.0))
-            .bg(theme.inverse)
-            .text_color(theme.on_inverse)
-            .focus_visible(|style| style.border_color(theme.accent))
-            .hover(|element| element.opacity(0.9))
-            .child(tr!("automations.save"))
-            .on_activation(cx, |this, _, cx| {
-                this.save_automation_editor(cx);
-            });
+        // Create is the editor's only explicit write, and only while the
+        // automation does not exist yet. Once it does, every control commits on
+        // change, so leaving a Save button there would imply the rest of the
+        // form was still waiting on it.
+        let create = id.is_none().then(|| {
+            div()
+                .id("automation-create")
+                .track_focus(&self.automation_save_focus)
+                .tab_index(0)
+                .flex_none()
+                .h(px(AUTOMATIONS_ACTION_HEIGHT))
+                .px(px(AUTOMATIONS_ACTION_PADDING))
+                .rounded(px(7.0))
+                // A border that is only transparent, not absent: Delete beside
+                // it carries one, so this keeps both boxes the same size and
+                // stops the button resizing when focus draws its ring.
+                .border_1()
+                .border_color(gpui::transparent_black())
+                .flex()
+                .items_center()
+                .justify_center()
+                .cursor_default()
+                .text_size(px(13.0))
+                .bg(theme.inverse)
+                .text_color(theme.on_inverse)
+                .focus_visible(|style| style.border_color(theme.accent))
+                .hover(|element| element.opacity(0.9))
+                .child(tr!("automations.create"))
+                .on_activation(cx, |this, _, cx| {
+                    this.create_automation_from_editor(cx);
+                })
+        });
 
         // Delete is only meaningful for an existing automation; Run now now
         // lives in the composer, bottom-right where the send button sits.
@@ -1356,7 +1470,7 @@ impl Waku {
                     .flex_none()
                     .gap(px(8.0))
                     .children(delete)
-                    .child(save),
+                    .children(create),
             );
 
         // One scroll flow, top to bottom like a settings page. The composer is
@@ -1592,7 +1706,36 @@ impl Waku {
             .child(self.render_project_control(AgentControlTarget::Automation, cx))
             .child(self.render_workspace_kind_control(AgentControlTarget::Automation, cx));
 
-        div().flex().flex_col().child(card).child(workspace_footer)
+        // An existing automation commits on change, so an empty prompt is a
+        // state the user can sit in — clearing the field to retype produces it.
+        // Say what that costs inline instead of blocking the write, and pair the
+        // warning colour with text so it does not rely on colour alone.
+        let prompt_missing = (id.is_some()
+            && self
+                .automation_prompt_input
+                .read(cx)
+                .content()
+                .trim()
+                .is_empty())
+        .then(|| {
+            div()
+                .mt(px(6.0))
+                .pl(px(10.0))
+                .flex()
+                .items_center()
+                .gap(px(5.0))
+                .text_size(px(11.5))
+                .text_color(theme.warning)
+                .child(icon("icons/alert.svg", 11.0, theme.warning))
+                .child(tr!("automations.prompt_missing"))
+        });
+
+        div()
+            .flex()
+            .flex_col()
+            .child(card)
+            .children(prompt_missing)
+            .child(workspace_footer)
     }
 
     fn editor_schedule_section(
@@ -2064,9 +2207,13 @@ pub(super) fn schedule_summary(schedule: &Schedule) -> String {
     }
 }
 
-/// The next-run line for the list, computed against the real local clock.
-fn next_run_label(schedule: &Schedule) -> String {
-    let now = chrono::Local::now().naive_local();
+/// The next-run line for one row, against a reference time the caller resolved
+/// once for the whole list.
+///
+/// `now` is injected rather than read here: this runs for every visible row on
+/// every frame, and `Local::now` re-reads the host timezone behind a cache, so
+/// per-row calls put a syscall-bearing path in the render loop.
+fn next_run_label(schedule: &Schedule, now: NaiveDateTime) -> String {
     match next_occurrence(schedule, now) {
         Some(next) => tr!("automations.next_run", time = format_next_run(next)),
         None => tr!("automations.next_run_none"),
