@@ -16,6 +16,10 @@ the original feature bullet instead of adding separate entries for them.
 
 ## [unreleased]
 
+## [0.1.2]
+
+- Fix regression: user bubble should fit its content width
+
 ## [0.1.1]
 
 - Give nested Markdown the full message width

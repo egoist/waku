@@ -146,11 +146,13 @@ impl Render for Waku {
         if self.settings_page.is_some() {
             let command_palette = self.render_command_palette(window, cx);
             let commit_dialog = self.render_commit_dialog(cx);
+            let toast = self.render_active_toast(cx);
             let content = div()
                 .relative()
                 .size_full()
                 .on_action(cx.listener(Self::toggle_command_palette_action))
                 .child(self.render_settings(window, cx))
+                .children(toast)
                 .children(command_palette)
                 .children(commit_dialog)
                 .children(image_preview)
@@ -167,15 +169,7 @@ impl Render for Waku {
         let computer_use = self.render_computer_use_overlay(cx);
         let command_palette = self.render_command_palette(window, cx);
         let commit_dialog = self.render_commit_dialog(cx);
-        self.start_toast_dismiss_timer(cx);
-        let toast = self
-            .toast
-            .as_ref()
-            .map(|toast| (toast.message.clone(), toast.tone, toast.id));
-        let toast = toast.map(|(message, tone, generation)| {
-            self.render_toast(message, tone, generation, cx)
-                .into_any_element()
-        });
+        let toast = self.render_active_toast(cx);
         let (sidebar_width, right_panel_width) = self.effective_panel_widths(window);
         let content = div()
             .key_context("Waku")
@@ -295,6 +289,22 @@ mod tests {
 }
 
 impl Waku {
+    /// Arm the dismiss timer and build the floating toast layer, if a toast
+    /// is active. Every full-window surface (workspace and settings alike)
+    /// must include this, or a toast raised there stays invisible until the
+    /// user navigates away.
+    fn render_active_toast(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        self.start_toast_dismiss_timer(cx);
+        let toast = self
+            .toast
+            .as_ref()
+            .map(|toast| (toast.message.clone(), toast.tone, toast.id));
+        toast.map(|(message, tone, generation)| {
+            self.render_toast(message, tone, generation, cx)
+                .into_any_element()
+        })
+    }
+
     fn render_toast(
         &self,
         message: String,
