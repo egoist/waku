@@ -27,6 +27,7 @@ macro_rules! tr {
 }
 
 pub mod attachments;
+pub mod automation;
 pub mod blob;
 pub mod checkpoint;
 pub mod composer;
@@ -51,10 +52,10 @@ mod protocol;
 
 pub use driver_wire::{decode_enum, encode_enum, event_from_wire, event_to_wire};
 pub use protocol::{
-    APP_EXECUTABLE_ENV, ClientMessage, Command, DAEMON_ADDRESS_ENV, DAEMON_TOKEN_ENV, DaemonReady,
-    MAX_WIRE_MESSAGE_BYTES, PROTOCOL_VERSION, ReplayCursor, Request, ResponseOutcome,
-    ResponsePayload, RpcError, SequencedEvent, ServerMessage, WireComputerToolRequest,
-    WireDriverEvent, WireDriverStartOptions, WireSessionOptions,
+    APP_EXECUTABLE_ENV, ClientMessage, Command, DAEMON_ADDRESS_ENV,
+    DAEMON_TOKEN_ENV, DaemonReady, MAX_WIRE_MESSAGE_BYTES, PROTOCOL_VERSION, ReplayCursor, Request,
+    ResponseOutcome, ResponsePayload, RpcError, SequencedEvent, ServerMessage,
+    WireComputerToolRequest, WireDriverEvent, WireDriverStartOptions, WireSessionOptions,
 };
 pub use settings::DaemonSettings;
 pub use workspace::{WorkspaceOperation, WorkspaceResult};
