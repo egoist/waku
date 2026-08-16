@@ -548,6 +548,7 @@ mod tests {
                 draft: Some(crate::persistence::ComposerDraft {
                     text: "unfinished".into(),
                     attachments: Vec::new(),
+                    annotations: Vec::new(),
                 }),
             }],
         };

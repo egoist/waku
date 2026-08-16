@@ -258,10 +258,17 @@ common.copied: コピーしました
 common.copy_message: メッセージをコピー
 common.copy_message_title: メッセージをコピー
 common.copy_selection: 選択範囲をコピー
+common.comment_on_selection: 選択範囲にコメント…
 common.copy_to_composer: 入力欄にコピー
 common.copy_code: コードをコピー
 common.cancel: キャンセル
 common.send: 送信
+annotations.count: "%{count} 件の注釈"
+annotations.show: 注釈を表示
+annotations.comment_placeholder: コメントを追加…
+annotations.remove: 注釈を削除
+annotations.goto: 移動
+annotations.sent_heading: 注釈
 
 session.fork_task: タスクをフォーク
 session.fork_task_title: タスクをフォーク

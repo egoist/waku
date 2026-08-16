@@ -79,6 +79,7 @@ impl Waku {
                 .iter()
                 .map(crate::persistence::ComposerDraftAttachment::from)
                 .collect(),
+            annotations: self.composer_annotations.clone(),
         }
     }
 
@@ -170,6 +171,10 @@ impl Waku {
             .into_iter()
             .map(ComposerAttachment::from)
             .collect();
+        self.composer_annotations = draft.annotations;
+        self.active_annotation = None;
+        self.annotation_editor
+            .update(cx, |input, cx| input.clear(cx));
         self.composer
             .update(cx, |input, cx| input.set_content(draft.text, cx));
         cx.notify();

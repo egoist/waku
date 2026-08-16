@@ -52,6 +52,14 @@ pub type TranscriptSelection = SelectionState<TextGeometry>;
 /// callers that do have that context can intercept a link, while every other
 /// markdown view continues to use GPUI's ordinary URL opener.
 pub type LinkHandler = Rc<dyn Fn(&str, &mut Window, &mut gpui::App)>;
+pub type AnnotationMarker = Rc<dyn Fn(usize) -> Option<AnyElement>>;
+
+#[derive(Clone, Debug)]
+pub struct PersistentHighlight {
+    pub text_index: usize,
+    pub range: Range<usize>,
+    pub color: Hsla,
+}
 
 // ── Layout metrics ─────────────────────────────────────────────────────────
 //
@@ -474,6 +482,8 @@ pub struct Ctx<'a> {
     metrics: Metrics,
     selection: TranscriptSelection,
     link_handler: Option<LinkHandler>,
+    persistent_highlights: Rc<[PersistentHighlight]>,
+    annotation_marker: Option<AnnotationMarker>,
     /// Cross-frame flatten cache, when this render has one to consult.
     cache: Option<&'a MarkdownView>,
     next_ordinal: Cell<usize>,
@@ -496,6 +506,8 @@ impl<'a> Ctx<'a> {
             metrics,
             selection,
             link_handler: None,
+            persistent_highlights: Rc::from([]),
+            annotation_marker: None,
             cache: None,
             next_ordinal: Cell::new(0),
             starts_block: Cell::new(true),
@@ -518,6 +530,16 @@ impl<'a> Ctx<'a> {
         self
     }
 
+    pub fn with_annotations(
+        mut self,
+        highlights: Vec<PersistentHighlight>,
+        marker: AnnotationMarker,
+    ) -> Self {
+        self.persistent_highlights = highlights.into();
+        self.annotation_marker = Some(marker);
+        self
+    }
+
     fn with_cache(&self, view: &'a MarkdownView) -> Self {
         Self {
             row: self.row.clone(),
@@ -525,6 +547,8 @@ impl<'a> Ctx<'a> {
             metrics: self.metrics,
             selection: self.selection.clone(),
             link_handler: self.link_handler.clone(),
+            persistent_highlights: self.persistent_highlights.clone(),
+            annotation_marker: self.annotation_marker.clone(),
             cache: Some(view),
             next_ordinal: Cell::new(self.next_ordinal.get()),
             starts_block: Cell::new(self.starts_block.get()),
@@ -570,6 +594,8 @@ fn text_element_with_selection(
     link_handler: Option<LinkHandler>,
     code_wash: Hsla,
     selection_wash: Hsla,
+    persistent_highlights: Vec<(Range<usize>, Hsla)>,
+    annotation_marker: Option<AnyElement>,
     block_break: bool,
 ) -> AnyElement {
     let styled = StyledText::new(flat.text.clone()).with_runs(runs);
@@ -611,6 +637,18 @@ fn text_element_with_selection(
                     ));
                 }
             }
+            for (range, color) in &persistent_highlights {
+                for rect in range_rects(&layout, range, 1.0, 0.5) {
+                    window.paint_quad(quad(
+                        rect,
+                        px(3.0),
+                        *color,
+                        px(0.0),
+                        gpui::transparent_black(),
+                        BorderStyle::default(),
+                    ));
+                }
+            }
             if let Some(range) = selection.selection.borrow().wash_range(&key) {
                 for rect in range_rects(&layout, &range, 0.0, 0.0) {
                     window.paint_quad(quad(
@@ -643,6 +681,7 @@ fn text_element_with_selection(
         .cursor(CursorStyle::IBeam)
         .child(underlay)
         .child(body)
+        .when_some(annotation_marker, |element, marker| element.child(marker))
         .into_any_element()
 }
 
@@ -660,6 +699,16 @@ fn text_element(flat: &FlatText, key: TextKey, ctx: &Ctx) -> AnyElement {
         }
         None => flat.runs.clone(),
     };
+    let persistent_highlights = ctx
+        .persistent_highlights
+        .iter()
+        .filter(|highlight| highlight.text_index == key.index)
+        .map(|highlight| (highlight.range.clone(), highlight.color))
+        .collect();
+    let annotation_marker = ctx
+        .annotation_marker
+        .as_ref()
+        .and_then(|marker| marker(key.index));
     text_element_with_selection(
         flat,
         runs,
@@ -668,6 +717,8 @@ fn text_element(flat: &FlatText, key: TextKey, ctx: &Ctx) -> AnyElement {
         ctx.link_handler.clone(),
         ctx.palette.code_wash,
         ctx.palette.selection,
+        persistent_highlights,
+        annotation_marker,
         ctx.take_block_break(),
     )
 }
@@ -694,6 +745,8 @@ pub fn selectable_flat_text(
         None,
         code_wash,
         selection_wash,
+        Vec::new(),
+        None,
         block_break,
     )
 }
@@ -998,8 +1051,7 @@ fn markdown_capped<'a>(
         ctx.next_ordinal.set(block_ordinal_base(block_ix));
         children.push(render_block(block, &ctx));
         debug_assert!(
-            ctx.next_ordinal.get() - block_ordinal_base(block_ix)
-                < 1 << BLOCK_ORDINAL_STRIDE_BITS,
+            ctx.next_ordinal.get() - block_ordinal_base(block_ix) < 1 << BLOCK_ORDINAL_STRIDE_BITS,
             "a single block overflowed its ordinal stride"
         );
     }

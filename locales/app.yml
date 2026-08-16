@@ -501,6 +501,8 @@ common.copy_message_title:
   en: Copy Message
 common.copy_selection:
   en: Copy Selection
+common.comment_on_selection:
+  en: Comment on Selection…
 common.copy_to_composer:
   en: Copy to Composer
 common.copy_code:
@@ -509,6 +511,19 @@ common.cancel:
   en: Cancel
 common.send:
   en: Send
+
+annotations.count:
+  en: "%{count} annotations"
+annotations.show:
+  en: Show annotations
+annotations.comment_placeholder:
+  en: Add a comment…
+annotations.remove:
+  en: Remove annotation
+annotations.goto:
+  en: Go to
+annotations.sent_heading:
+  en: Annotations
 
 session.fork_task:
   en: Fork task

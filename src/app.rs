@@ -32,17 +32,17 @@ use crate::md;
 use crate::model::{
     ActivityItem, ActivityKind, AgentSession, BackgroundWorkEvent, BackgroundWorkItem,
     BackgroundWorkKey, BackgroundWorkKind, BackgroundWorkStatus, Checkpoint, CheckpointStatus,
-    ContextUsage, DriverEvent, FavoriteModel, InteractionMode, Message, MessageAttachment,
-    MessageRole, PendingPermission, Project, ProviderKind, ProviderModel, ProviderProbe,
-    ProviderResumeCursor, QueuedMessage, ReasoningBlock, RuntimeMode, SessionStatus,
-    SessionWorkspace, TranscriptBlock, TurnStatus, UserInputAnswer, UserInputQuestion,
-    compact_path, unix_time, unix_time_millis,
+    ComposerAnnotation, ComposerAnnotationRange, ContextUsage, DriverEvent, FavoriteModel,
+    InteractionMode, Message, MessageAttachment, MessageRole, PendingPermission, Project,
+    ProviderKind, ProviderModel, ProviderProbe, ProviderResumeCursor, QueuedMessage,
+    ReasoningBlock, RuntimeMode, SessionStatus, SessionWorkspace, TranscriptBlock, TurnStatus,
+    UserInputAnswer, UserInputQuestion, compact_path, unix_time, unix_time_millis,
 };
 use unicode_segmentation::UnicodeSegmentation;
 
 use crate::md::render::{
     Ctx as MarkdownCtx, MarkdownView, Metrics as MarkdownMetrics, Palette as MarkdownPalette,
-    TranscriptSelection,
+    PersistentHighlight, TranscriptSelection,
 };
 use crate::ui::menu::{
     ConfirmEntry, ContextMenuHandle, DismissMenu, MenuAlign, MenuItem, SelectNextEntry,
@@ -328,6 +328,7 @@ struct ComposerSubmission {
     prompt: String,
     display_content: Option<String>,
     attachments: Vec<MessageAttachment>,
+    annotations: Vec<ComposerAnnotation>,
 }
 
 impl ComposerSubmission {
@@ -336,11 +337,17 @@ impl ComposerSubmission {
             prompt,
             display_content: None,
             attachments: Vec::new(),
+            annotations: Vec::new(),
         }
     }
 
     fn into_queued_message(self) -> QueuedMessage {
-        QueuedMessage::with_presentation(self.prompt, self.display_content, self.attachments)
+        QueuedMessage::with_annotations(
+            self.prompt,
+            self.display_content,
+            self.attachments,
+            self.annotations,
+        )
     }
 
     fn from_queued_message(message: QueuedMessage) -> Self {
@@ -348,6 +355,7 @@ impl ComposerSubmission {
             prompt: message.content,
             display_content: message.display_content,
             attachments: message.attachments,
+            annotations: message.annotations,
         }
     }
 
@@ -1027,6 +1035,11 @@ pub struct Waku {
     composer_drafts: ComposerDrafts,
     composer_draft_store: ComposerDraftStore,
     composer_draft_save_generation: u64,
+    /// Pending review notes for the selected draft. The shared editor is
+    /// rebound to whichever response marker is open.
+    composer_annotations: Vec<ComposerAnnotation>,
+    annotation_editor: Entity<ComposerInput>,
+    active_annotation: Option<Uuid>,
     command_palette: command_palette::CommandPaletteUi,
     model_search: Entity<ComposerInput>,
     settings_search: Entity<ComposerInput>,
@@ -1493,6 +1506,7 @@ pub struct Waku {
 }
 
 mod activity_diff;
+mod annotations;
 mod autocomplete;
 mod background_work;
 mod branches;
@@ -1838,6 +1852,11 @@ impl Waku {
         });
 
         let composer = cx.new(|cx| ComposerInput::new(window, cx).padding_x(px(14.0)));
+        let annotation_editor = cx.new(|cx| {
+            ComposerInput::new(window, cx)
+                .comment_field()
+                .placeholder(tr!("annotations.comment_placeholder"))
+        });
         let user_input_answer = cx.new(|cx| {
             ComposerInput::new(window, cx)
                 .search_field()
@@ -2042,6 +2061,7 @@ impl Waku {
         let crate::persistence::ComposerDraft {
             text: initial_composer_text,
             attachments: initial_composer_attachments,
+            annotations: composer_annotations,
         } = initial_composer_draft;
         if !initial_composer_text.is_empty() {
             composer.update(cx, |input, cx| input.set_content(initial_composer_text, cx));
@@ -2265,6 +2285,33 @@ impl Waku {
                             cx.notify();
                         }
                     }
+                },
+            )
+            .detach();
+
+            cx.subscribe_in(
+                &annotation_editor,
+                window,
+                |this: &mut Self, input, event: &ComposerEvent, window, cx| match event {
+                    ComposerEvent::Submit(comment) | ComposerEvent::SubmitSteer(comment) => {
+                        this.finish_annotation_edit(Some(comment.clone()), window, cx);
+                    }
+                    ComposerEvent::Edited => {
+                        let Some(annotation_id) = this.active_annotation else {
+                            return;
+                        };
+                        let comment = input.read(cx).content().to_owned();
+                        if let Some(annotation) = this
+                            .composer_annotations
+                            .iter_mut()
+                            .find(|annotation| annotation.id == annotation_id)
+                        {
+                            annotation.comment = comment;
+                            this.schedule_composer_draft_save(cx);
+                            cx.notify();
+                        }
+                    }
+                    ComposerEvent::Focus | ComposerEvent::BackspaceOnEmpty => {}
                 },
             )
             .detach();
@@ -2564,6 +2611,9 @@ impl Waku {
                 composer_drafts,
                 composer_draft_store,
                 composer_draft_save_generation: 0,
+                composer_annotations,
+                annotation_editor,
+                active_annotation: None,
                 command_palette: command_palette::CommandPaletteUi::new(command_palette_search),
                 model_search,
                 branch_search,

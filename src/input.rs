@@ -514,6 +514,7 @@ fn attachment_paste_entries(clipboard: &ClipboardItem) -> Option<Vec<ClipboardEn
 pub enum FieldMode {
     #[default]
     Composer,
+    Comment,
     Code,
     Search,
 }
@@ -739,6 +740,13 @@ impl ComposerInput {
     pub fn code_editor(mut self, language: Option<&str>) -> Self {
         self.mode = FieldMode::Code;
         self.language = language.and_then(highlight::lang_for_tag);
+        self
+    }
+
+    /// A multiline field whose submit shortcuts confirm without clearing it.
+    /// Popover owners use the emitted event to commit and dismiss themselves.
+    pub fn comment_field(mut self) -> Self {
+        self.mode = FieldMode::Comment;
         self
     }
 
@@ -1225,6 +1233,9 @@ impl ComposerInput {
             FieldMode::Code => {
                 self.replace_text_in_range(None, "\n", window, cx);
             }
+            FieldMode::Comment => {
+                cx.emit(ComposerEvent::Submit(self.content.to_string()));
+            }
             // A search query survives its own submission — Enter means "find
             // next", not "send" — and stays untrimmed because leading or
             // trailing spaces are part of what is searched for.
@@ -1251,6 +1262,10 @@ impl ComposerInput {
     }
 
     fn submit_steer(&mut self, _: &SubmitSteer, _: &mut Window, cx: &mut Context<Self>) {
+        if self.mode == FieldMode::Comment {
+            cx.emit(ComposerEvent::SubmitSteer(self.content.to_string()));
+            return;
+        }
         if self.mode != FieldMode::Composer {
             // Search and code fields have no running turn to steer; let an
             // outer handler claim the primary-modifier Enter shortcut instead of swallowing it.
@@ -1281,7 +1296,7 @@ impl ComposerInput {
             // A composer is one prompt — and a search box one query — so
             // pasted line breaks become spaces.
             FieldMode::Composer | FieldMode::Search => text.replace(['\n', '\r'], " "),
-            FieldMode::Code => text.replace('\r', ""),
+            FieldMode::Comment | FieldMode::Code => text.replace('\r', ""),
         };
         // A paste is its own undo step, never part of the typing around it —
         // the native NSTextView boundary, stricter than Zed's time grouping.
@@ -2355,6 +2370,12 @@ impl Render for ComposerInput {
                     .overflow_y_scroll()
                     .track_scroll(&scroll_handle)
                     .px(padding_x)
+                    .line_height(px(22.0))
+                    .text_size(px(13.5))
+            })
+            .when(self.mode == FieldMode::Comment, |field| {
+                field
+                    .min_h(px(24.0))
                     .line_height(px(22.0))
                     .text_size(px(13.5))
             })

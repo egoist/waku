@@ -1809,6 +1809,7 @@ mod tests {
         ComposerDraft {
             text: text.to_owned(),
             attachments: Vec::new(),
+            annotations: Vec::new(),
         }
     }
 
@@ -2014,6 +2015,7 @@ mod tests {
                 is_image: true,
                 blob_reference: None,
             }],
+            annotations: Vec::new(),
         };
         let mut drafts = ComposerDrafts::default();
         drafts.set(ComposerDraftKey::NewSession(project_id), draft.clone());
@@ -2381,6 +2383,7 @@ mod tests {
                     is_image: true,
                     blob_reference: Some(reference),
                 }],
+                annotations: Vec::new(),
             },
         );
         ComposerDraftStore::for_state_path(&directory.join("app.db"))

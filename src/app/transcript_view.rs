@@ -1206,18 +1206,79 @@ impl Waku {
                         .collect();
                     let attachments_can_reveal = !self.daemon.is_remote();
                     let menu = self.menu_handle(format!("message-{}", message.id), cx);
+                    let message_annotations = self
+                        .composer_annotations
+                        .iter()
+                        .filter(|annotation| annotation.message_id == message.id)
+                        .cloned()
+                        .collect::<Vec<_>>();
+                    let highlights = message_annotations
+                        .iter()
+                        .flat_map(|annotation| annotation.ranges.iter())
+                        .map(|range| PersistentHighlight {
+                            text_index: range.text_index,
+                            range: range.start..range.end,
+                            color: theme
+                                .accent
+                                .opacity(if theme.is_dark { 0.24 } else { 0.16 }),
+                        })
+                        .collect::<Vec<_>>();
+                    let mut marker_groups = HashMap::<usize, Vec<ComposerAnnotation>>::new();
+                    for annotation in message_annotations {
+                        let text_index = annotation
+                            .ranges
+                            .first()
+                            .map_or(0, |range| range.text_index);
+                        marker_groups
+                            .entry(text_index)
+                            .or_default()
+                            .push(annotation);
+                    }
+                    let marker_groups = marker_groups
+                        .into_iter()
+                        .map(|(text_index, annotations)| {
+                            (
+                                text_index,
+                                annotations::MessageAnnotationRender {
+                                    message_id: message.id,
+                                    annotations,
+                                    active: self.active_annotation,
+                                    editor: self.annotation_editor.clone(),
+                                    handle: self.menu_handle(
+                                        format!("message-annotations-{}-{text_index}", message.id),
+                                        cx,
+                                    ),
+                                },
+                            )
+                        })
+                        .collect::<HashMap<_, _>>();
                     let metrics = if message.role == MessageRole::User {
                         MarkdownMetrics::USER_MESSAGE
                     } else {
                         MarkdownMetrics::BODY
                     };
                     let animate_streaming = message.streaming && !cx.reduce_motion();
-                    let ctx = self.markdown_ctx(
-                        format!("message-{}", message.id),
-                        &palette,
-                        metrics,
-                        animate_streaming,
-                    );
+                    let marker_theme = theme;
+                    let marker_waku = waku.clone();
+                    let ctx = self
+                        .markdown_ctx(
+                            format!("message-{}", message.id),
+                            &palette,
+                            metrics,
+                            animate_streaming,
+                        )
+                        .with_annotations(
+                            highlights,
+                            Rc::new(move |text_index| {
+                                marker_groups.get(&text_index).cloned().map(|annotation| {
+                                    annotations::render_message_annotation_indicator(
+                                        annotation,
+                                        &marker_theme,
+                                        marker_waku.clone(),
+                                    )
+                                })
+                            }),
+                        );
                     // Human and assistant messages share the Markdown path.
                     // Parse only visible rows rather than doing work for every
                     // driver delta or every off-screen prompt.

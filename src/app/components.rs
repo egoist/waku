@@ -760,6 +760,7 @@ pub(super) fn render_message(params: MessageRender, cx: &mut App) -> AnyElement 
         move |cx| {
             message_menu_items(
                 &menu_copy_content,
+                message_id,
                 role,
                 user_message_action,
                 assistant_message_action,
@@ -777,6 +778,7 @@ pub(super) fn render_message(params: MessageRender, cx: &mut App) -> AnyElement 
 #[allow(clippy::too_many_arguments)]
 fn message_menu_items(
     content: &str,
+    message_id: Uuid,
     role: MessageRole,
     user_message_action: Option<UserMessageAction>,
     assistant_message_action: Option<AssistantMessageAction>,
@@ -787,10 +789,47 @@ fn message_menu_items(
 ) -> Vec<MenuItem> {
     let mut items = Vec::new();
 
-    if let Some(selected) = selection.selection.borrow().selected_text() {
+    let row = format!("message-{message_id}");
+    let spans = selection.selection.borrow().spans_for_row(&row);
+    if !spans.is_empty() {
+        let mut selected = String::new();
+        let mut ranges = Vec::with_capacity(spans.len());
+        for (text_index, range, text, block_break) in spans {
+            if !selected.is_empty() {
+                selected.push('\n');
+                if block_break {
+                    selected.push('\n');
+                }
+            }
+            selected.push_str(&text[range.clone()]);
+            ranges.push(ComposerAnnotationRange {
+                text_index,
+                start: range.start,
+                end: range.end,
+            });
+        }
+        let copy_selection = selected.clone();
         items.push(MenuItem::new(tr!("common.copy_selection"), move |_, cx| {
-            cx.write_to_clipboard(ClipboardItem::new_string(selected.clone()));
+            cx.write_to_clipboard(ClipboardItem::new_string(copy_selection.clone()));
         }));
+
+        if role == MessageRole::Assistant {
+            let waku = waku.clone();
+            items.push(
+                MenuItem::new(tr!("common.comment_on_selection"), move |window, cx| {
+                    let _ = waku.update(cx, |this, cx| {
+                        this.begin_annotation(
+                            message_id,
+                            selected.clone(),
+                            ranges.clone(),
+                            window,
+                            cx,
+                        );
+                    });
+                })
+                .icon("icons/comment.svg"),
+            );
+        }
     }
 
     let copy_content = content.to_owned();
