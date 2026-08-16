@@ -3,7 +3,7 @@ use std::io;
 use std::net::{TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Weak};
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context as _, bail};
 use crossbeam_channel::{Receiver, RecvTimeoutError, Sender, bounded, unbounded};
@@ -30,7 +30,7 @@ const MAX_HANDSHAKE_MESSAGE_BYTES: usize = 64 * 1024;
 const MAX_CONNECTIONS: usize = 64;
 const MAX_REPLAY_EVENTS_PER_SESSION: usize = 4096;
 const MAX_CACHED_RESPONSES: usize = 2048;
-const AUTOMATION_TICK_INTERVAL: Duration = Duration::from_secs(1);
+const WALL_CLOCK_MINUTE: Duration = Duration::from_secs(60);
 
 #[derive(Clone, Debug, Default)]
 pub struct ServerOptions {
@@ -62,6 +62,38 @@ pub trait Backend: Send + Sync + 'static {
     fn tick(self: Arc<Self>, _events: EventSink) {}
 
     fn shutdown(&self) {}
+}
+
+/// Return the time remaining before the next whole wall-clock minute.
+///
+/// Exact boundaries advance to the following minute. This keeps a scheduler
+/// tick delivered at `hh:mm:00` from immediately scheduling a duplicate tick
+/// at the same boundary.
+fn delay_until_next_minute(now: SystemTime) -> Duration {
+    let since_epoch = now.duration_since(UNIX_EPOCH).unwrap_or(Duration::ZERO);
+    let elapsed_in_minute = Duration::new(
+        since_epoch.as_secs() % WALL_CLOCK_MINUTE.as_secs(),
+        since_epoch.subsec_nanos(),
+    );
+    WALL_CLOCK_MINUTE - elapsed_in_minute
+}
+
+fn run_automation_scheduler(
+    backend: Arc<dyn Backend>,
+    events: EventSink,
+    shutdown: &AtomicBool,
+    mut now: impl FnMut() -> SystemTime,
+    mut wait: impl FnMut(Duration) -> bool,
+) {
+    while !shutdown.load(Ordering::Acquire) {
+        // The first tick is immediate for startup catch-up. Later ticks arrive
+        // after `wait`, then calculate their next target from the current wall
+        // clock so tick work and delayed timer delivery cannot accumulate drift.
+        backend.clone().tick(events.clone());
+        if !wait(delay_until_next_minute(now())) {
+            break;
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -544,17 +576,18 @@ pub fn serve(
     let scheduler = std::thread::Builder::new()
         .name("waku-daemon-automation-scheduler".into())
         .spawn(move || {
-            while !scheduler_shutdown.load(Ordering::Acquire) {
-                scheduler_backend
-                    .clone()
-                    .tick(scheduler_hub.event_sink(Uuid::nil(), Uuid::nil()));
-                if !matches!(
-                    scheduler_stopped.recv_timeout(AUTOMATION_TICK_INTERVAL),
-                    Err(RecvTimeoutError::Timeout)
-                ) {
-                    break;
-                }
-            }
+            run_automation_scheduler(
+                scheduler_backend,
+                scheduler_hub.event_sink(Uuid::nil(), Uuid::nil()),
+                scheduler_shutdown.as_ref(),
+                SystemTime::now,
+                |delay| {
+                    matches!(
+                        scheduler_stopped.recv_timeout(delay),
+                        Err(RecvTimeoutError::Timeout)
+                    )
+                },
+            );
         })
         .context("could not start automation scheduler")?;
 
@@ -1153,6 +1186,148 @@ mod tests {
                 _ => Ok(ResponsePayload::Ack),
             }
         }
+    }
+
+    struct SchedulerProbeBackend {
+        ticks: AtomicUsize,
+        trace: Option<Arc<Mutex<Vec<&'static str>>>>,
+    }
+
+    impl SchedulerProbeBackend {
+        fn new(trace: Option<Arc<Mutex<Vec<&'static str>>>>) -> Self {
+            Self {
+                ticks: AtomicUsize::new(0),
+                trace,
+            }
+        }
+    }
+
+    impl Backend for SchedulerProbeBackend {
+        fn handle(&self, _request: Request, _events: EventSink) -> anyhow::Result<ResponsePayload> {
+            Ok(ResponsePayload::Ack)
+        }
+
+        fn tick(self: Arc<Self>, _events: EventSink) {
+            self.ticks.fetch_add(1, Ordering::Relaxed);
+            if let Some(trace) = &self.trace {
+                trace.lock().push("tick");
+            }
+        }
+    }
+
+    fn wall_time(seconds: u64, nanoseconds: u32) -> SystemTime {
+        UNIX_EPOCH + Duration::new(seconds, nanoseconds)
+    }
+
+    #[test]
+    fn minute_boundary_delay_handles_exact_and_rollover_times() {
+        assert_eq!(
+            delay_until_next_minute(wall_time(60, 0)),
+            Duration::from_secs(60)
+        );
+        assert_eq!(
+            delay_until_next_minute(wall_time(60, 1)),
+            Duration::new(59, 999_999_999)
+        );
+        assert_eq!(
+            delay_until_next_minute(wall_time(119, 999_999_999)),
+            Duration::from_nanos(1)
+        );
+        assert_eq!(
+            delay_until_next_minute(wall_time(3_599, 250_000_000)),
+            Duration::from_millis(750)
+        );
+        assert_eq!(
+            delay_until_next_minute(wall_time(86_399, 500_000_000)),
+            Duration::from_millis(500)
+        );
+    }
+
+    #[test]
+    fn scheduler_ticks_before_waiting_on_startup() {
+        let trace = Arc::new(Mutex::new(Vec::new()));
+        let backend = Arc::new(SchedulerProbeBackend::new(Some(trace.clone())));
+        let clock_trace = trace.clone();
+        let wait_trace = trace.clone();
+
+        run_automation_scheduler(
+            backend.clone(),
+            EventSink::for_test(),
+            &AtomicBool::new(false),
+            move || {
+                clock_trace.lock().push("clock");
+                wall_time(17, 0)
+            },
+            move |_| {
+                wait_trace.lock().push("wait");
+                false
+            },
+        );
+
+        assert_eq!(backend.ticks.load(Ordering::Relaxed), 1);
+        assert_eq!(*trace.lock(), vec!["tick", "clock", "wait"]);
+    }
+
+    #[test]
+    fn scheduler_recalculates_boundaries_after_each_ticks_work() {
+        let backend = Arc::new(SchedulerProbeBackend::new(None));
+        let mut completed_ticks = VecDeque::from([
+            wall_time(17, 0),
+            wall_time(67, 0),
+            wall_time(122, 500_000_000),
+        ]);
+        let delays = Arc::new(Mutex::new(Vec::new()));
+        let recorded_delays = delays.clone();
+        let mut waits = 0;
+
+        run_automation_scheduler(
+            backend.clone(),
+            EventSink::for_test(),
+            &AtomicBool::new(false),
+            move || completed_ticks.pop_front().unwrap(),
+            move |delay| {
+                recorded_delays.lock().push(delay);
+                waits += 1;
+                waits < 3
+            },
+        );
+
+        assert_eq!(backend.ticks.load(Ordering::Relaxed), 3);
+        assert_eq!(
+            *delays.lock(),
+            vec![
+                Duration::from_secs(43),
+                Duration::from_secs(53),
+                Duration::new(57, 500_000_000),
+            ]
+        );
+    }
+
+    #[test]
+    fn late_wake_ticks_once_then_realigns() {
+        let backend = Arc::new(SchedulerProbeBackend::new(None));
+        let mut completed_ticks = VecDeque::from([wall_time(17, 0), wall_time(185, 0)]);
+        let delays = Arc::new(Mutex::new(Vec::new()));
+        let recorded_delays = delays.clone();
+        let mut waits = 0;
+
+        run_automation_scheduler(
+            backend.clone(),
+            EventSink::for_test(),
+            &AtomicBool::new(false),
+            move || completed_ticks.pop_front().unwrap(),
+            move |delay| {
+                recorded_delays.lock().push(delay);
+                waits += 1;
+                waits == 1
+            },
+        );
+
+        assert_eq!(backend.ticks.load(Ordering::Relaxed), 2);
+        assert_eq!(
+            *delays.lock(),
+            vec![Duration::from_secs(43), Duration::from_secs(55)]
+        );
     }
 
     #[test]
