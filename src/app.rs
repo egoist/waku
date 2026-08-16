@@ -320,9 +320,10 @@ enum RemoteImageState {
     Unavailable,
 }
 
-/// One accepted composer submission. `prompt` is the exact provider-facing
-/// text; presentation metadata keeps its appended attachment mentions out of
-/// the user bubble.
+/// One accepted composer submission. `prompt` preserves the composer and
+/// transcript syntax; provider-specific command syntax resolves only at the
+/// transport boundary. Presentation metadata keeps appended attachment
+/// mentions out of the user bubble.
 #[derive(Clone, Debug)]
 struct ComposerSubmission {
     prompt: String,

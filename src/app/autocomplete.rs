@@ -353,7 +353,10 @@ impl Waku {
             return;
         };
         let insert = match row {
-            AutocompleteRow::Command(scored) => format!("/{} ", scored.item.name),
+            AutocompleteRow::Command(scored) => {
+                let composer_text = composer_complete::command_composer_text(&scored.item);
+                format!("{composer_text} ")
+            }
             AutocompleteRow::File(scored) => format!("@{} ", scored.item.path),
         };
         if matches!(row, AutocompleteRow::Command(_)) {
@@ -470,12 +473,13 @@ impl Waku {
         match row {
             AutocompleteRow::Command(scored) => {
                 let command = &scored.item;
+                let composer_text = composer_complete::command_composer_text(command);
                 let icon_path = if command.scope == composer_complete::CommandScope::Skill {
                     "icons/sparkle.svg"
                 } else {
                     "icons/command.svg"
                 };
-                // Positions index the bare name; the drawn `/` shifts every
+                // Positions index the bare name; the drawn sigil shifts every
                 // byte range right by one.
                 let name_ranges = highlight_byte_ranges(&command.name, &scored.positions, 0)
                     .into_iter()
@@ -491,7 +495,7 @@ impl Waku {
                             .truncate()
                             .text_size(px(12.0))
                             .child(matched_text(
-                                format!("/{}", command.name),
+                                composer_text,
                                 name_ranges,
                                 theme.text,
                                 theme.accent,

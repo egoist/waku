@@ -81,6 +81,11 @@ pub fn merge_reported_commands(
     merged
 }
 
+/// Build the slash-prefixed text shown for an autocomplete command.
+pub fn command_composer_text(command: &SlashCommand) -> String {
+    format!("/{}", command.name)
+}
+
 /// Whether the submitted text resolves to Waku's Codex-only fast-mode
 /// toggle. Checking the resolved entry preserves project/user command
 /// precedence when one of them intentionally owns `/fast`.
@@ -155,18 +160,45 @@ pub fn expand_command_template(template: &str, args: &str) -> String {
     expanded
 }
 
-pub fn expanded_submission(prompt: &str, commands: &[SlashCommand]) -> Option<String> {
+/// Resolve composer text into the exact prompt expected by the provider.
+///
+/// Template commands expand to their body. Codex skills keep a slash in the
+/// composer and transcript, but its harness requires a dollar-prefixed catalog
+/// key at the transport boundary.
+pub fn resolved_submission(
+    provider: ProviderKind,
+    prompt: &str,
+    commands: &[SlashCommand],
+) -> Option<String> {
+    if let Some(skill) = resolved_skill_submission(provider, prompt, commands) {
+        return Some(skill);
+    }
     let invocation = prompt.strip_prefix('/')?;
     let (name, args) = invocation
         .split_once(char::is_whitespace)
         .map_or((invocation, ""), |(name, args)| (name, args.trim()));
-    let command = commands
+    let command = commands.iter().find(|command| command.name == name)?;
+    let template = command.template.as_deref()?;
+    Some(expand_command_template(template, args))
+}
+
+/// Resolve only provider-native skill syntax, without expanding templates.
+pub fn resolved_skill_submission(
+    provider: ProviderKind,
+    prompt: &str,
+    commands: &[SlashCommand],
+) -> Option<String> {
+    if provider != ProviderKind::Codex {
+        return None;
+    }
+    let invocation = prompt.strip_prefix('/')?;
+    let name = invocation
+        .split_once(char::is_whitespace)
+        .map_or(invocation, |(name, _)| name);
+    commands
         .iter()
-        .find(|command| command.name == name && command.template.is_some())?;
-    Some(expand_command_template(
-        command.template.as_deref().unwrap_or_default(),
-        args,
-    ))
+        .any(|command| command.name == name && command.scope == CommandScope::Skill)
+        .then(|| format!("${invocation}"))
 }
 
 pub fn matcher() -> Matcher {
@@ -340,6 +372,38 @@ mod tests {
             Some("default")
         );
         assert_eq!(toggled_fast_service_tier(None, &[]), None);
+    }
+
+    #[test]
+    fn codex_skill_completion_keeps_slash_in_the_composer() {
+        let skill = command("mattpocock-skills:to-spec", CommandScope::Skill);
+        assert_eq!(command_composer_text(&skill), "/mattpocock-skills:to-spec");
+        assert_eq!(
+            command_composer_text(&command("fast", CommandScope::Builtin)),
+            "/fast"
+        );
+    }
+
+    #[test]
+    fn codex_skill_submission_uses_the_catalog_invocation() {
+        let skill = command("mattpocock-skills:to-spec", CommandScope::Skill);
+        assert_eq!(
+            resolved_submission(
+                ProviderKind::Codex,
+                "/mattpocock-skills:to-spec carefully",
+                std::slice::from_ref(&skill)
+            )
+            .as_deref(),
+            Some("$mattpocock-skills:to-spec carefully")
+        );
+        assert_eq!(
+            resolved_submission(
+                ProviderKind::Claude,
+                "/mattpocock-skills:to-spec carefully",
+                std::slice::from_ref(&skill)
+            ),
+            None
+        );
     }
 
     fn command(name: &str, scope: CommandScope) -> SlashCommand {
