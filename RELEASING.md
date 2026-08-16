@@ -39,8 +39,10 @@ bun run release
 ## One-time setup
 
 The release runs on [Bun](https://bun.sh) and needs
-[`create-dmg`](https://github.com/create-dmg/create-dmg) and
-[rclone](https://rclone.org) (`brew install bun create-dmg rclone`).
+[`create-dmg`](https://github.com/create-dmg/create-dmg),
+[rclone](https://rclone.org), and the authenticated
+[GitHub CLI](https://cli.github.com) for the Homebrew cask bump
+(`brew install bun create-dmg rclone gh && gh auth login`).
 
 ### 1. Sparkle signing keys
 
@@ -125,15 +127,43 @@ published), builds and signs the app via `scripts/bundle.sh release`, verifies
 the bundled JS REPL and computer-use helper, builds the styled DMG, notarizes
 and staples DMG + app, zips the app for Sparkle, pulls the recent archives
 from R2 so `generate_appcast` can build binary deltas, attaches the changelog
-section as release notes, regenerates the signed `appcast.xml`, and uploads
+section as release notes, regenerates the signed `appcast.xml`, uploads
 everything with immutable cache headers (the appcast itself stays
-`max-age=300`). When it finishes:
+`max-age=300`), and bumps the Homebrew cask. When it finishes:
 
 - **Download link**: `https://releases.waku.sh/Waku-<version>.dmg`
 - **In-app updates**: served from the same origin via the appcast.
+- **Homebrew**: `brew install --cask egoist/tap/waku`
 
 Test by keeping an older build around, launching it, and choosing
 **Check for Updates…**.
+
+### Homebrew cask
+
+The cask lives in [egoist/homebrew-tap](https://github.com/egoist/homebrew-tap)
+as `Casks/waku.rb` and serves the DMG straight from R2, so its `version` and
+`sha256` have to follow every release.
+
+The tap owns that work: its **Update waku cask** workflow downloads
+`Waku-<version>.dmg`, hashes it, patches those two stanzas, and commits. It
+only ever rewrites those stanzas, so hand-maintained parts of the cask
+(`depends_on`, `zap`) survive a release — edit those in the tap directly.
+
+`scripts/release.ts` dispatches that workflow with `gh` once the upload
+finishes, so the cask can never name a URL that is not live yet. The release is
+already published by then, so a failure here only warns and prints the retry:
+
+```sh
+gh workflow run update-waku.yml -R egoist/homebrew-tap -f version=<version>
+```
+
+That same command is how you bump the cask for a release published by the tag
+workflow rather than locally — the R2 sync runs in CI, which does not dispatch
+the tap. Pass `--no-tap` (or `WAKU_NO_TAP=1`) to skip the bump.
+
+`depends_on macos:` mirrors the app's `LSMinimumSystemVersion` and
+`depends_on arch: :arm64` mirrors the appcast's hardware requirement; neither is
+automated, so move them in the tap when the app's requirements move.
 
 ### GitHub draft release + R2 sync
 
@@ -180,6 +210,7 @@ secrets first:
 | --- | --- | --- |
 | `--local` | — | build, notarize, and write the DMG + zip without publishing |
 | `--force` | — | re-publish a version that already exists in R2 |
+| `--no-tap` / `WAKU_NO_TAP=1` | — | publish without bumping the Homebrew cask |
 | `--adhoc`, `--skip-notarize` | — | local test builds (imply `--local`) |
 | `--skip-build` | — | reuse existing release binaries |
 | `--build-number <n>` / `WAKU_BUILD_NUMBER` | derived | `CFBundleVersion` override |
@@ -188,6 +219,8 @@ secrets first:
 | `WAKU_DOWNLOAD_URL_PREFIX` | `https://releases.waku.sh/` | base URL in the appcast |
 | `WAKU_HISTORY_COUNT` | `15` | recent archives pulled for delta generation |
 | `WAKU_NO_HISTORY=1` | — | skip pulling old archives (full updates only) |
+| `WAKU_TAP_REPO` | `egoist/homebrew-tap` | tap holding the cask |
+| `WAKU_TAP_WORKFLOW` | `update-waku.yml` | workflow dispatched in that tap |
 | `SPARKLE_BIN` | the `.waku-cache` copy | Sparkle tools directory |
 
 ---

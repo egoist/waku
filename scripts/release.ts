@@ -50,6 +50,7 @@ Options:
                                 waku-daemon
   --skip-notarize               Unnotarized signed DMG (implies --local)
   --adhoc                       Ad-hoc sign, no notarization (implies --local)
+  --no-tap                      Publish without bumping the Homebrew cask
   --help                        Show this help
 
 Environment:
@@ -62,6 +63,11 @@ Environment:
                                 (default: ${defaultDownloadUrlPrefix})
   WAKU_HISTORY_COUNT            prior archives pulled for deltas (default: 15)
   WAKU_NO_HISTORY=1             skip pulling prior archives (no deltas)
+  WAKU_TAP_REPO                 Homebrew tap bumped after publishing
+                                (default: egoist/homebrew-tap)
+  WAKU_TAP_WORKFLOW             workflow dispatched in that tap
+                                (default: update-waku.yml)
+  WAKU_NO_TAP=1                 skip the cask bump (same as --no-tap)
   SPARKLE_BIN                   Sparkle tools dir (default: the bundle.sh cache
                                 under .waku-cache/sparkle)
   SPARKLE_PRIVATE_KEY           Sparkle EdDSA private key (otherwise keychain)
@@ -79,6 +85,7 @@ const { values } = parseArgs({
     force: { type: "boolean" },
     help: { type: "boolean", short: "h" },
     local: { type: "boolean" },
+    "no-tap": { type: "boolean" },
     "notary-profile": { type: "string" },
     output: { type: "string", short: "o" },
     "signing-identity": { type: "string" },
@@ -162,6 +169,9 @@ const downloadUrlPrefix =
   process.env.WAKU_DOWNLOAD_URL_PREFIX ?? defaultDownloadUrlPrefix;
 const historyCount = Number(process.env.WAKU_HISTORY_COUNT ?? "15");
 const skipHistory = process.env.WAKU_NO_HISTORY === "1";
+const tapRepo = process.env.WAKU_TAP_REPO ?? "egoist/homebrew-tap";
+const tapWorkflow = process.env.WAKU_TAP_WORKFLOW ?? "update-waku.yml";
+const skipTap = (values["no-tap"] ?? false) || process.env.WAKU_NO_TAP === "1";
 
 if (adhoc && values["signing-identity"]) {
   throw new Error("Use either --adhoc or --signing-identity, not both.");
@@ -670,6 +680,36 @@ try {
     console.log(`  download : ${downloadUrlPrefix}${dmgName}`);
     console.log(`  update   : ${downloadUrlPrefix}${zipName}`);
     console.log(`  feed     : ${downloadUrlPrefix}appcast.xml`);
+
+    // The Homebrew cask serves the DMG that just went up, so its version and
+    // sha256 have to follow. The tap's own workflow hashes the published file
+    // and commits; this only has to fire it, after the upload rather than
+    // before, so the cask can never point at a URL that is not there yet.
+    //
+    // The release is already live at this point, so a tap failure is a warning
+    // with a retry command, not a failed release.
+    if (!skipTap) {
+      logStep(`Updating the Homebrew cask in ${tapRepo}`);
+      const retry = `gh workflow run ${tapWorkflow} -R ${tapRepo} -f version=${version}`;
+      if (!Bun.which("gh")) {
+        console.warn(
+          `warning: gh is not in PATH, so the cask was not bumped.\n` +
+            `         Install the GitHub CLI and run: ${retry}`,
+        );
+      } else {
+        const dispatch =
+          await $`gh workflow run ${tapWorkflow} -R ${tapRepo} -f version=${version}`
+            .nothrow();
+        if (dispatch.exitCode === 0) {
+          console.log(`Dispatched ${tapWorkflow} for ${version}.`);
+        } else {
+          console.warn(
+            `warning: could not bump the cask (gh exited ${dispatch.exitCode}).\n` +
+              `         Retry with: ${retry}`,
+          );
+        }
+      }
+    }
   }
 
   console.log(`\nDMG ready: ${outputPath}`);
