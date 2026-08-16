@@ -91,3 +91,12 @@ export type { WireSessionOptions } from "./WireSessionOptions";
 export type { WorkingTreeEntry } from "./WorkingTreeEntry";
 export type { WorkspaceOperation } from "./WorkspaceOperation";
 export type { WorkspaceResult } from "./WorkspaceResult";
+export * from './Automation'
+export * from './AutomationAgent'
+export * from './NotificationConfig'
+export * from './NotificationTrigger'
+export * from './OverlapPolicy'
+export * from './RunOutcome'
+export * from './Schedule'
+export * from './TimeOfDay'
+export * from './Weekday'
