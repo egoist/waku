@@ -1137,7 +1137,9 @@ automations.summary_monthly: "毎月 %{days} 日 %{time}"
 automations.summary_hourly: "毎時 :%{minute}"
 automations.summary_manual: 手動 — スケジュールなし
 automations.prompt_required: 保存する前にプロンプトを入力してください。
+automations.name_required: 保存する前に名前を入力してください。
 automations.web_description: スケジュール、実行結果、トランスクリプトを確認できます。
+automations.authoring_description: プロンプト、エージェント、スケジュール、重複、通知を設定します。
 automations.daemon_required: スケジュール実行には Waku クライアントが起動している必要があります。
 automations.client_connected: Waku クライアントに接続済み
 automations.client_disconnected: Waku クライアントに未接続
@@ -1145,11 +1147,22 @@ automations.empty_read_body: Waku で作成した自動化とその実行履歴�
 automations.history: 実行履歴
 automations.no_runs: 実行履歴はまだありません。
 automations.select_hint: 自動化を選択するとスケジュールと実行履歴を確認できます。
+automations.run_started: 自動化を開始しました
+automations.saved: 自動化を保存しました
+automations.deleted: 自動化を削除しました
 automations.run_transcript: 実行トランスクリプト
 automations.loading_transcript: トランスクリプトを読み込み中…
 automations.transcript_unavailable: この実行のトランスクリプトは利用できません。
 automations.open_task: タスクを開く
 automations.catch_up: キャッチアップ
+automations.notifications_off: オフ
+automations.model_description: 空欄にするとプロバイダーのデフォルトを使用します。
+automations.field_service_tier: サービスティア
+automations.field_agent_preset: エージェントプリセット
+automations.field_interaction: 対話モード
+automations.delete_safe_description: 自動化だけを削除し、セッションとトランスクリプトは残します。
+automations.delete_sessions_exact: セッション %{count} 件とそのトランスクリプトも削除します。
+automations.frequency_hourly: 毎時
 automations.outcome_running: 実行中
 automations.outcome_succeeded: 成功
 automations.outcome_failed: 失敗

@@ -1085,7 +1085,9 @@ automations.summary_monthly: "每月 %{days} 日 %{time}"
 automations.summary_hourly: "每小时 :%{minute}"
 automations.summary_manual: 手动 — 无计划
 automations.prompt_required: 请先输入提示词再保存此自动化。
+automations.name_required: 请先输入名称再保存此自动化。
 automations.web_description: 查看计划任务、运行结果和对话记录。
+automations.authoring_description: 配置提示词、智能体、计划、重叠策略和通知。
 automations.daemon_required: 只有 Waku 客户端运行时，计划任务才会执行。
 automations.client_connected: Waku 客户端已连接
 automations.client_disconnected: Waku 客户端未连接
@@ -1093,11 +1095,22 @@ automations.empty_read_body: 在 Waku 中创建的自动化及其运行历史会
 automations.history: 运行历史
 automations.no_runs: 尚无运行记录。
 automations.select_hint: 选择一个自动化以查看计划和运行历史。
+automations.run_started: 自动化已开始运行
+automations.saved: 自动化已保存
+automations.deleted: 自动化已删除
 automations.run_transcript: 运行对话记录
 automations.loading_transcript: 正在加载对话记录…
 automations.transcript_unavailable: 此运行没有可用的对话记录。
 automations.open_task: 打开任务
 automations.catch_up: 补运行
+automations.notifications_off: 关闭
+automations.model_description: 留空以使用服务商默认设置。
+automations.field_service_tier: 服务等级
+automations.field_agent_preset: 智能体预设
+automations.field_interaction: 交互模式
+automations.delete_safe_description: 只删除自动化，保留其会话和对话记录。
+automations.delete_sessions_exact: 同时删除确切的 %{count} 个会话及其对话记录。
+automations.frequency_hourly: 每小时
 automations.outcome_running: 运行中
 automations.outcome_succeeded: 成功
 automations.outcome_failed: 失败

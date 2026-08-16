@@ -1,6 +1,8 @@
 import type {
   AgentSession,
   AgentInvocation,
+  Automation,
+  AutomationChange,
   BranchSnapshot,
   Checkpoint,
   CommitSnapshot,
@@ -69,6 +71,46 @@ export const daemonKeys = {
 
 export async function loadTaskState(client: WakuClient): Promise<TaskState> {
   return expectResponse(await client.request({ type: 'loadTaskState' }), 'taskState')
+}
+
+/**
+ * Starts one automation through the daemon-owned scheduler execution path.
+ *
+ * @param client Connected daemon client.
+ * @param automationId Automation to run immediately.
+ * @returns The updated automation and spawned session.
+ */
+export async function runAutomation(
+  client: WakuClient,
+  automationId: string,
+): Promise<Extract<ResponsePayload, { type: 'automationRunStarted' }>> {
+  return expectResponse(
+    await client.request({
+      type: 'runAutomation',
+      automationId,
+      catchUp: false,
+    }),
+    'automationRunStarted',
+  )
+}
+
+/**
+ * Applies per-automation deltas without replacing the automation catalog.
+ *
+ * @param client Connected daemon client.
+ * @param changes Targeted upsert or remove deltas.
+ * @returns The daemon's current automation catalog after applying the deltas.
+ */
+export async function applyAutomationChanges(
+  client: WakuClient,
+  changes: AutomationChange[],
+): Promise<Automation[]> {
+  if (!changes.length) return []
+  const response = expectResponse(
+    await client.request({ type: 'applyAutomationChanges', changes }),
+    'automationChangesApplied',
+  )
+  return response.automations
 }
 
 export async function loadComposerDrafts(client: WakuClient): Promise<ComposerDrafts> {

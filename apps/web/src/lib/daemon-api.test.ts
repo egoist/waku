@@ -1,6 +1,14 @@
 import { describe, expect, test } from 'bun:test'
-import type { ComposerDraftChange, DaemonSettings, Project, WakuClient } from '@waku/client'
+import type {
+  AgentSession,
+  Automation,
+  ComposerDraftChange,
+  DaemonSettings,
+  Project,
+  WakuClient,
+} from '@waku/client'
 import {
+  applyAutomationChanges,
   applyComposerDraftChanges,
   beginTurn,
   browseDaemonDirectory,
@@ -12,10 +20,76 @@ import {
   persistSession,
   probeProvider,
   removeSession,
+  runAutomation,
   selectableProjects,
   writeWorkspaceTextFile,
   type DaemonDirectory,
 } from './daemon-api'
+
+describe('automation daemon commands', () => {
+  test('routes run-now through the daemon execution command', async () => {
+    let command: unknown
+    const automation = {} as Automation
+    const session = {} as AgentSession
+    const client = {
+      request: async (next: unknown) => {
+        command = next
+        return {
+          type: 'automationRunStarted',
+          automation,
+          session,
+          runtimeId: 'runtime',
+          supportsSteer: true,
+        }
+      },
+    } as unknown as WakuClient
+
+    await expect(runAutomation(client, 'automation')).resolves.toMatchObject({
+      automation,
+      session,
+      runtimeId: 'runtime',
+      supportsSteer: true,
+    })
+    expect(command).toEqual({
+      type: 'runAutomation',
+      automationId: 'automation',
+      catchUp: false,
+    })
+  })
+
+  test('sends an upsert as one targeted automation delta payload', async () => {
+    let command: unknown
+    const automation = { id: 'automation' } as Automation
+    const changes = [{ kind: 'upsert', automation }] as const
+    const client = {
+      request: async (next: unknown) => {
+        command = next
+        return { type: 'automationChangesApplied', automations: [automation] }
+      },
+    } as unknown as WakuClient
+
+    await expect(applyAutomationChanges(client, [...changes])).resolves.toEqual([automation])
+    expect(command).toEqual({ type: 'applyAutomationChanges', changes: [...changes] })
+  })
+
+  test('puts the explicit cascade decision in a remove delta payload', async () => {
+    let command: unknown
+    const changes = [{
+      kind: 'remove',
+      automation_id: 'automation',
+      cascade_sessions: false,
+    }] as const
+    const client = {
+      request: async (next: unknown) => {
+        command = next
+        return { type: 'automationChangesApplied', automations: [] }
+      },
+    } as unknown as WakuClient
+
+    await expect(applyAutomationChanges(client, [...changes])).resolves.toEqual([])
+    expect(command).toEqual({ type: 'applyAutomationChanges', changes: [...changes] })
+  })
+})
 
 describe('applyComposerDraftChanges', () => {
   test('sends keyed updates instead of replacing every client draft', async () => {
