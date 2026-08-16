@@ -885,27 +885,15 @@ impl Waku {
     /// started session and runs calendar math per session — far too much per
     /// tick for values that move at most once per stream commit. The
     /// fingerprint is an allocation-free scan of exactly what
-    /// [`Self::sidebar_rows`] reads: started sessions in order with their
-    /// recency timestamps, the collapsed-group set, and today's date.
+    /// [`Self::sidebar_rows`] reads.
     fn sidebar_rows_cached(&self, today: NaiveDate) -> Rc<SidebarRows> {
-        let mut fingerprint = mix(0x51de_ba5e_5eed_c0de, today.num_days_from_ce() as u64);
-        for session in &self.state.sessions {
-            if !session.has_started() {
-                continue;
-            }
-            fingerprint = mix_uuid(fingerprint, session.id);
-            fingerprint = mix(fingerprint, sidebar_session_timestamp(session));
-        }
-        // A set has no stable iteration order; combine order-independently.
-        let collapsed = self
-            .sidebar_collapsed_groups
-            .iter()
-            .fold(0u64, |combined, group| {
-                combined.wrapping_add(mix(0, group.index() as u64 + 1))
-            });
-        fingerprint = mix(
-            mix(fingerprint, self.sidebar_collapsed_groups.len() as u64),
-            collapsed,
+        let fingerprint = sidebar_rows_fingerprint(
+            &self.state.sessions,
+            today,
+            &self.sidebar_collapsed_groups,
+            self.sidebar_automations_collapsed,
+            &self.sidebar_expanded_automations,
+            &self.sidebar_expanded_automation_runs,
         );
         if self.sidebar_rows_fingerprint.get() != Some(fingerprint) {
             *self.sidebar_rows_snapshot.borrow_mut() = Rc::new(self.sidebar_rows(today));
@@ -2188,6 +2176,47 @@ impl Waku {
     }
 }
 
+fn sidebar_rows_fingerprint(
+    sessions: &[AgentSession],
+    today: NaiveDate,
+    collapsed_groups: &HashSet<SessionDateGroup>,
+    automations_collapsed: bool,
+    expanded_automations: &HashSet<Uuid>,
+    expanded_automation_runs: &HashSet<Uuid>,
+) -> u64 {
+    let mut fingerprint = mix(0x51de_ba5e_5eed_c0de, today.num_days_from_ce() as u64);
+    for session in sessions {
+        if !session.has_started() {
+            continue;
+        }
+        fingerprint = mix_uuid(fingerprint, session.id);
+        fingerprint = mix(fingerprint, sidebar_session_timestamp(session));
+    }
+    // Sets have no stable iteration order; combine each one order-independently
+    // and use distinct seeds so moving an id between disclosures changes the key.
+    let collapsed = collapsed_groups.iter().fold(0u64, |combined, group| {
+        combined.wrapping_add(mix(0, group.index() as u64 + 1))
+    });
+    fingerprint = mix(mix(fingerprint, collapsed_groups.len() as u64), collapsed);
+    fingerprint = mix(fingerprint, u64::from(automations_collapsed));
+
+    let expanded = expanded_automations.iter().fold(0u64, |combined, id| {
+        combined.wrapping_add(mix_uuid(0xa710_5eed, *id))
+    });
+    fingerprint = mix(
+        mix(fingerprint, expanded_automations.len() as u64),
+        expanded,
+    );
+
+    let expanded_runs = expanded_automation_runs.iter().fold(0u64, |combined, id| {
+        combined.wrapping_add(mix_uuid(0x7a11_5eed, *id))
+    });
+    mix(
+        mix(fingerprint, expanded_automation_runs.len() as u64),
+        expanded_runs,
+    )
+}
+
 fn localized_session_title(session: &AgentSession) -> String {
     let title = session.display_title();
     if title == AgentSession::DEFAULT_TITLE {
@@ -2302,6 +2331,61 @@ mod tests {
             pending
         ));
         assert!(sidebar_session_selected(Some(current), None, current));
+    }
+
+    #[test]
+    fn automation_disclosures_invalidate_sidebar_rows() {
+        let today = NaiveDate::from_ymd_opt(2026, 8, 12).unwrap();
+        let automation_id = Uuid::from_u128(1);
+        let sessions = Vec::new();
+        let collapsed_groups = HashSet::new();
+        let collapsed = HashSet::new();
+        let expanded = HashSet::from([automation_id]);
+
+        let baseline = sidebar_rows_fingerprint(
+            &sessions,
+            today,
+            &collapsed_groups,
+            false,
+            &collapsed,
+            &collapsed,
+        );
+        assert_ne!(
+            baseline,
+            sidebar_rows_fingerprint(
+                &sessions,
+                today,
+                &collapsed_groups,
+                true,
+                &collapsed,
+                &collapsed,
+            ),
+            "collapsing the Automations section must invalidate its row snapshot"
+        );
+        assert_ne!(
+            baseline,
+            sidebar_rows_fingerprint(
+                &sessions,
+                today,
+                &collapsed_groups,
+                false,
+                &expanded,
+                &collapsed,
+            ),
+            "expanding an automation must invalidate its run rows"
+        );
+        assert_ne!(
+            baseline,
+            sidebar_rows_fingerprint(
+                &sessions,
+                today,
+                &collapsed_groups,
+                false,
+                &collapsed,
+                &expanded,
+            ),
+            "showing all automation runs must invalidate its run rows"
+        );
     }
 
     #[test]
