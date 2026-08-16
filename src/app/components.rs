@@ -677,6 +677,8 @@ pub(super) fn render_message(params: MessageRender, cx: &mut App) -> AnyElement 
                     let body = render_markdown_message_body(&content, markdown, theme, ctx);
                     column = column.child(
                         div()
+                            // Give nested Markdown a definite width for measurement.
+                            .w_full()
                             .max_w(px(540.0))
                             .min_w_0()
                             .rounded(px(12.0))
