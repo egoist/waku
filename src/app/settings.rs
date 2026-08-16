@@ -440,52 +440,14 @@ impl Waku {
             .try_global::<crate::updater::UpdaterState>()
             .is_some_and(|updater| updater.0.is_some());
         let analytics_enabled = self.state.analytics_enabled;
-        let analytics_toggle = div()
-            .id("anonymous-analytics-toggle")
-            .tab_index(0)
-            .focus_visible(|style| style.border_color(theme.accent))
-            .w(px(36.0))
-            .h(px(20.0))
-            .p(px(2.0))
-            .flex_none()
-            .rounded_full()
-            .cursor_default()
-            .bg(if analytics_enabled {
-                theme.inverse
-            } else {
-                theme.inset
-            })
-            .border_1()
-            .border_color(if analytics_enabled {
-                theme.inverse
-            } else {
-                theme.border_strong
-            })
-            .flex()
-            .items_center()
-            .when(analytics_enabled, |element| element.justify_end())
-            .child(
-                div()
-                    .w(px(14.0))
-                    .h(px(14.0))
-                    .rounded_full()
-                    .bg(if analytics_enabled {
-                        theme.on_inverse
-                    } else {
-                        theme.text_tertiary
-                    }),
-            )
-            .on_click(cx.listener(move |this, _, _, cx| {
-                this.set_analytics_enabled(!analytics_enabled, cx);
-            }))
-            .on_key_down(cx.listener(move |this, event: &KeyDownEvent, _, cx| {
-                if !event.keystroke.modifiers.modified()
-                    && matches!(event.keystroke.key.as_str(), "enter" | "space")
-                {
-                    this.set_analytics_enabled(!analytics_enabled, cx);
-                    cx.stop_propagation();
-                }
-            }));
+        let analytics_toggle = toggle_switch(
+            "anonymous-analytics-toggle",
+            analytics_enabled,
+            false,
+            theme,
+            cx,
+            move |this, _, cx| this.set_analytics_enabled(!analytics_enabled, cx),
+        );
         div()
             .child(
                 div()
@@ -547,34 +509,14 @@ impl Waku {
             )
             .when(updater_available, |column| {
                 let enabled = self.automatic_updates_enabled;
-                let toggle = div()
-                    .id("automatic-updates-toggle")
-                    .tab_index(0)
-                    .focus_visible(|style| style.border_color(theme.accent))
-                    .w(px(36.0))
-                    .h(px(20.0))
-                    .p(px(2.0))
-                    .flex_none()
-                    .rounded_full()
-                    .cursor_default()
-                    .bg(if enabled { theme.inverse } else { theme.inset })
-                    .border_1()
-                    .border_color(if enabled {
-                        theme.inverse
-                    } else {
-                        theme.border_strong
-                    })
-                    .flex()
-                    .items_center()
-                    .when(enabled, |element| element.justify_end())
-                    .child(div().w(px(14.0)).h(px(14.0)).rounded_full().bg(if enabled {
-                        theme.on_inverse
-                    } else {
-                        theme.text_tertiary
-                    }))
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.set_automatic_updates_enabled(!enabled, cx);
-                    }));
+                let toggle = toggle_switch(
+                    "automatic-updates-toggle",
+                    enabled,
+                    false,
+                    theme,
+                    cx,
+                    move |this, _, cx| this.set_automatic_updates_enabled(!enabled, cx),
+                );
                 column.child(
                     div()
                         .mt(px(15.0))
@@ -666,46 +608,14 @@ impl Waku {
         let websocket_url = format!("ws://{}:{port}", self.daemon_hostname);
         let token = self.state.daemon_exposure.token.clone();
 
-        let exposure_toggle = div()
-            .id("daemon-exposure-toggle")
-            .tab_index(0)
-            .focus_visible(|style| style.border_color(theme.accent))
-            .w(px(36.0))
-            .h(px(20.0))
-            .p(px(2.0))
-            .flex_none()
-            .rounded_full()
-            .cursor_default()
-            .opacity(if pending { 0.55 } else { 1.0 })
-            .bg(if enabled { theme.inverse } else { theme.inset })
-            .border_1()
-            .border_color(if enabled {
-                theme.inverse
-            } else {
-                theme.border_strong
-            })
-            .flex()
-            .items_center()
-            .when(enabled, |element| element.justify_end())
-            .child(div().w(px(14.0)).h(px(14.0)).rounded_full().bg(if enabled {
-                theme.on_inverse
-            } else {
-                theme.text_tertiary
-            }))
-            .when(!pending, |element| {
-                element
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.set_daemon_exposure_enabled(!enabled, cx);
-                    }))
-                    .on_key_down(cx.listener(move |this, event: &KeyDownEvent, _, cx| {
-                        if !event.keystroke.modifiers.modified()
-                            && matches!(event.keystroke.key.as_str(), "enter" | "space")
-                        {
-                            this.set_daemon_exposure_enabled(!enabled, cx);
-                            cx.stop_propagation();
-                        }
-                    }))
-            });
+        let exposure_toggle = toggle_switch(
+            "daemon-exposure-toggle",
+            enabled,
+            pending,
+            theme,
+            cx,
+            move |this, _, cx| this.set_daemon_exposure_enabled(!enabled, cx),
+        );
 
         let apply_disabled = pending || !fields_dirty;
         let apply_button = div()
@@ -1566,47 +1476,14 @@ impl Waku {
             };
 
             let toggle_on = !disabled;
-            let toggle = div()
-                .id(SharedString::from(format!(
-                    "provider-enabled-{}",
-                    kind.id()
-                )))
-                .tab_index(0)
-                .focus_visible(|style| style.border_color(theme.accent))
-                .w(px(36.0))
-                .h(px(20.0))
-                .p(px(2.0))
-                .flex_none()
-                .rounded_full()
-                .cursor_default()
-                .bg(if toggle_on {
-                    theme.inverse
-                } else {
-                    theme.inset
-                })
-                .border_1()
-                .border_color(if toggle_on {
-                    theme.inverse
-                } else {
-                    theme.border_strong
-                })
-                .flex()
-                .items_center()
-                .when(toggle_on, |element| element.justify_end())
-                .child(
-                    div()
-                        .w(px(14.0))
-                        .h(px(14.0))
-                        .rounded_full()
-                        .bg(if toggle_on {
-                            theme.on_inverse
-                        } else {
-                            theme.text_tertiary
-                        }),
-                )
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    this.set_provider_enabled(kind, disabled, cx);
-                }));
+            let toggle = toggle_switch(
+                SharedString::from(format!("provider-enabled-{}", kind.id())),
+                toggle_on,
+                false,
+                theme,
+                cx,
+                move |this, _, cx| this.set_provider_enabled(kind, disabled, cx),
+            );
 
             let expanded = self.expanded_provider_settings == Some(kind);
             let expand_button = icon_button(
@@ -2090,33 +1967,14 @@ impl Waku {
                                     .child(tr!("computer_use.availability")),
                             ),
                     )
-                    .child(
-                        div()
-                            .id("computer-use-enabled")
-                            .w(px(36.0))
-                            .h(px(20.0))
-                            .p(px(2.0))
-                            .rounded_full()
-                            .cursor_default()
-                            .bg(if enabled { theme.inverse } else { theme.inset })
-                            .border_1()
-                            .border_color(if enabled {
-                                theme.inverse
-                            } else {
-                                theme.border_strong
-                            })
-                            .flex()
-                            .items_center()
-                            .when(enabled, |element| element.justify_end())
-                            .child(div().w(px(14.0)).h(px(14.0)).rounded_full().bg(if enabled {
-                                theme.on_inverse
-                            } else {
-                                theme.text_tertiary
-                            }))
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.set_computer_use_enabled(!enabled, cx);
-                            })),
-                    ),
+                    .child(toggle_switch(
+                        "computer-use-enabled",
+                        enabled,
+                        false,
+                        theme,
+                        cx,
+                        move |this, _, cx| this.set_computer_use_enabled(!enabled, cx),
+                    )),
             )
             .child(
                 div()
