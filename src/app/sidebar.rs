@@ -889,6 +889,8 @@ impl Waku {
     fn sidebar_rows_cached(&self, today: NaiveDate) -> Rc<SidebarRows> {
         let fingerprint = sidebar_rows_fingerprint(
             &self.state.sessions,
+            &self.state.automations,
+            self.state.selected_session,
             today,
             &self.sidebar_collapsed_groups,
             self.sidebar_automations_collapsed,
@@ -2178,6 +2180,8 @@ impl Waku {
 
 fn sidebar_rows_fingerprint(
     sessions: &[AgentSession],
+    automations: &[crate::automation::Automation],
+    selected_session: Option<Uuid>,
     today: NaiveDate,
     collapsed_groups: &HashSet<SessionDateGroup>,
     automations_collapsed: bool,
@@ -2191,7 +2195,26 @@ fn sidebar_rows_fingerprint(
         }
         fingerprint = mix_uuid(fingerprint, session.id);
         fingerprint = mix(fingerprint, sidebar_session_timestamp(session));
+        // `sidebar_rows` also caches each automation group's spinner state, and
+        // a run can go Connecting -> Working -> Failed without ever landing a
+        // reply, so the recency timestamp above would not move.
+        if session.originating_automation.is_some() {
+            fingerprint = mix(fingerprint, session.status as u64 + 1);
+        }
     }
+    // The group rows cache each automation's name and enabled flag, so a rename
+    // or a toggle has to invalidate the snapshot even though no session moved.
+    for automation in automations {
+        fingerprint = mix_uuid(fingerprint, automation.id);
+        fingerprint = mix(fingerprint, automation.updated_at);
+        fingerprint = mix(fingerprint, u64::from(automation.enabled));
+    }
+    // A collapsed group mirrors its selected run's highlight, which is cached
+    // alongside the rest of the metadata.
+    fingerprint = match selected_session {
+        Some(session_id) => mix_uuid(fingerprint, session_id),
+        None => mix(fingerprint, 0x5e1e_c7ed_0000_0000),
+    };
     // Sets have no stable iteration order; combine each one order-independently
     // and use distinct seeds so moving an id between disclosures changes the key.
     let collapsed = collapsed_groups.iter().fold(0u64, |combined, group| {
@@ -2338,12 +2361,15 @@ mod tests {
         let today = NaiveDate::from_ymd_opt(2026, 8, 12).unwrap();
         let automation_id = Uuid::from_u128(1);
         let sessions = Vec::new();
+        let automations = Vec::new();
         let collapsed_groups = HashSet::new();
         let collapsed = HashSet::new();
         let expanded = HashSet::from([automation_id]);
 
         let baseline = sidebar_rows_fingerprint(
             &sessions,
+            &automations,
+            None,
             today,
             &collapsed_groups,
             false,
@@ -2354,6 +2380,8 @@ mod tests {
             baseline,
             sidebar_rows_fingerprint(
                 &sessions,
+                &automations,
+                None,
                 today,
                 &collapsed_groups,
                 true,
@@ -2366,6 +2394,8 @@ mod tests {
             baseline,
             sidebar_rows_fingerprint(
                 &sessions,
+                &automations,
+                None,
                 today,
                 &collapsed_groups,
                 false,
@@ -2378,6 +2408,8 @@ mod tests {
             baseline,
             sidebar_rows_fingerprint(
                 &sessions,
+                &automations,
+                None,
                 today,
                 &collapsed_groups,
                 false,
@@ -2385,6 +2417,73 @@ mod tests {
                 &expanded,
             ),
             "showing all automation runs must invalidate its run rows"
+        );
+    }
+
+    /// The group rows cache the automation's name, enabled flag, spinner, and
+    /// selection highlight. None of those move a session's recency timestamp,
+    /// so each one needs its own fingerprint input or the sidebar renders the
+    /// last-cached value indefinitely.
+    #[test]
+    fn automation_metadata_changes_invalidate_sidebar_rows() {
+        use crate::automation::Automation;
+
+        let today = NaiveDate::from_ymd_opt(2026, 8, 12).unwrap();
+        let collapsed_groups = HashSet::new();
+        let collapsed = HashSet::new();
+        let automation = Automation::new("Nightly", ProviderKind::Codex, 1_000);
+        let mut session = AgentSession::new(Uuid::new_v4(), ProviderKind::Codex);
+        session.originating_automation = Some(automation.id);
+        session.begin_turn("run");
+        session.status = SessionStatus::Connecting;
+        let session_id = session.id;
+        let sessions = vec![session];
+        let automations = vec![automation.clone()];
+
+        let fingerprint =
+            |sessions: &[AgentSession], automations: &[Automation], selected: Option<Uuid>| {
+                sidebar_rows_fingerprint(
+                    sessions,
+                    automations,
+                    selected,
+                    today,
+                    &collapsed_groups,
+                    false,
+                    &collapsed,
+                    &collapsed,
+                )
+            };
+        let baseline = fingerprint(&sessions, &automations, None);
+
+        let mut renamed = automation.clone();
+        renamed.name = "Renamed".to_owned();
+        renamed.updated_at = automation.updated_at + 1;
+        assert_ne!(
+            baseline,
+            fingerprint(&sessions, &[renamed], None),
+            "renaming an automation must invalidate its cached group name"
+        );
+
+        let mut disabled = automation.clone();
+        disabled.enabled = false;
+        assert_ne!(
+            baseline,
+            fingerprint(&sessions, &[disabled], None),
+            "toggling an automation must invalidate its cached enabled state"
+        );
+
+        assert_ne!(
+            baseline,
+            fingerprint(&sessions, &automations, Some(session_id)),
+            "selecting a run must invalidate the group's cached highlight"
+        );
+
+        let mut working = sessions.clone();
+        working[0].status = SessionStatus::Failed;
+        assert_ne!(
+            baseline,
+            fingerprint(&working, &automations, None),
+            "a run settling without a reply must invalidate the group's spinner"
         );
     }
 
