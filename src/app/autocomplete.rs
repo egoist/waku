@@ -147,11 +147,22 @@ impl Waku {
                     self.slash_command_index_key = None;
                 }
                 let path = project_path.clone();
+                let workspace = waku_client::WorkspaceClient::new(self.daemon.client());
                 cx.spawn(async move |waku, cx| {
                     let commands = cx
                         .background_executor()
                         .spawn(async move {
-                            composer_complete::discover_slash_commands(provider, &path)
+                            match workspace.request(
+                                waku_client::WorkspaceOperation::DiscoverSlashCommands {
+                                    provider,
+                                    project_root: path,
+                                },
+                            ) {
+                                Ok(waku_client::WorkspaceResult::SlashCommands { commands }) => {
+                                    commands
+                                }
+                                Ok(_) | Err(_) => Vec::new(),
+                            }
                         })
                         .await;
                     waku.update(cx, |waku, cx| {
@@ -183,11 +194,22 @@ impl Waku {
                     self.mention_file_index_path = None;
                 }
                 let path = project_path.clone();
+                let workspace = waku_client::WorkspaceClient::new(self.daemon.client());
                 cx.spawn(async move |waku, cx| {
                     let files = cx
                         .background_executor()
                         .spawn(async move {
-                            composer_complete::list_project_files(&path, FILE_INDEX_CAP)
+                            match workspace.request(
+                                waku_client::WorkspaceOperation::ListProjectFiles {
+                                    root: path,
+                                    cap: FILE_INDEX_CAP,
+                                },
+                            ) {
+                                Ok(waku_client::WorkspaceResult::ProjectFiles { entries }) => {
+                                    entries
+                                }
+                                Ok(_) | Err(_) => Vec::new(),
+                            }
                         })
                         .await;
                     waku.update(cx, |waku, cx| {
@@ -334,6 +356,13 @@ impl Waku {
             AutocompleteRow::Command(scored) => format!("/{} ", scored.item.name),
             AutocompleteRow::File(scored) => format!("@{} ", scored.item.path),
         };
+        if matches!(row, AutocompleteRow::Command(_)) {
+            let mut submission = self.composer.read(cx).content().to_owned();
+            submission.replace_range(trigger.range.clone(), &insert);
+            if self.execute_local_composer_command(&submission, cx) {
+                return;
+            }
+        }
         self.composer.update(cx, |input, cx| {
             input.replace_range(trigger.range.clone(), &insert, cx);
         });
@@ -444,7 +473,7 @@ impl Waku {
                 let icon_path = if command.scope == composer_complete::CommandScope::Skill {
                     "icons/sparkle.svg"
                 } else {
-                    "icons/slash.svg"
+                    "icons/command.svg"
                 };
                 // Positions index the bare name; the drawn `/` shifts every
                 // byte range right by one.

@@ -56,6 +56,7 @@ settings.general: 通用
 settings.appearance: 外观
 settings.providers: 服务商
 settings.usage: 用量
+settings.daemon: 守护进程
 settings.computer_use: 电脑操作
 settings.general_keywords: 通用 本地 项目 对话 隐私 匿名 使用数据 分析 分享 更新 自动 版本
 settings.appearance_keywords: 外观 主题 系统 浅色 深色 语言 英语 中文 简体
@@ -63,9 +64,75 @@ settings.providers_keywords: 服务商 智能体 模型 命令行 版本 安装 
 settings.skills: 技能
 settings.skills_keywords: 技能 技能库 智能体 禁用 启用 删除 claude codex cursor opencode pi amp 共享
 settings.usage_keywords: 用量 令牌 费用 支出 缓存 每日 图表 模型 明细 历史 claude codex
+settings.daemon_keywords: 守护进程 服务 远程 网页 网络 暴露 来源 令牌 端口 websocket
 settings.computer_use_keywords: 电脑操作 屏幕录制 辅助功能 应用 控制 codex
 settings.back: 返回
 settings.search: 搜索设置
+daemon.expose_title: 暴露由 Waku 管理的守护进程
+daemon.expose_description: 允许这台 Mac 之外的 Waku 客户端连接。更改此项只会重启守护进程。
+daemon.status_local: 仅本机
+daemon.status_exposed: 已暴露
+daemon.status_restarting: 正在重启
+daemon.connection_title: 监听访问
+daemon.connection_description: 浏览器来源必须完全匹配。多个来源请用逗号分隔。
+daemon.port: 端口
+daemon.port_description: 启用暴露后，Waku 会在所有网络接口的此端口上监听。
+daemon.port_placeholder: "34123"
+daemon.allowed_origins: 允许的浏览器来源
+daemon.allowed_origins_description: 可打开 WebSocket 的确切 http:// 或 https:// 来源。
+daemon.allowed_origins_placeholder: https://waku.example.com, http://localhost:3001
+daemon.apply: 应用
+daemon.restarting: 正在重启…
+daemon.credentials_title: 连接信息
+daemon.credentials_description: 在 Waku Web 中输入这些信息。此地址使用这台 Mac 的局域网主机名。
+daemon.websocket_url: WebSocket 地址
+daemon.token: 令牌
+daemon.reveal_token: 显示令牌
+daemon.hide_token: 隐藏令牌
+daemon.regenerate_token: 重新生成
+daemon.security_warning: 此令牌可完全访问这台 Mac 上的任务、文件、Git、附件和编程智能体。在私有网络之外请通过受信任的 TLS 代理使用 WSS。
+daemon.external_title: 外部守护进程
+daemon.external_description: 此桌面应用连接到由 Waku 之外管理的守护进程。请在对应主机上配置监听地址、浏览器来源和令牌。
+daemon.web_external_description: Waku Web 连接到由浏览器之外管理的守护进程。请在对应主机上配置监听地址、浏览器来源和令牌。
+daemon.web_connection_description: 此浏览器不会启动或停止守护进程。
+daemon.not_configured: 未配置
+daemon.status: 状态
+daemon.disconnect: 断开连接
+daemon.forget: 忘记守护进程
+daemon.reconnect: 重新连接
+daemon.phase_booting: 正在启动
+daemon.phase_disconnected: 已断开
+daemon.phase_connecting: 正在连接
+daemon.phase_connected: 已连接
+daemon.phase_error: 错误
+daemon.invalid_port: 请输入 1 到 65535 之间的端口
+daemon.invalid_settings: 守护进程设置无效：%{error}
+daemon.stop_active_tasks: 更改守护进程访问设置前请先停止进行中的任务
+daemon.settings_applied: 守护进程访问设置已更新
+daemon.restart_failed: 无法重启守护进程：%{error}
+daemon.url_copied: 已复制 WebSocket 地址
+daemon.token_copied: 已复制守护进程令牌
+web.connect_title: 连接 Waku 守护进程
+web.connect_description: 输入桌面应用“设置 → 守护进程”中显示的远程监听地址和令牌。
+web.token_placeholder: 守护进程访问令牌
+web.remember_device: 在此设备上记住
+web.remember_device_description: 否则，浏览器会话结束时将清除凭据。
+web.connect: 连接
+web.connecting: 正在连接…
+web.security_warning: 浏览器只会将令牌发送到此 WebSocket。在私有网络之外请通过受信任的 TLS 代理使用 WSS。
+web.starting: Waku 正在启动…
+web.starting_label: Waku 正在启动
+web.start_failed_label: Waku 无法启动
+web.load_failed: 无法加载 Waku
+web.try_again: 重试
+web.daemon_connection_closed: 与守护进程的连接已关闭
+web.daemon_not_configured: 尚未配置守护进程
+web.error_daemon_url_required: 请输入守护进程 URL
+web.error_daemon_url_invalid: 请输入有效的 ws:// 或 wss:// 守护进程 URL
+web.error_daemon_url_scheme: 守护进程 URL 必须使用 ws:// 或 wss://
+web.error_daemon_url_host: 守护进程 URL 必须包含主机，且不能包含凭据
+web.error_secure_websocket_required: 安全的 Waku Web 页面只能通过 wss:// 连接
+web.error_daemon_token_required: 请输入守护进程令牌
 settings.theme: 主题
 settings.theme_description: 选择跟随系统、浅色或深色主题
 settings.theme_system: 跟随系统
@@ -85,14 +152,23 @@ common.refresh: 刷新
 common.recheck: 重新检查
 common.reset: 重置
 common.revoke: 撤销授权
+common.retry: 重试
+common.creating: 正在创建…
 settings.local_by_default: 默认存储在本地
 settings.local_by_default_description: 项目、对话和设置均存储在这台 Mac 上
+settings.local_by_default_web_description: 项目、对话和附件保留在所连接的守护进程主机上。Waku Web 的偏好设置保留在此浏览器中。
 settings.automatic_updates: 自动更新
 settings.automatic_updates_description: 在后台检查新版本，并在发现更新时提示安装
 settings.share_anonymous_usage_data: 分享匿名使用数据
 settings.share_anonymous_usage_data_description: 分享功能使用情况和可靠性数据，帮助改进 Waku。不会包含提示词、回复、项目名称、文件路径等个人信息
 providers.coding_agents: 编程智能体
 providers.description: Waku 调用安装在这台 Mac 上的智能体命令行工具。请先安装相应工具或完成登录，然后刷新
+providers.web_description: Waku 调用安装在守护进程主机上的智能体命令行工具。请先安装相应工具或完成登录，然后刷新
+providers.check_failed: "无法检查 %{command}：%{error}"
+providers.show_settings: 显示 %{provider} 设置
+providers.hide_settings: 隐藏 %{provider} 设置
+providers.enable: 启用 %{provider}
+providers.disable: 禁用 %{provider}
 providers.disabled_for_new_tasks: 新建任务时不可用
 providers.model_count_one: "%{count} 个模型"
 providers.model_count_many: "%{count} 个模型"
@@ -100,6 +176,7 @@ providers.not_detected_as: 未在 PATH 中找到 %{command}
 providers.using_override: 正在使用 %{path}，不再从 PATH 自动检测
 providers.invalid_override: 此路径下没有可执行文件。清空后可恢复从 PATH 自动检测
 providers.detected_at: 已在 %{path} 检测到
+providers.detected_as: 已检测到 %{command}
 providers.searches_path: Waku 未在 PATH 中找到 %{command}
 providers.binary_path: 可执行文件路径
 providers.binary_path_description: Waku 用于启动 %{provider} 的可执行文件。按 Return 应用；留空则从 PATH 自动检测
@@ -121,6 +198,7 @@ computer_use.access_granted: 已授权
 computer_use.grant_access: 授予权限
 computer_use.permission_check_failed: 无法检查电脑操作权限
 common.settings: 设置
+common.copy: 复制
 common.remove: 移除
 common.rename: 重命名
 session.new_task: 新任务
@@ -137,15 +215,26 @@ sidebar.minutes_ago: "%{count} 分钟前"
 sidebar.hours_ago: "%{count} 小时前"
 sidebar.days_ago: "%{count} 天前"
 sidebar.unknown_project: 未知项目
+sidebar.close: 关闭侧边栏
+sidebar.hide: 隐藏侧边栏
+sidebar.open: 打开侧边栏
+sidebar.tasks: 任务
+sidebar.add_project: 添加远程项目
+sidebar.resize: 调整侧边栏宽度
+sidebar.status_working: 正在工作
+sidebar.status_waiting: 正在等待
+sidebar.status_failed: 失败
 project.new_project: 新建项目…
 project.no_project: 不使用项目
 project.no_project_name: 无项目
 project.choose_project: 选择项目
+project.default_folder: 默认文件夹
 project.project_lower: 项目
 project.without_a_project: 不使用项目
 project.your_project: 你的项目
 onboarding.open_project_to_begin: 打开一个项目即可开始
 onboarding.description: Waku 会在你选择的文件夹中运行编程智能体。代码、任务和历史记录都保留在这台 Mac 上
+onboarding.web_description: 请选择守护进程主机上的路径，或在不使用项目的情况下开始。
 onboarding.open_project_folder: 打开项目文件夹…
 onboarding.what_should_we_build: 想构建什么？
 onboarding.what_should_we_build_in: "想在 "
@@ -164,6 +253,8 @@ session.forking_task: 正在派生任务…
 session.forking_task_title: 正在派生任务…
 session.revert_to_here: 回退到这里
 session.revert_to_here_title: 回退到这里
+session.reverting_message: 正在回退消息…
+session.reverting_message_title: 正在回退消息…
 time.yesterday_at: 昨天 %{time}
 time.weekday_at: "%{weekday} %{time}"
 time.date_at: "%{month}月%{day}日 %{time}"
@@ -177,7 +268,18 @@ time.saturday: 周六
 time.sunday: 周日
 activity.count: "%{count} 次%{activity}"
 activity.running: 正在执行：%{activities}
+activity.detail: 活动详情
+activity.named_content: "%{name}内容"
 activity.ran: 已执行：%{activities}
+activity.action_think: 思考
+activity.action_run: 运行
+activity.action_edit: 编辑
+activity.action_read: 读取
+activity.action_search: 搜索
+activity.action_list: 列出
+activity.action_plan: 计划
+activity.action_use: 使用
+activity.ask_questions: 提问
 activity.arguments: 参数
 activity.output: 输出
 activity.image_output: 图片输出
@@ -198,6 +300,9 @@ activity.run_command: 运行命令
 activity.running_named_command: 正在运行 %{command}
 activity.ran_named_command: 已运行 %{command}
 activity.named_command_failed: "命令执行失败：%{command}"
+activity.running_described_command: "正在运行命令：%{description}"
+activity.ran_described_command: "已运行命令：%{description}"
+activity.described_command_failed: "命令执行失败：%{description}"
 activity.running_command: 正在运行命令
 activity.ran_command: 已运行命令
 activity.command_failed: 命令执行失败
@@ -248,6 +353,7 @@ activity.output_truncated: "\n\n… 输出已截断"
 activity.thought: 思考
 activity.thoughts: 思考
 activity.command: 命令
+activity.command_detail: 命令
 activity.commands: 命令
 activity.file_edit: 文件修改
 activity.file_edits: 文件修改
@@ -274,6 +380,7 @@ mode.supervised_description: 执行命令或修改文件前先征求许可
 mode.auto_accept_edits_description: 自动批准文件修改，执行其他操作前先询问
 mode.auto_description: 由 AI 审核并批准常规操作；高风险操作仍会询问
 mode.full_access_description: 无需确认即可执行命令和修改文件
+mode.switch_to: 切换为%{mode}
 agent_preset.standard: 标准模式
 agent_preset.code: 代码模式
 agent_preset.minimal: 极简模式
@@ -317,9 +424,14 @@ models.none_found: 未找到模型
 models.favorite_hint: 为模型加星标即可固定在这里
 models.loading: 正在加载模型…
 models.none_reported: 此服务商未提供任何模型
+models.choose: 选择模型
+models.favorites: 收藏
+models.add_favorite: 添加到收藏
+models.remove_favorite: 从收藏中移除
 models.standard: 标准
 models.reasoning: 推理强度
 models.service_tier: 服务等级
+models.context_window: 上下文窗口
 model_option.none: 无
 model_option.minimal: 最低
 model_option.low: 低
@@ -328,6 +440,9 @@ model_option.high: 高
 model_option.extra_high: 极高
 model_option.max: 最高
 model_option.ultra: 超高
+model_option.ultracode: Ultracode
+model_option.context_200k: 200K
+model_option.context_1m: 1M
 model_option.auto: 自动
 model_option.fast: 快速
 model_option.amp_fast_description: 使用 Amp 的快速服务等级，但会消耗更多用量
@@ -375,23 +490,45 @@ skills.delete_failed: "无法删除技能：%{error}"
 skills.toggle_failed: "无法更新技能：%{error}"
 skills.empty_title: 还没有技能
 skills.empty_description: 技能是一个包含 SKILL.md 的文件夹 — 任何智能体都能加载的可复用指令，例如部署手册或评审清单。为 Claude Code、Codex 等所有智能体安装的技能都会显示在这里，以 /名称 调用。
+skills.library: 技能库
+skills.details: 技能详情
+skills.section_user_skills: 用户技能
+skills.enable_named: 启用%{name}
+skills.disable_named: 停用%{name}
 commands.init_description: 为此项目创建或更新 %{instructions_file}
 commands.review_description: 审查当前分支中尚未合并的更改
 commands.commit_description: 暂存并提交当前更改
+commands.fast_description: 切换快速模式
+commands.fast_enabled: 已启用快速模式
+commands.fast_disabled: 已关闭快速模式
 commands.claude_compact: 总结对话以释放上下文空间
 commands.claude_context: 查看上下文窗口的占用情况
 commands.claude_cost: 查看当前任务的令牌用量与费用
 commands.claude_init: 分析项目并编写 CLAUDE.md
-commands.claude_pr_comments: 获取当前拉取请求的审查意见
 commands.claude_review: 审查拉取请求
 commands.claude_security_review: 对尚未合并的更改进行安全审查
-commands.claude_todos: 列出当前待办事项
 composer.edit_in_composer: 在输入框中编辑
-composer.queued_followups: 已排队的后续消息
-composer.queued_followups_description: 已排队的后续消息 · 当前回复结束后发送
+composer.steer: 引导
+composer.remove_followup: 从队列中移除
+user_input.other_placeholder: 输入其他回答
+user_input.back: 上一步
+user_input.next: 下一步
+user_input.submit: 提交
+user_input.progress: "%{current} / %{total}"
 composer.preparing_task: 正在准备任务…
-composer.steer_turn: 向本轮补充指示（%{shortcut}）
 composer.queue_followup: 排队为后续消息（⏎）
+composer.message: 消息
+composer.queue_placeholder: 添加后续消息…
+composer.prompt_placeholder: 让 Waku 构建些什么…
+composer.attach_daemon: 从守护进程主机附加文件或文件夹
+composer.attach_daemon_title: 从守护进程主机附加
+composer.stop: 停止
+composer.stop_confirm: 再按一次 Escape 停止
+composer.steer_current: 引导当前回合
+composer.starting_agent: 正在启动智能体…
+composer.suggestions: 输入建议
+composer.remove_attachment: 移除 %{name}
+composer.queued_message_actions: 后续消息操作
 branches.detached_head: 游离 HEAD
 branches.search_project: 搜索 %{project} 的分支
 branches.switching: 正在切换…
@@ -400,6 +537,8 @@ branches.create_hint: 按 Return 创建 · 按 Esc 取消
 branches.none_found: 未找到分支
 branches.create_and_checkout_ellipsis: 创建并切换到新分支…
 branches.title: 分支
+branches.choose: 选择分支
+branches.checked_out_elsewhere: 已在另一个工作树中检出
 workspace.work_in: 工作位置
 workspace.local: 本地
 workspace.new_worktree: 新建工作树
@@ -407,18 +546,21 @@ workspace.workspace: 工作区
 workspace.worktree: 工作树
 terminal.starting: 正在启动终端…
 project.add_project: 添加项目
+errors.remote_project_picker: 添加守护进程主机上的项目需要远程路径选择器，但该功能尚不可用
 session.stopped: 已停止
 session.turn_completed: 本轮已完成
 session.stopped_before_response: 智能体在返回回复前停止了
 session.codex_exited_before_response: Codex app-server 在返回回复前退出了
 session.steer_rejected: 无法向智能体补充指示（%{error}）；消息已排队，将作为后续消息发送
+session.steer_rejected_plain: 无法向智能体补充指示；消息已排队，将作为后续消息发送
 session.agent_ran_out_of_context: 智能体在本轮任务中耗尽了上下文空间
 session.agent_declined_turn: 智能体拒绝执行本轮任务
 session.agent_stopped_reason: "智能体已停止：%{reason}"
 errors.open_session: "无法打开该任务：%{error}"
-errors.create_projectless_task: "无法在 ~/.waku 下创建任务：%{error}"
+errors.create_projectless_task: "无法在 ~/.waku/projects 下创建任务：%{error}"
 errors.save_projectless_migration: "无法保存无项目任务的迁移结果：%{error}"
-errors.move_projectless_task: "无法将旧的根目录无项目任务移至 ~/.waku：%{error}"
+errors.move_projectless_task: "无法将旧的根目录无项目任务移至 ~/.waku/projects：%{error}"
+errors.remote_host_path: 此路径属于守护进程主机，无法在桌面应用中打开
 errors.change_branch: "无法切换分支：%{error}"
 errors.capture_pre_turn_checkpoint: "无法创建任务开始前的检查点：%{error}"
 errors.capture_turn_checkpoint: "无法创建本轮任务的检查点：%{error}"
@@ -442,6 +584,18 @@ errors.rollback_rejected_workspace_restored: "服务商拒绝回退，工作区�
 errors.rollback_and_safety_failed: "服务商回退失败（%{error}），安全快照也未能恢复（%{restore_error}）。恢复引用已保留在 %{safety_ref}"
 errors.no_session_selected: 尚未选择任务
 errors.session_not_found: 找不到任务
+errors.task_not_found: 找不到任务
+errors.task_not_loaded: 此任务尚未加载
+errors.task_already_forking: 此任务正在派生
+errors.task_already_rewinding: 此任务正在回退
+errors.no_live_runtime: 此任务没有正在运行的智能体
+errors.unexpected_daemon_response: "预期守护进程返回 %{expected}，实际收到 %{actual}"
+errors.daemon_disconnected: Waku 守护进程未连接
+errors.path_outside_workspace: 此路径位于守护进程主机上的当前工作区之外
+errors.rename_task: "无法重命名任务：%{error}"
+errors.remove_task: "无法移除任务：%{error}"
+errors.save_draft: "无法保存草稿：%{error}"
+errors.rewind_task: "无法回退任务：%{error}"
 errors.project_not_found: 找不到项目
 errors.prepare_task_project_not_found: 无法准备任务：找不到项目
 errors.store_pasted_image: "无法添加粘贴的图片：%{error}"
@@ -466,6 +620,7 @@ errors.open_provider_session: "无法打开 %{provider} 会话：%{error}"
 errors.select_model: "无法选择模型：%{error}"
 errors.read_provider_event_stream: "无法读取 %{provider} 事件流：%{error}"
 errors.answer_provider_permission: "无法响应 %{provider} 的权限请求：%{error}"
+errors.answer_provider_question: "无法回答 %{provider} 的问题：%{error}"
 errors.initialize_codex_app_server: 无法初始化 Codex app-server
 errors.register_computer_use_skill: 无法向 Codex 注册 Waku 电脑操作技能
 errors.codex_thread_open_incomplete: Codex 未能完成线程打开操作
@@ -506,12 +661,18 @@ right_panel.files_description: 浏览并阅读工作区文件
 right_panel.diff_description: 审阅文件更改
 right_panel.terminal_unavailable: 终端不可用
 right_panel.terminal_unavailable_description: 请重新打开终端面板以启动 Shell
+right_panel.resize: 调整右侧面板宽度
+right_panel.tabs: 右侧面板标签页
+right_panel.add_tab: 添加面板标签页
+right_panel.hide: 隐藏右侧面板
+right_panel.close_tab: 关闭%{title}
 environment.title: 环境
 environment.summary: 环境和后台工作
 environment.changes: 更改
 environment.commit_or_push: 提交或推送
 environment.compare_branch: 比较分支
 commit.message_placeholder: 提交信息（留空以自动生成）…
+commit.message: 提交信息
 commit.include_unstaged: 包含未暂存的更改
 commit.commit: 提交
 commit.commit_and_push: 提交并推送
@@ -538,6 +699,7 @@ background.no_work: 暂无后台工作
 background.no_work_description: 长时间运行的命令和子智能体显示在这里。
 background.view: 查看
 background.stop: 停止
+background.stop_named: 停止 %{name}
 background.stop_all: 全部停止
 background.stop_not_running: 该进程已不再运行。
 background.output: 输出
@@ -562,6 +724,7 @@ background.status.completed: 已完成
 background.status.failed: 失败
 background.status.stopped: 已停止
 background.status.lost: 已断开
+background.unavailable: 此后台工作已不可用。
 files.unsaved_changes: 有未保存的更改 — 按 %{shortcut} 保存
 files.no_project_open: 尚未打开项目
 files.no_project_open_description: 打开一个项目即可浏览其中的文件
@@ -570,6 +733,48 @@ files.unable_to_edit: "无法编辑此文件：%{error}"
 files.could_not_save_opening: "无法保存 %{path}：文件仍在打开"
 files.could_not_save_read_only: "无法保存 %{path}：文件不可编辑"
 files.could_not_save: "无法保存 %{path}：%{error}"
+files.resize_tree: 调整文件树宽度
+files.refresh: 刷新文件
+files.loading: 正在加载文件…
+files.workspace_files: 工作区文件
+files.loading_file: 正在加载文件
+files.reading_from_daemon: 正在从守护进程主机读取。
+files.file_unavailable: 文件不可用
+files.loading_editor: 正在加载编辑器
+files.preparing_editor: 正在准备编辑器…
+files.preparing_syntax: 正在准备语法高亮。
+file_picker.open_project: 打开项目
+file_picker.attach: 添加附件
+file_picker.daemon_folders: 守护进程文件夹
+file_picker.daemon_items: 守护进程上的文件和文件夹
+file_picker.choose_project_folder: 从守护进程中选择项目文件夹
+file_picker.attach_from_daemon: 从守护进程中添加文件或文件夹
+file_picker.daemon_disconnected: 守护进程未连接
+file_picker.locations: 位置
+file_picker.home: 主目录
+file_picker.file_system: 文件系统
+file_picker.back: 后退
+file_picker.forward: 前进
+file_picker.enclosing_folder: 上级文件夹
+file_picker.filter_folder: 筛选此文件夹
+file_picker.filter: 筛选
+file_picker.refresh: 刷新
+file_picker.name: 名称
+file_picker.kind: 类型
+file_picker.loading_folder: 正在加载文件夹…
+file_picker.no_matching_items: 没有匹配项
+file_picker.empty_folder: 此文件夹为空
+file_picker.folders: 文件夹
+file_picker.files: 文件
+file_picker.selected_folder: 已选文件夹
+file_picker.selected_item: 已选项目
+file_picker.none: 无
+file_picker.opening: 正在打开…
+file_picker.attaching: 正在添加…
+file_picker.open: 打开
+file_picker.folder: 文件夹
+file_picker.file: 文件
+file_picker.typed_file: "%{type} 文件"
 diff.no_changes: 没有更改
 diff.no_changes_description: 此来源没有可审阅的文件更改
 diff.filter_files: 筛选文件…
@@ -581,6 +786,7 @@ diff.source_staged: 已暂存
 diff.source_committed: 已提交
 diff.source_branch: 分支
 diff.loading: 正在加载更改…
+diff.preparing_review: 正在准备审阅…
 diff.loading_description: 正在捕获一致的 Git 快照以供审阅
 diff.unavailable: 无法查看更改
 diff.refresh: 刷新更改
@@ -591,6 +797,13 @@ diff.expand_all_context: 展开所有未更改的行
 diff.expand_context: 展开未更改的行 · 按住 Shift 点击可全部展开
 diff.expand_context_above: 显示上方 100 行 · 按住 Shift 点击可全部展开
 diff.expand_context_below: 显示下方 100 行 · 按住 Shift 点击可全部展开
+diff.resize_tree: 调整差异文件树宽度
+diff.changed_files: 已更改的文件
+diff.file_count_one: 1 个文件
+diff.file_count: "%{count} 个文件"
+terminal.transport_failed: 终端传输失败
+terminal.no_workspace_description: 请先选择一个任务，再打开终端。
+terminal.process_exited: 进程已退出
 browser.back: 后退（%{shortcut}）
 browser.forward: 前进（%{shortcut}）
 browser.stop_loading: 停止加载（Esc）
@@ -615,6 +828,7 @@ find.toggle_replace: 展开或收起替换栏
 common.dismiss_notification: 关闭通知
 common.reveal_in_finder: 在文件管理器中显示
 attachments.close_preview: 关闭图片预览
+attachments.open_preview: 打开%{name}
 attachments.preview_unavailable: 无法显示图片
 common.copy_named: 复制%{name}
 transcript.worked: 已完成
@@ -629,6 +843,10 @@ transcript.review_changes: 审阅
 transcript.show_more_files: 再显示 %{count} 个文件
 transcript.show_fewer_files: 收起文件列表
 transcript.showing_first_files: 仅显示前 %{count}/%{total} 个
+transcript.scroll_to_bottom: 滚动到底部
+transcript.conversation_turns: 对话轮次
+transcript.turn_label: "第 %{number} 轮：%{prompt}"
+transcript.edit_message: 编辑消息
 duration.second: "%{count} 秒"
 duration.seconds: "%{count} 秒"
 duration.minute: "%{count} 分钟"
@@ -712,6 +930,8 @@ usage.model_one: "%{count} 个模型"
 usage.model_many: "%{count} 个模型"
 usage.active_day_one: "%{count} 个活跃日"
 usage.active_day_many: "%{count} 个活跃日"
+usage.filter_projects: 筛选项目…
+usage.chart_description: Claude Code 与 Codex 的每日%{metric}分布。
 usage.refresh_failed: "用量刷新失败：%{error}"
 usage.context_used: 上下文窗口已使用 %{percent}%（%{shortcut}）
 usage.shortcut: 用量（%{shortcut}）

@@ -7,7 +7,7 @@ const CHANGED_FILES_PREVIEW_LIMIT: usize = 3;
 /// right panel.
 const CHANGED_FILES_EXPANDED_LIMIT: usize = 12;
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug)]
 struct ConversationNavigationRailSnapshot {
     visible: bool,
     /// Shared with the `Waku` cache: the turns only change when the row-kinds
@@ -18,6 +18,17 @@ struct ConversationNavigationRailSnapshot {
     active_turn: Option<Uuid>,
     reset_generation: u64,
     theme_is_dark: bool,
+}
+
+impl PartialEq for ConversationNavigationRailSnapshot {
+    fn eq(&self, other: &Self) -> bool {
+        self.visible == other.visible
+            && Rc::ptr_eq(&self.turns, &other.turns)
+            && self.viewport_height == other.viewport_height
+            && self.active_turn == other.active_turn
+            && self.reset_generation == other.reset_generation
+            && self.theme_is_dark == other.theme_is_dark
+    }
 }
 
 impl Default for ConversationNavigationRailSnapshot {
@@ -36,7 +47,10 @@ impl Default for ConversationNavigationRailSnapshot {
 pub(super) struct ConversationNavigationRail {
     waku: Option<WeakEntity<Waku>>,
     snapshot: ConversationNavigationRailSnapshot,
+    turn_list_state: ListState,
+    turn_indexes: HashMap<Uuid, usize>,
     hovered_turn: Option<Uuid>,
+    focused_turn: Option<Uuid>,
     focus_handles: HashMap<Uuid, FocusHandle>,
     visual_state: NavigationRailVisualState,
     transition_from: NavigationRailVisualState,
@@ -45,10 +59,16 @@ pub(super) struct ConversationNavigationRail {
 
 impl ConversationNavigationRail {
     pub(super) fn new() -> Self {
+        let turn_list_state = ListState::new(0, ListAlignment::Top, px(48.0))
+            .with_uniform_item_height(px(NAVIGATION_RAIL_TURN_HEIGHT));
+        turn_list_state.set_scroll_handler(|_, window, _| window.refresh());
         Self {
             waku: None,
             snapshot: ConversationNavigationRailSnapshot::default(),
+            turn_list_state,
+            turn_indexes: HashMap::new(),
             hovered_turn: None,
+            focused_turn: None,
             focus_handles: HashMap::new(),
             visual_state: NavigationRailVisualState::default(),
             transition_from: NavigationRailVisualState::default(),
@@ -68,21 +88,57 @@ impl ConversationNavigationRail {
         if self.snapshot == snapshot {
             return;
         }
-        if self.snapshot.reset_generation != snapshot.reset_generation {
+        let reset = self.snapshot.reset_generation != snapshot.reset_generation;
+        let turn_identity_changed = self.snapshot.turns.len() != snapshot.turns.len()
+            || self
+                .snapshot
+                .turns
+                .iter()
+                .zip(snapshot.turns.iter())
+                .any(|(previous, next)| previous.message_id != next.message_id);
+        let active_turn_changed = self.snapshot.active_turn != snapshot.active_turn;
+        if reset {
             self.hovered_turn = None;
+            self.focused_turn = None;
             self.focus_handles.clear();
             self.visual_state = NavigationRailVisualState::default();
             self.transition_from = NavigationRailVisualState::default();
             self.animation_generation = self.animation_generation.wrapping_add(1);
-        } else {
+        } else if turn_identity_changed {
             self.focus_handles.retain(|message_id, _| {
                 snapshot
                     .turns
                     .iter()
                     .any(|turn| turn.message_id == *message_id)
             });
+            if self
+                .focused_turn
+                .is_some_and(|message_id| !self.focus_handles.contains_key(&message_id))
+            {
+                self.focused_turn = None;
+            }
+        }
+        if reset || turn_identity_changed {
+            self.turn_list_state
+                .reset_with_uniform_height(snapshot.turns.len(), px(NAVIGATION_RAIL_TURN_HEIGHT));
+            self.turn_indexes.clear();
+            self.turn_indexes.extend(
+                snapshot
+                    .turns
+                    .iter()
+                    .enumerate()
+                    .map(|(index, turn)| (turn.message_id, index)),
+            );
         }
         self.snapshot = snapshot;
+        if (reset || turn_identity_changed || active_turn_changed)
+            && let Some(active_index) = self
+                .snapshot
+                .active_turn
+                .and_then(|message_id| self.turn_indexes.get(&message_id).copied())
+        {
+            self.turn_list_state.scroll_to_reveal_item(active_index);
+        }
         cx.notify();
     }
 }
@@ -236,10 +292,12 @@ impl Waku {
             // exactly the text elements this frame put on screen, in order.
             .child(md::render::frame_reset(self.transcript_selection.clone()))
             .child(
-                list(transcript_rows, move |index, _window, cx| {
+                list(transcript_rows, move |index, window, cx| {
                     entity
                         .upgrade()
-                        .map(|entity| entity.update(cx, |this, cx| this.transcript_row(index, cx)))
+                        .map(|entity| {
+                            entity.update(cx, |this, cx| this.transcript_row(index, window, cx))
+                        })
                         .unwrap_or_else(|| div().into_any_element())
                 })
                 .size_full()
@@ -347,53 +405,31 @@ impl Render for ConversationNavigationRail {
         let turns = self.snapshot.turns.clone();
         let turn_count = turns.len();
         let viewport_height = self.snapshot.viewport_height;
-        // Hundreds of turns cannot each keep a legible tick, so ticks sample
-        // the turns: every tick keeps the rail's full pitch and stands for a
-        // contiguous bucket of turns, represented by the bucket's first. While
-        // everything fits this is the identity and each turn has its own tick.
-        // Bounding the tick count also bounds what a hover re-render builds —
-        // per-frame work stays proportional to the viewport, not the session.
-        let tick_count = navigation_rail_tick_count(turn_count, viewport_height);
-        if tick_count == 0 {
+        if turn_count == 0 {
             return div().into_any_element();
         }
         let rail_height = navigation_rail_height(turn_count, viewport_height);
+        if rail_height <= 0.0 {
+            return div().into_any_element();
+        }
         let rail_top = (viewport_height - rail_height).max(0.0) / 2.0;
-        let tick_turn_indexes = (0..tick_count)
-            .map(|tick_index| navigation_rail_tick_turn(tick_index, tick_count, turn_count))
-            .collect::<Vec<_>>();
-        let tick_message_ids = tick_turn_indexes
-            .iter()
-            .map(|&turn_index| turns[turn_index].message_id)
-            .collect::<Vec<_>>();
-        let focus_handles = tick_message_ids
-            .iter()
-            .map(|&message_id| self.navigation_rail_focus_handle(message_id, window, cx))
-            .collect::<Vec<_>>();
-        // Focus emphasizes a tick only while focus is keyboard-driven, matching
-        // the `focus_visible` ring: a click also focuses the tick it hit, and
-        // ungated focus would pin the preview card open after the cursor left.
-        let focused_tick_index = window
-            .last_input_was_keyboard()
-            .then(|| {
-                focus_handles
-                    .iter()
-                    .position(|focus_handle| focus_handle.is_focused(window))
-            })
-            .flatten();
-        let hovered_tick_index = self
-            .hovered_turn
-            .and_then(|message_id| tick_message_ids.iter().position(|&id| id == message_id));
-        let emphasized_tick_index = hovered_tick_index.or(focused_tick_index);
-        let active_tick_index = self.snapshot.active_turn.and_then(|message_id| {
-            turns
-                .iter()
-                .position(|turn| turn.message_id == message_id)
-                .map(|turn_index| navigation_rail_turn_tick(turn_index, tick_count, turn_count))
+        // The rail keeps a true one-to-one scroll position for every turn. Its
+        // `ListState` only asks the builder for visible ticks plus overdraw, so
+        // hover and scroll work remain bounded by the viewport even for a very
+        // long conversation.
+        let emphasized_turn = self.hovered_turn.or_else(|| {
+            window
+                .last_input_was_keyboard()
+                .then_some(self.focused_turn)
+                .flatten()
         });
-        let visual_state = NavigationRailVisualState {
-            emphasized_turn: emphasized_tick_index.map(|index| tick_message_ids[index]),
-        };
+        let emphasized_turn_index =
+            emphasized_turn.and_then(|message_id| self.turn_indexes.get(&message_id).copied());
+        let active_turn_index = self
+            .snapshot
+            .active_turn
+            .and_then(|message_id| self.turn_indexes.get(&message_id).copied());
+        let visual_state = NavigationRailVisualState { emphasized_turn };
         let previous_visual_state = self.visual_state;
         if previous_visual_state != visual_state {
             self.transition_from = previous_visual_state;
@@ -401,94 +437,37 @@ impl Render for ConversationNavigationRail {
             self.animation_generation = self.animation_generation.wrapping_add(1);
         }
         let transition_from = self.transition_from;
-        let tick_for_message = |message_id: Option<Uuid>| {
-            message_id
-                .and_then(|message_id| tick_message_ids.iter().position(|&id| id == message_id))
-        };
-        let from_emphasized_tick_index = tick_for_message(transition_from.emphasized_turn);
+        let from_emphasized_turn_index = transition_from
+            .emphasized_turn
+            .and_then(|message_id| self.turn_indexes.get(&message_id).copied());
         let animation_generation = self.animation_generation;
+        let entity = cx.entity().downgrade();
+        let turn_list_state = self.turn_list_state.clone();
+        let tick_list = list(turn_list_state.clone(), move |turn_index, window, cx| {
+            entity
+                .upgrade()
+                .map(|entity| {
+                    entity.update(cx, |this, cx| {
+                        this.render_navigation_rail_tick(
+                            turn_index,
+                            from_emphasized_turn_index,
+                            emphasized_turn_index,
+                            active_turn_index,
+                            animation_generation,
+                            window,
+                            cx,
+                        )
+                    })
+                })
+                .unwrap_or_else(|| div().into_any_element())
+        })
+        .size_full();
 
-        let tick_rows = tick_message_ids
-            .iter()
-            .zip(focus_handles)
-            .enumerate()
-            .map(|(tick_index, (&message_id, focus_handle))| {
-                let from_width = NAVIGATION_RAIL_TICK_WIDTH
-                    * navigation_rail_scale(tick_index, from_emphasized_tick_index);
-                let to_width = NAVIGATION_RAIL_TICK_WIDTH
-                    * navigation_rail_scale(tick_index, emphasized_tick_index);
-                let prominent = active_tick_index == Some(tick_index)
-                    || emphasized_tick_index == Some(tick_index);
-                let tick_color = if prominent {
-                    if theme.is_dark {
-                        rgb(0xFFFFFF).into()
-                    } else {
-                        theme.text
-                    }
-                } else {
-                    theme.text_ghost.opacity(NAVIGATION_RAIL_INACTIVE_OPACITY)
-                };
-                let click_focus = focus_handle.clone();
-                let animation_id = SharedString::from(format!(
-                    "conversation-navigation-tick-animation-{message_id}-{animation_generation}"
-                ));
-                let tick = div()
-                    .h(px(NAVIGATION_RAIL_TICK_HEIGHT))
-                    .rounded_full()
-                    .bg(tick_color)
-                    .with_animation(
-                        animation_id,
-                        Animation::new(NAVIGATION_RAIL_ANIMATION_DURATION)
-                            .with_easing(ease_out_quint()),
-                        move |element, delta| {
-                            element.w(px(from_width + (to_width - from_width) * delta))
-                        },
-                    );
-
-                div()
-                    .id(SharedString::from(format!(
-                        "conversation-navigation-turn-hit-{message_id}"
-                    )))
-                    .w(px(NAVIGATION_RAIL_WIDTH))
-                    .flex_1()
-                    .min_h_0()
-                    .flex()
-                    .items_center()
-                    .cursor_default()
-                    .on_hover(cx.listener(move |this, hovering: &bool, _, cx| {
-                        if *hovering {
-                            this.hovered_turn = Some(message_id);
-                        } else if this.hovered_turn == Some(message_id) {
-                            this.hovered_turn = None;
-                        }
-                        cx.notify();
-                    }))
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        click_focus.focus(window, cx);
-                        this.activate_turn(message_id, cx);
-                    }))
-                    .child(
-                        div()
-                            .id(SharedString::from(format!(
-                                "conversation-navigation-turn-focus-{message_id}"
-                            )))
-                            .w(px(NAVIGATION_RAIL_TICK_WIDTH + 4.0))
-                            .h(px(8.0))
-                            .ml(px(-2.0))
-                            .pl(px(2.0))
-                            .flex()
-                            .items_center()
-                            .rounded(px(4.0))
-                            .track_focus(&focus_handle)
-                            .tab_index(tick_index as isize)
-                            .focus_visible(|style| style.border_1().border_color(theme.accent))
-                            .on_key_down(cx.listener(move |this, event, window, cx| {
-                                this.navigation_rail_key_down(message_id, event, window, cx);
-                            }))
-                            .child(tick),
-                    )
-            })
-            .collect::<Vec<_>>();
+        let (show_top_fade, show_bottom_fade) = navigation_rail_fade_visibility(
+            self.turn_list_state.scroll_px_offset_for_scrollbar().y,
+            self.turn_list_state.max_offset_for_scrollbar().y,
+        );
+        let transparent_surface = theme.surface.opacity(0.0);
 
         let rail = div()
             .id("conversation-navigation-rail")
@@ -497,19 +476,51 @@ impl Render for ConversationNavigationRail {
             .top(px(rail_top))
             .w(px(NAVIGATION_RAIL_WIDTH))
             .h(px(rail_height))
-            .flex()
-            .flex_col()
+            .relative()
+            .overflow_hidden()
             .tab_index(0)
             .tab_group()
             .tab_stop(false)
-            .children(tick_rows);
+            .child(tick_list)
+            .when(show_top_fade, |rail| {
+                rail.child(
+                    div()
+                        .absolute()
+                        .top_0()
+                        .left_0()
+                        .w_full()
+                        .h(px(NAVIGATION_RAIL_FADE_HEIGHT))
+                        .bg(linear_gradient(
+                            180.0,
+                            linear_color_stop(theme.surface, 0.0),
+                            linear_color_stop(transparent_surface, 1.0),
+                        )),
+                )
+            })
+            .when(show_bottom_fade, |rail| {
+                rail.child(
+                    div()
+                        .absolute()
+                        .bottom_0()
+                        .left_0()
+                        .w_full()
+                        .h(px(NAVIGATION_RAIL_FADE_HEIGHT))
+                        .bg(linear_gradient(
+                            180.0,
+                            linear_color_stop(transparent_surface, 0.0),
+                            linear_color_stop(theme.surface, 1.0),
+                        )),
+                )
+            });
 
-        let preview = emphasized_tick_index.map(|tick_index| {
-            let turn = &turns[tick_turn_indexes[tick_index]];
-            let hit_height = rail_height / tick_count as f32;
+        let preview = emphasized_turn_index.map(|turn_index| {
+            let turn = &turns[turn_index];
+            let scroll_top = -self.turn_list_state.scroll_px_offset_for_scrollbar().y;
             let preview_height = 126.0;
             let max_preview_top = (viewport_height - preview_height - 12.0).max(12.0);
-            let preview_top = (rail_top + (tick_index as f32 + 0.5) * hit_height
+            let preview_top = (rail_top + turn_index as f32 * NAVIGATION_RAIL_TURN_HEIGHT
+                - f32::from(scroll_top)
+                + NAVIGATION_RAIL_TURN_HEIGHT / 2.0
                 - preview_height / 2.0)
                 .clamp(12.0, max_preview_top);
             div()
@@ -568,6 +579,97 @@ impl Render for ConversationNavigationRail {
 }
 
 impl ConversationNavigationRail {
+    #[allow(clippy::too_many_arguments)]
+    fn render_navigation_rail_tick(
+        &mut self,
+        turn_index: usize,
+        from_emphasized_turn_index: Option<usize>,
+        emphasized_turn_index: Option<usize>,
+        active_turn_index: Option<usize>,
+        animation_generation: u64,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let Some(turn) = self.snapshot.turns.get(turn_index) else {
+            return div().into_any_element();
+        };
+        let message_id = turn.message_id;
+        let theme = Theme::current(cx);
+        let focus_handle = self.navigation_rail_focus_handle(message_id, window, cx);
+        let from_width = NAVIGATION_RAIL_TICK_WIDTH
+            * navigation_rail_scale(turn_index, from_emphasized_turn_index);
+        let to_width =
+            NAVIGATION_RAIL_TICK_WIDTH * navigation_rail_scale(turn_index, emphasized_turn_index);
+        let prominent =
+            active_turn_index == Some(turn_index) || emphasized_turn_index == Some(turn_index);
+        let tick_color = if prominent {
+            if theme.is_dark {
+                rgb(0xFFFFFF).into()
+            } else {
+                theme.text
+            }
+        } else {
+            theme.text_ghost.opacity(NAVIGATION_RAIL_INACTIVE_OPACITY)
+        };
+        let click_focus = focus_handle.clone();
+        let animation_id = SharedString::from(format!(
+            "conversation-navigation-tick-animation-{message_id}-{animation_generation}"
+        ));
+        let tick = div()
+            .h(px(NAVIGATION_RAIL_TICK_HEIGHT))
+            .rounded_full()
+            .bg(tick_color)
+            .with_animation(
+                animation_id,
+                Animation::new(NAVIGATION_RAIL_ANIMATION_DURATION).with_easing(ease_out_quint()),
+                move |element, delta| element.w(px(from_width + (to_width - from_width) * delta)),
+            );
+
+        div()
+            .id(SharedString::from(format!(
+                "conversation-navigation-turn-hit-{message_id}"
+            )))
+            .w(px(NAVIGATION_RAIL_WIDTH))
+            .h(px(NAVIGATION_RAIL_TURN_HEIGHT))
+            .flex_none()
+            .flex()
+            .items_center()
+            .cursor_default()
+            .on_hover(cx.listener(move |this, hovering: &bool, _, cx| {
+                if *hovering {
+                    this.hovered_turn = Some(message_id);
+                } else if this.hovered_turn == Some(message_id) {
+                    this.hovered_turn = None;
+                }
+                cx.notify();
+            }))
+            .on_click(cx.listener(move |this, _, window, cx| {
+                click_focus.focus(window, cx);
+                this.activate_turn(message_id, cx);
+            }))
+            .child(
+                div()
+                    .id(SharedString::from(format!(
+                        "conversation-navigation-turn-focus-{message_id}"
+                    )))
+                    .w(px(NAVIGATION_RAIL_TICK_WIDTH + 4.0))
+                    .h(px(8.0))
+                    .ml(px(-2.0))
+                    .pl(px(2.0))
+                    .flex()
+                    .items_center()
+                    .rounded(px(4.0))
+                    .track_focus(&focus_handle)
+                    .tab_index(turn_index as isize)
+                    .focus_visible(|style| style.border_1().border_color(theme.accent))
+                    .on_key_down(cx.listener(move |this, event, window, cx| {
+                        this.navigation_rail_key_down(message_id, event, window, cx);
+                    }))
+                    .child(tick),
+            )
+            .into_any_element()
+    }
+
     fn navigation_rail_focus_handle(
         &mut self,
         message_id: Uuid,
@@ -579,11 +681,15 @@ impl ConversationNavigationRail {
         }
 
         let focus_handle = cx.focus_handle();
-        cx.on_focus(&focus_handle, window, |_: &mut Self, _, cx| {
+        cx.on_focus(&focus_handle, window, move |this: &mut Self, _, cx| {
+            this.focused_turn = Some(message_id);
             cx.notify();
         })
         .detach();
-        cx.on_blur(&focus_handle, window, |_: &mut Self, _, cx| {
+        cx.on_blur(&focus_handle, window, move |this: &mut Self, _, cx| {
+            if this.focused_turn == Some(message_id) {
+                this.focused_turn = None;
+            }
             cx.notify();
         })
         .detach();
@@ -598,27 +704,20 @@ impl ConversationNavigationRail {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        // Arrows walk the rendered ticks, not the underlying turns: on a
-        // sampled rail only tick representatives have focus handles.
         let turns = &self.snapshot.turns;
         let turn_count = turns.len();
-        let tick_count = navigation_rail_tick_count(turn_count, self.snapshot.viewport_height);
-        if tick_count == 0 {
+        if turn_count == 0 {
             return;
         }
-        let tick_turn =
-            |tick_index: usize| navigation_rail_tick_turn(tick_index, tick_count, turn_count);
-        let Some(tick_index) =
-            (0..tick_count).position(|tick| turns[tick_turn(tick)].message_id == message_id)
-        else {
+        let Some(turn_index) = self.turn_indexes.get(&message_id).copied() else {
             return;
         };
 
-        let target_tick = match event.keystroke.key.as_str() {
-            "up" => Some(tick_index.saturating_sub(1)),
-            "down" => Some((tick_index + 1).min(tick_count - 1)),
+        let target_turn = match event.keystroke.key.as_str() {
+            "up" => Some(turn_index.saturating_sub(1)),
+            "down" => Some((turn_index + 1).min(turn_count - 1)),
             "home" => Some(0),
-            "end" => Some(tick_count - 1),
+            "end" => Some(turn_count - 1),
             "enter" | "space" => {
                 self.activate_turn(message_id, cx);
                 cx.stop_propagation();
@@ -626,17 +725,15 @@ impl ConversationNavigationRail {
             }
             _ => None,
         };
-        let Some(target_tick) = target_tick else {
+        let Some(target_turn) = target_turn else {
             return;
         };
-        if let Some(focus_handle) = self
-            .focus_handles
-            .get(&turns[tick_turn(target_tick)].message_id)
-            .cloned()
-        {
-            focus_handle.focus(window, cx);
-            cx.stop_propagation();
-        }
+        self.turn_list_state.scroll_to_reveal_item(target_turn);
+        let target_message_id = turns[target_turn].message_id;
+        let focus_handle = self.navigation_rail_focus_handle(target_message_id, window, cx);
+        focus_handle.focus(window, cx);
+        cx.notify();
+        cx.stop_propagation();
     }
 
     fn activate_turn(&self, message_id: Uuid, cx: &mut Context<Self>) {
@@ -831,10 +928,21 @@ impl Waku {
             .collect::<Vec<_>>();
         self.checkpoint_ref_prefetch
             .set(Some((session_id, generation)));
+        let workspace = waku_client::WorkspaceClient::new(self.daemon.client());
         cx.spawn(async move |this, cx| {
             let existing = cx
                 .background_executor()
-                .spawn(async move { checkpoint::session_turn_refs(&project_path, session_id) })
+                .spawn(async move {
+                    match workspace.request(waku_client::WorkspaceOperation::SessionTurnRefs {
+                        cwd: project_path,
+                        session_id,
+                    }) {
+                        Ok(waku_client::WorkspaceResult::TurnRefs { turn_counts }) => {
+                            turn_counts.into_iter().collect::<HashSet<_>>()
+                        }
+                        Ok(_) | Err(_) => HashSet::new(),
+                    }
+                })
                 .await;
             let _ = this.update(cx, |this, cx| {
                 if this.checkpoint_ref_generation.get() != generation {
@@ -890,9 +998,11 @@ impl Waku {
         row: String,
         palette: &'a MarkdownPalette,
         metrics: MarkdownMetrics,
+        animate_streaming: bool,
     ) -> MarkdownCtx<'a> {
         MarkdownCtx::new(row, palette, metrics, self.transcript_selection.clone())
             .with_link_handler(self.markdown_link_handler.clone())
+            .with_streaming_animation(animate_streaming)
     }
 
     /// The menu handle for `id`, created on first use.
@@ -936,7 +1046,12 @@ impl Waku {
         handle
     }
 
-    pub(super) fn transcript_row(&mut self, index: usize, cx: &mut Context<Self>) -> AnyElement {
+    pub(super) fn transcript_row(
+        &mut self,
+        index: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let theme = Theme::current(cx);
         let palette = MarkdownPalette::from_theme(&theme);
         let composer = self.composer.clone();
@@ -971,12 +1086,8 @@ impl Waku {
                 .cloned()
                 .map(|message| {
                     let copied = self.copied_message_feedback.contains_key(&message.id);
-                    let assistant_footer_copy_content = self
-                        .selected_session()
-                        .and_then(|session| assistant_response_footer(session, message_index));
-                    let assistant_footer_time = self
-                        .selected_session()
-                        .and_then(|session| assistant_response_footer_time(session, message_index));
+                    let (assistant_footer_copy_content, assistant_footer_time) =
+                        self.assistant_response_footer_cached(message_index);
                     let assistant_before_footer = assistant_footer_copy_content
                         .as_ref()
                         .and(message.turn_id)
@@ -1002,14 +1113,38 @@ impl Waku {
                             )
                         })
                         .collect();
+                    let attachment_images = message
+                        .attachments
+                        .iter()
+                        .map(|attachment| {
+                            if !attachment.is_image {
+                                return None;
+                            }
+                            let Some(reference) = attachment.blob_reference.as_deref() else {
+                                return None;
+                            };
+                            self.image_for_reference(
+                                reference,
+                                Some(&attachment.path),
+                                Some(&attachment.name),
+                                cx,
+                            )
+                        })
+                        .collect();
+                    let attachments_can_reveal = !self.daemon.is_remote();
                     let menu = self.menu_handle(format!("message-{}", message.id), cx);
                     let metrics = if message.role == MessageRole::User {
                         MarkdownMetrics::USER_MESSAGE
                     } else {
                         MarkdownMetrics::BODY
                     };
-                    let ctx =
-                        self.markdown_ctx(format!("message-{}", message.id), &palette, metrics);
+                    let animate_streaming = message.streaming && !cx.reduce_motion();
+                    let ctx = self.markdown_ctx(
+                        format!("message-{}", message.id),
+                        &palette,
+                        metrics,
+                        animate_streaming,
+                    );
                     // Human and assistant messages share the Markdown path.
                     // Parse only visible rows rather than doing work for every
                     // driver delta or every off-screen prompt.
@@ -1020,7 +1155,7 @@ impl Waku {
                             view.set_text(message.visible_content(), message.streaming);
                             &*view
                         });
-                    render_message(
+                    let rendered = render_message(
                         MessageRender {
                             theme: &theme,
                             message: &message,
@@ -1032,6 +1167,8 @@ impl Waku {
                             user_message_action,
                             message_edit_input,
                             attachment_menus,
+                            attachment_images,
+                            attachments_can_reveal,
                             markdown: view,
                             ctx: &ctx,
                             menu,
@@ -1039,13 +1176,30 @@ impl Waku {
                             composer,
                         },
                         cx,
-                    )
+                    );
+                    if animate_streaming && view.is_some_and(MarkdownView::is_fading) {
+                        // Advance the dissolve from the shared pulse clock,
+                        // not `request_animation_frame`: chunks land every
+                        // stream commit, so a fade is active for essentially
+                        // the whole response and a display-rate re-arm held
+                        // the window at 120 Hz — and every one of those
+                        // frames rebuilds each visible row. ~30 fps across a
+                        // 120-400 ms dissolve is visually equivalent at a
+                        // quarter of the redraws, the same trade the loaders
+                        // make, and the lease parks once the last chunk
+                        // settles. Leasing `current_view` (the transcript
+                        // pane) keeps the tick from busting sibling islands.
+                        motion::pulse_lease(window.current_view(), cx);
+                    }
+                    rendered
                 })
                 .unwrap_or_else(|| div().into_any_element()),
             TranscriptRowKind::TurnBlock(block_index) => self
                 .selected_transcript_blocks()
                 .get(block_index)
-                .map(|block| self.render_activities_row(&block.activities, block_index, &theme, cx))
+                .map(|block| {
+                    self.render_activities_row(&block.activities, block_index, &theme, window, cx)
+                })
                 .unwrap_or_else(|| div().into_any_element()),
             TranscriptRowKind::TurnFold(turn_id) => self.render_turn_fold_row(turn_id, &theme, cx),
             TranscriptRowKind::ChangedFiles(turn_id) => self
@@ -1462,9 +1616,9 @@ impl Waku {
         activities: &[ActivityItem],
         block_index: usize,
         theme: &Theme,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let running = activities.iter().any(|activity| !activity.complete);
         let live_turn = self
             .selected_session()
             .and_then(AgentSession::active_turn_id)
@@ -1493,34 +1647,38 @@ impl Waku {
                 .map(|activity| activity.id)
         })
         .flatten();
+        let header_title = activity_header_title(activities, live_turn, live_reasoning_id);
+        let header_focus =
+            self.transcript_control_focus(format!("activity-toggle-{block_index}"), cx);
         let cluster = div()
             .w_full()
             .min_w_0()
             .flex()
             .flex_col()
-            .gap(px(2.0))
+            .gap(px(4.0))
             .child(
                 div()
                     .id(SharedString::from(format!("activity-toggle-{block_index}")))
-                    .h(px(22.0))
+                    .track_focus(&header_focus)
+                    .tab_index(0)
+                    .w_full()
+                    .min_w_0()
+                    .h(px(26.0))
                     .flex()
                     .items_center()
                     .gap(px(6.0))
-                    .text_size(px(11.0))
-                    .line_height(px(14.0))
+                    .text_size(px(12.5))
+                    .line_height(px(16.0))
                     .cursor_default()
-                    .when(running, |element| {
-                        element.child(pulse_dot(
-                            format!("activity-running-{block_index}"),
-                            5.0,
-                            theme.accent,
-                        ))
-                    })
+                    .focus_visible(|style| style.text_color(theme.text))
+                    .hover(|style| style.text_color(theme.text))
                     .child(
                         div()
+                            .min_w_0()
+                            .truncate()
                             .font_weight(FontWeight::MEDIUM)
-                            .text_color(theme.text_tertiary)
-                            .child(SharedString::from(activity_summary(activities))),
+                            .text_color(theme.text_secondary)
+                            .child(SharedString::from(header_title)),
                     )
                     .child(icon(
                         if expanded {
@@ -1528,17 +1686,37 @@ impl Waku {
                         } else {
                             "icons/chevron-right.svg"
                         },
-                        9.0,
-                        theme.text_ghost,
+                        10.0,
+                        theme.text_tertiary,
                     ))
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.toggle_activities(block_index, expanded, cx);
+                    }))
+                    .on_key_down(cx.listener(move |this, event: &KeyDownEvent, _, cx| {
+                        if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                            this.toggle_activities(block_index, expanded, cx);
+                            cx.stop_propagation();
+                        }
                     })),
             );
         if !expanded {
             return cluster.into_any_element();
         }
-        let mut items = div().w_full().min_w_0().flex().flex_col().pl(px(15.0));
+        // `Theme::overlay` is 5% alpha and GPUI's `opacity` multiplies it.
+        let activity_surface = theme.surface.blend(theme.overlay.opacity(0.7));
+        let activity_hover_surface = theme.surface.blend(theme.overlay);
+        let activity_active_surface = theme.surface.blend(theme.overlay_strong.opacity(0.72));
+        let mut items = div()
+            .w_full()
+            .min_w_0()
+            .ml(px(6.0))
+            .pl(px(12.0))
+            .pb(px(2.0))
+            .border_l_1()
+            .border_color(theme.border)
+            .flex()
+            .flex_col()
+            .gap(px(8.0));
         for activity in activities {
             let id = activity.id;
             let background_work = self
@@ -1595,10 +1773,11 @@ impl Waku {
             } else {
                 activity_preview(activity)
             };
-            let display_title = reasoning.map_or_else(
-                || activity_display_title(activity),
-                |reasoning| reasoning_activity_title(reasoning, reasoning_live),
-            );
+            let action_label = activity_action_label(activity);
+            let mut row_detail = activity_row_detail(activity, reasoning_live);
+            if row_detail.trim().is_empty() {
+                row_detail = preview;
+            }
             let file_change_stats = activity_file_change_stats(activity);
             let has_detail = reasoning
                 .is_some_and(|reasoning| !reasoning.content.trim().is_empty())
@@ -1609,124 +1788,223 @@ impl Waku {
                     .get(&id)
                     .copied()
                     .unwrap_or(reasoning_live);
-            let mut item = div().flex().flex_col().child(
-                div()
-                    .id(SharedString::from(format!("activity-item-{id}")))
-                    .min_h(px(24.0))
-                    .px(px(4.0))
-                    .py(px(2.0))
-                    .rounded(px(6.0))
-                    .flex()
-                    .items_center()
-                    .gap(px(8.0))
-                    .text_size(px(11.5))
-                    .line_height(px(14.0))
-                    .when(has_detail, |element| {
-                        element
-                            .cursor_default()
-                            .hover(|element| element.bg(theme.overlay))
-                            .active(|element| element.bg(theme.overlay_strong))
-                    })
-                    .child(icon(
-                        activity_icon(activity.kind),
-                        11.0,
-                        theme.text_tertiary,
-                    ))
-                    .child(
-                        div()
-                            .flex_none()
-                            .max_w(px(300.0))
-                            .min_w_0()
-                            .flex()
-                            .items_center()
-                            .gap(px(5.0))
-                            .child(
+            let item_focus = self.transcript_control_focus(format!("activity-item-{id}"), cx);
+            let mut item = div()
+                .w_full()
+                .min_w_0()
+                .overflow_hidden()
+                .rounded(px(9.0))
+                .border_1()
+                .border_color(theme.border_strong)
+                .bg(activity_surface)
+                .flex()
+                .flex_col()
+                .child(
+                    div()
+                        .id(SharedString::from(format!("activity-item-{id}")))
+                        // The parent owns a 1px border on each edge, so a
+                        // 28px row makes the visible activity header 30px.
+                        .h(px(28.0))
+                        .px(px(8.0))
+                        .flex()
+                        .items_center()
+                        .gap(px(8.0))
+                        .rounded_tl(px(8.0))
+                        .rounded_tr(px(8.0))
+                        .when(!item_expanded, |element| {
+                            element.rounded_bl(px(8.0)).rounded_br(px(8.0))
+                        })
+                        .text_size(px(12.0))
+                        .line_height(px(16.0))
+                        .when(has_detail, |element| {
+                            element
+                                .track_focus(&item_focus)
+                                .tab_index(0)
+                                .cursor_default()
+                                .focus_visible(|element| element.bg(activity_hover_surface))
+                                .hover(|element| element.bg(activity_hover_surface))
+                                .active(|element| element.bg(activity_active_surface))
+                        })
+                        .child(icon(
+                            activity_icon(activity.kind),
+                            12.0,
+                            theme.text_tertiary,
+                        ))
+                        .child(
+                            div()
+                                .flex_none()
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(theme.text_secondary)
+                                .child(SharedString::from(action_label)),
+                        )
+                        .when(!row_detail.is_empty(), |element| {
+                            element.child(
                                 div()
+                                    .flex_1()
                                     .min_w_0()
                                     .truncate()
                                     .text_color(theme.text_secondary)
-                                    .child(SharedString::from(display_title)),
+                                    .child(SharedString::from(row_detail)),
                             )
-                            .when_some(file_change_stats, |title, (additions, deletions)| {
-                                title
-                                    .child(
-                                        div()
-                                            .flex_none()
-                                            .text_color(theme.success)
-                                            .child(SharedString::from(format!("+{additions}"))),
-                                    )
-                                    .child(
-                                        div()
-                                            .flex_none()
-                                            .text_color(theme.danger)
-                                            .child(SharedString::from(format!("-{deletions}"))),
-                                    )
-                            }),
-                    )
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .truncate()
-                            .text_size(px(11.0))
-                            .text_color(theme.text_ghost)
-                            .when(item_expanded, |element| element.invisible())
-                            .child(SharedString::from(preview)),
-                    )
-                    .children(background_badge)
-                    .when(reasoning.is_none(), |element| {
-                        element.child(if activity.failed {
-                            icon("icons/x.svg", 10.0, theme.danger).into_any_element()
-                        } else if activity.complete {
-                            icon("icons/check.svg", 10.0, theme.text_ghost).into_any_element()
-                        } else {
-                            pulse_dot(format!("activity-pulse-{id}"), 5.0, theme.accent)
                         })
-                    })
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        if has_detail {
-                            this.toggle_activity_item(id, item_expanded, cx);
-                        }
-                    })),
-            );
+                        .when_some(file_change_stats, |row, (additions, deletions)| {
+                            row.child(
+                                div()
+                                    .flex_none()
+                                    .text_color(theme.success)
+                                    .child(SharedString::from(format!("+{additions}"))),
+                            )
+                            .child(
+                                div()
+                                    .flex_none()
+                                    .text_color(theme.danger)
+                                    .child(SharedString::from(format!("-{deletions}"))),
+                            )
+                        })
+                        .children(background_badge)
+                        .when(has_detail, |element| {
+                            element.child(icon(
+                                if item_expanded {
+                                    "icons/chevron-down.svg"
+                                } else {
+                                    "icons/chevron-right.svg"
+                                },
+                                10.0,
+                                theme.text_tertiary,
+                            ))
+                        })
+                        .when(!has_detail && reasoning.is_none(), |element| {
+                            element
+                                .when(activity.failed, |element| {
+                                    element.child(
+                                        icon("icons/x.svg", 10.0, theme.danger).into_any_element(),
+                                    )
+                                })
+                                .when(!activity.complete && !activity.failed, |element| {
+                                    element.child(pulse_dot(5.0, theme.accent))
+                                })
+                        })
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            if has_detail {
+                                this.toggle_activity_item(id, item_expanded, cx);
+                            }
+                        }))
+                        .on_key_down(cx.listener(move |this, event: &KeyDownEvent, _, cx| {
+                            if has_detail
+                                && matches!(event.keystroke.key.as_str(), "enter" | "space")
+                            {
+                                this.toggle_activity_item(id, item_expanded, cx);
+                                cx.stop_propagation();
+                            }
+                        })),
+                );
             if item_expanded && let Some(reasoning) = reasoning {
                 // Reasoning remains model prose even though it now shares the
                 // activity stream, so keep selectable markdown rather than
                 // presenting it as monospace tool output.
                 let mut palette = MarkdownPalette::from_theme(theme);
-                palette.text = theme.text_tertiary;
+                palette.text = theme.text_secondary;
                 palette.secondary = theme.text_tertiary;
                 let ctx = self.markdown_ctx(
                     format!("reasoning-{id}"),
                     &palette,
                     MarkdownMetrics::COMPACT,
+                    reasoning_live && !cx.reduce_motion(),
                 );
+                let reasoning_viewport = self
+                    .activity_scroll_viewports
+                    .borrow_mut()
+                    .entry(id)
+                    .or_default()
+                    .clone();
                 let mut views = self.activity_markdown.borrow_mut();
                 let view = views.entry(id).or_default();
-                view.set_text(&reasoning.content, reasoning_live);
+                if reasoning_live {
+                    let start = self.live_reasoning_window_start(id, &reasoning.content, view);
+                    view.set_text(&reasoning.content[start..], true);
+                } else {
+                    self.reasoning_window_starts.borrow_mut().remove(&id);
+                    view.set_text(&reasoning.content, false);
+                }
+                let wheel_scroll = reasoning_viewport.scroll_handle.clone();
+                let wheel_follow_tail = reasoning_viewport.follow_tail.clone();
+                let markdown = if reasoning_live {
+                    // The live peek pins to the tail of a growing document;
+                    // building every block of a long think per pulse tick was
+                    // the remaining 40%-CPU streaming path.
+                    md::render::markdown_tail(view, &ctx, LIVE_REASONING_TAIL_BLOCKS)
+                } else {
+                    md::render::markdown(view, &ctx)
+                };
+                if reasoning_live && !cx.reduce_motion() && view.is_fading() {
+                    // The reasoning dissolve rides the half-rate lease: fast
+                    // thinking keeps a fade active for the whole phase, every
+                    // tick rebuilds each visible transcript row, and 15 fps
+                    // alpha on the dim 11.5px peek is indistinguishable. The
+                    // answer text keeps the full-rate dissolve.
+                    motion::pulse_lease_slow(window.current_view(), cx);
+                }
                 item = item.child(
                     div()
                         .w_full()
                         .min_w_0()
-                        .px(px(4.0))
-                        .children(md::render::markdown(view, &ctx)),
+                        .relative()
+                        .max_h(px(400.0))
+                        .overflow_hidden()
+                        .border_t_1()
+                        .border_color(theme.border_strong)
+                        .child(
+                            div()
+                                .id(SharedString::from(format!("reasoning-scroll-{id}")))
+                                .w_full()
+                                .min_w_0()
+                                .max_h(px(400.0))
+                                .overflow_y_scroll()
+                                .track_scroll(&reasoning_viewport.scroll_handle)
+                                .px(px(12.0))
+                                .py(px(8.0))
+                                .children(markdown)
+                                .on_scroll_wheel(move |_, window, cx| {
+                                    contain_scroll(&wheel_scroll, cx);
+                                    let scroll = wheel_scroll.clone();
+                                    let follow_tail = wheel_follow_tail.clone();
+                                    window.defer(cx, move |_, _| {
+                                        follow_tail.set(activity_scroll_at_bottom(&scroll));
+                                    });
+                                }),
+                        )
+                        .child(activity_scroll_fade(
+                            reasoning_viewport.scroll_handle.clone(),
+                            ActivityScrollFadeSide::Top,
+                            activity_surface,
+                        ))
+                        .child(activity_scroll_fade(
+                            reasoning_viewport.scroll_handle.clone(),
+                            ActivityScrollFadeSide::Bottom,
+                            activity_surface,
+                        ))
+                        .child(scrollbar::vertical(
+                            &reasoning_viewport.scroll_handle,
+                            &reasoning_viewport.scrollbar,
+                        ))
+                        .child(activity_scroll_guard(reasoning_viewport, reasoning_live)),
                 );
             }
             if item_expanded && reasoning.is_none() {
                 let palette = MarkdownPalette::from_theme(theme);
-                let ctx =
-                    self.markdown_ctx(format!("activity-{id}"), &palette, MarkdownMetrics::COMPACT);
+                let ctx = self.markdown_ctx(
+                    format!("activity-{id}"),
+                    &palette,
+                    MarkdownMetrics::COMPACT,
+                    false,
+                );
                 let mut detail_card = div()
-                    .ml(px(21.0))
-                    .mr(px(4.0))
+                    .w_full()
                     .min_w_0()
-                    .mt(px(2.0))
-                    .mb(px(4.0))
-                    .p(px(8.0))
-                    .rounded(px(7.0))
-                    .bg(theme.inset)
-                    .border_1()
-                    .border_color(theme.border)
+                    .border_t_1()
+                    .border_color(theme.border_strong)
+                    .px(px(12.0))
+                    .py(px(8.0))
                     .flex()
                     .flex_col()
                     .gap(px(8.0))
@@ -1805,26 +2083,102 @@ impl Waku {
                         );
                     }
                     if !content.is_empty() {
-                        section_view = section_view.child(
-                            div()
-                                .w_full()
-                                .min_w_0()
-                                .text_size(px(10.5))
-                                .line_height(px(16.0))
-                                .child(md::render::plain_text(
-                                    content.clone(),
-                                    md::render::MONO_FAMILY,
-                                    FontWeight::NORMAL,
-                                    theme.text_secondary,
-                                    &ctx,
-                                )),
-                        );
+                        if activity.kind == ActivityKind::Command
+                            && section_kind == ActivityDisclosureSectionKind::Output
+                        {
+                            let output_viewport = self
+                                .activity_scroll_viewports
+                                .borrow_mut()
+                                .entry(id)
+                                .or_default()
+                                .clone();
+                            let wheel_scroll = output_viewport.scroll_handle.clone();
+                            let wheel_follow_tail = output_viewport.follow_tail.clone();
+                            section_view = section_view.child(
+                                div()
+                                    .w_full()
+                                    .min_w_0()
+                                    .relative()
+                                    .max_h(px(400.0))
+                                    .overflow_hidden()
+                                    .child(
+                                        div()
+                                            .id(SharedString::from(format!(
+                                                "activity-output-scroll-{id}"
+                                            )))
+                                            .w_full()
+                                            .min_w_0()
+                                            .max_h(px(400.0))
+                                            .overflow_y_scroll()
+                                            .track_scroll(&output_viewport.scroll_handle)
+                                            .py(px(4.0))
+                                            .pr(px(8.0))
+                                            .text_size(px(10.5))
+                                            .line_height(px(16.0))
+                                            .child(md::render::plain_text(
+                                                content.clone(),
+                                                md::render::MONO_FAMILY,
+                                                FontWeight::NORMAL,
+                                                theme.text_secondary,
+                                                &ctx,
+                                            ))
+                                            .on_scroll_wheel(move |_, window, cx| {
+                                                contain_scroll(&wheel_scroll, cx);
+                                                let scroll = wheel_scroll.clone();
+                                                let follow_tail = wheel_follow_tail.clone();
+                                                window.defer(cx, move |_, _| {
+                                                    follow_tail
+                                                        .set(activity_scroll_at_bottom(&scroll));
+                                                });
+                                            }),
+                                    )
+                                    .child(activity_scroll_fade(
+                                        output_viewport.scroll_handle.clone(),
+                                        ActivityScrollFadeSide::Top,
+                                        activity_surface,
+                                    ))
+                                    .child(activity_scroll_fade(
+                                        output_viewport.scroll_handle.clone(),
+                                        ActivityScrollFadeSide::Bottom,
+                                        activity_surface,
+                                    ))
+                                    .child(scrollbar::vertical(
+                                        &output_viewport.scroll_handle,
+                                        &output_viewport.scrollbar,
+                                    ))
+                                    .child(activity_scroll_guard(
+                                        output_viewport,
+                                        !activity.complete,
+                                    )),
+                            );
+                        } else {
+                            section_view = section_view.child(
+                                div()
+                                    .w_full()
+                                    .min_w_0()
+                                    .text_size(px(10.5))
+                                    .line_height(px(16.0))
+                                    .child(md::render::plain_text(
+                                        content.clone(),
+                                        md::render::MONO_FAMILY,
+                                        FontWeight::NORMAL,
+                                        theme.text_secondary,
+                                        &ctx,
+                                    )),
+                            );
+                        }
                     }
                     detail_card = detail_card.child(section_view);
                 }
                 for (image_index, image_url) in activity.image_urls.iter().enumerate() {
-                    detail_card =
-                        detail_card.child(render_activity_image(image_url, id, image_index));
+                    let image = self.image_for_reference(image_url, None, None, cx);
+                    detail_card = detail_card.child(render_activity_image(
+                        image_url,
+                        image,
+                        id,
+                        image_index,
+                        theme,
+                    ));
                 }
                 item = item.child(detail_card);
             }
@@ -1834,45 +2188,219 @@ impl Waku {
     }
 }
 
-fn reasoning_activity_title(reasoning: &ReasoningBlock, live: bool) -> String {
-    if live {
-        tr!("transcript.thinking")
+#[derive(Clone, Copy)]
+enum ActivityScrollFadeSide {
+    Top,
+    Bottom,
+}
+
+fn activity_scroll_at_bottom(scroll: &ScrollHandle) -> bool {
+    let scrolled = -scroll.offset().y;
+    scroll.max_offset().y - scrolled <= px(0.5)
+}
+
+fn activity_scroll_follow_state(
+    following: bool,
+    previous_scrolled: Option<Pixels>,
+    previous_max_offset: Option<Pixels>,
+    scrolled: Pixels,
+    max_offset: Pixels,
+) -> bool {
+    let at_bottom = max_offset - scrolled <= px(0.5);
+    let user_moved = previous_scrolled.zip(previous_max_offset).is_some_and(
+        |(previous_scrolled, previous_max_offset)| {
+            (scrolled - previous_scrolled).abs() > px(0.5)
+                && (max_offset - previous_max_offset).abs() <= px(0.5)
+        },
+    );
+    if user_moved || at_bottom {
+        at_bottom
     } else {
-        tr!(
-            "transcript.thought_for",
-            duration = format_worked_duration(
-                reasoning
-                    .finished_at_ms
-                    .saturating_sub(reasoning.started_at_ms)
-                    .div_ceil(1000)
-                    .max(1)
-            )
-        )
+        following
     }
 }
 
-fn render_activity_image(image_url: &str, activity_id: Uuid, image_index: usize) -> AnyElement {
-    // Stored blobs go through GPUI's asset cache, which reads and decodes the
-    // file once off the UI thread. Only legacy inline data URLs still pay a
-    // per-render base64 decode.
-    let element = match crate::blob_store::shared_path_for(image_url) {
-        Some(path) => img(path),
-        None => match decode_activity_image(image_url) {
-            Some(image) => img(image),
-            None => img(image_url.to_owned()),
+/// Pure window arithmetic behind [`Waku::live_reasoning_window_start`]:
+/// given the cached start and the current content, the byte offset the
+/// window should render from. Every returned offset is a character boundary
+/// of `content`, so callers may slice with it directly.
+fn live_reasoning_window_anchor(cached: usize, content: &str) -> usize {
+    // A restarted block can leave the cached start past the end of the new
+    // content or inside a multibyte character; either way the window is
+    // stale (`is_char_boundary` is false past the end too), so restart it.
+    let cached = if content.is_char_boundary(cached) { cached } else { 0 };
+    if content.len() - cached <= LIVE_REASONING_WINDOW_MAX {
+        return cached;
+    }
+    // Slide: re-anchor near the tail, preferring a block boundary so the
+    // window opens on whole markdown. The raw cut is an arbitrary byte
+    // offset, so advance it to a character boundary before slicing; the
+    // end of the string is always a boundary, so this terminates.
+    let mut cut = content.len() - LIVE_REASONING_WINDOW_TARGET;
+    while !content.is_char_boundary(cut) {
+        cut += 1;
+    }
+    content[cut..]
+        .find("\n\n")
+        .map(|found| cut + found + 2)
+        .unwrap_or(cut)
+}
+
+impl Waku {
+    /// Byte offset the live reasoning peek renders from, slid forward as the
+    /// thought grows. The peek pins a 400 px viewport to the tail, but
+    /// markdown cost is O(rendered source) per pulse tick regardless of block
+    /// shape, so the window keeps parse, flatten, elements, and veil all
+    /// O(window); the full trace renders once the turn settles. A slide
+    /// re-anchors at a block boundary and reseeds the view so already-shown
+    /// text never re-dissolves.
+    fn live_reasoning_window_start(
+        &self,
+        id: Uuid,
+        content: &str,
+        view: &mut MarkdownView,
+    ) -> usize {
+        let mut starts = self.reasoning_window_starts.borrow_mut();
+        let start = starts.entry(id).or_insert(0);
+        let next = live_reasoning_window_anchor(*start, content);
+        if next != *start {
+            *start = next;
+            *view = MarkdownView::seeded();
+        }
+        *start
+    }
+}
+
+fn activity_scroll_guard(viewport: ActivityScrollViewport, live: bool) -> impl IntoElement {
+    canvas(
+        move |_, window, cx| {
+            let scrolled = -viewport.scroll_handle.offset().y;
+            let max_offset = viewport.scroll_handle.max_offset().y;
+            let following = activity_scroll_follow_state(
+                viewport.follow_tail.get(),
+                viewport.last_scrolled.get(),
+                viewport.last_max_offset.get(),
+                scrolled,
+                max_offset,
+            );
+            viewport.follow_tail.set(following);
+            viewport.last_scrolled.set(Some(scrolled));
+            viewport.last_max_offset.set(Some(max_offset));
+            if live && following && max_offset - scrolled > px(0.5) {
+                viewport.scroll_handle.scroll_to_bottom();
+                // Notify the enclosing island rather than `window.refresh()`:
+                // a refresh busts every pane cache, and this fires on each
+                // stream commit while a live viewport follows its tail.
+                cx.notify(window.current_view());
+            }
         },
+        |_, _, _, _| {},
+    )
+    .absolute()
+    .w(px(0.0))
+    .h(px(0.0))
+}
+
+fn activity_scroll_fade(
+    scroll: ScrollHandle,
+    side: ActivityScrollFadeSide,
+    surface: Hsla,
+) -> impl IntoElement {
+    canvas(
+        move |bounds, _, _| {
+            let scrolled = -scroll.offset().y;
+            let max_offset = scroll.max_offset().y;
+            let visible = match side {
+                ActivityScrollFadeSide::Top => scrolled > px(0.5),
+                ActivityScrollFadeSide::Bottom => max_offset - scrolled > px(0.5),
+            };
+            visible.then(|| {
+                let transparent = surface.opacity(0.0);
+                let background = match side {
+                    ActivityScrollFadeSide::Top => linear_gradient(
+                        180.0,
+                        linear_color_stop(surface, 0.0),
+                        linear_color_stop(transparent, 1.0),
+                    ),
+                    ActivityScrollFadeSide::Bottom => linear_gradient(
+                        180.0,
+                        linear_color_stop(transparent, 0.0),
+                        linear_color_stop(surface, 1.0),
+                    ),
+                };
+                fill(bounds, background)
+            })
+        },
+        |_, fade, window, _| {
+            if let Some(fade) = fade {
+                window.paint_quad(fade);
+            }
+        },
+    )
+    .absolute()
+    .left_0()
+    .w_full()
+    .h(px(18.0))
+    .when(matches!(side, ActivityScrollFadeSide::Top), |element| {
+        element.top_0()
+    })
+    .when(matches!(side, ActivityScrollFadeSide::Bottom), |element| {
+        element.bottom_0()
+    })
+}
+
+fn render_activity_image(
+    image_url: &str,
+    image: Option<Arc<gpui::Image>>,
+    activity_id: Uuid,
+    image_index: usize,
+    theme: &Theme,
+) -> AnyElement {
+    // Daemon blobs arrive only when a visible row requests them and GPUI keeps
+    // their decoded form in memory. Only legacy inline data URLs still pay a
+    // per-render base64 decode.
+    let id = SharedString::from(format!("activity-image-{activity_id}-{image_index}"));
+    if let Some(image) = image {
+        return img(image)
+            .id(id)
+            .w(px(ACTIVITY_IMAGE_WIDTH))
+            .max_w(gpui::relative(1.0))
+            .max_h(px(ACTIVITY_IMAGE_HEIGHT))
+            .mt(px(8.0))
+            .rounded(px(4.0))
+            .object_fit(ObjectFit::Contain)
+            .into_any_element();
+    }
+    if waku_protocol::blob::is_reference(image_url)
+        || image_url.starts_with(waku_protocol::attachments::ATTACHMENT_SCHEME)
+    {
+        return div()
+            .id(id)
+            .w(px(ACTIVITY_IMAGE_WIDTH))
+            .max_w(gpui::relative(1.0))
+            .h(px(80.0))
+            .mt(px(8.0))
+            .rounded(px(4.0))
+            .bg(theme.inset)
+            .flex()
+            .items_center()
+            .justify_center()
+            .child(icon("icons/file-types/image.svg", 18.0, theme.text_ghost))
+            .into_any_element();
     };
-    element
-        .id(SharedString::from(format!(
-            "activity-image-{activity_id}-{image_index}"
-        )))
-        .w(px(ACTIVITY_IMAGE_WIDTH))
-        .max_w(gpui::relative(1.0))
-        .max_h(px(ACTIVITY_IMAGE_HEIGHT))
-        .mt(px(8.0))
-        .rounded(px(4.0))
-        .object_fit(ObjectFit::Contain)
-        .into_any_element()
+
+    match decode_activity_image(image_url) {
+        Some(image) => img(image),
+        None => img(image_url.to_owned()),
+    }
+    .id(id)
+    .w(px(ACTIVITY_IMAGE_WIDTH))
+    .max_w(gpui::relative(1.0))
+    .max_h(px(ACTIVITY_IMAGE_HEIGHT))
+    .mt(px(8.0))
+    .rounded(px(4.0))
+    .object_fit(ObjectFit::Contain)
+    .into_any_element()
 }
 
 fn decode_activity_image(image_url: &str) -> Option<std::sync::Arc<gpui::Image>> {
@@ -1883,4 +2411,104 @@ fn decode_activity_image(image_url: &str) -> Option<std::sync::Arc<gpui::Image>>
         .decode(encoded)
         .ok()?;
     (!bytes.is_empty()).then(|| std::sync::Arc::new(gpui::Image::from_bytes(format, bytes)))
+}
+
+#[cfg(test)]
+mod activity_scroll_tests {
+    use super::*;
+
+    #[test]
+    fn user_scroll_pauses_following_until_the_tail_is_reached_again() {
+        assert!(!activity_scroll_follow_state(
+            true,
+            Some(px(100.0)),
+            Some(px(200.0)),
+            px(70.0),
+            px(200.0),
+        ));
+        assert!(!activity_scroll_follow_state(
+            false,
+            Some(px(70.0)),
+            Some(px(200.0)),
+            px(120.0),
+            px(200.0),
+        ));
+        assert!(activity_scroll_follow_state(
+            false,
+            Some(px(120.0)),
+            Some(px(200.0)),
+            px(200.0),
+            px(200.0),
+        ));
+    }
+
+    #[test]
+    fn growing_content_does_not_cancel_tail_following() {
+        assert!(activity_scroll_follow_state(
+            true,
+            Some(px(200.0)),
+            Some(px(200.0)),
+            px(200.0),
+            px(240.0),
+        ));
+        assert!(!activity_scroll_follow_state(
+            false,
+            Some(px(120.0)),
+            Some(px(200.0)),
+            px(120.0),
+            px(240.0),
+        ));
+    }
+}
+
+#[cfg(test)]
+mod live_reasoning_window_tests {
+    use super::*;
+
+    #[test]
+    fn slide_lands_on_a_character_boundary_in_multibyte_content() {
+        // A body of 3-byte chars with two ASCII bytes at the end leaves the
+        // naive cut mid-character while both tuning consts are KiB multiples;
+        // the guard assert keeps the test honest if they are ever retuned.
+        let content = "界".repeat(LIVE_REASONING_WINDOW_MAX / 3 + 1) + "zz";
+        assert!(content.len() > LIVE_REASONING_WINDOW_MAX);
+        assert!(
+            !content.is_char_boundary(content.len() - LIVE_REASONING_WINDOW_TARGET),
+            "setup must place the naive cut mid-character to cover the panic",
+        );
+        let start = live_reasoning_window_anchor(0, &content);
+        assert!(content.is_char_boundary(start));
+        assert!(content.len() - start <= LIVE_REASONING_WINDOW_TARGET);
+        assert!(!content[start..].is_empty());
+    }
+
+    #[test]
+    fn stale_start_from_a_restarted_block_resets_to_zero() {
+        let content = "思".repeat(64);
+        assert!(!content.is_char_boundary(4));
+        assert_eq!(live_reasoning_window_anchor(4, &content), 0);
+        assert_eq!(live_reasoning_window_anchor(content.len() + 1, &content), 0);
+    }
+
+    #[test]
+    fn stale_start_still_slides_when_the_new_content_is_long() {
+        let content = "界".repeat(LIVE_REASONING_WINDOW_MAX);
+        assert!(!content.is_char_boundary(5));
+        let start = live_reasoning_window_anchor(5, &content);
+        assert!(content.is_char_boundary(start));
+        assert!(content.len() - start <= LIVE_REASONING_WINDOW_TARGET);
+    }
+
+    #[test]
+    fn slide_reanchors_after_a_block_boundary_when_one_is_near() {
+        let content = format!("{}\n\ntail", "a".repeat(LIVE_REASONING_WINDOW_MAX));
+        let start = live_reasoning_window_anchor(0, &content);
+        assert_eq!(&content[start..], "tail");
+    }
+
+    #[test]
+    fn window_below_the_threshold_keeps_the_cached_start() {
+        let content = "a".repeat(LIVE_REASONING_WINDOW_MAX);
+        assert_eq!(live_reasoning_window_anchor(7, &content), 7);
+    }
 }

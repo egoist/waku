@@ -116,6 +116,8 @@ settings.providers:
   en: Providers
 settings.usage:
   en: Usage
+settings.daemon:
+  en: Daemon
 settings.computer_use:
   en: Computer Use
 settings.general_keywords:
@@ -130,12 +132,144 @@ settings.skills_keywords:
   en: skills skill library agent disable enable delete claude codex cursor opencode pi amp shared
 settings.usage_keywords:
   en: usage tokens cost spend cache daily chart model breakdown history claude codex
+settings.daemon_keywords:
+  en: daemon server remote web network expose origin token port websocket
 settings.computer_use_keywords:
   en: computer use screen recording accessibility apps control codex
 settings.back:
   en: Back
 settings.search:
   en: Search Settings
+daemon.expose_title:
+  en: Expose managed daemon
+daemon.expose_description:
+  en: Listen beyond this Mac so another Waku client can connect. Changing this restarts only the daemon.
+daemon.status_local:
+  en: Local only
+daemon.status_exposed:
+  en: Exposed
+daemon.status_restarting:
+  en: Restarting
+daemon.connection_title:
+  en: Listener access
+daemon.connection_description:
+  en: Browser origins must match exactly. Separate multiple origins with commas.
+daemon.port:
+  en: Port
+daemon.port_description:
+  en: Waku listens on all network interfaces at this port while exposure is enabled.
+daemon.port_placeholder:
+  en: "34123"
+daemon.allowed_origins:
+  en: Allowed browser origins
+daemon.allowed_origins_description:
+  en: Exact http:// or https:// origins allowed to open the WebSocket.
+daemon.allowed_origins_placeholder:
+  en: https://waku.example.com, http://localhost:3001
+daemon.apply:
+  en: Apply
+daemon.restarting:
+  en: Restarting…
+daemon.credentials_title:
+  en: Connection details
+daemon.credentials_description:
+  en: Enter these in Waku Web. The URL uses this Mac’s local network hostname.
+daemon.websocket_url:
+  en: WebSocket URL
+daemon.token:
+  en: Token
+daemon.reveal_token:
+  en: Reveal token
+daemon.hide_token:
+  en: Hide token
+daemon.regenerate_token:
+  en: Regenerate
+daemon.security_warning:
+  en: The token grants full access to tasks, files, Git, attachments, and coding agents on this Mac. Use WSS through a trusted TLS proxy outside a private network.
+daemon.external_title:
+  en: External daemon
+daemon.external_description:
+  en: This desktop is connected to a daemon managed outside Waku. Configure its listener, browser origins, and token on that host.
+daemon.web_external_description:
+  en: Waku Web connects to a daemon managed outside this browser. Configure its listener, browser origins, and token on that host.
+daemon.web_connection_description:
+  en: This browser never starts or stops the daemon.
+daemon.not_configured:
+  en: Not configured
+daemon.status:
+  en: Status
+daemon.disconnect:
+  en: Disconnect
+daemon.forget:
+  en: Forget daemon
+daemon.reconnect:
+  en: Reconnect
+daemon.phase_booting:
+  en: Starting
+daemon.phase_disconnected:
+  en: Disconnected
+daemon.phase_connecting:
+  en: Connecting
+daemon.phase_connected:
+  en: Connected
+daemon.phase_error:
+  en: Error
+daemon.invalid_port:
+  en: Enter a port from 1 to 65535
+daemon.invalid_settings:
+  en: "Invalid daemon settings: %{error}"
+daemon.stop_active_tasks:
+  en: Stop active tasks before changing daemon access
+daemon.settings_applied:
+  en: Daemon access updated
+daemon.restart_failed:
+  en: "Could not restart daemon: %{error}"
+daemon.url_copied:
+  en: WebSocket URL copied
+daemon.token_copied:
+  en: Daemon token copied
+web.connect_title:
+  en: Connect to Waku daemon
+web.connect_description:
+  en: Enter the remote listener URL and token from Desktop Settings → Daemon.
+web.token_placeholder:
+  en: Daemon access token
+web.remember_device:
+  en: Remember on this device
+web.remember_device_description:
+  en: Otherwise the credentials are cleared when this browser session ends.
+web.connect:
+  en: Connect
+web.connecting:
+  en: Connecting…
+web.security_warning:
+  en: The browser sends the token only to this WebSocket. Use WSS through a trusted TLS proxy outside a private network.
+web.starting:
+  en: Starting Waku…
+web.starting_label:
+  en: Starting Waku
+web.start_failed_label:
+  en: Waku could not start
+web.load_failed:
+  en: Couldn’t load Waku
+web.try_again:
+  en: Try again
+web.daemon_connection_closed:
+  en: The daemon connection closed
+web.daemon_not_configured:
+  en: No daemon has been configured
+web.error_daemon_url_required:
+  en: Enter the daemon URL
+web.error_daemon_url_invalid:
+  en: Enter a valid ws:// or wss:// daemon URL
+web.error_daemon_url_scheme:
+  en: The daemon URL must use ws:// or wss://
+web.error_daemon_url_host:
+  en: The daemon URL must contain a host and no credentials
+web.error_secure_websocket_required:
+  en: A secure Waku Web page can only connect through wss://
+web.error_daemon_token_required:
+  en: Enter the daemon token
 settings.theme:
   en: Theme
 settings.theme_description:
@@ -176,11 +310,17 @@ common.reset:
   en: Reset
 common.revoke:
   en: Revoke
+common.retry:
+  en: Retry
+common.creating:
+  en: Creating…
 
 settings.local_by_default:
   en: Local by default
 settings.local_by_default_description:
   en: Projects, conversations, and settings are stored on this Mac
+settings.local_by_default_web_description:
+  en: Projects, conversations, and attachments stay on the connected daemon host. Waku Web preferences stay in this browser.
 settings.automatic_updates:
   en: Automatic updates
 settings.automatic_updates_description:
@@ -194,6 +334,18 @@ providers.coding_agents:
   en: Coding agents
 providers.description:
   en: Waku drives agent CLIs installed on this Mac. Install or sign in with each agent's own CLI, then refresh
+providers.web_description:
+  en: Waku drives agent CLIs installed on the daemon host. Install or sign in with each agent's own CLI, then refresh
+providers.check_failed:
+  en: "Could not check %{command}: %{error}"
+providers.show_settings:
+  en: Show %{provider} settings
+providers.hide_settings:
+  en: Hide %{provider} settings
+providers.enable:
+  en: Enable %{provider}
+providers.disable:
+  en: Disable %{provider}
 providers.disabled_for_new_tasks:
   en: Disabled for new tasks
 providers.model_count_one:
@@ -208,6 +360,8 @@ providers.invalid_override:
   en: Nothing runnable at this path. Clear it to detect from PATH
 providers.detected_at:
   en: Detected at %{path}
+providers.detected_as:
+  en: Detected as %{command}
 providers.searches_path:
   en: Waku did not detect %{command} in PATH
 providers.binary_path:
@@ -252,6 +406,8 @@ computer_use.permission_check_failed:
 
 common.settings:
   en: Settings
+common.copy:
+  en: Copy
 common.remove:
   en: Remove
 common.rename:
@@ -286,6 +442,24 @@ sidebar.days_ago:
   en: "%{count}d"
 sidebar.unknown_project:
   en: Unknown project
+sidebar.close:
+  en: Close sidebar
+sidebar.hide:
+  en: Hide sidebar
+sidebar.open:
+  en: Open sidebar
+sidebar.tasks:
+  en: Tasks
+sidebar.add_project:
+  en: Add remote project
+sidebar.resize:
+  en: Resize sidebar
+sidebar.status_working:
+  en: Working
+sidebar.status_waiting:
+  en: Waiting
+sidebar.status_failed:
+  en: Failed
 
 project.new_project:
   en: New project…
@@ -295,6 +469,8 @@ project.no_project_name:
   en: No project
 project.choose_project:
   en: choose a project
+project.default_folder:
+  en: Default folder
 project.project_lower:
   en: project
 project.without_a_project:
@@ -306,6 +482,8 @@ onboarding.open_project_to_begin:
   en: Open a project to begin
 onboarding.description:
   en: Waku runs coding agents in folders you choose. Your code, sessions, and history stay on this Mac
+onboarding.web_description:
+  en: Choose a path on the daemon host, or start without a project.
 onboarding.open_project_folder:
   en: Open project folder…
 onboarding.what_should_we_build:
@@ -344,6 +522,10 @@ session.revert_to_here:
   en: Revert to here
 session.revert_to_here_title:
   en: Revert to Here
+session.reverting_message:
+  en: Reverting message…
+session.reverting_message_title:
+  en: Reverting Message…
 
 time.yesterday_at:
   en: Yesterday %{time}
@@ -372,8 +554,30 @@ activity.count:
   en: "%{count} %{activity}"
 activity.running:
   en: Running %{activities}
+activity.detail:
+  en: Activity detail
+activity.named_content:
+  en: "%{name} content"
 activity.ran:
   en: Ran %{activities}
+activity.action_think:
+  en: Think
+activity.action_run:
+  en: Run
+activity.action_edit:
+  en: Edit
+activity.action_read:
+  en: Read
+activity.action_search:
+  en: Search
+activity.action_list:
+  en: List
+activity.action_plan:
+  en: Plan
+activity.action_use:
+  en: Use
+activity.ask_questions:
+  en: Ask questions
 activity.arguments:
   en: Arguments
 activity.output:
@@ -414,6 +618,12 @@ activity.ran_named_command:
   en: Ran %{command}
 activity.named_command_failed:
   en: "Command failed: %{command}"
+activity.running_described_command:
+  en: "Running command: %{description}"
+activity.ran_described_command:
+  en: "Ran command: %{description}"
+activity.described_command_failed:
+  en: "Command failed: %{description}"
 activity.running_command:
   en: Running command
 activity.ran_command:
@@ -514,6 +724,8 @@ activity.thoughts:
   en: thoughts
 activity.command:
   en: command
+activity.command_detail:
+  en: Command
 activity.commands:
   en: commands
 activity.file_edit:
@@ -567,6 +779,8 @@ mode.auto_description:
   en: An AI reviewer approves routine actions; risky ones still ask
 mode.full_access_description:
   en: Allow commands and edits without prompts
+mode.switch_to:
+  en: Switch to %{mode}
 
 agent_preset.standard:
   en: Standard mode
@@ -657,12 +871,22 @@ models.loading:
   en: Loading models…
 models.none_reported:
   en: No models reported by this provider
+models.choose:
+  en: Choose model
+models.favorites:
+  en: Favorites
+models.add_favorite:
+  en: Add to favorites
+models.remove_favorite:
+  en: Remove from favorites
 models.standard:
   en: Standard
 models.reasoning:
   en: Reasoning
 models.service_tier:
   en: Service Tier
+models.context_window:
+  en: Context Window
 
 model_option.none:
   en: None
@@ -680,6 +904,12 @@ model_option.max:
   en: Max
 model_option.ultra:
   en: Ultra
+model_option.ultracode:
+  en: Ultracode
+model_option.context_200k:
+  en: 200K
+model_option.context_1m:
+  en: 1M
 model_option.auto:
   en: Auto
 model_option.fast:
@@ -776,6 +1006,16 @@ skills.empty_title:
   en: No skills yet
 skills.empty_description:
   en: A skill is a folder with a SKILL.md — reusable instructions any agent can load, like a deploy runbook or a review checklist. Skills installed for Claude Code, Codex, and every other agent show up here, invoked as /name.
+skills.library:
+  en: Skills library
+skills.details:
+  en: Skill details
+skills.section_user_skills:
+  en: User skills
+skills.enable_named:
+  en: Enable %{name}
+skills.disable_named:
+  en: Disable %{name}
 
 commands.init_description:
   en: Create or update %{instructions_file} for this project
@@ -783,6 +1023,12 @@ commands.review_description:
   en: Review the pending changes on this branch
 commands.commit_description:
   en: Stage and commit the current changes
+commands.fast_description:
+  en: Toggle fast mode
+commands.fast_enabled:
+  en: Fast mode enabled
+commands.fast_disabled:
+  en: Fast mode disabled
 commands.claude_compact:
   en: Free up context by summarizing the conversation
 commands.claude_context:
@@ -791,27 +1037,55 @@ commands.claude_cost:
   en: Show token usage and cost for this session
 commands.claude_init:
   en: Analyze the project and write CLAUDE.md
-commands.claude_pr_comments:
-  en: Fetch review comments for the current PR
 commands.claude_review:
   en: Review a pull request
 commands.claude_security_review:
   en: Security review of the pending changes
-commands.claude_todos:
-  en: List the current todo items
 
 composer.edit_in_composer:
   en: Edit in composer
-composer.queued_followups:
-  en: Queued follow-ups
-composer.queued_followups_description:
-  en: Queued follow-ups · sends when the current turn finishes
+composer.steer:
+  en: Steer
+composer.remove_followup:
+  en: Remove from queue
+composer.queued_message_actions:
+  en: Follow-up actions
+user_input.other_placeholder:
+  en: Type another answer
+user_input.back:
+  en: Back
+user_input.next:
+  en: Next
+user_input.submit:
+  en: Submit
+user_input.progress:
+  en: "%{current} of %{total}"
 composer.preparing_task:
   en: Preparing task…
-composer.steer_turn:
-  en: Steer the running turn (%{shortcut})
 composer.queue_followup:
   en: Queue as follow-up (⏎)
+composer.message:
+  en: Message
+composer.queue_placeholder:
+  en: Queue a follow-up…
+composer.prompt_placeholder:
+  en: Ask Waku to build something…
+composer.attach_daemon:
+  en: Attach a file or folder from the daemon host
+composer.attach_daemon_title:
+  en: Attach from daemon host
+composer.stop:
+  en: Stop
+composer.stop_confirm:
+  en: Press Escape again to stop
+composer.steer_current:
+  en: Steer current turn
+composer.starting_agent:
+  en: Starting agent…
+composer.suggestions:
+  en: Composer suggestions
+composer.remove_attachment:
+  en: Remove %{name}
 
 branches.detached_head:
   en: Detached HEAD
@@ -829,6 +1103,10 @@ branches.create_and_checkout_ellipsis:
   en: Create and checkout new branch…
 branches.title:
   en: Branches
+branches.choose:
+  en: Choose a branch
+branches.checked_out_elsewhere:
+  en: Checked out in another worktree
 
 workspace.work_in:
   en: Work in
@@ -846,6 +1124,8 @@ terminal.starting:
 
 project.add_project:
   en: Add project
+errors.remote_project_picker:
+  en: Adding a daemon-host project needs a remote path picker, which is not available yet
 
 session.stopped:
   en: Stopped
@@ -857,6 +1137,8 @@ session.codex_exited_before_response:
   en: Codex app-server exited before returning a response
 session.steer_rejected:
   en: The agent couldn't be steered (%{error}); the message was queued as a follow-up
+session.steer_rejected_plain:
+  en: The agent couldn't be steered; the message was queued as a follow-up
 session.agent_ran_out_of_context:
   en: The agent ran out of context for this turn
 session.agent_declined_turn:
@@ -867,11 +1149,13 @@ session.agent_stopped_reason:
 errors.open_session:
   en: "Could not open that session: %{error}"
 errors.create_projectless_task:
-  en: "Could not create a task beneath ~/.waku: %{error}"
+  en: "Could not create a task beneath ~/.waku/projects: %{error}"
 errors.save_projectless_migration:
   en: "Could not save the projectless task migration: %{error}"
 errors.move_projectless_task:
-  en: "Could not move the old root-level projectless task beneath ~/.waku: %{error}"
+  en: "Could not move the old projectless task beneath ~/.waku/projects: %{error}"
+errors.remote_host_path:
+  en: This path belongs to the daemon host and cannot be opened by the desktop
 errors.change_branch:
   en: "Could not change branch: %{error}"
 errors.capture_pre_turn_checkpoint:
@@ -918,6 +1202,30 @@ errors.no_session_selected:
   en: No session selected
 errors.session_not_found:
   en: Session not found
+errors.task_not_found:
+  en: Task not found
+errors.task_not_loaded:
+  en: This task is not loaded
+errors.task_already_forking:
+  en: This task is already being forked
+errors.task_already_rewinding:
+  en: This task is already being rewound
+errors.no_live_runtime:
+  en: This task has no live runtime
+errors.unexpected_daemon_response:
+  en: "Expected %{expected}, received %{actual} from the daemon"
+errors.daemon_disconnected:
+  en: Waku daemon is disconnected
+errors.path_outside_workspace:
+  en: This path is outside the active workspace on the daemon host
+errors.rename_task:
+  en: "Could not rename the task: %{error}"
+errors.remove_task:
+  en: "Could not remove the task: %{error}"
+errors.save_draft:
+  en: "Could not save the draft: %{error}"
+errors.rewind_task:
+  en: "Could not rewind the task: %{error}"
 errors.project_not_found:
   en: Project not found
 errors.prepare_task_project_not_found:
@@ -966,6 +1274,8 @@ errors.read_provider_event_stream:
   en: "Could not read the %{provider} event stream: %{error}"
 errors.answer_provider_permission:
   en: "Could not answer %{provider}'s permission request: %{error}"
+errors.answer_provider_question:
+  en: "Could not answer %{provider}'s question: %{error}"
 errors.initialize_codex_app_server:
   en: Failed to initialize Codex app-server
 errors.register_computer_use_skill:
@@ -1048,6 +1358,16 @@ right_panel.terminal_unavailable:
   en: Terminal unavailable
 right_panel.terminal_unavailable_description:
   en: Open the Terminal surface again to start a shell
+right_panel.resize:
+  en: Resize right panel
+right_panel.tabs:
+  en: Right panel tabs
+right_panel.add_tab:
+  en: Add panel tab
+right_panel.hide:
+  en: Hide right panel
+right_panel.close_tab:
+  en: Close %{title}
 
 environment.title:
   en: Environment
@@ -1062,6 +1382,8 @@ environment.compare_branch:
 
 commit.message_placeholder:
   en: Commit message (leave blank to generate)…
+commit.message:
+  en: Commit message
 commit.include_unstaged:
   en: Include unstaged changes
 commit.commit:
@@ -1115,6 +1437,8 @@ background.view:
   en: View
 background.stop:
   en: Stop
+background.stop_named:
+  en: Stop %{name}
 background.stop_all:
   en: Stop all
 background.stop_not_running:
@@ -1163,6 +1487,8 @@ background.status.stopped:
   en: Stopped
 background.status.lost:
   en: Disconnected
+background.unavailable:
+  en: This work is no longer available.
 
 files.unsaved_changes:
   en: Unsaved changes — %{shortcut} to save
@@ -1180,6 +1506,91 @@ files.could_not_save_read_only:
   en: "Could not save %{path}: file is not editable"
 files.could_not_save:
   en: "Could not save %{path}: %{error}"
+files.resize_tree:
+  en: Resize file tree
+files.refresh:
+  en: Refresh files
+files.loading:
+  en: Loading files…
+files.workspace_files:
+  en: Workspace files
+files.loading_file:
+  en: Loading file
+files.reading_from_daemon:
+  en: Reading from the daemon host.
+files.file_unavailable:
+  en: File unavailable
+files.loading_editor:
+  en: Loading editor
+files.preparing_editor:
+  en: Preparing editor…
+files.preparing_syntax:
+  en: Preparing syntax highlighting.
+
+file_picker.open_project:
+  en: Open Project
+file_picker.attach:
+  en: Attach
+file_picker.daemon_folders:
+  en: Daemon folders
+file_picker.daemon_items:
+  en: Daemon files and folders
+file_picker.choose_project_folder:
+  en: Choose a project folder from the daemon
+file_picker.attach_from_daemon:
+  en: Attach a file or folder from the daemon
+file_picker.daemon_disconnected:
+  en: The daemon is not connected
+file_picker.locations:
+  en: Locations
+file_picker.home:
+  en: Home
+file_picker.file_system:
+  en: File System
+file_picker.back:
+  en: Back
+file_picker.forward:
+  en: Forward
+file_picker.enclosing_folder:
+  en: Enclosing folder
+file_picker.filter_folder:
+  en: Filter this folder
+file_picker.filter:
+  en: Filter
+file_picker.refresh:
+  en: Refresh
+file_picker.name:
+  en: Name
+file_picker.kind:
+  en: Kind
+file_picker.loading_folder:
+  en: Loading folder…
+file_picker.no_matching_items:
+  en: No matching items
+file_picker.empty_folder:
+  en: This folder is empty
+file_picker.folders:
+  en: Folders
+file_picker.files:
+  en: Files
+file_picker.selected_folder:
+  en: Selected folder
+file_picker.selected_item:
+  en: Selected item
+file_picker.none:
+  en: None
+file_picker.opening:
+  en: Opening…
+file_picker.attaching:
+  en: Attaching…
+file_picker.open:
+  en: Open
+file_picker.folder:
+  en: Folder
+file_picker.file:
+  en: File
+file_picker.typed_file:
+  en: "%{type} file"
 
 diff.no_changes:
   en: No changes
@@ -1203,6 +1614,8 @@ diff.source_branch:
   en: Branch
 diff.loading:
   en: Loading changes…
+diff.preparing_review:
+  en: Preparing review…
 diff.loading_description:
   en: Capturing a consistent Git snapshot for review
 diff.unavailable:
@@ -1223,6 +1636,21 @@ diff.expand_context_above:
   en: Show 100 lines above · Shift-click for all
 diff.expand_context_below:
   en: Show 100 lines below · Shift-click for all
+diff.resize_tree:
+  en: Resize diff file tree
+diff.changed_files:
+  en: Changed files
+diff.file_count_one:
+  en: 1 file
+diff.file_count:
+  en: "%{count} files"
+
+terminal.transport_failed:
+  en: Terminal transport failed
+terminal.no_workspace_description:
+  en: Select a task before opening a terminal.
+terminal.process_exited:
+  en: Process exited
 
 browser.back:
   en: Back (%{shortcut})
@@ -1276,6 +1704,8 @@ common.reveal_in_finder:
 
 attachments.close_preview:
   en: Close image preview
+attachments.open_preview:
+  en: Open %{name}
 
 attachments.preview_unavailable:
   en: Image unavailable
@@ -1307,6 +1737,14 @@ transcript.show_fewer_files:
   en: Show fewer files
 transcript.showing_first_files:
   en: Showing first %{count} of %{total}
+transcript.scroll_to_bottom:
+  en: Scroll to bottom
+transcript.conversation_turns:
+  en: Conversation turns
+transcript.turn_label:
+  en: "Turn %{number}: %{prompt}"
+transcript.edit_message:
+  en: Edit message
 
 duration.second:
   en: "%{count} second"
@@ -1475,6 +1913,10 @@ usage.active_day_one:
   en: "%{count} active day"
 usage.active_day_many:
   en: "%{count} active days"
+usage.filter_projects:
+  en: Filter projects…
+usage.chart_description:
+  en: Daily %{metric} split between Claude Code and Codex.
 
 usage.refresh_failed:
   en: "Usage refresh failed: %{error}"

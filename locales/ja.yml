@@ -60,6 +60,7 @@ settings.general: 一般
 settings.appearance: 外観
 settings.providers: プロバイダー
 settings.usage: 使用状況
+settings.daemon: デーモン
 settings.computer_use: コンピュータ操作
 settings.general_keywords: 一般 ローカル プロジェクト 会話 プライバシー 分析 テレメトリ 匿名 共有 アップデート 自動 バージョン
 settings.appearance_keywords: 外観 テーマ システム ライト ダーク 言語 英語 中国語 簡体字 日本語
@@ -67,9 +68,75 @@ settings.providers_keywords: プロバイダー エージェント モデル CLI
 settings.skills: スキル
 settings.skills_keywords: スキル ライブラリ エージェント 無効 有効 削除 claude codex cursor opencode pi amp 共有
 settings.usage_keywords: 使用状況 トークン コスト 支出 キャッシュ 日別 グラフ モデル 内訳 履歴 claude codex
+settings.daemon_keywords: デーモン サーバー リモート ウェブ ネットワーク 公開 オリジン トークン ポート websocket
 settings.computer_use_keywords: コンピュータ 操作 画面収録 アクセシビリティ アプリ 制御 codex
 settings.back: 戻る
 settings.search: 設定を検索
+daemon.expose_title: 管理対象デーモンを公開
+daemon.expose_description: この Mac 以外の Waku クライアントから接続できるようにします。変更時はデーモンだけが再起動します。
+daemon.status_local: この Mac のみ
+daemon.status_exposed: 公開中
+daemon.status_restarting: 再起動中
+daemon.connection_title: リスナーアクセス
+daemon.connection_description: ブラウザのオリジンは完全一致が必要です。複数指定する場合はカンマで区切ります。
+daemon.port: ポート
+daemon.port_description: 公開中は、すべてのネットワークインターフェイスのこのポートで待ち受けます。
+daemon.port_placeholder: "34123"
+daemon.allowed_origins: 許可するブラウザオリジン
+daemon.allowed_origins_description: WebSocket を開ける正確な http:// または https:// オリジンです。
+daemon.allowed_origins_placeholder: https://waku.example.com, http://localhost:3001
+daemon.apply: 適用
+daemon.restarting: 再起動中…
+daemon.credentials_title: 接続情報
+daemon.credentials_description: Waku Web に入力してください。URL にはこの Mac のローカルネットワーク用ホスト名が使われます。
+daemon.websocket_url: WebSocket URL
+daemon.token: トークン
+daemon.reveal_token: トークンを表示
+daemon.hide_token: トークンを隠す
+daemon.regenerate_token: 再生成
+daemon.security_warning: このトークンは、この Mac 上のタスク、ファイル、Git、添付ファイル、コーディングエージェントへの完全なアクセス権を持ちます。プライベートネットワーク外では信頼できる TLS プロキシ経由で WSS を使用してください。
+daemon.external_title: 外部デーモン
+daemon.external_description: このデスクトップは Waku の外部で管理されているデーモンに接続しています。リスナー、ブラウザオリジン、トークンは接続先ホストで設定してください。
+daemon.web_external_description: Waku Web はブラウザの外部で管理されているデーモンに接続します。リスナー、ブラウザオリジン、トークンは接続先ホストで設定してください。
+daemon.web_connection_description: このブラウザがデーモンを起動または停止することはありません。
+daemon.not_configured: 未設定
+daemon.status: 状態
+daemon.disconnect: 接続を解除
+daemon.forget: デーモンを削除
+daemon.reconnect: 再接続
+daemon.phase_booting: 起動中
+daemon.phase_disconnected: 接続解除済み
+daemon.phase_connecting: 接続中
+daemon.phase_connected: 接続済み
+daemon.phase_error: エラー
+daemon.invalid_port: 1 から 65535 のポートを入力してください
+daemon.invalid_settings: デーモン設定が無効です：%{error}
+daemon.stop_active_tasks: デーモンのアクセス設定を変更する前に実行中のタスクを停止してください
+daemon.settings_applied: デーモンのアクセス設定を更新しました
+daemon.restart_failed: デーモンを再起動できませんでした：%{error}
+daemon.url_copied: WebSocket URL をコピーしました
+daemon.token_copied: デーモントークンをコピーしました
+web.connect_title: Waku デーモンに接続
+web.connect_description: デスクトップアプリの「設定 → デーモン」に表示されるリモートリスナー URL とトークンを入力してください。
+web.token_placeholder: デーモンアクセストークン
+web.remember_device: このデバイスに保存
+web.remember_device_description: 保存しない場合、ブラウザセッションの終了時に認証情報が消去されます。
+web.connect: 接続
+web.connecting: 接続中…
+web.security_warning: ブラウザはこの WebSocket にのみトークンを送信します。プライベートネットワーク外では信頼できる TLS プロキシ経由で WSS を使用してください。
+web.starting: Waku を起動中…
+web.starting_label: Waku を起動中
+web.start_failed_label: Waku を起動できませんでした
+web.load_failed: Waku を読み込めませんでした
+web.try_again: もう一度試す
+web.daemon_connection_closed: デーモンとの接続が閉じられました
+web.daemon_not_configured: デーモンが設定されていません
+web.error_daemon_url_required: デーモン URL を入力してください
+web.error_daemon_url_invalid: 有効な ws:// または wss:// のデーモン URL を入力してください
+web.error_daemon_url_scheme: デーモン URL には ws:// または wss:// を使用してください
+web.error_daemon_url_host: デーモン URL にはホストが必要で、認証情報は含められません
+web.error_secure_websocket_required: 安全な Waku Web ページからは wss:// でのみ接続できます
+web.error_daemon_token_required: デーモントークンを入力してください
 settings.theme: テーマ
 settings.theme_description: システム、ライト、ダークのいずれかのテーマを選択します
 settings.theme_system: システム
@@ -91,9 +158,12 @@ common.refresh: 更新
 common.recheck: 再確認
 common.reset: リセット
 common.revoke: 許可を解除
+common.retry: 再試行
+common.creating: 作成中…
 
 settings.local_by_default: デフォルトでローカルに保存
 settings.local_by_default_description: プロジェクト、会話、設定はこの Mac に保存されます
+settings.local_by_default_web_description: プロジェクト、会話、添付ファイルは接続先デーモンのホストに保存されます。Waku Web の設定はこのブラウザに保存されます。
 settings.automatic_updates: 自動アップデート
 settings.automatic_updates_description: バックグラウンドで新しいバージョンを確認し、インストールを案内します
 settings.share_anonymous_usage_data: 匿名の使用状況データを共有
@@ -101,6 +171,12 @@ settings.share_anonymous_usage_data_description: 機能の利用状況と信頼�
 
 providers.coding_agents: コーディングエージェント
 providers.description: Waku はこの Mac にインストールされたエージェントの CLI を使用します。各エージェントの CLI をインストールするかログインしてから、更新してください
+providers.web_description: Waku はデーモンホストにインストールされたエージェント CLI を使用します。各エージェントの CLI をインストールするかログインしてから、更新してください
+providers.check_failed: "%{command} を確認できませんでした：%{error}"
+providers.show_settings: "%{provider} の設定を表示"
+providers.hide_settings: "%{provider} の設定を隠す"
+providers.enable: "%{provider} を有効にする"
+providers.disable: "%{provider} を無効にする"
 providers.disabled_for_new_tasks: 新規タスクでは無効
 providers.model_count_one: "%{count} 個のモデル"
 providers.model_count_many: "%{count} 個のモデル"
@@ -108,6 +184,7 @@ providers.not_detected_as: PATH 上に %{command} が見つかりません
 providers.using_override: PATH の自動検出ではなく %{path} を使用しています
 providers.invalid_override: このパスには実行可能なファイルがありません。空欄にすると PATH から自動検出します
 providers.detected_at: "%{path} で検出されました"
+providers.detected_as: "%{command} として検出されました"
 providers.searches_path: Waku は PATH で %{command} を検出できませんでした
 providers.binary_path: 実行ファイルのパス
 providers.binary_path_description: Waku が %{provider} の起動に使用する実行ファイルです。Return キーで適用します。空欄にすると PATH から自動検出します
@@ -131,6 +208,7 @@ computer_use.grant_access: アクセスを許可
 computer_use.permission_check_failed: コンピュータ操作の権限を確認できませんでした
 
 common.settings: 設定
+common.copy: コピー
 common.remove: 削除
 common.rename: 名前を変更
 
@@ -149,17 +227,28 @@ sidebar.minutes_ago: "%{count} 分前"
 sidebar.hours_ago: "%{count} 時間前"
 sidebar.days_ago: "%{count} 日前"
 sidebar.unknown_project: 不明なプロジェクト
+sidebar.close: サイドバーを閉じる
+sidebar.hide: サイドバーを隠す
+sidebar.open: サイドバーを開く
+sidebar.tasks: タスク
+sidebar.add_project: リモートプロジェクトを追加
+sidebar.resize: サイドバーの幅を変更
+sidebar.status_working: 作業中
+sidebar.status_waiting: 待機中
+sidebar.status_failed: 失敗
 
 project.new_project: 新規プロジェクト…
 project.no_project: プロジェクトを使用しない
 project.no_project_name: プロジェクトなし
 project.choose_project: プロジェクトを選択
+project.default_folder: デフォルトフォルダ
 project.project_lower: プロジェクト
 project.without_a_project: プロジェクトなし
 project.your_project: あなたのプロジェクト
 
 onboarding.open_project_to_begin: プロジェクトを開いて始めましょう
 onboarding.description: Waku は選択したフォルダでコーディングエージェントを実行します。コード、タスク、履歴はこの Mac に保存されます
+onboarding.web_description: デーモンホスト上のパスを選ぶか、プロジェクトなしで開始してください。
 onboarding.open_project_folder: プロジェクトフォルダを開く…
 onboarding.what_should_we_build: 何を作りましょうか？
 onboarding.what_should_we_build_in: ""
@@ -180,6 +269,8 @@ session.forking_task: タスクをフォーク中…
 session.forking_task_title: タスクをフォーク中…
 session.revert_to_here: ここまで戻す
 session.revert_to_here_title: ここまで戻す
+session.reverting_message: メッセージを戻しています…
+session.reverting_message_title: メッセージを戻しています…
 
 time.yesterday_at: 昨日 %{time}
 time.weekday_at: "%{weekday} %{time}"
@@ -195,7 +286,18 @@ time.sunday: 日曜日
 
 activity.count: "%{activity} %{count} 件"
 activity.running: 実行中：%{activities}
+activity.detail: アクティビティの詳細
+activity.named_content: "%{name} の内容"
 activity.ran: 実行済み：%{activities}
+activity.action_think: 思考
+activity.action_run: 実行
+activity.action_edit: 編集
+activity.action_read: 読み込み
+activity.action_search: 検索
+activity.action_list: 一覧
+activity.action_plan: 計画
+activity.action_use: 使用
+activity.ask_questions: 質問する
 activity.arguments: 引数
 activity.output: 出力
 activity.image_output: 画像出力
@@ -216,6 +318,9 @@ activity.run_command: コマンドを実行
 activity.running_named_command: "%{command} を実行中"
 activity.ran_named_command: "%{command} を実行しました"
 activity.named_command_failed: "コマンドの実行に失敗しました：%{command}"
+activity.running_described_command: "コマンドを実行中：%{description}"
+activity.ran_described_command: "コマンドを実行しました：%{description}"
+activity.described_command_failed: "コマンドの実行に失敗しました：%{description}"
 activity.running_command: コマンドを実行中
 activity.ran_command: コマンドを実行しました
 activity.command_failed: コマンドの実行に失敗しました
@@ -266,6 +371,7 @@ activity.output_truncated: "\n\n… 出力は省略されました"
 activity.thought: 思考
 activity.thoughts: 思考
 activity.command: コマンド
+activity.command_detail: コマンド
 activity.commands: コマンド
 activity.file_edit: ファイル編集
 activity.file_edits: ファイル編集
@@ -293,6 +399,7 @@ mode.supervised_description: コマンドの実行とファイル変更の前に
 mode.auto_accept_edits_description: 編集は自動承認し、その他の操作は事前に確認します
 mode.auto_description: 通常の操作は AI レビュアーが承認し、リスクのある操作は事前に確認します
 mode.full_access_description: 確認なしでコマンドの実行と編集を許可します
+mode.switch_to: "%{mode}に切り替える"
 
 agent_preset.standard: 標準モード
 agent_preset.code: コードモード
@@ -342,9 +449,14 @@ models.none_found: モデルが見つかりません
 models.favorite_hint: モデルにスターを付けると、ここに固定できます
 models.loading: モデルを読み込み中…
 models.none_reported: このプロバイダーにモデルがありません
+models.choose: モデルを選択
+models.favorites: お気に入り
+models.add_favorite: お気に入りに追加
+models.remove_favorite: お気に入りから削除
 models.standard: 標準
 models.reasoning: 推論レベル
 models.service_tier: サービスティア
+models.context_window: コンテキストウィンドウ
 
 model_option.none: なし
 model_option.minimal: 最小
@@ -354,6 +466,9 @@ model_option.high: 高
 model_option.extra_high: 非常に高い
 model_option.max: 最大
 model_option.ultra: 超高
+model_option.ultracode: Ultracode
+model_option.context_200k: 200K
+model_option.context_1m: 1M
 model_option.auto: 自動
 model_option.fast: 高速
 model_option.amp_fast_description: 使用量が増える代わりに、Amp の高速な処理階層を使用します
@@ -403,25 +518,47 @@ skills.delete_failed: "スキルを削除できませんでした：%{error}"
 skills.toggle_failed: "スキルを更新できませんでした：%{error}"
 skills.empty_title: スキルはまだありません
 skills.empty_description: スキルは SKILL.md を含むフォルダです。デプロイ手順やレビューチェックリストのように、どのエージェントでも読み込める再利用可能な指示をまとめられます。Claude Code、Codex、その他のエージェント向けにインストールされたスキルがここに表示され、/name で呼び出せます。
+skills.library: スキルライブラリ
+skills.details: スキルの詳細
+skills.section_user_skills: ユーザースキル
+skills.enable_named: "%{name} を有効にする"
+skills.disable_named: "%{name} を無効にする"
 
 commands.init_description: このプロジェクトの %{instructions_file} を作成または更新
 commands.review_description: このブランチの保留中の変更をレビュー
 commands.commit_description: 現在の変更をステージしてコミット
+commands.fast_description: 高速モードを切り替え
+commands.fast_enabled: 高速モードを有効にしました
+commands.fast_disabled: 高速モードを無効にしました
 commands.claude_compact: 会話を要約してコンテキストを空ける
 commands.claude_context: コンテキストウインドウの使用状況を表示
 commands.claude_cost: このセッションのトークン使用量とコストを表示
 commands.claude_init: プロジェクトを分析して CLAUDE.md を作成
-commands.claude_pr_comments: 現在の PR のレビューコメントを取得
 commands.claude_review: プルリクエストをレビュー
 commands.claude_security_review: 保留中の変更をセキュリティレビュー
-commands.claude_todos: 現在の TODO 項目を一覧表示
 
 composer.edit_in_composer: 入力欄で編集
-composer.queued_followups: キューに追加したフォローアップ
-composer.queued_followups_description: キューに追加したフォローアップ · 現在のターンが完了すると送信されます
+composer.steer: 指示を追加
+composer.remove_followup: キューから削除
+user_input.other_placeholder: 別の回答を入力
+user_input.back: 戻る
+user_input.next: 次へ
+user_input.submit: 送信
+user_input.progress: "%{current} / %{total}"
 composer.preparing_task: タスクを準備中…
-composer.steer_turn: 実行中のターンに指示を追加（%{shortcut}）
 composer.queue_followup: フォローアップとしてキューに追加（⏎）
+composer.message: メッセージ
+composer.queue_placeholder: フォローアップを追加…
+composer.prompt_placeholder: Waku に作業を依頼…
+composer.attach_daemon: デーモンホストからファイルまたはフォルダを添付
+composer.attach_daemon_title: デーモンホストから添付
+composer.stop: 停止
+composer.stop_confirm: もう一度 Escape を押すと停止します
+composer.steer_current: 現在のターンに指示を追加
+composer.starting_agent: エージェントを起動中…
+composer.suggestions: 入力候補
+composer.remove_attachment: "%{name} を削除"
+composer.queued_message_actions: フォローアップの操作
 
 branches.detached_head: Detached HEAD
 branches.search_project: "%{project} のブランチを検索"
@@ -431,6 +568,8 @@ branches.create_hint: Return キーで作成 · Esc キーでキャンセル
 branches.none_found: ブランチが見つかりません
 branches.create_and_checkout_ellipsis: 新しいブランチを作成してチェックアウト…
 branches.title: ブランチ
+branches.choose: ブランチを選択
+branches.checked_out_elsewhere: 別のワークツリーでチェックアウトされています
 
 workspace.work_in: 作業場所
 workspace.local: ローカル
@@ -441,20 +580,23 @@ workspace.worktree: ワークツリー
 terminal.starting: ターミナルを起動中…
 
 project.add_project: プロジェクトを追加
+errors.remote_project_picker: デーモンホスト上のプロジェクトを追加するにはリモートパス選択が必要ですが、まだ利用できません
 
 session.stopped: 停止しました
 session.turn_completed: ターンが完了しました
 session.stopped_before_response: エージェントは回答を返す前に停止しました
 session.codex_exited_before_response: Codex app-server は回答を返す前に終了しました
 session.steer_rejected: エージェントに追加の指示を送れませんでした（%{error}）。メッセージはフォローアップとしてキューに追加されました
+session.steer_rejected_plain: エージェントに追加の指示を送れませんでした。メッセージはフォローアップとしてキューに追加されました
 session.agent_ran_out_of_context: このターンでエージェントのコンテキストが不足しました
 session.agent_declined_turn: エージェントはこのターンを辞退しました
 session.agent_stopped_reason: "エージェントが停止しました：%{reason}"
 
 errors.open_session: "そのタスクを開けませんでした：%{error}"
-errors.create_projectless_task: "~/.waku 内にタスクを作成できませんでした：%{error}"
+errors.create_projectless_task: "~/.waku/projects 内にタスクを作成できませんでした：%{error}"
 errors.save_projectless_migration: "プロジェクトなしタスクの移行を保存できませんでした：%{error}"
-errors.move_projectless_task: "以前のルート直下のプロジェクトなしタスクを ~/.waku 内に移動できませんでした：%{error}"
+errors.move_projectless_task: "以前のルート直下のプロジェクトなしタスクを ~/.waku/projects 内に移動できませんでした：%{error}"
+errors.remote_host_path: このパスはデーモンホスト上にあるため、デスクトップアプリでは開けません
 errors.change_branch: "ブランチを変更できませんでした：%{error}"
 errors.capture_pre_turn_checkpoint: "ターン開始前のチェックポイントを取得できませんでした：%{error}"
 errors.capture_turn_checkpoint: "ターンのチェックポイントを取得できませんでした：%{error}"
@@ -478,6 +620,18 @@ errors.rollback_rejected_workspace_restored: "プロバイダーがロールバ�
 errors.rollback_and_safety_failed: "プロバイダーのロールバックに失敗し（%{error}）、安全スナップショットも復元できませんでした（%{restore_error}）。復旧用 ref は %{safety_ref} に保持されています"
 errors.no_session_selected: タスクが選択されていません
 errors.session_not_found: タスクが見つかりません
+errors.task_not_found: タスクが見つかりません
+errors.task_not_loaded: このタスクは読み込まれていません
+errors.task_already_forking: このタスクはすでにフォーク中です
+errors.task_already_rewinding: このタスクはすでに巻き戻し中です
+errors.no_live_runtime: このタスクには実行中のエージェントがありません
+errors.unexpected_daemon_response: "デーモンから %{expected} が返るはずでしたが、%{actual} を受信しました"
+errors.daemon_disconnected: Waku デーモンに接続されていません
+errors.path_outside_workspace: このパスはデーモンホスト上の現在のワークスペース外にあります
+errors.rename_task: "タスクの名前を変更できませんでした：%{error}"
+errors.remove_task: "タスクを削除できませんでした：%{error}"
+errors.save_draft: "下書きを保存できませんでした：%{error}"
+errors.rewind_task: "タスクを巻き戻せませんでした：%{error}"
 errors.project_not_found: プロジェクトが見つかりません
 errors.prepare_task_project_not_found: タスクを準備できませんでした：プロジェクトが見つかりません
 errors.store_pasted_image: "ペーストした画像を添付できませんでした：%{error}"
@@ -502,6 +656,7 @@ errors.open_provider_session: "%{provider} のセッションを開けません�
 errors.select_model: "モデルを選択できませんでした：%{error}"
 errors.read_provider_event_stream: "%{provider} のイベントストリームを読み取れませんでした：%{error}"
 errors.answer_provider_permission: "%{provider} の権限リクエストに回答できませんでした：%{error}"
+errors.answer_provider_question: "%{provider} の質問に回答できませんでした：%{error}"
 errors.initialize_codex_app_server: Codex app-server を初期化できませんでした
 errors.register_computer_use_skill: Waku のコンピュータ操作スキルを Codex に登録できませんでした
 errors.codex_thread_open_incomplete: Codex はスレッドを開く処理を完了しませんでした
@@ -544,6 +699,11 @@ right_panel.files_description: ワークスペースのファイルを閲覧し�
 right_panel.diff_description: ファイルの変更をレビューします
 right_panel.terminal_unavailable: ターミナルを利用できません
 right_panel.terminal_unavailable_description: ターミナルパネルをもう一度開くとシェルが起動します
+right_panel.resize: 右パネルの幅を変更
+right_panel.tabs: 右パネルのタブ
+right_panel.add_tab: パネルタブを追加
+right_panel.hide: 右パネルを隠す
+right_panel.close_tab: "%{title} を閉じる"
 
 environment.title: 環境
 environment.summary: 環境とバックグラウンド作業
@@ -552,6 +712,7 @@ environment.commit_or_push: コミットまたはプッシュ
 environment.compare_branch: ブランチを比較
 
 commit.message_placeholder: コミットメッセージ（空欄の場合は自動生成）…
+commit.message: コミットメッセージ
 commit.include_unstaged: ステージしていない変更を含める
 commit.commit: コミット
 commit.commit_and_push: コミットしてプッシュ
@@ -579,6 +740,7 @@ background.no_work: バックグラウンドの作業はありません
 background.no_work_description: 長時間実行されるコマンドとサブエージェントがここに表示されます。
 background.view: 表示
 background.stop: 停止
+background.stop_named: "%{name} を停止"
 background.stop_all: すべて停止
 background.stop_not_running: プロセスはすでに停止しています。
 background.output: 出力
@@ -603,6 +765,7 @@ background.status.completed: 完了
 background.status.failed: 失敗
 background.status.stopped: 停止
 background.status.lost: 切断
+background.unavailable: このバックグラウンド処理は利用できなくなりました。
 
 files.unsaved_changes: 未保存の変更があります — %{shortcut} で保存
 files.no_project_open: プロジェクトが開かれていません
@@ -612,6 +775,48 @@ files.unable_to_edit: "このファイルを編集できません：%{error}"
 files.could_not_save_opening: "%{path} を保存できませんでした：まだ開いています"
 files.could_not_save_read_only: "%{path} を保存できませんでした：このファイルは編集できません"
 files.could_not_save: "%{path} を保存できませんでした：%{error}"
+files.resize_tree: ファイルツリーの幅を変更
+files.refresh: ファイルを更新
+files.loading: ファイルを読み込み中…
+files.workspace_files: ワークスペースのファイル
+files.loading_file: ファイルを読み込み中
+files.reading_from_daemon: デーモンホストから読み込んでいます。
+files.file_unavailable: ファイルを利用できません
+files.loading_editor: エディタを読み込み中
+files.preparing_editor: エディタを準備中…
+files.preparing_syntax: シンタックスハイライトを準備しています。
+file_picker.open_project: プロジェクトを開く
+file_picker.attach: 添付
+file_picker.daemon_folders: デーモンのフォルダ
+file_picker.daemon_items: デーモンのファイルとフォルダ
+file_picker.choose_project_folder: デーモンからプロジェクトフォルダを選択
+file_picker.attach_from_daemon: デーモンからファイルまたはフォルダを添付
+file_picker.daemon_disconnected: デーモンに接続されていません
+file_picker.locations: 場所
+file_picker.home: ホーム
+file_picker.file_system: ファイルシステム
+file_picker.back: 戻る
+file_picker.forward: 進む
+file_picker.enclosing_folder: 親フォルダ
+file_picker.filter_folder: このフォルダを絞り込む
+file_picker.filter: 絞り込み
+file_picker.refresh: 更新
+file_picker.name: 名前
+file_picker.kind: 種類
+file_picker.loading_folder: フォルダを読み込み中…
+file_picker.no_matching_items: 一致する項目はありません
+file_picker.empty_folder: このフォルダは空です
+file_picker.folders: フォルダ
+file_picker.files: ファイル
+file_picker.selected_folder: 選択したフォルダ
+file_picker.selected_item: 選択した項目
+file_picker.none: なし
+file_picker.opening: 開いています…
+file_picker.attaching: 添付しています…
+file_picker.open: 開く
+file_picker.folder: フォルダ
+file_picker.file: ファイル
+file_picker.typed_file: "%{type} ファイル"
 
 diff.no_changes: 変更はありません
 diff.no_changes_description: このソースにはレビューするファイル変更がありません
@@ -624,6 +829,7 @@ diff.source_staged: ステージ済み
 diff.source_committed: コミット済み
 diff.source_branch: ブランチ
 diff.loading: 変更を読み込み中…
+diff.preparing_review: レビューを準備中…
 diff.loading_description: レビュー用に一貫した Git スナップショットを取得しています
 diff.unavailable: 変更を利用できません
 diff.refresh: 変更を更新
@@ -634,6 +840,13 @@ diff.expand_all_context: 未変更の行をすべて展開
 diff.expand_context: 未変更の行を展開 · Shift キーを押しながらクリックですべて展開
 diff.expand_context_above: 上の 100 行を表示 · Shift キーを押しながらクリックですべて表示
 diff.expand_context_below: 下の 100 行を表示 · Shift キーを押しながらクリックですべて表示
+diff.resize_tree: 差分ファイルツリーの幅を変更
+diff.changed_files: 変更されたファイル
+diff.file_count_one: ファイル 1 件
+diff.file_count: "ファイル %{count} 件"
+terminal.transport_failed: ターミナル転送に失敗しました
+terminal.no_workspace_description: ターミナルを開く前にタスクを選択してください。
+terminal.process_exited: プロセスが終了しました
 
 browser.back: 戻る（%{shortcut}）
 browser.forward: 進む（%{shortcut}）
@@ -662,6 +875,7 @@ common.dismiss_notification: 通知を閉じる
 common.reveal_in_finder: ファイルマネージャーで表示
 
 attachments.close_preview: 画像プレビューを閉じる
+attachments.open_preview: "%{name} を開く"
 attachments.preview_unavailable: 画像を表示できません
 
 common.copy_named: "%{name} をコピー"
@@ -678,6 +892,10 @@ transcript.review_changes: レビュー
 transcript.show_more_files: "さらに %{count} 個のファイルを表示"
 transcript.show_fewer_files: 表示するファイルを減らす
 transcript.showing_first_files: "%{total} 個中、先頭 %{count} 個を表示"
+transcript.scroll_to_bottom: 一番下へスクロール
+transcript.conversation_turns: 会話ターン
+transcript.turn_label: "ターン %{number}：%{prompt}"
+transcript.edit_message: メッセージを編集
 
 duration.second: "%{count} 秒"
 duration.seconds: "%{count} 秒"
@@ -763,6 +981,8 @@ usage.model_one: "%{count} 個のモデル"
 usage.model_many: "%{count} 個のモデル"
 usage.active_day_one: "アクティブ %{count} 日"
 usage.active_day_many: "アクティブ %{count} 日"
+usage.filter_projects: プロジェクトを絞り込む…
+usage.chart_description: "Claude Code と Codex の日別 %{metric}。"
 usage.refresh_failed: "使用状況の更新に失敗しました：%{error}"
 usage.context_used: コンテキストウインドウを %{percent}% 使用（%{shortcut}）
 usage.shortcut: 使用状況（%{shortcut}）

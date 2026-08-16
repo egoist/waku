@@ -30,6 +30,9 @@ jobs:
           rustup toolchain install 1.96.0 --profile minimal
           rustup default 1.96.0
 
+      - name: Install Bun
+        uses: oven-sh/setup-bun@v2
+
       - name: Install Linux dependencies
         if: runner.os == 'Linux'
         run: |
@@ -58,3 +61,12 @@ jobs:
 
       - name: Run tests
         run: cargo test --locked
+
+      - name: Install JavaScript dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Check generated protocol and browser client
+        run: |
+          bun run protocol:check
+          bun run --filter @waku/client check
+          bun run --filter @waku/client test

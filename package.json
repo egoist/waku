@@ -4,6 +4,8 @@
   "scripts": {
     "dev": "bun ./scripts/dev.ts",
     "release": "bun ./scripts/release.ts",
+    "protocol:generate": "cargo run -p waku-protocol --bin export_types",
+    "protocol:check": "cargo run -p waku-protocol --bin export_types -- --check",
     "db:generate": "drizzle-kit generate",
     "db:push": "drizzle-kit push"
   },
@@ -15,5 +17,5 @@
     "drizzle-orm": "^0.45.2",
     "typescript": "^7.0.2"
   },
-  "workspaces": ["website"]
+  "workspaces": ["website", "apps/*", "packages/*"]
 }

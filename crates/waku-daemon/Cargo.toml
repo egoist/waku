@@ -1,0 +1,28 @@
+[package]
+name = "waku-daemon"
+version = "0.1.0"
+edition = "2024"
+description = "Headless Waku provider daemon"
+license = "GPL-3.0-only"
+readme = "README.md"
+
+[features]
+dev-binary = []
+
+[[bin]]
+name = "waku-daemon"
+path = "src/main.rs"
+
+[[bin]]
+name = "waku-debug-daemon"
+path = "src/bin/waku-debug-daemon.rs"
+required-features = ["dev-binary"]
+
+[dependencies]
+anyhow = "1.0"
+serde_json = "1.0"
+waku-core = { path = "../waku-core" }
+waku-protocol = { path = "../waku-protocol" }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"

@@ -1,10 +1,11 @@
 use gpui::{
     AnyElement, App, Div, ElementId, Hsla, Img, InteractiveElement, Interactivity, ParentElement,
-    PathBuilder, Pixels, RenderOnce, SharedString, Stateful, StyleRefinement, Styled, Svg, Window,
-    canvas, div, img, point, prelude::*, px, rgb, svg,
+    PathBuilder, Pixels, RenderOnce, ScrollHandle, SharedString, Stateful, StyleRefinement, Styled,
+    Svg, Window, canvas, div, img, point, prelude::*, px, rgb, svg,
 };
 
 pub mod menu;
+pub mod motion;
 pub mod scrollbar;
 pub mod text_field;
 pub mod tooltip;
@@ -43,6 +44,22 @@ pub fn icon_button(id: impl Into<ElementId>, path: &'static str, theme: Theme) -
         .hover(|element| element.bg(theme.overlay))
         .active(|element| element.bg(theme.overlay_strong))
         .child(icon(path, 13.0, theme.text_tertiary))
+}
+
+/// Keeps a wheel gesture inside a scrollable nested in another scrollable
+/// (activity output inside the transcript list, command output inside the
+/// background-work page), matching AppKit: while the viewport under the
+/// pointer has overflow of its own, the ancestor must not scroll it away.
+/// Call from an `on_scroll_wheel` listener. The viewport's own scroll
+/// handler registers after user listeners, so it has already consumed the
+/// delta when this stops the bubble; a viewport whose content fits keeps
+/// chaining so short blocks do not dead-zone the page. Stopping propagation
+/// also skips wheel listeners pushed earlier on the same element, so fold
+/// any sibling wheel logic into the listener that calls this.
+pub fn contain_scroll(handle: &ScrollHandle, cx: &mut App) {
+    if handle.max_offset().y > px(0.5) {
+        cx.stop_propagation();
+    }
 }
 
 /// Brand hue for each provider's official mark.
