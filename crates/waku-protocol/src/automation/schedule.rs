@@ -32,7 +32,10 @@ pub fn next_occurrence(schedule: &Schedule, after: NaiveDateTime) -> Option<Naiv
         // Manual automations never fire on their own.
         Schedule::Manual => None,
         Schedule::Hourly { minute } => {
-            let minute = u32::from(*minute).min(59);
+            let minute = u32::from(*minute);
+            if minute > 59 {
+                return None;
+            }
             // The `:minute` slot in the current hour, then walk hours forward
             // until it lands strictly after `after` (covers the hour and day
             // rollover in one loop).
@@ -82,7 +85,11 @@ pub fn next_occurrence(schedule: &Schedule, after: NaiveDateTime) -> Option<Naiv
                 let best = days
                     .iter()
                     .filter_map(|&day| {
-                        let clamped = u32::from(day).clamp(1, last);
+                        let day = u32::from(day);
+                        if !(1..=31).contains(&day) {
+                            return None;
+                        }
+                        let clamped = day.min(last);
                         let date = NaiveDate::from_ymd_opt(year, month, clamped)?;
                         let candidate = date.and_time(time);
                         (candidate > after).then_some(candidate)
@@ -198,6 +205,12 @@ mod tests {
             next_occurrence(&schedule, at(2026, 8, 13, 23, 45)),
             Some(at(2026, 8, 14, 0, 30))
         );
+    }
+
+    #[test]
+    fn malformed_hourly_minute_never_fires() {
+        let schedule = Schedule::Hourly { minute: 60 };
+        assert_eq!(next_occurrence(&schedule, at(2026, 8, 13, 9, 0)), None);
     }
 
     #[test]
@@ -363,6 +376,24 @@ mod tests {
         assert_eq!(
             next_occurrence(&schedule, at(2026, 2, 28, 12, 0)),
             Some(at(2026, 3, 1, 9, 0))
+        );
+    }
+
+    #[test]
+    fn malformed_monthly_days_are_ignored() {
+        let only_invalid = Schedule::Monthly {
+            time: TimeOfDay::new(9, 0),
+            days: vec![0, 32],
+        };
+        assert_eq!(next_occurrence(&only_invalid, at(2026, 8, 13, 9, 0)), None);
+
+        let mixed = Schedule::Monthly {
+            time: TimeOfDay::new(9, 0),
+            days: vec![0, 15, 32],
+        };
+        assert_eq!(
+            next_occurrence(&mixed, at(2026, 8, 13, 9, 0)),
+            Some(at(2026, 8, 15, 9, 0))
         );
     }
 

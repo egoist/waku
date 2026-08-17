@@ -4,7 +4,8 @@ use std::path::{Path, PathBuf};
 
 use ts_rs::{Config, TS};
 use waku_protocol::{
-    ClientMessage, DaemonReady, MAX_WIRE_MESSAGE_BYTES, PROTOCOL_VERSION, ServerMessage,
+    automation::Automation, ClientMessage, DaemonReady, MAX_WIRE_MESSAGE_BYTES, PROTOCOL_VERSION,
+    ServerMessage,
 };
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -36,6 +37,7 @@ fn export_to(output: &Path) -> Result<(), Box<dyn std::error::Error>> {
     ClientMessage::export_all(&config)?;
     ServerMessage::export_all(&config)?;
     DaemonReady::export_all(&config)?;
+    Automation::export_all(&config)?;
     strip_trailing_whitespace(output)?;
     fs::write(
         output.join("constants.ts"),
