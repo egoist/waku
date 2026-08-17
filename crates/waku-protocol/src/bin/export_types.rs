@@ -4,8 +4,8 @@ use std::path::{Path, PathBuf};
 
 use ts_rs::{Config, TS};
 use waku_protocol::{
-    automation::Automation, ClientMessage, DaemonReady, MAX_WIRE_MESSAGE_BYTES, PROTOCOL_VERSION,
-    ServerMessage,
+    ClientMessage, DaemonReady, MAX_WIRE_MESSAGE_BYTES, PROTOCOL_VERSION, ServerMessage,
+    automation::Automation,
 };
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
