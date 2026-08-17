@@ -77,7 +77,9 @@ pub fn fallback_models(provider: ProviderKind) -> Vec<ProviderModel> {
         ProviderKind::DeepSeek => Vec::new(),
         ProviderKind::OpenCode => Vec::new(),
         ProviderKind::Grok => {
-            vec![ProviderModel::new("grok-build", "Grok Build").default()]
+            vec![grok_reasoning_model(
+                ProviderModel::new("grok-build", "Grok Build").default(),
+            )]
         }
         // Pi, Oh My Pi, and Kimi Code all take their catalog from the user's
         // configured LLM providers. A fabricated fallback would make
@@ -452,7 +454,7 @@ fn parse_grok_models(output: &str) -> Vec<ProviderModel> {
             }
             let mut model = ProviderModel::new(id, display_name_from_slug(id));
             model.is_default = default_model.as_deref() == Some(id);
-            Some(model)
+            Some(grok_reasoning_model(model))
         })
         .collect()
 }
@@ -938,6 +940,19 @@ fn reasoning_options<const N: usize>(efforts: [&str; N]) -> Vec<ProviderModelOpt
         .collect()
 }
 
+/// Grok 4.6 and the `grok-build` alias advertise low/medium/high/xhigh.
+/// Grok 4.5's live catalog stops at high; offering xhigh would be ignored.
+fn grok_reasoning_model(model: ProviderModel) -> ProviderModel {
+    if waku_protocol::model_catalog::grok_model_supports_xhigh(&model.id) {
+        model.reasoning(
+            reasoning_options(["low", "medium", "high", "xhigh"]),
+            "high",
+        )
+    } else {
+        model.reasoning(reasoning_options(["low", "medium", "high"]), "high")
+    }
+}
+
 fn claude_reasoning_model(id: &str, name: &str) -> ProviderModel {
     ProviderModel::new(id, name).reasoning(
         reasoning_options(["low", "medium", "high", "xhigh", "max"]),
@@ -1312,8 +1327,42 @@ mod tests {
         assert_eq!(models.len(), 2);
         assert_eq!(models[0].id, "grok-4.6");
         assert!(models[0].is_default);
+        assert_eq!(
+            models[0]
+                .reasoning_efforts
+                .iter()
+                .map(|option| option.id.as_str())
+                .collect::<Vec<_>>(),
+            ["low", "medium", "high", "xhigh"]
+        );
+        assert_eq!(models[0].default_reasoning_effort.as_deref(), Some("high"));
         assert_eq!(models[1].id, "grok-4.5");
         assert!(!models[1].is_default);
+        assert_eq!(
+            models[1]
+                .reasoning_efforts
+                .iter()
+                .map(|option| option.id.as_str())
+                .collect::<Vec<_>>(),
+            ["low", "medium", "high"]
+        );
+        assert_eq!(models[1].default_reasoning_effort.as_deref(), Some("high"));
+    }
+
+    #[test]
+    fn grok_fallback_offers_xhigh_on_the_build_alias() {
+        let models = fallback_models(ProviderKind::Grok);
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0].id, "grok-build");
+        assert_eq!(
+            models[0]
+                .reasoning_efforts
+                .iter()
+                .map(|option| option.id.as_str())
+                .collect::<Vec<_>>(),
+            ["low", "medium", "high", "xhigh"]
+        );
+        assert_eq!(models[0].default_reasoning_effort.as_deref(), Some("high"));
     }
 
     #[test]

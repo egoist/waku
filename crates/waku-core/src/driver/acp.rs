@@ -66,16 +66,24 @@ struct AcpLaunch {
     env: Vec<(String, String)>,
 }
 
-fn launch_for(provider: ProviderKind) -> anyhow::Result<AcpLaunch> {
+fn launch_for(provider: ProviderKind, reasoning_effort: Option<&str>) -> anyhow::Result<AcpLaunch> {
     match provider {
         ProviderKind::Cursor => Ok(AcpLaunch {
             args: vec!["acp".into()],
             env: Vec::new(),
         }),
-        ProviderKind::Grok => Ok(AcpLaunch {
-            args: vec!["agent".into(), "stdio".into()],
-            env: vec![("GROK_OAUTH2_REFERRER".into(), "waku".into())],
-        }),
+        ProviderKind::Grok => {
+            let mut args = vec!["agent".into()];
+            if let Some(effort) = reasoning_effort.filter(|effort| !effort.is_empty()) {
+                args.push("--reasoning-effort".into());
+                args.push(effort.to_owned());
+            }
+            args.push("stdio".into());
+            Ok(AcpLaunch {
+                args,
+                env: vec![("GROK_OAUTH2_REFERRER".into(), "waku".into())],
+            })
+        }
         ProviderKind::Kimi => Ok(AcpLaunch {
             args: vec!["acp".into()],
             env: Vec::new(),
@@ -129,7 +137,7 @@ impl AcpDriver {
             None => None,
         };
 
-        let launch = launch_for(provider)?;
+        let launch = launch_for(provider, reasoning_effort.as_deref())?;
         let computer_use = (provider == ProviderKind::Grok && computer_use_enabled)
             .then(|| super::support::HeadlessComputerUseRuntime::start(provider, events.clone()))
             .transpose()?;
@@ -481,12 +489,13 @@ async fn run_sdk_connection(
             });
 
             let mut current_model = model;
+            let mut current_effort = reasoning_effort;
             apply_model(
                 &connection,
                 provider,
                 &session_id,
                 current_model.as_deref(),
-                reasoning_effort.as_deref(),
+                current_effort.as_deref(),
                 &events,
             )
             .await;
@@ -590,14 +599,18 @@ async fn run_sdk_connection(
                         }
                     }
                     CommandMessage::Options(options) => {
-                        if options.model != current_model {
+                        if options.model != current_model
+                            || (provider == ProviderKind::Grok
+                                && options.reasoning_effort != current_effort)
+                        {
                             current_model = options.model;
+                            current_effort = options.reasoning_effort;
                             apply_model(
                                 &connection,
                                 provider,
                                 &session_id,
                                 current_model.as_deref(),
-                                options.reasoning_effort.as_deref(),
+                                current_effort.as_deref(),
                                 &events,
                             )
                             .await;
@@ -674,12 +687,28 @@ fn desired_mode(
 
 /// Which session config option carries reasoning effort. ACP leaves the id to
 /// the agent: Kimi Code exposes it as its `thinking` level, while the other
-/// agents Waku drives keep it on `mode`.
+/// agents Waku drives keep it on `mode`. Grok does not use this path: its
+/// effort rides on `session/set_model` as `_meta.reasoningEffort`.
 fn reasoning_effort_config_id(provider: ProviderKind) -> &'static str {
     match provider {
         ProviderKind::Kimi => "thinking",
         _ => "mode",
     }
+}
+
+fn set_model_params(
+    session_id: &SessionId,
+    model: &str,
+    reasoning_effort: Option<&str>,
+    provider: ProviderKind,
+) -> serde_json::Value {
+    let mut params = json!({"sessionId": session_id, "modelId": model});
+    if provider == ProviderKind::Grok
+        && let Some(effort) = reasoning_effort.filter(|effort| !effort.is_empty())
+    {
+        params["_meta"] = json!({"reasoningEffort": effort});
+    }
+    params
 }
 
 async fn apply_model(
@@ -695,7 +724,7 @@ async fn apply_model(
     };
     let request = match UntypedMessage::new(
         "session/set_model",
-        json!({"sessionId": session_id, "modelId": model}),
+        set_model_params(session_id, model, reasoning_effort, provider),
     ) {
         Ok(request) => request,
         Err(error) => {
@@ -713,7 +742,9 @@ async fn apply_model(
         )));
         return;
     }
-    if let Some(effort) = reasoning_effort {
+    if provider != ProviderKind::Grok
+        && let Some(effort) = reasoning_effort
+    {
         // Reasoning effort is an optional config extension and is deliberately
         // non-fatal when an agent does not expose it.
         let _ = connection
@@ -1770,6 +1801,29 @@ mod tests {
                 context_window: Some(500000),
             }
         ));
+    }
+
+    #[test]
+    fn grok_launch_passes_reasoning_effort_before_stdio() {
+        let launch = launch_for(ProviderKind::Grok, Some("xhigh")).unwrap();
+        assert_eq!(
+            launch.args,
+            ["agent", "--reasoning-effort", "xhigh", "stdio"]
+        );
+        let bare = launch_for(ProviderKind::Grok, None).unwrap();
+        assert_eq!(bare.args, ["agent", "stdio"]);
+    }
+
+    #[test]
+    fn grok_set_model_includes_reasoning_effort_meta() {
+        let params = set_model_params(
+            &SessionId::new("sess"),
+            "grok-4.6",
+            Some("xhigh"),
+            ProviderKind::Grok,
+        );
+        assert_eq!(params["modelId"], "grok-4.6");
+        assert_eq!(params["_meta"]["reasoningEffort"], "xhigh");
     }
 
     #[test]
