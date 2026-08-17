@@ -1402,6 +1402,54 @@ impl Waku {
             },
         );
 
+        let group_by_project = self.state.group_conversations_by_project;
+        let project_grouping_toggle = div()
+            .id("group-conversations-by-project-toggle")
+            .tab_index(0)
+            .focus_visible(|style| style.border_color(theme.accent))
+            .w(px(36.0))
+            .h(px(20.0))
+            .p(px(2.0))
+            .flex_none()
+            .rounded_full()
+            .cursor_default()
+            .bg(if group_by_project {
+                theme.inverse
+            } else {
+                theme.inset
+            })
+            .border_1()
+            .border_color(if group_by_project {
+                theme.inverse
+            } else {
+                theme.border_strong
+            })
+            .flex()
+            .items_center()
+            .when(group_by_project, |element| element.justify_end())
+            .child(
+                div()
+                    .w(px(14.0))
+                    .h(px(14.0))
+                    .rounded_full()
+                    .bg(if group_by_project {
+                        theme.on_inverse
+                    } else {
+                        theme.text_tertiary
+                    }),
+            )
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.set_group_conversations_by_project(!group_by_project, cx);
+            }))
+            .on_key_down(cx.listener(move |this, event: &KeyDownEvent, _, cx| {
+                if !event.keystroke.modifiers.modified()
+                    && matches!(event.keystroke.key.as_str(), "enter" | "space")
+                {
+                    this.set_group_conversations_by_project(!group_by_project, cx);
+                    cx.stop_propagation();
+                }
+            }));
+
         div()
             .mt(px(15.0))
             .w_full()
@@ -1472,6 +1520,40 @@ impl Waku {
                             ),
                     )
                     .child(language_selector),
+            )
+            .child(div().mx(px(20.0)).h(px(1.0)).bg(theme.border))
+            .child(
+                div()
+                    .w_full()
+                    .min_h(px(60.0))
+                    .px(px(20.0))
+                    .py(px(12.0))
+                    .flex()
+                    .items_center()
+                    .gap(px(24.0))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .child(
+                                div()
+                                    .text_size(px(13.5))
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .text_color(theme.text)
+                                    .child(tr!("settings.group_conversations_by_project")),
+                            )
+                            .child(
+                                div()
+                                    .mt(px(5.0))
+                                    .text_size(px(12.5))
+                                    .line_height(px(18.0))
+                                    .text_color(theme.text_secondary)
+                                    .child(tr!(
+                                        "settings.group_conversations_by_project_description"
+                                    )),
+                            ),
+                    )
+                    .child(project_grouping_toggle),
             )
             .into_any_element()
     }
@@ -2341,6 +2423,15 @@ impl Waku {
         }
         self.state.theme = preference;
         crate::theme::apply_theme_preference(preference, window, cx);
+        self.save();
+        cx.notify();
+    }
+
+    fn set_group_conversations_by_project(&mut self, enabled: bool, cx: &mut Context<Self>) {
+        if self.state.group_conversations_by_project == enabled {
+            return;
+        }
+        self.state.group_conversations_by_project = enabled;
         self.save();
         cx.notify();
     }

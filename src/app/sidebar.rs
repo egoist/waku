@@ -7,6 +7,7 @@ actions!(waku_sidebar, [CancelSessionRename]);
 
 const SESSION_RENAME_PARENT_CONTEXT: &str = "SessionRename";
 const SESSION_RENAME_FIELD_CONTEXT: &str = "SessionRename > ComposerInput";
+const PROJECT_SESSION_PREVIEW_LIMIT: usize = 5;
 
 /// Keep Escape inside the focused inline editor so it cancels the rename,
 /// rather than falling through to the window-wide Stop action.
@@ -26,6 +27,21 @@ pub(super) enum SessionDateGroup {
     ThisMonth,
     ThisYear,
     More,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub(super) enum SidebarProjectGroup {
+    Project(Uuid),
+    NoProject,
+}
+
+impl SidebarProjectGroup {
+    fn fingerprint(self) -> u64 {
+        match self {
+            Self::Project(id) => mix_uuid(0x70a1_ec7, id),
+            Self::NoProject => 0x70a1_ec7,
+        }
+    }
 }
 
 impl SessionDateGroup {
@@ -118,9 +134,35 @@ fn append_sidebar_group_rows(
         return;
     }
 
-    rows.push(SidebarRow::Header(group));
+    rows.push(SidebarRow::DateHeader(group));
     if !collapsed {
         rows.extend(sessions.iter().copied().map(SidebarRow::Session));
+    }
+    rows.push(SidebarRow::GroupSpacer);
+}
+
+fn append_sidebar_project_rows(
+    rows: &mut Vec<SidebarRow>,
+    group: SidebarProjectGroup,
+    sessions: &[Uuid],
+    collapsed: bool,
+    expanded: bool,
+) {
+    rows.push(SidebarRow::ProjectHeader(group));
+    if !collapsed {
+        let visible = if expanded {
+            sessions.len()
+        } else {
+            sessions.len().min(PROJECT_SESSION_PREVIEW_LIMIT)
+        };
+        rows.extend(sessions[..visible].iter().copied().map(SidebarRow::Session));
+        if sessions.len() > PROJECT_SESSION_PREVIEW_LIMIT {
+            rows.push(SidebarRow::ProjectLimit {
+                group,
+                remaining: sessions.len() - PROJECT_SESSION_PREVIEW_LIMIT,
+                expanded,
+            });
+        }
     }
     rows.push(SidebarRow::GroupSpacer);
 }
@@ -210,9 +252,17 @@ pub(super) enum SidebarRow {
     /// Opens the window-wide command palette and scrolls with history.
     Search,
     /// Date-group header; the first row also carries the project action.
-    Header(SessionDateGroup),
+    DateHeader(SessionDateGroup),
+    /// Project header used when project grouping is enabled.
+    ProjectHeader(SidebarProjectGroup),
     /// A started session.
     Session(Uuid),
+    /// Reveals all sessions in a project, or restores its five-item preview.
+    ProjectLimit {
+        group: SidebarProjectGroup,
+        remaining: usize,
+        expanded: bool,
+    },
     /// Spacing between date groups.
     GroupSpacer,
 }
@@ -747,14 +797,20 @@ impl Waku {
     /// tick for values that move at most once per stream commit. The
     /// fingerprint is an allocation-free scan of exactly what
     /// [`Self::sidebar_rows`] reads: started sessions in order with their
-    /// recency timestamps, the collapsed-group set, and today's date.
+    /// project and recency timestamps, disclosure state, grouping preference,
+    /// and today's date.
     fn sidebar_rows_cached(&self, today: NaiveDate) -> Rc<Vec<SidebarRow>> {
         let mut fingerprint = mix(0x51de_ba5e_5eed_c0de, today.num_days_from_ce() as u64);
+        fingerprint = mix(
+            fingerprint,
+            u64::from(self.state.group_conversations_by_project),
+        );
         for session in &self.state.sessions {
             if !session.has_started() {
                 continue;
             }
             fingerprint = mix_uuid(fingerprint, session.id);
+            fingerprint = mix_uuid(fingerprint, session.project_id);
             fingerprint = mix(fingerprint, sidebar_session_timestamp(session));
         }
         // A set has no stable iteration order; combine order-independently.
@@ -768,6 +824,32 @@ impl Waku {
             mix(fingerprint, self.sidebar_collapsed_groups.len() as u64),
             collapsed,
         );
+        let collapsed_projects = self
+            .sidebar_collapsed_project_groups
+            .iter()
+            .fold(0u64, |combined, group| {
+                combined.wrapping_add(group.fingerprint())
+            });
+        fingerprint = mix(
+            mix(
+                fingerprint,
+                self.sidebar_collapsed_project_groups.len() as u64,
+            ),
+            collapsed_projects,
+        );
+        let expanded_projects = self
+            .sidebar_expanded_project_groups
+            .iter()
+            .fold(0u64, |combined, group| {
+                combined.wrapping_add(group.fingerprint())
+            });
+        fingerprint = mix(
+            mix(
+                fingerprint,
+                self.sidebar_expanded_project_groups.len() as u64,
+            ),
+            expanded_projects,
+        );
         if self.sidebar_rows_fingerprint.get() != Some(fingerprint) {
             *self.sidebar_rows_snapshot.borrow_mut() = Rc::new(self.sidebar_rows(today));
             self.sidebar_rows_fingerprint.set(Some(fingerprint));
@@ -776,9 +858,8 @@ impl Waku {
     }
 
     /// Snapshot the session history as a flat list of lightweight rows, newest
-    /// first, grouped by calendar period like the previous eager render.
+    /// first, grouped by either calendar period or project.
     fn sidebar_rows(&self, today: NaiveDate) -> Vec<SidebarRow> {
-        let mut grouped_sessions: [Vec<Uuid>; 6] = std::array::from_fn(|_| Vec::new());
         let mut sorted_sessions = self
             .state
             .sessions
@@ -787,6 +868,46 @@ impl Waku {
             .collect::<Vec<_>>();
         sorted_sessions
             .sort_by_key(|session| std::cmp::Reverse(sidebar_session_timestamp(session)));
+
+        if self.state.group_conversations_by_project {
+            let mut groups: Vec<(SidebarProjectGroup, Vec<Uuid>)> = Vec::new();
+            let mut group_indexes = HashMap::new();
+            for session in sorted_sessions {
+                let group = self.sidebar_project_group(session.project_id);
+                let index = *group_indexes.entry(group).or_insert_with(|| {
+                    groups.push((group, Vec::new()));
+                    groups.len() - 1
+                });
+                groups[index].1.push(session.id);
+            }
+            // Named projects keep the order of their newest conversation;
+            // projectless work stays in one predictable section at the end.
+            if let Some(index) = groups
+                .iter()
+                .position(|(group, _)| *group == SidebarProjectGroup::NoProject)
+            {
+                let no_project = groups.remove(index);
+                groups.push(no_project);
+            }
+
+            let mut rows = vec![SidebarRow::Search];
+            for (group, sessions) in groups {
+                append_sidebar_project_rows(
+                    &mut rows,
+                    group,
+                    &sessions,
+                    self.sidebar_collapsed_project_groups.contains(&group),
+                    self.sidebar_expanded_project_groups.contains(&group),
+                );
+            }
+            if rows.len() == 1 {
+                // Keep the project action visible while there is no history.
+                rows.push(SidebarRow::ProjectHeader(SidebarProjectGroup::NoProject));
+            }
+            return rows;
+        }
+
+        let mut grouped_sessions: [Vec<Uuid>; 6] = std::array::from_fn(|_| Vec::new());
         for session in sorted_sessions {
             grouped_sessions[session_date_group(sidebar_session_timestamp(session), today).index()]
                 .push(session.id);
@@ -804,9 +925,19 @@ impl Waku {
         }
         if rows.len() == 1 {
             // Keep the project action visible while there is no history.
-            rows.push(SidebarRow::Header(SessionDateGroup::Today));
+            rows.push(SidebarRow::DateHeader(SessionDateGroup::Today));
         }
         rows
+    }
+
+    fn sidebar_project_group(&self, project_id: Uuid) -> SidebarProjectGroup {
+        self.state
+            .projects
+            .iter()
+            .find(|project| project.id == project_id)
+            .filter(|project| !project.is_projectless())
+            .map(|project| SidebarProjectGroup::Project(project.id))
+            .unwrap_or(SidebarProjectGroup::NoProject)
     }
 
     /// Keep the virtualized list in sync with the current row snapshot.
@@ -845,11 +976,21 @@ impl Waku {
         };
         match *row {
             SidebarRow::Search => self.render_sidebar_search(cx).into_any_element(),
-            SidebarRow::Header(group) => self
+            SidebarRow::DateHeader(group) => self
                 .render_sidebar_group_header(group, index == 1, cx)
+                .into_any_element(),
+            SidebarRow::ProjectHeader(group) => self
+                .render_sidebar_project_header(group, index == 1, cx)
                 .into_any_element(),
             SidebarRow::Session(session_id) => self
                 .render_sidebar_session_item(session_id, cx)
+                .into_any_element(),
+            SidebarRow::ProjectLimit {
+                group,
+                remaining,
+                expanded,
+            } => self
+                .render_sidebar_project_limit(group, remaining, expanded, cx)
                 .into_any_element(),
             SidebarRow::GroupSpacer => div().w_full().h(px(10.0)).into_any_element(),
         }
@@ -933,6 +1074,167 @@ impl Waku {
             self.sidebar_collapsed_groups.insert(group)
         } else {
             self.sidebar_collapsed_groups.remove(&group)
+        };
+        if changed {
+            cx.notify();
+        }
+    }
+
+    fn sidebar_project_group_label(&self, group: SidebarProjectGroup) -> String {
+        match group {
+            SidebarProjectGroup::Project(project_id) => self
+                .state
+                .projects
+                .iter()
+                .find(|project| project.id == project_id)
+                .map(Project::display_name)
+                .unwrap_or_else(|| tr!("sidebar.unknown_project")),
+            SidebarProjectGroup::NoProject => tr!("project.no_project_name"),
+        }
+    }
+
+    fn render_sidebar_project_header(
+        &self,
+        group: SidebarProjectGroup,
+        first: bool,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let theme = Theme::current(cx);
+        let collapsed = self.sidebar_collapsed_project_groups.contains(&group);
+        let chevron = icon("icons/chevron-down.svg", 11.0, theme.text_ghost)
+            .when(collapsed, |icon| {
+                icon.with_transformation(gpui::Transformation::rotate(gpui::percentage(0.75)))
+            });
+
+        session_group_header(&theme)
+            .w_full()
+            .child(
+                div()
+                    .id(SharedString::from(format!(
+                        "sidebar-project-group-toggle-{}",
+                        group.fingerprint()
+                    )))
+                    .tab_index(0)
+                    .h(px(22.0))
+                    .min_w_0()
+                    .rounded(px(4.0))
+                    .flex()
+                    .items_center()
+                    .gap(px(5.0))
+                    .cursor_default()
+                    .focus_visible(|style| style.border_1().border_color(theme.accent))
+                    .child(chevron)
+                    .child(
+                        div()
+                            .min_w_0()
+                            .line_clamp(1)
+                            .text_overflow(gpui::TextOverflow::Truncate("...".into()))
+                            .child(self.sidebar_project_group_label(group)),
+                    )
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.toggle_sidebar_project_group(group, cx);
+                    }))
+                    .on_key_down(cx.listener(move |this, event: &KeyDownEvent, _, cx| {
+                        match event.keystroke.key.as_str() {
+                            "enter" | "space" => {
+                                this.toggle_sidebar_project_group(group, cx);
+                                cx.stop_propagation();
+                            }
+                            "left" if !collapsed => {
+                                this.set_sidebar_project_group_collapsed(group, true, cx);
+                                cx.stop_propagation();
+                            }
+                            "right" if collapsed => {
+                                this.set_sidebar_project_group_collapsed(group, false, cx);
+                                cx.stop_propagation();
+                            }
+                            _ => {}
+                        }
+                    })),
+            )
+            .when(first, |element| {
+                element
+                    .justify_between()
+                    .child(self.render_sidebar_project_action(cx))
+            })
+    }
+
+    fn render_sidebar_project_limit(
+        &self,
+        group: SidebarProjectGroup,
+        remaining: usize,
+        expanded: bool,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let theme = Theme::current(cx);
+        let label = if expanded {
+            tr!("sidebar.show_less")
+        } else {
+            tr!("sidebar.show_more", count = remaining)
+        };
+        div().w_full().h(px(30.0)).px(px(8.0)).child(
+            div()
+                .id(SharedString::from(format!(
+                    "sidebar-project-limit-{}",
+                    group.fingerprint()
+                )))
+                .tab_index(0)
+                .h_full()
+                .px(px(5.0))
+                .rounded(px(5.0))
+                .flex()
+                .items_center()
+                .cursor_default()
+                .text_size(px(11.5))
+                .text_color(theme.text_tertiary)
+                .focus_visible(|style| style.border_1().border_color(theme.accent))
+                .hover(|element| element.bg(theme.overlay).text_color(theme.text_secondary))
+                .child(label)
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.set_sidebar_project_group_expanded(group, !expanded, cx);
+                }))
+                .on_key_down(cx.listener(move |this, event: &KeyDownEvent, _, cx| {
+                    if !event.keystroke.modifiers.modified()
+                        && matches!(event.keystroke.key.as_str(), "enter" | "space")
+                    {
+                        this.set_sidebar_project_group_expanded(group, !expanded, cx);
+                        cx.stop_propagation();
+                    }
+                })),
+        )
+    }
+
+    fn toggle_sidebar_project_group(&mut self, group: SidebarProjectGroup, cx: &mut Context<Self>) {
+        let collapsed = !self.sidebar_collapsed_project_groups.contains(&group);
+        self.set_sidebar_project_group_collapsed(group, collapsed, cx);
+    }
+
+    fn set_sidebar_project_group_collapsed(
+        &mut self,
+        group: SidebarProjectGroup,
+        collapsed: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let changed = if collapsed {
+            self.sidebar_collapsed_project_groups.insert(group)
+        } else {
+            self.sidebar_collapsed_project_groups.remove(&group)
+        };
+        if changed {
+            cx.notify();
+        }
+    }
+
+    fn set_sidebar_project_group_expanded(
+        &mut self,
+        group: SidebarProjectGroup,
+        expanded: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let changed = if expanded {
+            self.sidebar_expanded_project_groups.insert(group)
+        } else {
+            self.sidebar_expanded_project_groups.remove(&group)
         };
         if changed {
             cx.notify();
@@ -1029,6 +1331,7 @@ impl Waku {
             .find(|project| project.id == session.project_id)
             .map(Project::display_name)
             .unwrap_or_else(|| tr!("sidebar.unknown_project"));
+        let grouped_by_project = self.state.group_conversations_by_project;
         let rename_input =
             (self.session_rename == Some(session_id)).then(|| self.session_rename_input.clone());
         let renaming = rename_input.is_some();
@@ -1124,15 +1427,19 @@ impl Waku {
                     .gap(px(5.0))
                     .text_size(px(11.5))
                     .line_height(px(15.0))
-                    .child(icon("icons/folder.svg", 11.0, theme.text_tertiary))
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .truncate()
-                            .text_color(theme.text_tertiary)
-                            .child(SharedString::from(project_name)),
-                    )
+                    .when(!grouped_by_project, |element| {
+                        element
+                            .child(icon("icons/folder.svg", 11.0, theme.text_tertiary))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .truncate()
+                                    .text_color(theme.text_tertiary)
+                                    .child(SharedString::from(project_name)),
+                            )
+                    })
+                    .when(grouped_by_project, |element| element.child(div().flex_1()))
                     .when_some(
                         session_time_label(session, unix_time()),
                         |element, label| {
@@ -1621,7 +1928,7 @@ mod tests {
         assert_eq!(
             expanded,
             vec![
-                SidebarRow::Header(SessionDateGroup::Today),
+                SidebarRow::DateHeader(SessionDateGroup::Today),
                 SidebarRow::Session(sessions[0]),
                 SidebarRow::Session(sessions[1]),
                 SidebarRow::GroupSpacer,
@@ -1633,7 +1940,61 @@ mod tests {
         assert_eq!(
             collapsed,
             vec![
-                SidebarRow::Header(SessionDateGroup::Today),
+                SidebarRow::DateHeader(SessionDateGroup::Today),
+                SidebarRow::GroupSpacer,
+            ]
+        );
+    }
+
+    #[test]
+    fn project_group_previews_five_sessions_before_show_more() {
+        let group = SidebarProjectGroup::Project(Uuid::from_u128(99));
+        let sessions = (1..=7).map(Uuid::from_u128).collect::<Vec<_>>();
+        let mut rows = Vec::new();
+
+        append_sidebar_project_rows(&mut rows, group, &sessions, false, false);
+
+        assert_eq!(rows[0], SidebarRow::ProjectHeader(group));
+        assert_eq!(
+            &rows[1..=5],
+            &sessions[..5]
+                .iter()
+                .copied()
+                .map(SidebarRow::Session)
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            rows[6],
+            SidebarRow::ProjectLimit {
+                group,
+                remaining: 2,
+                expanded: false,
+            }
+        );
+        assert_eq!(rows[7], SidebarRow::GroupSpacer);
+    }
+
+    #[test]
+    fn expanded_and_collapsed_project_groups_keep_their_controls() {
+        let group = SidebarProjectGroup::NoProject;
+        let sessions = (1..=6).map(Uuid::from_u128).collect::<Vec<_>>();
+        let mut expanded = Vec::new();
+        append_sidebar_project_rows(&mut expanded, group, &sessions, false, true);
+        assert_eq!(
+            expanded[7],
+            SidebarRow::ProjectLimit {
+                group,
+                remaining: 1,
+                expanded: true,
+            }
+        );
+
+        let mut collapsed = Vec::new();
+        append_sidebar_project_rows(&mut collapsed, group, &sessions, true, false);
+        assert_eq!(
+            collapsed,
+            vec![
+                SidebarRow::ProjectHeader(group),
                 SidebarRow::GroupSpacer,
             ]
         );

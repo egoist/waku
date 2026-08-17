@@ -215,6 +215,7 @@ pub struct AppSettings {
     pub favorite_models: Vec<FavoriteModel>,
     pub theme: ThemePreference,
     pub language: AppLanguage,
+    pub group_conversations_by_project: bool,
     pub daemon_exposure: DaemonExposureSettings,
 }
 
@@ -225,6 +226,7 @@ impl Default for AppSettings {
             favorite_models: Vec::new(),
             theme: ThemePreference::System,
             language: AppLanguage::default(),
+            group_conversations_by_project: false,
             daemon_exposure: DaemonExposureSettings::default(),
         }
     }
@@ -292,6 +294,8 @@ pub struct PersistedState {
     #[serde(default)]
     pub language: AppLanguage,
     #[serde(default)]
+    pub group_conversations_by_project: bool,
+    #[serde(default)]
     pub daemon_exposure: DaemonExposureSettings,
     #[serde(default = "default_sidebar_visibility")]
     pub sidebar_visible: bool,
@@ -351,6 +355,7 @@ impl PersistedState {
             favorite_models: Vec::new(),
             theme: ThemePreference::System,
             language: AppLanguage::default(),
+            group_conversations_by_project: false,
             daemon_exposure: DaemonExposureSettings::default(),
             sidebar_visible: true,
             right_panel_visible: false,
@@ -469,6 +474,7 @@ impl PersistedState {
             favorite_models: self.favorite_models.clone(),
             theme: self.theme,
             language: self.language,
+            group_conversations_by_project: self.group_conversations_by_project,
             daemon_exposure: self.daemon_exposure.clone(),
         }
     }
@@ -498,6 +504,7 @@ impl PersistedState {
         self.favorite_models = settings.favorite_models;
         self.theme = settings.theme;
         self.language = settings.language;
+        self.group_conversations_by_project = settings.group_conversations_by_project;
         self.daemon_exposure = settings.daemon_exposure;
     }
 
@@ -993,6 +1000,14 @@ mod tests {
                 [configuration_directory().join("settings.json")]
             );
         }
+    }
+
+    #[test]
+    fn project_grouping_defaults_off_in_partial_settings() {
+        let settings: AppSettings = serde_json::from_str(r#"{"theme":"dark"}"#).unwrap();
+
+        assert_eq!(settings.theme, ThemePreference::Dark);
+        assert!(!settings.group_conversations_by_project);
     }
 
     #[test]

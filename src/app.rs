@@ -1258,6 +1258,10 @@ pub struct Waku {
     /// Date groups the user has folded in the sidebar. This is intentionally
     /// runtime-only, like transcript disclosure state.
     sidebar_collapsed_groups: HashSet<SessionDateGroup>,
+    /// Project groups folded while project grouping is active.
+    sidebar_collapsed_project_groups: HashSet<SidebarProjectGroup>,
+    /// Project groups expanded beyond the five-conversation preview.
+    sidebar_expanded_project_groups: HashSet<SidebarProjectGroup>,
     sidebar_visible: bool,
     sidebar_width: f32,
     right_panel_visible: bool,
@@ -1527,7 +1531,7 @@ use components::*;
 pub use image_preview::init as init_image_preview_keys;
 pub use settings::init as init_settings_keys;
 pub use sidebar::init as init_sidebar_keys;
-use sidebar::{SessionDateGroup, SidebarRow};
+use sidebar::{SessionDateGroup, SidebarProjectGroup, SidebarRow};
 pub use skills_page::init as init_skills_keys;
 use streaming::*;
 use transcript::*;
@@ -2685,6 +2689,8 @@ impl Waku {
                 session_rename: None,
                 session_rename_input,
                 sidebar_collapsed_groups: HashSet::new(),
+                sidebar_collapsed_project_groups: HashSet::new(),
+                sidebar_expanded_project_groups: HashSet::new(),
                 sidebar_visible,
                 sidebar_width,
                 right_panel_visible,

@@ -191,6 +191,7 @@ pub struct AppSettings {
     pub favorite_models: Vec<FavoriteModel>,
     pub theme: ThemePreference,
     pub language: AppLanguage,
+    pub group_conversations_by_project: bool,
 }
 
 impl Default for AppSettings {
@@ -200,6 +201,7 @@ impl Default for AppSettings {
             favorite_models: Vec::new(),
             theme: ThemePreference::System,
             language: AppLanguage::default(),
+            group_conversations_by_project: false,
         }
     }
 }
@@ -268,6 +270,8 @@ pub struct PersistedState {
     pub theme: ThemePreference,
     #[serde(default)]
     pub language: AppLanguage,
+    #[serde(default)]
+    pub group_conversations_by_project: bool,
     #[serde(default = "default_sidebar_visibility")]
     pub sidebar_visible: bool,
     #[serde(default = "default_right_panel_visibility")]
@@ -338,6 +342,7 @@ impl PersistedState {
             favorite_models: Vec::new(),
             theme: ThemePreference::System,
             language: AppLanguage::default(),
+            group_conversations_by_project: false,
             sidebar_visible: true,
             right_panel_visible: false,
             sidebar_width: DEFAULT_SIDEBAR_WIDTH,
@@ -436,6 +441,7 @@ impl PersistedState {
             favorite_models: self.favorite_models.clone(),
             theme: self.theme,
             language: self.language,
+            group_conversations_by_project: self.group_conversations_by_project,
         }
     }
 
@@ -473,6 +479,7 @@ impl PersistedState {
         self.favorite_models = settings.favorite_models;
         self.theme = settings.theme;
         self.language = settings.language;
+        self.group_conversations_by_project = settings.group_conversations_by_project;
     }
 
     pub fn apply_daemon_settings(&mut self, settings: crate::DaemonSettings) {
@@ -1919,6 +1926,7 @@ mod tests {
         assert_eq!(settings.theme, ThemePreference::Dark);
         assert_eq!(settings.language, AppLanguage::System);
         assert!(settings.analytics_enabled);
+        assert!(!settings.group_conversations_by_project);
     }
 
     #[test]
@@ -2684,6 +2692,7 @@ mod tests {
         let mut state = PersistedState::fresh(PathBuf::from("/tmp/project"));
         state.theme = ThemePreference::Light;
         state.language = AppLanguage::SimplifiedChinese;
+        state.group_conversations_by_project = true;
         state.sidebar_width = 301.0;
         store.save(&mut state).unwrap();
 
@@ -2696,6 +2705,7 @@ mod tests {
         let value: serde_json::Value = serde_json::from_str(&text).unwrap();
         assert_eq!(value["theme"], "light");
         assert_eq!(value["language"], "simplified-chinese");
+        assert_eq!(value["group_conversations_by_project"], true);
         for daemon_key in [
             "computer_use_enabled",
             "computer_use_allowed_apps",
@@ -2739,6 +2749,7 @@ mod tests {
             "favorite_models",
             "theme",
             "language",
+            "group_conversations_by_project",
             "computer_use_enabled",
             "computer_use_allowed_apps",
             "disabled_providers",

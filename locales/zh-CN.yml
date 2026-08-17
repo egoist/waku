@@ -59,7 +59,7 @@ settings.usage: 用量
 settings.daemon: 守护进程
 settings.computer_use: 电脑操作
 settings.general_keywords: 通用 本地 项目 对话 隐私 匿名 使用数据 分析 分享 更新 自动 版本
-settings.appearance_keywords: 外观 主题 系统 浅色 深色 语言 英语 中文 简体
+settings.appearance_keywords: 外观 主题 系统 浅色 深色 语言 英语 中文 简体 侧边栏 对话 项目 分组
 settings.providers_keywords: 服务商 智能体 模型 命令行 版本 安装 检测 claude codex cursor opencode amp grok pi
 settings.skills: 技能
 settings.skills_keywords: 技能 技能库 智能体 禁用 启用 删除 claude codex cursor opencode pi amp 共享
@@ -135,6 +135,8 @@ web.error_secure_websocket_required: 安全的 Waku Web 页面只能通过 wss:/
 web.error_daemon_token_required: 请输入守护进程令牌
 settings.theme: 主题
 settings.theme_description: 选择跟随系统、浅色或深色主题
+settings.group_conversations_by_project: 按项目分组对话
+settings.group_conversations_by_project_description: 将侧边栏中的日期分组替换为可折叠的项目分组
 settings.theme_system: 跟随系统
 settings.theme_light: 浅色
 settings.theme_dark: 深色
@@ -209,6 +211,8 @@ sidebar.this_week: 本周
 sidebar.this_month: 本月
 sidebar.this_year: 今年
 sidebar.more: 更早
+sidebar.show_more: "再显示 %{count} 个"
+sidebar.show_less: 收起
 sidebar.working: 工作中 · %{elapsed}
 sidebar.just_now: 刚刚
 sidebar.minutes_ago: "%{count} 分钟前"
