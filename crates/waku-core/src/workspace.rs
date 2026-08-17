@@ -69,8 +69,13 @@ pub fn execute(operation: WorkspaceOperation) -> anyhow::Result<WorkspaceResult>
         WorkspaceOperation::DiscoverSlashCommands {
             provider,
             project_root,
+            claude_config_dir,
         } => WorkspaceResult::SlashCommands {
-            commands: crate::composer_complete::discover_slash_commands(provider, &project_root),
+            commands: crate::composer_complete::discover_slash_commands_for(
+                provider,
+                &project_root,
+                claude_config_dir.as_deref(),
+            ),
         },
         WorkspaceOperation::CreateProjectlessWorkspace { prompt } => {
             WorkspaceResult::ProjectlessWorkspace {

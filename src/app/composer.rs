@@ -2,6 +2,7 @@ use super::*;
 
 use anyhow::Context as _;
 use base64::Engine as _;
+const CLAUDE_ACCOUNT_MENU_ID: &str = "claude-account-picker";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum ComposerSubmitAction {
@@ -24,6 +25,145 @@ pub(super) fn composer_submit_action(
 }
 
 impl Waku {
+    pub(super) fn render_claude_account_control(
+        &self,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let session = self.selected_session()?;
+        let theme = Theme::current(cx);
+        if session.provider != ProviderKind::Claude || self.state.claude_accounts.is_empty() {
+            return None;
+        }
+        let selected = session.claude_config_dir.clone();
+        let label = self
+            .state
+            .claude_accounts
+            .iter()
+            .find(|account| Some(&account.config_dir) == selected.as_ref())
+            .map(|account| account.alias.clone())
+            .unwrap_or_else(|| {
+                if selected.is_some() {
+                    "Saved account".to_owned()
+                } else {
+                    self.state.claude_default_account_alias.clone()
+                }
+            });
+        if session.has_started() {
+            return Some(
+                MenuChip::new("composer-claude-account-locked")
+                    .icon("icons/provider-claude.svg", theme.text_tertiary)
+                    .label(label)
+                    .caret(false)
+                    .into_any_element(),
+            );
+        }
+
+        let handle = self.menu_handle(CLAUDE_ACCOUNT_MENU_ID, cx);
+        let accounts = std::iter::once((self.state.claude_default_account_alias.clone(), None))
+            .chain(
+                self.state
+                    .claude_accounts
+                    .iter()
+                    .map(|account| (account.alias.clone(), Some(account.config_dir.clone()))),
+            )
+            .map(|(alias, config_dir)| {
+                let identity = self.claude_account_identity(config_dir.clone(), cx);
+                let detail = super::settings::claude_account_detail(identity.as_deref());
+                (alias, config_dir, detail)
+            })
+            .collect::<Vec<_>>();
+        let weak = cx.entity().downgrade();
+        Some(dropdown_menu(
+            MenuChip::new("composer-claude-account")
+                .icon("icons/provider-claude.svg", theme.text_tertiary)
+                .label(label)
+                .caret(true)
+                .selected(handle.is_open()),
+            "composer-claude-account-menu",
+            &handle,
+            MenuAlign::AboveLeft,
+            move |_| {
+                accounts
+                    .iter()
+                    .map(|(alias, config_dir, detail)| {
+                        let row_weak = weak.clone();
+                        let row_dir = config_dir.clone();
+                        let alias = alias.clone();
+                        let detail = detail.clone();
+                        let is_selected = *config_dir == selected;
+                        MenuItem::custom(move |_, _| {
+                            div()
+                                .w(px(288.0))
+                                .py(px(4.0))
+                                .flex()
+                                .items_center()
+                                .gap(px(10.0))
+                                .child(icon("icons/provider-claude.svg", 14.0, theme.text_tertiary))
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .min_w_0()
+                                        .child(
+                                            div()
+                                                .truncate()
+                                                .text_size(px(12.0))
+                                                .font_weight(if is_selected {
+                                                    FontWeight::SEMIBOLD
+                                                } else {
+                                                    FontWeight::MEDIUM
+                                                })
+                                                .text_color(theme.text)
+                                                .child(alias.clone()),
+                                        )
+                                        .child(
+                                            div()
+                                                .mt(px(2.0))
+                                                .truncate()
+                                                .text_size(px(10.5))
+                                                .text_color(theme.text_tertiary)
+                                                .child(detail.clone()),
+                                        ),
+                                )
+                                .when(is_selected, |element| {
+                                    element.child(icon(
+                                        "icons/check.svg",
+                                        11.0,
+                                        theme.text_tertiary,
+                                    ))
+                                })
+                                .into_any_element()
+                        })
+                        .on_click(move |_, cx| {
+                            let _ = row_weak.update(cx, |this, cx| {
+                                this.choose_claude_account(row_dir.clone(), cx);
+                            });
+                        })
+                    })
+                    .collect()
+            },
+        ))
+    }
+
+    fn choose_claude_account(&mut self, config_dir: Option<PathBuf>, cx: &mut Context<Self>) {
+        let Some(session) = self.selected_session_mut() else {
+            return;
+        };
+        if session.provider != ProviderKind::Claude
+            || session.has_started()
+            || session.claude_config_dir == config_dir
+        {
+            return;
+        }
+        session.claude_config_dir = config_dir;
+        self.plan_usage.remove(&ProviderKind::Claude);
+        self.plan_usage_pending.remove(&ProviderKind::Claude);
+        self.plan_usage_checked_at.remove(&ProviderKind::Claude);
+        self.plan_usage_stale.insert(ProviderKind::Claude);
+        self.invalidate_composer_sources(cx);
+        self.save();
+        cx.notify();
+    }
+
     // ── Permission ─────────────────────────────────────────────────────────
 
     pub(super) fn render_permission(&self, cx: &mut Context<Self>) -> Option<Div> {
@@ -1454,8 +1594,10 @@ impl Waku {
             });
 
         let fast = selected_tier == "fast" || tier_label.eq_ignore_ascii_case("fast");
-        let trigger_label = match (effort_label.unwrap_or_else(|| tier_label.clone()), window_label)
-        {
+        let trigger_label = match (
+            effort_label.unwrap_or_else(|| tier_label.clone()),
+            window_label,
+        ) {
             (label, Some(window)) => format!("{label} · {window}"),
             (label, None) => label,
         };
@@ -2595,6 +2737,7 @@ impl Waku {
                         .text_size(px(11.5))
                         .line_height(px(14.0))
                         .child(self.render_provider_model_control(cx))
+                        .children(self.render_claude_account_control(cx))
                         .children(self.render_model_traits_control(cx))
                         .children(self.render_agent_preset_control(cx))
                         .child(self.render_access_control(cx))

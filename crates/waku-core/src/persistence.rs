@@ -38,6 +38,7 @@ pub use waku_protocol::persistence::{
     ComposerDraft, ComposerDraftAttachment, ComposerDraftChange, ComposerDraftKey,
     ComposerDraftTarget, ComposerDrafts, SessionMessageMatch,
 };
+pub use waku_protocol::settings::ClaudeAccount;
 
 const STATE_VERSION: u32 = 5;
 const APP_STATE_VERSION: u32 = 1;
@@ -193,6 +194,10 @@ pub struct AppSettings {
     pub language: AppLanguage,
 }
 
+fn default_claude_account_alias() -> String {
+    "Default account".to_owned()
+}
+
 impl Default for AppSettings {
     fn default() -> Self {
         Self {
@@ -287,6 +292,10 @@ pub struct PersistedState {
     /// detect from PATH.
     #[serde(default)]
     pub provider_binary_overrides: HashMap<ProviderKind, String>,
+    #[serde(default = "default_claude_account_alias")]
+    pub claude_default_account_alias: String,
+    #[serde(default)]
+    pub claude_accounts: Vec<ClaudeAccount>,
     /// Unknown daemon settings survive edits made by this desktop version.
     #[serde(skip)]
     daemon_settings_extra: BTreeMap<String, serde_json::Value>,
@@ -346,6 +355,8 @@ impl PersistedState {
             computer_use_allowed_apps: Vec::new(),
             disabled_providers: Vec::new(),
             provider_binary_overrides: HashMap::new(),
+            claude_default_account_alias: default_claude_account_alias(),
+            claude_accounts: Vec::new(),
             daemon_settings_extra: BTreeMap::new(),
             dirty_sessions: HashSet::new(),
         }
@@ -371,9 +382,7 @@ impl PersistedState {
                 .reasoning_effort
                 .clone_from(&self.last_reasoning_effort);
             session.service_tier.clone_from(&self.last_service_tier);
-            session
-                .context_window
-                .clone_from(&self.last_context_window);
+            session.context_window.clone_from(&self.last_context_window);
         }
         session
     }
@@ -445,6 +454,8 @@ impl PersistedState {
             computer_use_allowed_apps: self.computer_use_allowed_apps.clone(),
             disabled_providers: self.disabled_providers.clone(),
             provider_binary_overrides: self.provider_binary_overrides.clone(),
+            claude_default_account_alias: self.claude_default_account_alias.clone(),
+            claude_accounts: self.claude_accounts.clone(),
             extra: self.daemon_settings_extra.clone(),
         }
     }
@@ -480,6 +491,8 @@ impl PersistedState {
         self.computer_use_allowed_apps = settings.computer_use_allowed_apps;
         self.disabled_providers = settings.disabled_providers;
         self.provider_binary_overrides = settings.provider_binary_overrides;
+        self.claude_default_account_alias = settings.claude_default_account_alias;
+        self.claude_accounts = settings.claude_accounts;
         self.daemon_settings_extra = settings.extra;
     }
 
@@ -1496,6 +1509,7 @@ fn session_skeleton(row: SessionColumns) -> Option<AgentSession> {
         project_id: Uuid::parse_str(&project_id).ok()?,
         workspace: SessionWorkspace::Local,
         provider: serde_json::from_value(serde_json::Value::String(provider)).ok()?,
+        claude_config_dir: None,
         model,
         // Hydration replaces these; the list never reads them.
         runtime_mode: RuntimeMode::default(),
@@ -1919,6 +1933,36 @@ mod tests {
         assert_eq!(settings.theme, ThemePreference::Dark);
         assert_eq!(settings.language, AppLanguage::System);
         assert!(settings.analytics_enabled);
+    }
+
+    #[test]
+    fn claude_accounts_and_task_identity_round_trip() {
+        let mut state = PersistedState::fresh(PathBuf::from("/tmp/project"));
+        let config_dir = PathBuf::from("/tmp/claude-account-two");
+        state.claude_accounts.push(ClaudeAccount {
+            alias: "Work".into(),
+            config_dir: config_dir.clone(),
+        });
+        state.claude_default_account_alias = "Personal".into();
+        state.sessions[0].provider = ProviderKind::Claude;
+        state.sessions[0].claude_config_dir = Some(config_dir.clone());
+
+        let settings: crate::DaemonSettings =
+            serde_json::from_value(serde_json::to_value(state.daemon_settings()).unwrap()).unwrap();
+        let session: AgentSession =
+            serde_json::from_value(serde_json::to_value(&state.sessions[0]).unwrap()).unwrap();
+
+        assert_eq!(settings.claude_accounts[0].config_dir, config_dir);
+        assert_eq!(settings.claude_accounts[0].alias, "Work");
+        assert_eq!(settings.claude_default_account_alias, "Personal");
+        assert_eq!(session.claude_config_dir, Some(config_dir));
+
+        let migrated: ClaudeAccount = serde_json::from_value(serde_json::json!({
+            "name": "Legacy alias",
+            "configDir": "/tmp/legacy-claude-account"
+        }))
+        .unwrap();
+        assert_eq!(migrated.alias, "Legacy alias");
     }
 
     #[test]
@@ -2513,11 +2557,7 @@ mod tests {
         assert_eq!(restored.sessions[0].context_window.as_deref(), Some("1m"));
         assert_eq!(
             restored.model_traits_for(ProviderKind::Codex, "gpt-5.6-luna"),
-            (
-                Some("xhigh".into()),
-                Some("fast".into()),
-                Some("1m".into())
-            )
+            (Some("xhigh".into()), Some("fast".into()), Some("1m".into()))
         );
         assert_eq!(
             restored.sessions[0].runtime_mode,

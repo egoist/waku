@@ -734,6 +734,7 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
                 contextWindow: session.context_window ?? null,
                 agentPreset: session.agent_preset ?? null,
                 computerUseEnabled: false,
+                claudeConfigDir: session.claude_config_dir ?? null,
                 providerCursor: session.provider_cursor as never,
               },
             },

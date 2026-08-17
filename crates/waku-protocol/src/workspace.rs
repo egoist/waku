@@ -79,6 +79,8 @@ pub enum WorkspaceOperation {
         provider: ProviderKind,
         #[ts(type = "string")]
         project_root: PathBuf,
+        #[ts(type = "string | null")]
+        claude_config_dir: Option<PathBuf>,
     },
     CreateProjectlessWorkspace {
         prompt: Option<String>,

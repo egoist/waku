@@ -769,6 +769,11 @@ pub struct AgentSession {
     #[serde(default, skip_serializing_if = "SessionWorkspace::is_local")]
     pub workspace: SessionWorkspace,
     pub provider: ProviderKind,
+    /// Claude Code configuration root pinned to this task. `None` keeps the
+    /// normal `~/.claude` account. It must not change after the task starts:
+    /// native transcripts and OAuth credentials both live below this root.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claude_config_dir: Option<PathBuf>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
     pub runtime_mode: RuntimeMode,
@@ -849,6 +854,7 @@ impl AgentSession {
             project_id,
             workspace: SessionWorkspace::Local,
             provider,
+            claude_config_dir: None,
             model: None,
             runtime_mode: RuntimeMode::FullAccess,
             interaction_mode: InteractionMode::Build,
@@ -886,6 +892,7 @@ impl AgentSession {
             project_id: self.project_id,
             workspace: SessionWorkspace::Local,
             provider: self.provider,
+            claude_config_dir: self.claude_config_dir.clone(),
             model: self.model.clone(),
             runtime_mode: RuntimeMode::default(),
             interaction_mode: InteractionMode::default(),

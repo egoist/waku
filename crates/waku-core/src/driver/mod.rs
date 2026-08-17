@@ -180,6 +180,7 @@ pub struct DriverStartOptions {
     pub context_window: Option<String>,
     pub agent_preset: Option<String>,
     pub computer_use_enabled: bool,
+    pub claude_config_dir: Option<PathBuf>,
     pub provider_cursor: Option<ProviderResumeCursor>,
 }
 

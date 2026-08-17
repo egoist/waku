@@ -2,6 +2,15 @@ use chrono::Datelike as _;
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct ClaudeAccountIdentity {
+    pub logged_in: bool,
+    pub email: Option<String>,
+    pub organization_name: Option<String>,
+    pub subscription_type: Option<String>,
+}
+
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct PlanUsage {

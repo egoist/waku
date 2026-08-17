@@ -27,7 +27,13 @@ auto_title?: string | null, project_id: string,
 /**
  * Local project checkout or an isolated Git worktree for this task.
  */
-workspace?: SessionWorkspace, provider: ProviderKind, model?: string | null, runtime_mode: RuntimeMode, interaction_mode: InteractionMode, reasoning_effort?: string | null, service_tier?: string | null,
+workspace?: SessionWorkspace, provider: ProviderKind,
+/**
+ * Claude Code configuration root pinned to this task. `None` keeps the
+ * normal `~/.claude` account. It must not change after the task starts:
+ * native transcripts and OAuth credentials both live below this root.
+ */
+claude_config_dir?: string | null, model?: string | null, runtime_mode: RuntimeMode, interaction_mode: InteractionMode, reasoning_effort?: string | null, service_tier?: string | null,
 /**
  * Selected context window, when the provider exposes more than one.
  */

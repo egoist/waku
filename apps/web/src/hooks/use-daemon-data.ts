@@ -83,6 +83,7 @@ export function useComposerFiles(cwd: string | undefined) {
 export function useComposerCommands(
   provider: ProviderKind | undefined,
   cwd: string | undefined,
+  claudeConfigDir: string | null = null,
 ) {
   const { client, config, phase } = useDaemon()
   return useQuery({
@@ -90,8 +91,10 @@ export function useComposerCommands(
       config?.address ?? 'disconnected',
       provider ?? 'codex',
       cwd ?? 'none',
+      claudeConfigDir,
     ),
-    queryFn: () => discoverComposerCommands(requireClient(client), provider!, cwd!),
+    queryFn: () =>
+      discoverComposerCommands(requireClient(client), provider!, cwd!, claudeConfigDir),
     enabled: phase === 'connected' && Boolean(client && config && provider && cwd),
     staleTime: Number.POSITIVE_INFINITY,
   })

@@ -120,12 +120,15 @@ impl Waku {
             .selected_session()
             .map(|session| session.provider)
             .unwrap_or(self.state.last_provider);
+        let claude_config_dir = self
+            .selected_session()
+            .and_then(|session| session.claude_config_dir.clone());
         let reported = self
             .selected_session()
             .map(|session| session.available_commands.clone())
             .unwrap_or_default();
 
-        let command_key = (provider, project_path.clone());
+        let command_key = (provider, project_path.clone(), claude_config_dir.clone());
         match self.slash_commands.read(&command_key) {
             Query::Ready(commands) => {
                 self.slash_command_index = Rc::new(composer_complete::merge_reported_commands(
@@ -156,6 +159,7 @@ impl Waku {
                                 waku_client::WorkspaceOperation::DiscoverSlashCommands {
                                     provider,
                                     project_root: path,
+                                    claude_config_dir,
                                 },
                             ) {
                                 Ok(waku_client::WorkspaceResult::SlashCommands { commands }) => {
@@ -235,7 +239,11 @@ impl Waku {
                 .selected_session()
                 .map(|session| session.provider)
                 .unwrap_or(self.state.last_provider);
-            self.slash_commands.invalidate(&(provider, path.clone()));
+            let claude_config_dir = self
+                .selected_session()
+                .and_then(|session| session.claude_config_dir.clone());
+            self.slash_commands
+                .invalidate(&(provider, path.clone(), claude_config_dir));
             self.mention_files.invalidate(&path);
         }
         self.refresh_composer_sources(cx);

@@ -25,6 +25,7 @@ pub use waku_protocol::persistence::{
     ComposerDraft, ComposerDraftAttachment, ComposerDraftChange, ComposerDraftKey,
     ComposerDraftTarget, ComposerDrafts, SessionMessageMatch,
 };
+pub use waku_protocol::settings::ClaudeAccount;
 
 const STATE_VERSION: u32 = 5;
 const APP_STATE_VERSION: u32 = 1;
@@ -42,6 +43,10 @@ fn default_right_panel_visibility() -> bool {
 
 fn default_computer_use_enabled() -> bool {
     false
+}
+
+fn default_claude_account_alias() -> String {
+    "Default account".to_owned()
 }
 
 fn default_analytics_enabled() -> bool {
@@ -311,6 +316,10 @@ pub struct PersistedState {
     pub disabled_providers: Vec<ProviderKind>,
     #[serde(default)]
     pub provider_binary_overrides: HashMap<ProviderKind, String>,
+    #[serde(default = "default_claude_account_alias")]
+    pub claude_default_account_alias: String,
+    #[serde(default)]
+    pub claude_accounts: Vec<ClaudeAccount>,
     #[serde(skip)]
     daemon_settings_extra: BTreeMap<String, serde_json::Value>,
     #[serde(skip)]
@@ -361,6 +370,8 @@ impl PersistedState {
             computer_use_allowed_apps: Vec::new(),
             disabled_providers: Vec::new(),
             provider_binary_overrides: HashMap::new(),
+            claude_default_account_alias: default_claude_account_alias(),
+            claude_accounts: Vec::new(),
             daemon_settings_extra: BTreeMap::new(),
             dirty_sessions: HashSet::new(),
         }
@@ -386,9 +397,7 @@ impl PersistedState {
                 .reasoning_effort
                 .clone_from(&self.last_reasoning_effort);
             session.service_tier.clone_from(&self.last_service_tier);
-            session
-                .context_window
-                .clone_from(&self.last_context_window);
+            session.context_window.clone_from(&self.last_context_window);
         }
         session
     }
@@ -451,6 +460,8 @@ impl PersistedState {
             computer_use_allowed_apps: self.computer_use_allowed_apps.clone(),
             disabled_providers: self.disabled_providers.clone(),
             provider_binary_overrides: self.provider_binary_overrides.clone(),
+            claude_default_account_alias: self.claude_default_account_alias.clone(),
+            claude_accounts: self.claude_accounts.clone(),
             extra: self.daemon_settings_extra.clone(),
         }
     }
@@ -460,6 +471,8 @@ impl PersistedState {
         self.computer_use_allowed_apps = settings.computer_use_allowed_apps;
         self.disabled_providers = settings.disabled_providers;
         self.provider_binary_overrides = settings.provider_binary_overrides;
+        self.claude_default_account_alias = settings.claude_default_account_alias;
+        self.claude_accounts = settings.claude_accounts;
         self.daemon_settings_extra = settings.extra;
     }
 
@@ -1024,6 +1037,22 @@ mod tests {
         restore_task_state_skeletons(&mut sessions);
         assert!(!sessions[0].detail_loaded);
         assert!(sessions[0].has_started());
+    }
+
+    #[test]
+    fn claude_accounts_round_trip_through_daemon_settings() {
+        let mut state = PersistedState::empty();
+        state.claude_default_account_alias = "Personal".into();
+        state.claude_accounts.push(ClaudeAccount {
+            alias: "Work".into(),
+            config_dir: PathBuf::from("/tmp/claude-work"),
+        });
+
+        let mut restored = PersistedState::empty();
+        restored.apply_daemon_settings(state.daemon_settings());
+
+        assert_eq!(restored.claude_default_account_alias, "Personal");
+        assert_eq!(restored.claude_accounts, state.claude_accounts);
     }
 }
 

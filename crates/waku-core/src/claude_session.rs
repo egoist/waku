@@ -24,26 +24,47 @@ pub struct ClaudeSessionMetadata {
     pub title: Option<String>,
 }
 
-pub fn session_metadata(session_id: &str) -> anyhow::Result<ClaudeSessionMetadata> {
-    session_metadata_in(&projects_directory()?, session_id)
+pub fn session_metadata_for(
+    config_directory: Option<&Path>,
+    session_id: &str,
+) -> anyhow::Result<ClaudeSessionMetadata> {
+    session_metadata_in(&projects_directory_for(config_directory)?, session_id)
 }
 
-pub fn message_id_for_turn(session_id: &str, provider_turn_count: usize) -> anyhow::Result<String> {
-    message_id_for_turn_in(&projects_directory()?, session_id, provider_turn_count)
+pub fn message_id_for_turn_for(
+    config_directory: Option<&Path>,
+    session_id: &str,
+    provider_turn_count: usize,
+) -> anyhow::Result<String> {
+    message_id_for_turn_in(
+        &projects_directory_for(config_directory)?,
+        session_id,
+        provider_turn_count,
+    )
 }
 
-pub fn fork_session_at(
+pub fn fork_session_at_for(
+    config_directory: Option<&Path>,
     session_id: &str,
     up_to_message_id: &str,
     title: &str,
 ) -> anyhow::Result<ForkedClaudeSession> {
-    fork_session_at_in(&projects_directory()?, session_id, up_to_message_id, title)
+    fork_session_at_in(
+        &projects_directory_for(config_directory)?,
+        session_id,
+        up_to_message_id,
+        title,
+    )
 }
 
-fn projects_directory() -> anyhow::Result<PathBuf> {
-    let config_directory = std::env::var_os("CLAUDE_CONFIG_DIR")
-        .filter(|value| !value.is_empty())
-        .map(PathBuf::from)
+fn projects_directory_for(config_directory: Option<&Path>) -> anyhow::Result<PathBuf> {
+    let config_directory = config_directory
+        .map(Path::to_path_buf)
+        .or_else(|| {
+            std::env::var_os("CLAUDE_CONFIG_DIR")
+                .filter(|value| !value.is_empty())
+                .map(PathBuf::from)
+        })
         .or_else(|| dirs::home_dir().map(|home| home.join(".claude")))
         .ok_or_else(|| anyhow!("Claude's configuration directory could not be located"))?;
     Ok(config_directory.join("projects"))
@@ -436,6 +457,19 @@ mod tests {
             ASSISTANT_THREE
         );
         fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn selected_config_directory_owns_its_native_sessions() {
+        let (account, _) = fixture();
+        let other = std::env::temp_dir().join(format!("waku-claude-account-{}", Uuid::new_v4()));
+        fs::create_dir_all(other.join("projects")).unwrap();
+
+        assert!(session_metadata_for(Some(&account), SESSION).is_ok());
+        assert!(session_metadata_for(Some(&other), SESSION).is_err());
+
+        fs::remove_dir_all(account).ok();
+        fs::remove_dir_all(other).ok();
     }
 
     #[test]
