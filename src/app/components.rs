@@ -675,6 +675,7 @@ pub(super) fn render_message(params: MessageRender, cx: &mut App) -> AnyElement 
             } else {
                 if !content.trim().is_empty() {
                     let body = render_markdown_message_body(&content, markdown, theme, ctx);
+                    let metrics = ctx.metrics();
                     column = column.child(
                         div()
                             .max_w(px(540.0))
@@ -683,8 +684,8 @@ pub(super) fn render_message(params: MessageRender, cx: &mut App) -> AnyElement 
                             .bg(theme.raised)
                             .px(px(12.0))
                             .py(px(8.0))
-                            .text_size(px(14.0))
-                            .line_height(px(20.0))
+                            .text_size(px(metrics.text_size))
+                            .line_height(px(metrics.line_height))
                             .child(body),
                     );
                 }
