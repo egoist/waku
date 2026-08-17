@@ -8,6 +8,9 @@ export type { AgentSession } from "./AgentSession";
 export type { AgentTurn } from "./AgentTurn";
 export type { AttachmentUpload } from "./AttachmentUpload";
 export type { AttachmentUploadEntry } from "./AttachmentUploadEntry";
+export type { Automation } from "./Automation";
+export type { AutomationAgent } from "./AutomationAgent";
+export type { AutomationRun } from "./AutomationRun";
 export type { BranchEntry } from "./BranchEntry";
 export type { BranchSnapshot } from "./BranchSnapshot";
 export type { Checkpoint } from "./Checkpoint";
@@ -37,6 +40,9 @@ export type { MessageAttachment } from "./MessageAttachment";
 export type { MessageRole } from "./MessageRole";
 export type { ModelSlice } from "./ModelSlice";
 export type { MonthSlice } from "./MonthSlice";
+export type { NotificationConfig } from "./NotificationConfig";
+export type { NotificationTrigger } from "./NotificationTrigger";
+export type { OverlapPolicy } from "./OverlapPolicy";
 export type { PlanUsage } from "./PlanUsage";
 export type { PlanWindow } from "./PlanWindow";
 export type { PricingStatus } from "./PricingStatus";
@@ -62,8 +68,10 @@ export type { ResponsePayload } from "./ResponsePayload";
 export type { ReviewDiffData } from "./ReviewDiffData";
 export type { ReviewDiffSource } from "./ReviewDiffSource";
 export type { RpcError } from "./RpcError";
+export type { RunOutcome } from "./RunOutcome";
 export type { RuntimeEventCursor } from "./RuntimeEventCursor";
 export type { RuntimeMode } from "./RuntimeMode";
+export type { Schedule } from "./Schedule";
 export type { SequencedEvent } from "./SequencedEvent";
 export type { ServerMessage } from "./ServerMessage";
 export type { SessionMessageMatch } from "./SessionMessageMatch";
@@ -77,6 +85,7 @@ export type { SkillsCatalog } from "./SkillsCatalog";
 export type { SlashCommand } from "./SlashCommand";
 export type { StoredAttachment } from "./StoredAttachment";
 export type { StoredTranscriptBlockContent } from "./StoredTranscriptBlockContent";
+export type { TimeOfDay } from "./TimeOfDay";
 export type { TokenTotals } from "./TokenTotals";
 export type { TranscriptBlock } from "./TranscriptBlock";
 export type { TurnStatus } from "./TurnStatus";
@@ -84,6 +93,7 @@ export type { UsageHistory } from "./UsageHistory";
 export type { UsageProvider } from "./UsageProvider";
 export type { UsageWindow } from "./UsageWindow";
 export type { UserInputAnswer } from "./UserInputAnswer";
+export type { Weekday } from "./Weekday";
 export type { WireComputerToolRequest } from "./WireComputerToolRequest";
 export type { WireDriverEvent } from "./WireDriverEvent";
 export type { WireDriverStartOptions } from "./WireDriverStartOptions";
@@ -91,12 +101,3 @@ export type { WireSessionOptions } from "./WireSessionOptions";
 export type { WorkingTreeEntry } from "./WorkingTreeEntry";
 export type { WorkspaceOperation } from "./WorkspaceOperation";
 export type { WorkspaceResult } from "./WorkspaceResult";
-export * from './Automation'
-export * from './AutomationAgent'
-export * from './NotificationConfig'
-export * from './NotificationTrigger'
-export * from './OverlapPolicy'
-export * from './RunOutcome'
-export * from './Schedule'
-export * from './TimeOfDay'
-export * from './Weekday'
