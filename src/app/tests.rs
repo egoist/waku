@@ -17,9 +17,9 @@ use super::{
     paused_toast_duration, pop_stream_batch, push_transcript_activity, session_is_reapable,
     should_refresh_branch_after_activity, should_show_navigation_rail,
     should_show_scroll_to_bottom, task_id_from_notification_tag, task_notification_tag,
-    transcript_anchor_end_space, transcript_navigation_turns, transcript_row_kinds,
-    transcript_row_splice, transcript_rows_fingerprint, widened_panel_width_for_file_editor,
-    widened_panel_width_for_review,
+    transcript_anchor_end_space, transcript_navigation_turns, transcript_rests_at_tail,
+    transcript_row_kinds, transcript_row_splice, transcript_rows_fingerprint,
+    widened_panel_width_for_file_editor, widened_panel_width_for_review,
 };
 use crate::git_branch::BranchEntry;
 use crate::model::{
@@ -585,6 +585,32 @@ fn scroll_to_bottom_only_appears_while_the_tail_is_below_the_viewport() {
         Some(px(500.0)),
         px(200.0),
     ));
+}
+
+#[test]
+fn scrolling_back_to_the_tail_is_told_apart_from_an_unmeasured_tail() {
+    let viewport_bottom = px(700.0);
+
+    // Landed on the tail: the reply's last row ends exactly at the viewport
+    // bottom, with or without the anchor's reserved end space.
+    assert_eq!(
+        transcript_rests_at_tail(viewport_bottom, Some(px(700.0)), Pixels::ZERO),
+        Some(true)
+    );
+    assert_eq!(
+        transcript_rests_at_tail(viewport_bottom, Some(px(500.0)), px(200.0)),
+        Some(true)
+    );
+    // Stopped short of it, so the stream must not reclaim the view.
+    assert_eq!(
+        transcript_rests_at_tail(viewport_bottom, Some(px(701.0)), Pixels::ZERO),
+        Some(false)
+    );
+    // A commit remeasured the tail this frame: unknown, not "stopped short".
+    assert_eq!(
+        transcript_rests_at_tail(viewport_bottom, None, Pixels::ZERO),
+        None
+    );
 }
 
 #[test]

@@ -156,6 +156,9 @@ impl Waku {
 
         self.transcript_anchor_following.set(false);
         self.transcript_is_scrolled.set(true);
+        // The position above is deliberate, so a wheel scroll still waiting to
+        // be classified must not re-arm following on top of it.
+        self.transcript_tail_recheck.set(false);
     }
 
     /// Bulk-reset the transcript. Used for session/document replacement.
@@ -738,7 +741,24 @@ pub(super) fn should_show_scroll_to_bottom(
         return false;
     }
 
-    tail_bottom.is_none_or(|tail_bottom| tail_bottom + end_space > viewport_bottom + px(0.5))
+    // Unknown reads as "below": a splice that leaves the tail unmeasured must
+    // keep the affordance rather than blink it away.
+    !transcript_rests_at_tail(viewport_bottom, tail_bottom, end_space).unwrap_or(false)
+}
+
+/// Whether the transcript currently sits at the end of its content, or `None`
+/// while the last row is unmeasured and its position is unknowable.
+///
+/// `None` is not `false`. The stream remeasures the tail on every commit, so a
+/// wheel scroll can easily settle on a frame that cannot answer; a caller
+/// waiting to re-arm tail following has to ask again rather than conclude the
+/// reader stopped short of the tail.
+pub(super) fn transcript_rests_at_tail(
+    viewport_bottom: Pixels,
+    tail_bottom: Option<Pixels>,
+    end_space: Pixels,
+) -> Option<bool> {
+    Some(tail_bottom? + end_space <= viewport_bottom + px(0.5))
 }
 
 pub(super) fn maintain_transcript_anchor(

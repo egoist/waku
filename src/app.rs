@@ -1428,6 +1428,12 @@ pub struct Waku {
     transcript_anchor: Cell<Option<TranscriptAnchor>>,
     transcript_anchor_end_space: Rc<Cell<Pixels>>,
     transcript_anchor_following: Rc<Cell<bool>>,
+    /// A wheel scroll has landed and where it came to rest is not classified
+    /// yet. The first frame that can measure the tail consumes this and re-arms
+    /// following when the reader scrolled back to it; a frame that cannot
+    /// measure the tail leaves it set, so a stream remeasure cannot swallow the
+    /// re-arm.
+    transcript_tail_recheck: Rc<Cell<bool>>,
     transcript_is_scrolled: Rc<Cell<bool>>,
     transcript_layout_width: Cell<Pixels>,
     /// Parsed markdown per assistant message, keeping each response's
@@ -2098,21 +2104,31 @@ impl Waku {
         let branch_picker_list_state = ListState::new(0, ListAlignment::Top, px(152.0));
         let transcript_is_scrolled = Rc::new(Cell::new(false));
         let transcript_anchor_following = Rc::new(Cell::new(false));
+        let transcript_tail_recheck = Rc::new(Cell::new(false));
+        // Every wheel scroll drops tail following and asks the next measured
+        // frame whether it landed back on the tail. The anchored list is
+        // top-aligned, so GPUI keeps reporting `is_scrolled` at its very bottom
+        // and cannot re-arm following on its own the way the bottom-aligned
+        // list does.
         transcript_rows.set_scroll_handler({
             let transcript_is_scrolled = transcript_is_scrolled.clone();
             let transcript_anchor_following = transcript_anchor_following.clone();
+            let transcript_tail_recheck = transcript_tail_recheck.clone();
             move |event, window, _| {
                 transcript_is_scrolled.set(event.is_scrolled);
                 transcript_anchor_following.set(false);
+                transcript_tail_recheck.set(true);
                 window.refresh();
             }
         });
         anchored_transcript_rows.set_scroll_handler({
             let transcript_is_scrolled = transcript_is_scrolled.clone();
             let transcript_anchor_following = transcript_anchor_following.clone();
+            let transcript_tail_recheck = transcript_tail_recheck.clone();
             move |event, window, _| {
                 transcript_is_scrolled.set(event.is_scrolled);
                 transcript_anchor_following.set(false);
+                transcript_tail_recheck.set(true);
                 window.refresh();
             }
         });
@@ -2766,6 +2782,7 @@ impl Waku {
                 transcript_anchor: Cell::new(None),
                 transcript_anchor_end_space: Rc::new(Cell::new(Pixels::ZERO)),
                 transcript_anchor_following,
+                transcript_tail_recheck,
                 transcript_is_scrolled,
                 transcript_layout_width: Cell::new(Pixels::ZERO),
                 message_markdown: RefCell::new(HashMap::new()),

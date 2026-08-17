@@ -192,6 +192,24 @@ impl Waku {
             .checked_sub(1)
             .and_then(|last_row| transcript_rows.bounds_for_item(last_row))
             .map(|bounds| bounds.bottom());
+        // Scrolling back down to the tail by hand re-arms following, exactly as
+        // the scroll-to-bottom button does. GPUI re-arms its own tail pin when a
+        // bottom-aligned list reaches the end, but the anchored list is
+        // top-aligned and the anchor pin is ours, so nothing else would resume
+        // it — leaving the reader stranded mid-stream after a round trip up and
+        // back. The pin itself lands on the next frame, from a position already
+        // identical to it.
+        if self.transcript_tail_recheck.get()
+            && let Some(rests_at_tail) =
+                transcript_rests_at_tail(viewport_bottom, tail_bottom, anchor_end_space)
+        {
+            self.transcript_tail_recheck.set(false);
+            if rests_at_tail {
+                self.transcript_is_scrolled.set(false);
+                self.transcript_anchor_following
+                    .set(self.transcript_anchor.get().is_some());
+            }
+        }
         let scroll_to_bottom = should_show_scroll_to_bottom(
             self.transcript_is_scrolled.get(),
             self.transcript_anchor_following.get(),
@@ -2228,7 +2246,11 @@ fn live_reasoning_window_anchor(cached: usize, content: &str) -> usize {
     // A restarted block can leave the cached start past the end of the new
     // content or inside a multibyte character; either way the window is
     // stale (`is_char_boundary` is false past the end too), so restart it.
-    let cached = if content.is_char_boundary(cached) { cached } else { 0 };
+    let cached = if content.is_char_boundary(cached) {
+        cached
+    } else {
+        0
+    };
     if content.len() - cached <= LIVE_REASONING_WINDOW_MAX {
         return cached;
     }
