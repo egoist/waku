@@ -3,6 +3,9 @@ _version: 1
 menu.about: 关于 %{app}
 menu.check_for_updates: 检查更新…
 menu.settings: 设置…
+menu.hide: 隐藏 %{app}
+menu.hide_others: 隐藏其他
+menu.show_all: 全部显示
 menu.quit: 退出 %{app}
 menu.file: 文件
 menu.new_task: 新建任务

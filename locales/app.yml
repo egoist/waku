@@ -6,6 +6,12 @@ menu.check_for_updates:
   en: Check for Updates…
 menu.settings:
   en: Settings…
+menu.hide:
+  en: Hide %{app}
+menu.hide_others:
+  en: Hide Others
+menu.show_all:
+  en: Show All
 menu.quit:
   en: Quit %{app}
 menu.file:

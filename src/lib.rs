@@ -62,6 +62,9 @@ actions!(
     [
         Quit,
         About,
+        Hide,
+        HideOthers,
+        ShowAll,
         CloseWindow,
         NewSession,
         NewProject,
@@ -220,6 +223,11 @@ pub fn run() {
                 }
             });
             cx.on_action(|_: &About, _| crate::platform::show_about_panel());
+            // AppKit's default Hide items live on the application menu. Replacing
+            // that menu without these actions leaves ⌘H / ⌥⌘H unbound.
+            cx.on_action(|_: &Hide, cx| cx.hide());
+            cx.on_action(|_: &HideOthers, cx| cx.hide_other_apps());
+            cx.on_action(|_: &ShowAll, cx| cx.unhide_other_apps());
 
             cx.bind_keys([
                 // `secondary` is Command on macOS and Control elsewhere.
@@ -281,6 +289,12 @@ pub fn run() {
                 KeyBinding::new("secondary-v", WebviewPaste, Some("Browser")),
                 KeyBinding::new("secondary-a", WebviewSelectAll, Some("Browser")),
                 KeyBinding::new("escape", BrowserAddressCancel, Some("BrowserAddress")),
+            ]);
+
+            #[cfg(target_os = "macos")]
+            cx.bind_keys([
+                KeyBinding::new("cmd-h", Hide, None),
+                KeyBinding::new("alt-cmd-h", HideOthers, None),
             ]);
 
             cx.on_action(|_: &Quit, cx| cx.quit());
@@ -389,11 +403,18 @@ pub(crate) fn set_app_menus(cx: &mut App, updater_available: bool) {
                     ));
                 }
                 items.push(MenuItem::separator());
-                items.extend([
-                    MenuItem::action(tr!("menu.settings"), OpenSettings),
-                    MenuItem::separator(),
-                    MenuItem::action(tr!("menu.quit", app = APP_NAME), Quit),
-                ]);
+                items.push(MenuItem::action(tr!("menu.settings"), OpenSettings));
+                items.push(MenuItem::separator());
+                #[cfg(target_os = "macos")]
+                {
+                    items.extend([
+                        MenuItem::action(tr!("menu.hide", app = APP_NAME), Hide),
+                        MenuItem::action(tr!("menu.hide_others"), HideOthers),
+                        MenuItem::action(tr!("menu.show_all"), ShowAll),
+                        MenuItem::separator(),
+                    ]);
+                }
+                items.push(MenuItem::action(tr!("menu.quit", app = APP_NAME), Quit));
                 items
             },
         },

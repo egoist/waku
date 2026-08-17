@@ -3,6 +3,9 @@ _version: 1
 menu.about: "%{app} について"
 menu.check_for_updates: アップデートを確認…
 menu.settings: 設定…
+menu.hide: "%{app} を隠す"
+menu.hide_others: ほかを隠す
+menu.show_all: すべてを表示
 menu.quit: "%{app} を終了"
 menu.file: ファイル
 menu.new_task: 新規タスク
