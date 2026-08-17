@@ -16,6 +16,8 @@ the original feature bullet instead of adding separate entries for them.
 
 ## [unreleased]
 
+- Hide the app with Cmd+H on macOS
+
 ## [0.1.2]
 
 - Fix regression: user bubble should fit its content width
