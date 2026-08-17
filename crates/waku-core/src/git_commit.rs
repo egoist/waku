@@ -783,6 +783,7 @@ mod tests {
                     assert!(has_pair(&args, "--tools", ""));
                     assert!(has(&args, "--no-memory"));
                     assert!(has(&args, "--no-subagents"));
+                    assert!(has_pair(&args, "--reasoning-effort", "low"));
                 }
                 ProviderKind::Pi => {
                     assert!(has(&args, "--print"));

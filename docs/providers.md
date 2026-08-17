@@ -572,7 +572,7 @@ received them.
 
 ## Agent Client Protocol
 
-**Launch** — `cursor-agent acp`, `fx acp`, `grok agent stdio`, `kimi acp`
+**Launch** — `cursor-agent acp`, `fx acp`, `grok agent [--reasoning-effort E] stdio`, `kimi acp`
 ([driver/acp.rs](../crates/waku-core/src/driver/acp.rs)).
 
 **Protocol** — newline-delimited JSON-RPC over stdio, bidirectional. One agent
@@ -716,7 +716,9 @@ its permission mode (`default`/`plan`/`auto`/`yolo`) and its effort lives on
 `thinking`. `reasoning_effort_config_id` resolves that per provider — sending
 the default id to Kimi would silently set nothing, or worse, move the permission
 mode. The call is non-fatal either way, since an agent may expose no effort at
-all.
+all. Grok is the exception: effort rides on `session/set_model` as
+`_meta.reasoningEffort` (and as `--reasoning-effort` at launch), not as a
+session config option.
 
 Kimi's catalog comes from `kimi provider list --json`, which covers both the
 managed plan and any registry the user imported with `kimi provider add`. Only
