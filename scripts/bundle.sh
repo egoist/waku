@@ -3,8 +3,11 @@ set -eu
 
 profile="${1:-debug}"
 cargo_target_dir="${CARGO_TARGET_DIR:-target}"
+debug_identity_cache=".waku-cache/codesign/debug-identity"
+codesign_identity_from_environment=0
 if [ -n "${WAKU_CODESIGN_IDENTITY:-}" ]; then
   codesign_identity="$WAKU_CODESIGN_IDENTITY"
+  codesign_identity_from_environment=1
 else
   if [ "$profile" = "debug" ]; then
     preferred_identity="Apple Development:"
@@ -13,8 +16,18 @@ else
     preferred_identity="Developer ID Application:"
     fallback_identity="Apple Development:"
   fi
-  codesign_identity=$(security find-identity -v -p codesigning 2>/dev/null \
-    | awk -v identity="$preferred_identity" 'index($0, "\"" identity) { print $2; exit }')
+  codesign_identity=""
+  if [ "$profile" = "debug" ] && [ -f "$debug_identity_cache" ]; then
+    IFS= read -r cached_identity < "$debug_identity_cache" || cached_identity=""
+    if [ -n "$cached_identity" ]; then
+      codesign_identity=$(security find-identity -v -p codesigning 2>/dev/null \
+        | awk -v identity="$cached_identity" 'index($0, identity) { print $2; exit }')
+    fi
+  fi
+  if [ -z "$codesign_identity" ]; then
+    codesign_identity=$(security find-identity -v -p codesigning 2>/dev/null \
+      | awk -v identity="$preferred_identity" 'index($0, "\"" identity) { print $2; exit }')
+  fi
   if [ -z "$codesign_identity" ]; then
     codesign_identity=$(security find-identity -v -p codesigning 2>/dev/null \
       | awk -v identity="$fallback_identity" 'index($0, "\"" identity) { print $2; exit }')
@@ -41,11 +54,16 @@ case "$profile" in
     exit 2
     ;;
 esac
+if [ "$profile" = "debug" ] && [ "$codesign_identity_from_environment" = "0" ] && [ "$codesign_identity" != "-" ]; then
+  mkdir -p "$(dirname "$debug_identity_cache")"
+  printf '%s\n' "$codesign_identity" > "$debug_identity_cache"
+fi
+debug_adhoc_requirement="=designated => identifier \"$bundle_identifier\""
 if [ "${WAKU_SKIP_CARGO_BUILD:-0}" != "1" ]; then
   if [ "$profile" = "release" ]; then
-    cargo build --release -vv --bin waku --bin waku_js_repl
+    cargo build --release --package waku --bin waku --bin waku_js_repl --package waku-daemon --bin waku-daemon
   else
-    cargo build -vv --bin waku --bin waku_js_repl
+    cargo build --package waku --bin waku --bin waku_js_repl
   fi
 fi
 
@@ -53,6 +71,7 @@ bundle="$cargo_target_dir/$profile/$app_name.app"
 contents="$bundle/Contents"
 helper_bundle="$contents/Helpers/$helper_name.app"
 repl_executable="$contents/Resources/waku_js_repl"
+daemon_executable="$contents/MacOS/waku-daemon"
 swift_module_cache="$cargo_target_dir/$profile/swift-module-cache"
 helper_source="resources/computer-use/WakuComputerUse.swift"
 menu_bar_cursor_resource="resources/computer-use/menubar-cursor.png"
@@ -136,6 +155,10 @@ mkdir -p "$contents/MacOS" "$contents/Resources/computer-use" "$contents/Resourc
 cp "$cargo_target_dir/$profile/waku" "$contents/MacOS/$app_name"
 cp "$cargo_target_dir/$profile/waku_js_repl" "$repl_executable"
 chmod 755 "$repl_executable"
+if [ "$profile" = "release" ]; then
+  cp "$cargo_target_dir/$profile/waku-daemon" "$daemon_executable"
+  chmod 755 "$daemon_executable"
+fi
 cp resources/Info.plist "$contents/Info.plist"
 cp "resources/$icon_file" "$contents/Resources/AppIcon.icns"
 cp resources/computer-use/pi-extension.ts "$contents/Resources/computer-use/pi-extension.ts"
@@ -167,12 +190,25 @@ if [ "$codesign_identity" = "-" ]; then
   codesign --force --sign - "$sparkle_framework/Versions/B/Updater.app"
   codesign --force --sign - "$sparkle_framework"
   codesign --force --identifier "$bundle_identifier.js-repl" --sign - "$repl_executable"
-  codesign --force --sign - "$bundle"
+  if [ "$profile" = "release" ]; then
+    codesign --force --identifier "$bundle_identifier.daemon" --sign - "$daemon_executable"
+  fi
+  if [ "$profile" = "debug" ]; then
+    # An ordinary ad-hoc signature's designated requirement contains its
+    # changing code hash, so macOS TCC treats every rebuild as a different app
+    # and repeatedly asks for Files & Folders access. The development-only
+    # bundle id is a stable local identity even when no trusted Apple
+    # Development certificate is installed.
+    codesign --force --identifier "$bundle_identifier" --requirements "$debug_adhoc_requirement" --sign - "$bundle"
+  else
+    codesign --force --sign - "$bundle"
+  fi
 elif [ "$profile" = "release" ]; then
   codesign --force --options runtime --timestamp --sign "$codesign_identity" "$sparkle_framework/Versions/B/Autoupdate"
   codesign --force --options runtime --timestamp --sign "$codesign_identity" "$sparkle_framework/Versions/B/Updater.app"
   codesign --force --options runtime --timestamp --sign "$codesign_identity" "$sparkle_framework"
   codesign --force --options runtime --timestamp --identifier "$bundle_identifier.js-repl" --sign "$codesign_identity" "$repl_executable"
+  codesign --force --options runtime --timestamp --identifier "$bundle_identifier.daemon" --sign "$codesign_identity" "$daemon_executable"
   codesign --force --options runtime --timestamp --sign "$codesign_identity" "$bundle"
 else
   codesign --force --options runtime --sign "$codesign_identity" "$sparkle_framework/Versions/B/Autoupdate"
@@ -183,6 +219,7 @@ else
 fi
 if [ "$profile" = "release" ]; then
   codesign --verify --strict --verbose=2 "$repl_executable"
+  codesign --verify --strict --verbose=2 "$daemon_executable"
   codesign --verify --deep --strict --verbose=2 "$bundle"
 fi
 

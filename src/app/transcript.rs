@@ -34,6 +34,41 @@ impl Waku {
         })
     }
 
+    /// The response footer's copy content and timestamp for `message_index`,
+    /// cached under the row-kinds fingerprint.
+    ///
+    /// The row builder asks for every visible row on every frame, and
+    /// [`assistant_response_footer`] walks the whole session and joins the
+    /// turn's answer into a fresh `String` — far too much to redo per frame
+    /// for values that only move when the fingerprint does: footers exist
+    /// only for settled turns ([`assistant_response_footer_index`] returns
+    /// `None` while the message streams or its turn runs), settled parts are
+    /// immutable, and settling flips a turn status the fingerprint hashes.
+    pub(super) fn assistant_response_footer_cached(
+        &self,
+        message_index: usize,
+    ) -> (Option<SharedString>, Option<u64>) {
+        self.refresh_transcript_row_kinds();
+        let fingerprint = self.transcript_row_kinds_fingerprint.get();
+        if self.assistant_footer_fingerprint.get() != fingerprint {
+            self.assistant_footer_cache.borrow_mut().clear();
+            self.assistant_footer_fingerprint.set(fingerprint);
+        }
+        if let Some(cached) = self.assistant_footer_cache.borrow().get(&message_index) {
+            return cached.clone();
+        }
+        let value = self.selected_session().map_or((None, None), |session| {
+            (
+                assistant_response_footer(session, message_index).map(SharedString::from),
+                assistant_response_footer_time(session, message_index),
+            )
+        });
+        self.assistant_footer_cache
+            .borrow_mut()
+            .insert(message_index, value.clone());
+        value
+    }
+
     /// The navigation rail's turn list, rebuilt only when the row-kinds
     /// fingerprint moves.
     ///
@@ -121,6 +156,9 @@ impl Waku {
 
         self.transcript_anchor_following.set(false);
         self.transcript_is_scrolled.set(true);
+        // The position above is deliberate, so a wheel scroll still waiting to
+        // be classified must not re-engage following on top of it.
+        self.transcript_tail_recheck.set(false);
     }
 
     /// Bulk-reset the transcript. Used for session/document replacement.
@@ -232,14 +270,20 @@ impl Waku {
             let last = transcript_rows.bounds_for_item(last_row)?;
             Some((last.bottom() - anchor.top()).max(Pixels::ZERO))
         });
-        // Unmeasured rows report no bounds. Treating that as a zero-height tail
-        // asks for a full viewport of end space, which pushes the transcript off
-        // screen; leave the padding alone until the rows have been measured.
-        let Some(anchored_tail_height) = anchored_tail_height else {
-            self.transcript_anchor_end_space.set(Pixels::ZERO);
-            return Pixels::ZERO;
+        // Tail rows report no bounds for a frame whenever they are remeasured —
+        // which the stream pump does on every commit — and report none at all
+        // before the anchored list's first paint. Missing bounds mean unknown,
+        // not zero: a zero end space reads as "the reply filled the viewport",
+        // so the render's follow branch pins the list to its end, the next
+        // measured frame snaps back to the anchor, and the two alternate at
+        // stream cadence for the whole turn. Let the previous end space stand
+        // (the send path seeds a provisional full-viewport reservation) and
+        // keep asserting the anchor straight through the unmeasured frame —
+        // scroll_to is bounds-independent.
+        let end_space = match anchored_tail_height {
+            Some(height) => transcript_anchor_end_space(viewport_height, height),
+            None => self.transcript_anchor_end_space.get(),
         };
-        let end_space = transcript_anchor_end_space(viewport_height, anchored_tail_height);
         self.transcript_anchor_end_space.set(end_space);
         if maintain_transcript_anchor(
             transcript_rows,
@@ -506,47 +550,18 @@ pub(super) fn navigation_rail_scale(
     })
 }
 
-/// How many ticks the rail draws: one per turn while they fit, otherwise as
-/// many whole ticks as the rail's height budget holds. Ticks never squeeze
-/// below their full pitch — a hundreds-of-turns session would compress the
-/// gaps to nothing and turn the rail into a solid bar, and the element count
-/// per hover re-render would grow with the session instead of the viewport.
-pub(super) fn navigation_rail_tick_count(turn_count: usize, viewport_height: f32) -> usize {
-    let budget = viewport_height * NAVIGATION_RAIL_VIEWPORT_HEIGHT_RATIO;
-    let max_ticks = ((budget / NAVIGATION_RAIL_TURN_HEIGHT) as usize).max(1);
-    turn_count.min(max_ticks)
-}
-
-/// The first turn of the bucket tick `tick_index` stands for — its
-/// representative for previews, clicks, and focus. The identity map while
-/// every turn has its own tick.
-pub(super) fn navigation_rail_tick_turn(
-    tick_index: usize,
-    tick_count: usize,
-    turn_count: usize,
-) -> usize {
-    if tick_count == 0 {
-        return 0;
-    }
-    (tick_index * turn_count).div_ceil(tick_count)
-}
-
-/// The tick whose bucket holds `turn_index` — the inverse of
-/// [`navigation_rail_tick_turn`], so an active turn always lights up exactly
-/// one tick.
-pub(super) fn navigation_rail_turn_tick(
-    turn_index: usize,
-    tick_count: usize,
-    turn_count: usize,
-) -> usize {
-    if turn_count == 0 {
-        return 0;
-    }
-    turn_index * tick_count / turn_count
-}
-
 pub(super) fn navigation_rail_height(turn_count: usize, viewport_height: f32) -> f32 {
-    navigation_rail_tick_count(turn_count, viewport_height) as f32 * NAVIGATION_RAIL_TURN_HEIGHT
+    (turn_count as f32 * NAVIGATION_RAIL_TURN_HEIGHT)
+        .min(viewport_height * NAVIGATION_RAIL_VIEWPORT_HEIGHT_RATIO)
+}
+
+pub(super) fn navigation_rail_fade_visibility(
+    offset_y: Pixels,
+    max_offset: Pixels,
+) -> (bool, bool) {
+    let scrolled = -offset_y;
+    let threshold = px(0.5);
+    (scrolled > threshold, max_offset - scrolled > threshold)
 }
 
 pub(super) fn should_show_navigation_rail(
@@ -709,11 +724,18 @@ pub(super) fn transcript_anchor_end_space(
 }
 
 /// Whether the transcript needs an explicit affordance for returning to its
-/// tail. A measured scroll range is required because disclosure pinning can
-/// leave `is_scrolled` set after a collapse removes all overflow. The final
-/// row's bounds then distinguish the tail position for both list alignments:
+/// tail, or `None` when the tail's position is unknowable this frame. A
+/// measured scroll range is required because disclosure pinning can leave
+/// `is_scrolled` set after a collapse removes all overflow. The final row's
+/// bounds then distinguish the tail position for both list alignments:
 /// `ListScrollEvent::is_scrolled` alone stays true at the bottom of the
 /// top-aligned list used while a turn is anchored.
+///
+/// The caller holds the previous answer through `None` rather than resolving
+/// it. Every stream commit remeasures the tail rows, so the frame after each
+/// one has no bounds to read, and answering "show" into that silence blinks the
+/// button against the measured frames in between — at commit cadence, for as
+/// long as the reader sits at the tail without following it.
 pub(super) fn should_show_scroll_to_bottom(
     is_scrolled: bool,
     anchor_following: bool,
@@ -721,12 +743,31 @@ pub(super) fn should_show_scroll_to_bottom(
     viewport_bottom: Pixels,
     tail_bottom: Option<Pixels>,
     end_space: Pixels,
-) -> bool {
+) -> Option<bool> {
     if !is_scrolled || anchor_following || !transcript_scrollable {
-        return false;
+        return Some(false);
     }
 
-    tail_bottom.is_none_or(|tail_bottom| tail_bottom + end_space > viewport_bottom + px(0.5))
+    Some(!transcript_rests_at_tail(
+        viewport_bottom,
+        tail_bottom,
+        end_space,
+    )?)
+}
+
+/// Whether the transcript currently sits at the end of its content, or `None`
+/// while the last row is unmeasured and its position is unknowable.
+///
+/// `None` is not `false`. The stream remeasures the tail on every commit, so a
+/// wheel scroll can easily settle on a frame that cannot answer; a caller
+/// waiting to re-engage tail following has to ask again rather than conclude
+/// the reader stopped short of the tail.
+pub(super) fn transcript_rests_at_tail(
+    viewport_bottom: Pixels,
+    tail_bottom: Option<Pixels>,
+    end_space: Pixels,
+) -> Option<bool> {
+    Some(tail_bottom? + end_space <= viewport_bottom + px(0.5))
 }
 
 pub(super) fn maintain_transcript_anchor(
@@ -847,11 +888,11 @@ pub(super) const EMPTY_TRANSCRIPT_FINGERPRINT: u64 = 0xcbf2_9ce4_8422_2325;
 
 const FINGERPRINT_PRIME: u64 = 0x0000_0100_0000_01b3;
 
-fn mix(hash: u64, value: u64) -> u64 {
+pub(super) fn mix(hash: u64, value: u64) -> u64 {
     (hash ^ value).wrapping_mul(FINGERPRINT_PRIME)
 }
 
-fn mix_uuid(hash: u64, id: Uuid) -> u64 {
+pub(super) fn mix_uuid(hash: u64, id: Uuid) -> u64 {
     let bits = id.as_u128();
     mix(mix(hash, bits as u64), (bits >> 64) as u64)
 }
@@ -1121,6 +1162,28 @@ pub(super) fn format_working_elapsed(seconds: u64) -> String {
             }
         }
     }
+}
+
+/// Whether this user message is the prompt that opened its turn.
+///
+/// A steer accepted mid-turn joins the running turn as another user message,
+/// so a turn can hold several. Only the opening prompt is a rewind boundary —
+/// checkpoints and provider rollback are per turn, not per message. Messages
+/// of a turn are contiguous, so this walks back only while the turn id holds
+/// rather than scanning the session, which a per-frame row builder must avoid.
+pub(super) fn message_opens_turn(messages: &[Message], message_index: usize) -> bool {
+    let Some(turn_id) = messages
+        .get(message_index)
+        .filter(|message| message.role == MessageRole::User)
+        .and_then(|message| message.turn_id)
+    else {
+        return false;
+    };
+    !messages[..message_index]
+        .iter()
+        .rev()
+        .take_while(|earlier| earlier.turn_id == Some(turn_id))
+        .any(|earlier| earlier.role == MessageRole::User)
 }
 
 pub(super) fn message_starts_followup_turn(messages: &[Message], message_index: usize) -> bool {

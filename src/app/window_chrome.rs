@@ -1,13 +1,17 @@
+#[cfg(target_os = "linux")]
+use gpui::WindowButtonLayout;
+#[cfg(target_os = "windows")]
+use gpui::WindowControlArea;
 use gpui::{
     AnyElement, BoxShadow, Context, Decorations, Div, Hsla, IntoElement, MouseButton, ResizeEdge,
     Tiling, Window, div, prelude::*, px, transparent_black,
 };
-#[cfg(target_os = "linux")]
-use gpui::{KeyDownEvent, WindowButton, WindowButtonLayout};
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+use gpui::{KeyDownEvent, WindowButton};
 
 use super::Waku;
 use crate::theme::Theme;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "windows"))]
 use crate::ui::{icon, tooltip::Tooltip};
 
 const CLIENT_FRAME_INSET: f32 = 10.0;
@@ -98,27 +102,45 @@ impl Waku {
             .into_any_element()
     }
 
-    /// Render the desktop's configured button order when GPUI had to fall
-    /// back from server-side to client-side decorations.
+    /// Render the window controls Waku owns: the desktop's configured button
+    /// order when GPUI had to fall back from server-side to client-side
+    /// decorations, and the platform order on Windows.
     pub(super) fn render_client_window_controls(
         &self,
         side: WindowControlSide,
         window: &Window,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
-        if !matches!(window.window_decorations(), Decorations::Client { .. }) {
-            return None;
-        }
+        #[cfg(target_os = "windows")]
+        let buttons = {
+            // Windows keeps all three on the right, in this order, and has no
+            // per-user layout preference to read.
+            if !matches!(side, WindowControlSide::Right) {
+                return None;
+            }
+            [
+                Some(WindowButton::Minimize),
+                Some(WindowButton::Maximize),
+                Some(WindowButton::Close),
+            ]
+        };
 
         #[cfg(target_os = "linux")]
-        {
+        let buttons = {
+            if !matches!(window.window_decorations(), Decorations::Client { .. }) {
+                return None;
+            }
             let layout = cx
                 .button_layout()
                 .unwrap_or_else(WindowButtonLayout::linux_default);
-            let buttons = match side {
+            match side {
                 WindowControlSide::Left => layout.left,
                 WindowControlSide::Right => layout.right,
-            };
+            }
+        };
+
+        #[cfg(any(target_os = "linux", target_os = "windows"))]
+        {
             if buttons.iter().all(Option::is_none) {
                 return None;
             }
@@ -155,7 +177,7 @@ impl Waku {
             )
         }
 
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(not(any(target_os = "linux", target_os = "windows")))]
         {
             let _ = (side, window, cx);
             None
@@ -163,7 +185,7 @@ impl Waku {
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "windows"))]
 fn client_window_button(
     button: WindowButton,
     enabled: bool,
@@ -200,8 +222,18 @@ fn client_window_button(
         theme.text_ghost
     };
 
-    div()
-        .id(id)
+    let control = div().id(id);
+    // Windows hit-tests the caption before it dispatches a mouse event.
+    // Claiming the button's area here is also what lets the maximize control
+    // show Windows 11's snap layouts on hover.
+    #[cfg(target_os = "windows")]
+    let control = control.window_control_area(match button {
+        WindowButton::Minimize => WindowControlArea::Min,
+        WindowButton::Maximize => WindowControlArea::Max,
+        WindowButton::Close => WindowControlArea::Close,
+    });
+
+    control
         .track_focus(&focus)
         .tab_index(0)
         .tab_stop(true)
@@ -246,7 +278,7 @@ fn client_window_button(
         .into_any_element()
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "windows"))]
 fn activate_window_button(button: WindowButton, window: &mut Window) {
     match button {
         WindowButton::Minimize => window.minimize_window(),

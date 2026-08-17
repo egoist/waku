@@ -1,15 +1,17 @@
 use std::ops::Range;
+use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use crate::md::highlight::{self, Lang, TokenClass};
 use crate::ui::menu::{ContextMenuHandle, MenuItem, context_menu};
+use crate::ui::scrollbar::{self, ScrollbarState};
 use gpui::{
-    App, Bounds, ClipboardEntry, ClipboardItem, Context, CursorStyle, Element, ElementId,
-    ElementInputHandler, Entity, EntityInputHandler, EventEmitter, FocusHandle, Focusable,
-    GlobalElementId, Hsla, InspectorElementId, IntoElement, KeyBinding, LayoutId, MouseButton,
-    MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Point, SharedString,
-    StyledText, Subscription, Task, TextLayout, TextRun, UTF16Selection, UnderlineStyle, Window,
-    actions, div, fill, point, prelude::*, px, size,
+    App, Bounds, ClipboardEntry, ClipboardItem, Context, CursorStyle, DispatchPhase, Element,
+    ElementId, ElementInputHandler, Entity, EntityInputHandler, EventEmitter, FocusHandle,
+    Focusable, GlobalElementId, Hsla, InspectorElementId, IntoElement, KeyBinding, LayoutId,
+    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Point,
+    ScrollHandle, SharedString, StyledText, Subscription, Task, TextLayout, TextRun,
+    UTF16Selection, UnderlineStyle, Window, actions, div, fill, point, prelude::*, px, size,
 };
 use unicode_segmentation::UnicodeSegmentation;
 
@@ -114,7 +116,8 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("ctrl-shift-e", SelectToEnd, Some("ComposerInput")),
     ]);
 
-    #[cfg(target_os = "linux")]
+    // The word-motion chords Windows and the Linux desktops share.
+    #[cfg(not(target_os = "macos"))]
     cx.bind_keys([
         KeyBinding::new(
             "ctrl-backspace",
@@ -516,6 +519,10 @@ pub enum FieldMode {
     Search,
 }
 
+/// Tallest a composer-mode field grows before its text scrolls under an
+/// overlay scrollbar instead of growing the card.
+const COMPOSER_MAX_HEIGHT: Pixels = px(300.);
+
 pub struct ComposerInput {
     focus_handle: FocusHandle,
     mode: FieldMode,
@@ -548,6 +555,19 @@ pub struct ComposerInput {
     /// caret in view; pinned to zero while the field is unfocused so the
     /// address bar's page echo shows the start of the URL.
     scroll_offset: Pixels,
+    /// Vertical scroll state for a composer-mode field, whose height is
+    /// capped at [`COMPOSER_MAX_HEIGHT`].
+    scroll_handle: ScrollHandle,
+    scrollbar_state: Rc<ScrollbarState>,
+    /// Horizontal inset a composer-mode embedder moves inside the field, so
+    /// the scroll viewport — and the overlay scrollbar pinned to its edge —
+    /// runs to the card's edge while the text keeps the inset.
+    padding_x: Pixels,
+    /// The `(caret, content length, wrap width)` the capped viewport last
+    /// followed. Prepaint scrolls the caret back into view only when this
+    /// changes, so a manual wheel scroll away from the caret holds until the
+    /// caret itself next moves.
+    caret_reconciled: Option<(usize, usize, Pixels)>,
     last_layout: Option<TextLayout>,
     /// Horizontal goal and soft-wrap affinity for consecutive Up/Down
     /// presses. A byte offset at a wrap boundary can mean either the end of
@@ -612,6 +632,10 @@ impl ComposerInput {
             selection_reversed: false,
             marked_range: None,
             scroll_offset: px(0.),
+            scroll_handle: ScrollHandle::new(),
+            scrollbar_state: ScrollbarState::new(),
+            padding_x: px(0.),
+            caret_reconciled: None,
             last_layout: None,
             vertical_navigation: None,
             is_selecting: false,
@@ -701,6 +725,14 @@ impl ComposerInput {
             self.placeholder = placeholder;
             cx.notify();
         }
+    }
+
+    /// Horizontal inset kept inside the field's scroll viewport rather than
+    /// on the embedding card, so the overlay scrollbar sits at the card's
+    /// edge instead of floating next to the text.
+    pub fn padding_x(mut self, padding: Pixels) -> Self {
+        self.padding_x = padding;
+        self
     }
 
     /// Turn the field into a code editor: Enter inserts a newline instead of
@@ -1826,6 +1858,37 @@ fn single_line_scroll(
     }
 }
 
+/// Vertical analogue of [`single_line_scroll`] for a composer-mode field
+/// capped at [`COMPOSER_MAX_HEIGHT`]: scroll the viewport the minimum needed
+/// to keep the caret inside it. `caret_top` is the caret's window position in
+/// this frame's already-scrolled layout, and the container consumed this
+/// frame's offset before prepainting children, so a correction lands on the
+/// next frame — which this requests.
+fn follow_caret(
+    caret_top: Point<Pixels>,
+    line_height: Pixels,
+    scroll_handle: &ScrollHandle,
+    window: &mut Window,
+) {
+    let viewport = scroll_handle.bounds();
+    if viewport.size.height <= px(0.) {
+        return;
+    }
+    let offset = scroll_handle.offset();
+    let mut y = offset.y;
+    let caret_bottom = caret_top.y + line_height;
+    if caret_bottom > viewport.bottom() {
+        y -= caret_bottom - viewport.bottom();
+    } else if caret_top.y < viewport.top() {
+        y += viewport.top() - caret_top.y;
+    }
+    let y = y.clamp(-scroll_handle.max_offset().y, px(0.));
+    if (y - offset.y).abs() > px(0.5) {
+        scroll_handle.set_offset(point(offset.x, y));
+        window.request_animation_frame();
+    }
+}
+
 struct InputElement {
     input: Entity<ComposerInput>,
 }
@@ -2127,40 +2190,60 @@ impl Element for InputElement {
             window,
             cx,
         );
-        let input = self.input.read(cx);
-        let cursor = input.cursor_offset();
-        let cursor_visible = cursor_should_be_visible(
-            window.is_window_active(),
-            input.focus_handle.is_focused(window),
-            input.context_menu_preserves_visual_focus(),
-            input.blink_cursor.read(cx).visible(),
-        );
         let theme = Theme::current(cx);
-        let layout = layout_state.text.layout();
-        let cursor = (input.selected_range.is_empty() && cursor_visible)
-            .then(|| {
-                input
-                    .vertical_navigation
-                    .filter(|navigation| {
-                        navigation.cursor_offset == cursor
-                            && navigation.layout_width == layout.bounds().size.width
-                    })
-                    .map(|navigation| {
-                        point(
-                            layout.bounds().left() + navigation.cursor_x,
-                            layout.bounds().top()
-                                + layout.line_height() * navigation.visual_row as f32,
-                        )
-                    })
-                    .or_else(|| layout.position_for_index(cursor))
-            })
-            .flatten()
-            .map(|cursor_position| {
-                fill(
-                    Bounds::new(cursor_position, size(px(1.5), layout.line_height())),
-                    theme.accent,
+        let layout = layout_state.text.layout().clone();
+        let (cursor_position, cursor, follow) = {
+            let input = self.input.read(cx);
+            let cursor = input.cursor_offset();
+            let cursor_visible = cursor_should_be_visible(
+                window.is_window_active(),
+                input.focus_handle.is_focused(window),
+                input.context_menu_preserves_visual_focus(),
+                input.blink_cursor.read(cx).visible(),
+            );
+            // The caret's position feeds both its painted quad and the capped
+            // viewport's follow below, so resolve it regardless of blink
+            // phase or selection.
+            let cursor_position = input
+                .vertical_navigation
+                .filter(|navigation| {
+                    navigation.cursor_offset == cursor
+                        && navigation.layout_width == layout.bounds().size.width
+                })
+                .map(|navigation| {
+                    point(
+                        layout.bounds().left() + navigation.cursor_x,
+                        layout.bounds().top() + layout.line_height() * navigation.visual_row as f32,
+                    )
+                })
+                .or_else(|| layout.position_for_index(cursor));
+            let quad = (input.selected_range.is_empty() && cursor_visible)
+                .then_some(cursor_position)
+                .flatten()
+                .map(|cursor_position| {
+                    fill(
+                        Bounds::new(cursor_position, size(px(1.5), layout.line_height())),
+                        theme.accent,
+                    )
+                });
+            let follow = (input.mode == FieldMode::Composer).then(|| {
+                (
+                    (cursor, input.content.len(), layout.bounds().size.width),
+                    input.caret_reconciled,
+                    input.scroll_handle.clone(),
                 )
             });
+            (cursor_position, quad, follow)
+        };
+        if let Some((follow_state, reconciled, scroll_handle)) = follow
+            && reconciled != Some(follow_state)
+        {
+            if let Some(position) = cursor_position {
+                follow_caret(position, layout.line_height(), &scroll_handle, window);
+            }
+            self.input
+                .update(cx, |input, _| input.caret_reconciled = Some(follow_state));
+        }
         PrepaintState { cursor }
     }
 
@@ -2182,6 +2265,20 @@ impl Element for InputElement {
             ElementInputHandler::new(bounds, self.input.clone()),
             cx,
         );
+        // Element-level mouse listeners are hitbox-gated, so a drag that
+        // leaves the field would freeze the selection at the border. Track
+        // the drag window-level instead — like a native text view, the
+        // selection keeps extending outside the bounds because
+        // index_for_mouse_position clamps an outside point to the nearest
+        // line edge (above maps to the start, below to the end).
+        window.on_mouse_event({
+            let input = self.input.clone();
+            move |event: &MouseMoveEvent, phase, window, cx| {
+                if phase == DispatchPhase::Bubble && input.read(cx).is_selecting {
+                    input.update(cx, |input, cx| input.on_mouse_move(event, window, cx));
+                }
+            }
+        });
         layout_state.text.paint(
             None,
             None,
@@ -2206,8 +2303,13 @@ impl Render for ComposerInput {
         let theme = Theme::current(cx);
         let input = cx.entity();
         let context_menu_input = input.clone();
+        let scroll_handle = self.scroll_handle.clone();
+        let padding_x = self.padding_x;
+        let scrollbar = (self.mode == FieldMode::Composer)
+            .then(|| scrollbar::vertical(&self.scroll_handle, &self.scrollbar_state));
         let field = div()
             .key_context("ComposerInput")
+            .id("composer-field")
             .track_focus(&self.focus_handle(cx))
             .cursor(CursorStyle::IBeam)
             .on_action(cx.listener(Self::backspace))
@@ -2243,7 +2345,6 @@ impl Render for ComposerInput {
             .on_mouse_down(MouseButton::Right, cx.listener(Self::on_context_mouse_down))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
-            .on_mouse_move(cx.listener(Self::on_mouse_move))
             .w_full()
             .text_color(theme.text)
             // A composer owns its own metrics; a code editor inherits the
@@ -2251,6 +2352,10 @@ impl Render for ComposerInput {
             .when(self.mode == FieldMode::Composer, |field| {
                 field
                     .min_h(px(24.0))
+                    .max_h(COMPOSER_MAX_HEIGHT)
+                    .overflow_y_scroll()
+                    .track_scroll(&scroll_handle)
+                    .px(padding_x)
                     .line_height(px(22.0))
                     .text_size(px(13.5))
             })
@@ -2263,7 +2368,7 @@ impl Render for ComposerInput {
             .child(InputElement { input });
 
         context_menu(
-            div().w_full().child(field),
+            div().w_full().child(field).children(scrollbar),
             "composer-context-menu",
             &self.context_menu,
             move |cx| {

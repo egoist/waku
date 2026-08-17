@@ -105,7 +105,31 @@ fn linux_reduce_motion_enabled() -> bool {
         .is_some_and(|animations_enabled| !animations_enabled)
 }
 
-#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+/// Ease of Access → "Show animations in Windows" clears
+/// `SPI_GETCLIENTAREAANIMATION`. GPUI has no Windows implementation of its
+/// own, and the call only reads a cached user setting, so startup can ask
+/// directly.
+#[cfg(target_os = "windows")]
+pub fn init_reduce_motion(cx: &mut gpui::App) {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        SPI_GETCLIENTAREAANIMATION, SystemParametersInfoW,
+    };
+
+    let mut animations_enabled: i32 = 1;
+    let read = unsafe {
+        SystemParametersInfoW(
+            SPI_GETCLIENTAREAANIMATION,
+            0,
+            std::ptr::from_mut(&mut animations_enabled).cast(),
+            0,
+        )
+    };
+    if read != 0 {
+        cx.set_reduce_motion(animations_enabled == 0);
+    }
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
 pub fn init_reduce_motion(_: &mut gpui::App) {}
 
 #[cfg(target_os = "linux")]
@@ -218,28 +242,6 @@ pub fn open_with_default_app(path: &std::path::Path, cx: &gpui::App) {
     cx.open_with_system(path);
 }
 
-/// Move `path` to the Trash, recoverably. Errors surface to the caller so the
-/// UI can say why nothing moved.
-#[cfg(target_os = "macos")]
-pub fn trash_item(path: &std::path::Path) -> Result<(), String> {
-    use objc2_foundation::{NSFileManager, NSString, NSURL};
-
-    let url = NSURL::fileURLWithPath(&NSString::from_str(&path.to_string_lossy()));
-    NSFileManager::defaultManager()
-        .trashItemAtURL_resultingItemURL_error(&url, None)
-        .map_err(|error| error.localizedDescription().to_string())
-}
-
-#[cfg(target_os = "linux")]
-pub fn trash_item(path: &std::path::Path) -> Result<(), String> {
-    trash::delete(path).map_err(|error| error.to_string())
-}
-
-#[cfg(not(any(target_os = "macos", target_os = "linux")))]
-pub fn trash_item(_: &std::path::Path) -> Result<(), String> {
-    Err("moving items to Trash is not supported on this platform".to_owned())
-}
-
 /// Decode the embedded desktop icon once. X11 consumes the RGBA pixels from
 /// `WindowOptions`; Wayland associates the window through `app_id` and its
 /// installed desktop entry.
@@ -327,7 +329,13 @@ pub fn titlebar_double_click(window: &Window) {
     #[cfg(target_os = "macos")]
     window.titlebar_double_click();
 
-    #[cfg(not(target_os = "macos"))]
+    // Windows performs the user's configured caption double-click action in
+    // `DefWindowProc`, which sees the click because the drag region reports
+    // itself as caption to the hit test.
+    #[cfg(target_os = "windows")]
+    let _ = window;
+
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     if window.window_controls().maximize && window.is_resizable() {
         window.zoom_window();
     }

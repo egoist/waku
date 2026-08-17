@@ -14,7 +14,6 @@
 //   SPARKLE_BIN                dir containing the Sparkle tools
 //   SPARKLE_PRIVATE_KEY        EdDSA private key (CI; otherwise the keychain)
 //   WAKU_DOWNLOAD_URL_PREFIX   base URL for enclosure links
-import { $ } from "bun";
 import { existsSync, readdirSync } from "node:fs";
 import { join, resolve } from "node:path";
 
@@ -72,12 +71,36 @@ export async function generateAppcast(
     ...(privateKey ? ["--ed-key-file", "-"] : []),
     updatesDir,
   ];
-  if (privateKey) {
-    await $`${command}`.stdin(privateKey);
-  } else {
-    await $`${command}`;
+  // The key is fed on stdin (`--ed-key-file -`) so it never lands on disk.
+  // Without one, generate_appcast reads the login keychain instead and wants
+  // nothing on stdin, so that path just leaves the terminal's attached.
+  const child = Bun.spawn(command, {
+    stdin: privateKey ? new Blob([`${privateKey}\n`]) : "inherit",
+    stdout: "inherit",
+    stderr: "inherit",
+  });
+  const exitCode = await child.exited;
+  if (exitCode !== 0) {
+    throw new Error(`generate_appcast exited with ${exitCode}`);
   }
-  console.log(`Wrote ${join(updatesDir, "appcast.xml")}`);
+
+  // generate_appcast exits 0 after writing an *unsigned* feed when the key it
+  // used does not match the bundle's SUPublicEDKey, and Sparkle rejects an
+  // unsigned enclosure — so a silent mismatch would ship a dead update feed.
+  const appcastPath = join(updatesDir, "appcast.xml");
+  const unsigned = [
+    ...(await Bun.file(appcastPath).text()).matchAll(/<enclosure\b[^>]*>/g),
+  ]
+    .filter(([tag]) => !tag.includes("sparkle:edSignature="))
+    .map(([tag]) => tag.match(/url="([^"]*)"/)?.[1] ?? tag);
+  if (unsigned.length > 0) {
+    throw new Error(
+      `generate_appcast left ${unsigned.length} enclosure(s) unsigned: ` +
+        `${unsigned.join(", ")}. The signing key does not match the app's ` +
+        "SUPublicEDKey (check SPARKLE_PRIVATE_KEY, or the login keychain).",
+    );
+  }
+  console.log(`Wrote ${appcastPath}`);
 }
 
 if (import.meta.main) {

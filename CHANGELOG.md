@@ -16,6 +16,50 @@ the original feature bullet instead of adding separate entries for them.
 
 ## [unreleased]
 
+- Add Kimi Code support
+
+## [0.1.8]
+
+- Fix `PATH` resolution on Windows
+
+## [0.1.4]
+
+- Fix text selection in diff view
+
+## [0.1.3]
+
+- Pin Codex and Claude commit message generation to cheap models: gpt-5.6-luna and claude-4.5-haiku
+- Animate sidebars
+- Render provider file edits as inline diffs in the transcript
+- Fix claude task title generation
+
+## [0.1.2]
+
+- Fix regression: user bubble should fit its content width
+
+## [0.1.1]
+
+- Give nested Markdown the full message width
+- Cap composer height and scroll overflow with an overlay scrollbar
+- Keep drag-selecting text past the input bounds
+- Fix char boundary panic when sliding the live reasoning window
+
+## [0.1.0]
+
+- Add standalone Waku daemon and browser client
+- Add Linux support (X11 and Wayland, you need to build from source for now)
+- Answer agent questions directly in the composer
+- Redesign queued follow-ups as composer cards with per-message steering
+- Add DeepSeek agent preset selection (Standard, Code, Minimal, and Creator)
+- Add Claude context window and ultracode effort options
+- Add /fast command to toggle fast mode for Codex
+- Show the latest activity in live transcript headers
+- Add soft wrapping and keyboard copy feedback
+- Add terminal overlay scrollbar and measure cell width from the font
+- Restore window position, size, and display across launches
+- Contain wheel scrolling in activity and command output viewports
+- Smooth streaming markdown and reduce CPU usage while streaming
+
 ## [0.0.13]
 
 - Add DeepSeek Harness provider

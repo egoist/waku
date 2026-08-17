@@ -1,31 +1,20 @@
 //! Immutable, render-ready Git diffs for Waku's Review surface.
 //!
-//! Every function in this module performs subprocess work or parses potentially
-//! large output. Callers run [`collect`] on the background executor and keep the
-//! resulting snapshot in memory; a frame only indexes its visible rows.
+//! The daemon captures Git output. This desktop module only parses and expands
+//! that returned data off the UI thread; a frame only indexes stored rows.
 
 use std::collections::HashMap;
 use std::path::Path;
-use std::process::{Command, Output};
 
-use anyhow::{Context as _, anyhow, bail};
 use uuid::Uuid;
 
-use crate::checkpoint;
-use crate::git_branch;
 use crate::md::highlight::{Carry, Lang, Token, lang_for_tag, tokenize_line};
 
-const EMPTY_TREE: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
 const COLLAPSED_CONTEXT_LINES: usize = 3;
 const COLLAPSED_CONTEXT_THRESHOLD: usize = 1;
 /// Pierre expands a directional hunk control in 100-line increments. The
 /// count label itself expands the complete region.
 pub const DEFAULT_EXPANSION_LINE_COUNT: usize = 100;
-/// Full-file context is what makes collapsed regions expandable without any
-/// frame-time I/O. Keep an escape hatch for pathological generated files; the
-/// compact patch remains reviewable when hydrating all context would retain an
-/// unreasonable amount of text.
-const MAX_HYDRATED_PATCH_BYTES: usize = 32 * 1024 * 1024;
 /// A pathological generated patch must not turn one Review tab into an
 /// unbounded in-memory document. The complete file summary remains available
 /// in the tree when rendered lines are capped.
@@ -261,153 +250,79 @@ fn push_remaining_gap(replacement: &mut Vec<Line>, file_index: usize, mut gap: G
     });
 }
 
-#[derive(Clone, Debug)]
-struct Range {
-    from: String,
-    to: String,
-}
-
-/// Capture one consistent source pair and parse its unified diff.
-pub fn collect(cwd: &Path, source: Source) -> anyhow::Result<Snapshot> {
-    ensure_repository(cwd)?;
-    let range = resolve_range(cwd, source)?;
-    let numstat = diff_output(cwd, &range, &["--numstat"])?;
-    let hydrated_patch = diff_output(cwd, &range, &["--unified=2147483647"])?;
-    if hydrated_patch.len() <= MAX_HYDRATED_PATCH_BYTES {
-        Ok(parse(source, &numstat, &hydrated_patch, true))
-    } else {
-        let compact_patch = diff_output(cwd, &range, &["--unified=3"])?;
-        let mut snapshot = parse(source, &numstat, &compact_patch, false);
+/// Turn daemon-captured Git output into render-ready rows. Parsing and syntax
+/// tokenization remain client-side presentation work; no path is resolved and
+/// no subprocess is started here.
+pub fn parse_collected(
+    source: Source,
+    numstat: &str,
+    patch: &str,
+    complete_context: bool,
+) -> Snapshot {
+    let mut snapshot = parse(source, numstat, patch, complete_context);
+    if !complete_context {
         snapshot.truncated = true;
-        Ok(snapshot)
     }
+    snapshot
 }
 
-fn resolve_range(cwd: &Path, source: Source) -> anyhow::Result<Range> {
-    let head = resolve(cwd, "HEAD").unwrap_or_else(|| EMPTY_TREE.to_owned());
-    Ok(match source {
+/// A snapshot over the file changes a provider reported for one tool call.
+///
+/// The normalization that produced those bodies already ran when the tool
+/// event arrived, so this only reassembles them into the patch text [`parse`]
+/// already understands. `Source` is meaningless here — nothing reads it on a
+/// tool-call diff — and context is never complete, because the provider sent
+/// hunks rather than whole files.
+pub fn from_file_changes(changes: &[crate::model::ActivityFileChange]) -> Snapshot {
+    let mut numstat = String::new();
+    let mut patch = String::new();
+    for change in changes {
+        let Some(body) = change.diff.as_deref() else {
+            continue;
+        };
+        numstat.push_str(&format!(
+            "{}\t{}\t{}\n",
+            change.additions.unwrap_or(0),
+            change.deletions.unwrap_or(0),
+            change.path
+        ));
+        patch.push_str(&format!(
+            "diff --git a/{path} b/{path}\n",
+            path = change.path
+        ));
+        match change.status {
+            Some(crate::model::ActivityFileChangeStatus::Added) => {
+                patch.push_str("new file mode 100644\n");
+            }
+            Some(crate::model::ActivityFileChangeStatus::Deleted) => {
+                patch.push_str("deleted file mode 100644\n");
+            }
+            _ => {}
+        }
+        patch.push_str(body);
+        if !body.ends_with('\n') {
+            patch.push('\n');
+        }
+    }
+    parse(Source::default(), &numstat, &patch, false)
+}
+
+pub fn wire_source(source: Source) -> waku_client::workspace::ReviewDiffSource {
+    match source {
         Source::LastTurn {
             session_id,
+            turn_id,
             turn_count,
-            ..
-        } => {
-            if turn_count == 0 {
-                bail!("the first checkpoint is a baseline, not a completed turn");
-            }
-            let diff_base_ref = checkpoint::turn_diff_base_ref(session_id, turn_count);
-            let start_ref = checkpoint::turn_start_ref(session_id, turn_count);
-            let legacy_ref = checkpoint::checkpoint_ref(session_id, turn_count - 1);
-            let to_ref = checkpoint::checkpoint_ref(session_id, turn_count);
-            Range {
-                from: resolve(cwd, &diff_base_ref)
-                    .or_else(|| resolve(cwd, &start_ref))
-                    .or_else(|| resolve(cwd, &legacy_ref))
-                    .ok_or_else(|| anyhow!("the turn's starting checkpoint is unavailable"))?,
-                to: resolve(cwd, &to_ref)
-                    .ok_or_else(|| anyhow!("the turn's ending checkpoint is unavailable"))?,
-            }
-        }
-        Source::Uncommitted => Range {
-            from: head,
-            to: checkpoint::capture_worktree_commit(cwd)?,
+        } => waku_client::workspace::ReviewDiffSource::LastTurn {
+            session_id,
+            turn_id,
+            turn_count,
         },
-        Source::Unstaged => Range {
-            from: index_tree(cwd)?,
-            to: checkpoint::capture_worktree_commit(cwd)?,
-        },
-        Source::Staged => Range {
-            from: head,
-            to: index_tree(cwd)?,
-        },
-        Source::Committed => Range {
-            from: branch_base(cwd)?,
-            to: head,
-        },
-        Source::Branch => Range {
-            from: branch_base(cwd)?,
-            to: checkpoint::capture_worktree_commit(cwd)?,
-        },
-    })
-}
-
-fn branch_base(cwd: &Path) -> anyhow::Result<String> {
-    let Some(snapshot) = git_branch::inspect(cwd)? else {
-        bail!("the workspace is not a Git repository");
-    };
-    let Some(head) = resolve(cwd, "HEAD") else {
-        return Ok(EMPTY_TREE.to_owned());
-    };
-    let current = snapshot.current.as_deref();
-    let default_branch = snapshot
-        .default_branch
-        .filter(|branch| current != Some(branch.as_str()))
-        .or_else(|| {
-            ["main", "master"]
-                .into_iter()
-                .find(|candidate| {
-                    current != Some(*candidate)
-                        && snapshot
-                            .branches
-                            .iter()
-                            .any(|branch| branch.name == *candidate)
-                })
-                .map(str::to_owned)
-        });
-    let Some(default_branch) = default_branch else {
-        return Ok(head);
-    };
-    let output = git(cwd, ["merge-base", "HEAD", default_branch.as_str()])?;
-    let base = output.trim();
-    Ok(if base.is_empty() {
-        head
-    } else {
-        base.to_owned()
-    })
-}
-
-fn index_tree(cwd: &Path) -> anyhow::Result<String> {
-    let output = Command::new("git")
-        .args(["write-tree"])
-        .current_dir(cwd)
-        .output()
-        .context("failed to snapshot the Git index")?;
-    if output.status.success() {
-        let tree = String::from_utf8_lossy(&output.stdout).trim().to_owned();
-        if !tree.is_empty() {
-            return Ok(tree);
-        }
-    }
-    // A repository with no index represents an empty staged tree.
-    if resolve(cwd, "HEAD").is_none() {
-        Ok(EMPTY_TREE.to_owned())
-    } else {
-        bail!("{}", command_error(&output))
-    }
-}
-
-fn diff_output(cwd: &Path, range: &Range, modes: &[&str]) -> anyhow::Result<String> {
-    let mut command = Command::new("git");
-    command
-        .args([
-            "-c",
-            "core.quotePath=false",
-            "diff",
-            "--no-ext-diff",
-            "--no-color",
-        ])
-        .args(modes)
-        // Treat renames as a deletion plus an addition. It keeps the patch and
-        // numstat path sets one-to-one, including paths containing spaces.
-        .arg("--no-renames")
-        .arg(&range.from)
-        .arg(&range.to)
-        .args(["--", "."])
-        .current_dir(cwd);
-    let output = command.output().context("failed to generate Git diff")?;
-    if output.status.success() {
-        Ok(String::from_utf8_lossy(&output.stdout).into_owned())
-    } else {
-        bail!("{}", command_error(&output))
+        Source::Uncommitted => waku_client::workspace::ReviewDiffSource::Uncommitted,
+        Source::Unstaged => waku_client::workspace::ReviewDiffSource::Unstaged,
+        Source::Staged => waku_client::workspace::ReviewDiffSource::Staged,
+        Source::Committed => waku_client::workspace::ReviewDiffSource::Committed,
+        Source::Branch => waku_client::workspace::ReviewDiffSource::Branch,
     }
 }
 
@@ -427,6 +342,8 @@ fn parse(source: Source, numstat: &str, patch: &str, complete_context: bool) -> 
     let mut old_carry = Carry::None;
     let mut new_carry = Carry::None;
     let mut next_gap_id = 0u64;
+    // Whether the current hunk told us where in the file it sits.
+    let mut positioned = true;
 
     for raw in patch.lines() {
         if let Some(path) = parse_diff_header_path(raw) {
@@ -449,6 +366,7 @@ fn parse(source: Source, numstat: &str, patch: &str, complete_context: bool) -> 
             previous_new_next = 1;
             old_carry = Carry::None;
             new_carry = Carry::None;
+            positioned = true;
             lines.push(Line {
                 file_index,
                 old_line: None,
@@ -492,7 +410,31 @@ fn parse(source: Source, numstat: &str, patch: &str, complete_context: bool) -> 
             continue;
         }
 
+        // A hunk header with no ranges. Git never writes one, but a diff
+        // synthesized from a provider's before/after text has no position to
+        // report, so its rows are numbered `None` rather than from 1.
+        if raw.starts_with("@@") && parse_hunk_starts(raw).is_none() {
+            positioned = false;
+            if !lines
+                .last()
+                .is_none_or(|line| line.kind == LineKind::FileHeader)
+            {
+                lines.push(Line {
+                    file_index,
+                    old_line: None,
+                    new_line: None,
+                    kind: LineKind::HunkHeader,
+                    content: String::new(),
+                    tokens: Vec::new(),
+                });
+            }
+            old_carry = Carry::None;
+            new_carry = Carry::None;
+            continue;
+        }
+
         if let Some((next_old, next_new)) = parse_hunk_starts(raw) {
+            positioned = true;
             let old_gap = next_old.saturating_sub(previous_old_next);
             let new_gap = next_new.saturating_sub(previous_new_next);
             let gap = old_gap.max(new_gap);
@@ -542,7 +484,10 @@ fn parse(source: Source, numstat: &str, patch: &str, complete_context: bool) -> 
             b' ' => {
                 let (tokens, next_new_carry) = tokenize(language, &content, new_carry);
                 let (_, next_old_carry) = tokenize(language, &content, old_carry);
-                let shown = (Some(old_line), Some(new_line));
+                let shown = (
+                    positioned.then_some(old_line),
+                    positioned.then_some(new_line),
+                );
                 old_line = old_line.saturating_add(1);
                 new_line = new_line.saturating_add(1);
                 old_carry = next_old_carry;
@@ -551,17 +496,17 @@ fn parse(source: Source, numstat: &str, patch: &str, complete_context: bool) -> 
             }
             b'-' => {
                 let (tokens, carry) = tokenize(language, &content, old_carry);
-                let shown = old_line;
+                let shown = positioned.then_some(old_line);
                 old_line = old_line.saturating_add(1);
                 old_carry = carry;
-                (LineKind::Deletion, Some(shown), None, tokens)
+                (LineKind::Deletion, shown, None, tokens)
             }
             b'+' => {
                 let (tokens, carry) = tokenize(language, &content, new_carry);
-                let shown = new_line;
+                let shown = positioned.then_some(new_line);
                 new_line = new_line.saturating_add(1);
                 new_carry = carry;
-                (LineKind::Addition, None, Some(shown), tokens)
+                (LineKind::Addition, None, shown, tokens)
             }
             b'\\' => (LineKind::Meta, None, None, Vec::new()),
             _ => continue,
@@ -803,7 +748,7 @@ fn unescape_git_path(path: &str) -> String {
     output
 }
 
-fn parse_hunk_starts(line: &str) -> Option<(u32, u32)> {
+pub fn parse_hunk_starts(line: &str) -> Option<(u32, u32)> {
     let ranges = line.strip_prefix("@@ ")?.split_once(" @@")?.0;
     let mut parts = ranges.split_whitespace();
     let old = parts.next()?.strip_prefix('-')?;
@@ -815,7 +760,7 @@ fn parse_range_start(range: &str) -> Option<u32> {
     range.split(',').next()?.parse().ok()
 }
 
-fn language_for_path(path: &str) -> Option<Lang> {
+pub fn language_for_path(path: &str) -> Option<Lang> {
     let path = Path::new(path);
     let name = path.file_name()?.to_str()?;
     let normalized = name.to_ascii_lowercase();
@@ -829,101 +774,16 @@ fn language_for_path(path: &str) -> Option<Lang> {
     lang_for_tag(tag)
 }
 
-fn tokenize(language: Option<Lang>, content: &str, carry: Carry) -> (Vec<Token>, Carry) {
+pub fn tokenize(language: Option<Lang>, content: &str, carry: Carry) -> (Vec<Token>, Carry) {
     language.map_or_else(
         || (Vec::new(), Carry::None),
         |language| tokenize_line(language, content, carry),
     )
 }
 
-fn ensure_repository(cwd: &Path) -> anyhow::Result<()> {
-    let output = Command::new("git")
-        .args(["rev-parse", "--is-inside-work-tree"])
-        .current_dir(cwd)
-        .output()
-        .context("failed to inspect Git workspace")?;
-    if output.status.success() {
-        Ok(())
-    } else {
-        bail!("the workspace is not a Git repository")
-    }
-}
-
-fn resolve(cwd: &Path, revision: &str) -> Option<String> {
-    let output = Command::new("git")
-        .args(["rev-parse", "--verify", &format!("{revision}^{{commit}}")])
-        .current_dir(cwd)
-        .output()
-        .ok()?;
-    output
-        .status
-        .success()
-        .then(|| String::from_utf8_lossy(&output.stdout).trim().to_owned())
-        .filter(|value| !value.is_empty())
-}
-
-fn git<I, S>(cwd: &Path, args: I) -> anyhow::Result<String>
-where
-    I: IntoIterator<Item = S>,
-    S: AsRef<std::ffi::OsStr>,
-{
-    let output = Command::new("git")
-        .args(args)
-        .current_dir(cwd)
-        .output()
-        .context("failed to execute git")?;
-    if output.status.success() {
-        Ok(String::from_utf8_lossy(&output.stdout).into_owned())
-    } else {
-        bail!("{}", command_error(&output))
-    }
-}
-
-fn command_error(output: &Output) -> String {
-    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
-    if stderr.is_empty() {
-        format!("git exited with {}", output.status)
-    } else {
-        stderr
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use std::fs;
-
     use super::*;
-
-    fn git_ok(cwd: &Path, args: &[&str]) {
-        let output = Command::new("git")
-            .args(args)
-            .current_dir(cwd)
-            .output()
-            .unwrap();
-        assert!(output.status.success(), "{}", command_error(&output));
-    }
-
-    fn repository() -> std::path::PathBuf {
-        let root = std::env::temp_dir().join(format!("waku-review-diff-{}", Uuid::new_v4()));
-        fs::create_dir_all(&root).unwrap();
-        git_ok(&root, &["init", "-b", "main"]);
-        fs::create_dir_all(root.join("src")).unwrap();
-        fs::write(root.join("src/lib.rs"), "fn baseline() {}\n").unwrap();
-        git_ok(&root, &["add", "."]);
-        git_ok(
-            &root,
-            &[
-                "-c",
-                "user.name=Waku Tests",
-                "-c",
-                "user.email=waku@example.com",
-                "commit",
-                "-m",
-                "baseline",
-            ],
-        );
-        root
-    }
 
     #[test]
     fn parses_file_headers_gaps_line_numbers_and_syntax() {
@@ -1070,158 +930,5 @@ index 1111111..2222222 100644
         };
         assert_eq!(gap.count(), 17);
         assert_eq!(snapshot.lines[gap_index + 101].new_line, Some(118));
-    }
-
-    #[test]
-    fn source_modes_compare_consistent_git_snapshots() {
-        let root = repository();
-        git_ok(&root, &["switch", "-c", "feature"]);
-        fs::write(root.join("src/lib.rs"), "fn committed() {}\n").unwrap();
-        git_ok(&root, &["add", "src/lib.rs"]);
-        git_ok(
-            &root,
-            &[
-                "-c",
-                "user.name=Waku Tests",
-                "-c",
-                "user.email=waku@example.com",
-                "commit",
-                "-m",
-                "feature",
-            ],
-        );
-        fs::write(
-            root.join("src/lib.rs"),
-            "fn committed() {}\nfn staged() {}\n",
-        )
-        .unwrap();
-        git_ok(&root, &["add", "src/lib.rs"]);
-        fs::write(
-            root.join("src/lib.rs"),
-            "fn committed() {}\nfn staged() {}\nfn unstaged() {}\n",
-        )
-        .unwrap();
-        fs::write(root.join("new file.txt"), "untracked\n").unwrap();
-
-        let committed = collect(&root, Source::Committed).unwrap();
-        let staged = collect(&root, Source::Staged).unwrap();
-        let unstaged = collect(&root, Source::Unstaged).unwrap();
-        let uncommitted = collect(&root, Source::Uncommitted).unwrap();
-        let branch = collect(&root, Source::Branch).unwrap();
-
-        assert_eq!(committed.files.len(), 1);
-        assert_eq!(staged.files.len(), 1);
-        assert_eq!(unstaged.files.len(), 2, "unstaged includes untracked files");
-        assert_eq!(uncommitted.files.len(), 2);
-        assert_eq!(branch.files.len(), 2);
-        assert_eq!((committed.additions, committed.deletions), (1, 1));
-        assert_eq!((staged.additions, staged.deletions), (1, 0));
-        assert_eq!((unstaged.additions, unstaged.deletions), (2, 0));
-        assert_eq!((uncommitted.additions, uncommitted.deletions), (3, 0));
-        assert_eq!((branch.additions, branch.deletions), (4, 1));
-        fs::remove_dir_all(root).ok();
-    }
-
-    #[test]
-    fn last_turn_uses_captured_checkpoints_not_the_live_worktree() {
-        let root = repository();
-        let session_id = Uuid::new_v4();
-        let turn_id = Uuid::new_v4();
-        checkpoint::capture_turn(&root, session_id, 0).unwrap();
-        fs::write(
-            root.join("src/lib.rs"),
-            "fn baseline() {}\nfn from_turn() {}\n",
-        )
-        .unwrap();
-        checkpoint::capture_turn(&root, session_id, 1).unwrap();
-        fs::write(
-            root.join("src/lib.rs"),
-            "fn baseline() {}\nfn from_turn() {}\nfn after_turn() {}\n",
-        )
-        .unwrap();
-
-        let snapshot = collect(
-            &root,
-            Source::LastTurn {
-                session_id,
-                turn_id,
-                turn_count: 1,
-            },
-        )
-        .unwrap();
-        assert_eq!((snapshot.additions, snapshot.deletions), (1, 0));
-        assert!(
-            snapshot
-                .lines
-                .iter()
-                .any(|line| line.content.contains("from_turn"))
-        );
-        assert!(
-            snapshot
-                .lines
-                .iter()
-                .all(|line| !line.content.contains("after_turn"))
-        );
-        fs::remove_dir_all(root).ok();
-    }
-
-    #[test]
-    fn last_turn_review_uses_the_branch_aware_diff_base() {
-        let root = repository();
-        git_ok(&root, &["switch", "-c", "feature"]);
-        fs::write(root.join("feature-only.rs"), "fn feature() {}\n").unwrap();
-        git_ok(&root, &["add", "feature-only.rs"]);
-        git_ok(
-            &root,
-            &[
-                "-c",
-                "user.name=Waku Tests",
-                "-c",
-                "user.email=waku@example.com",
-                "commit",
-                "-m",
-                "feature baseline",
-            ],
-        );
-        git_ok(&root, &["switch", "main"]);
-        fs::write(root.join("main-only.rs"), "fn main_only() {}\n").unwrap();
-        git_ok(&root, &["add", "main-only.rs"]);
-        git_ok(
-            &root,
-            &[
-                "-c",
-                "user.name=Waku Tests",
-                "-c",
-                "user.email=waku@example.com",
-                "commit",
-                "-m",
-                "main baseline",
-            ],
-        );
-
-        let session_id = Uuid::new_v4();
-        let turn_id = Uuid::new_v4();
-        checkpoint::capture_turn_start(&root, session_id, 1).unwrap();
-        git_ok(&root, &["switch", "feature"]);
-        fs::write(
-            root.join("src/lib.rs"),
-            "fn baseline() {}\nfn from_turn() {}\n",
-        )
-        .unwrap();
-        checkpoint::capture_turn(&root, session_id, 1).unwrap();
-
-        let snapshot = collect(
-            &root,
-            Source::LastTurn {
-                session_id,
-                turn_id,
-                turn_count: 1,
-            },
-        )
-        .unwrap();
-        assert_eq!(snapshot.files.len(), 1);
-        assert_eq!(snapshot.files[0].path, "src/lib.rs");
-        assert_eq!((snapshot.additions, snapshot.deletions), (1, 0));
-        fs::remove_dir_all(root).ok();
     }
 }

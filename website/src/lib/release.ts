@@ -14,6 +14,19 @@ const RELEASES_BASE = 'https://releases.waku.sh'
 // the appcast query is pending or unreachable.
 export const FALLBACK_DOWNLOAD_URL = `${RELEASES_BASE}/Waku-0.0.1.dmg`
 
+export const WINDOWS_ARCHITECTURES = [
+  { arch: 'x86_64', label: 'Windows (x86_64)' },
+  { arch: 'aarch64', label: 'Windows (arm64)' },
+] as const
+
+// Every release publishes both installers under versioned names — see
+// docs/windows.md. There is no unversioned "latest" object to link at, so a
+// direct link needs the resolved version; without one the menu falls back to
+// the docs page rather than guessing a URL that would 404.
+export function windowsInstallerUrl(version: string, arch: string) {
+  return `${RELEASES_BASE}/Waku-${version}-${arch}-Setup.exe`
+}
+
 // The Sparkle appcast has no CORS headers, so resolve it on the server.
 const fetchLatestRelease = createServerFn({ method: 'GET' }).handler(
   async (): Promise<LatestRelease | null> => {
