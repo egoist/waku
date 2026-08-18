@@ -17,6 +17,9 @@ use serde_json::{Value, json};
 use uuid::Uuid;
 
 use super::activity;
+use crate::deepseek_history::{
+    HistoryEvent, HistoryEventKind, OrphanCandidate, TokenUsage, TurnEndKind,
+};
 use crate::deepseek_pool::PooledDeepSeekServer;
 use crate::driver::{
     DriverControl, DriverEventSender, DriverEventSink, DriverStartOptions, SessionOptions,
@@ -78,7 +81,12 @@ struct StreamState {
 }
 
 struct HistorySnapshot {
-    events: Vec<Value>,
+    events: Vec<HistoryEvent>,
+    /// Steps that streamed deltas without a same-page `assistant/message`.
+    /// The caller holds the raw page bytes (passed into `fetch_history`)
+    /// until the replay phase, where `aggregate_orphan_deltas` reassembles
+    /// the aborted steps' partial text from them.
+    orphan_candidates: Vec<OrphanCandidate>,
     projection_values: Option<Value>,
     last_seq: i64,
     turn_active: bool,
@@ -156,7 +164,7 @@ impl DeepSeekDriver {
             .map(str::to_owned)
             .or(agent_preset);
 
-        let baseline = fetch_history(&server, &session_id)
+        let baseline = fetch_history(&server, &session_id, &mut Vec::new())
             .context("could not read DeepSeek Harness session history")?;
         let available_commands = fetch_commands(&server, &session_id)
             .context("could not read DeepSeek Harness commands")?;
@@ -183,7 +191,7 @@ impl DeepSeekDriver {
         // Selecting a model or changing a native command-backed option appends
         // durable state. Take the history cut after those operations so their
         // already-buffered stream frames are deduplicated by sequence.
-        let history = fetch_history(&server, &session_id)
+        let history = fetch_history(&server, &session_id, &mut Vec::new())
             .context("could not refresh DeepSeek Harness session history")?;
         let _ = events.send(DriverEvent::Connected {
             provider_cursor: Some(ProviderResumeCursor::DeepSeek {
@@ -496,7 +504,7 @@ fn handle_command(
             }
         }
         CommandMessage::ApplyOptions(options) => {
-            let projections = fetch_history(server, session_id)
+            let projections = fetch_history(server, session_id, &mut Vec::new())
                 .ok()
                 .and_then(|history| history.projection_values);
             match apply_session_options(
@@ -569,12 +577,30 @@ fn handle_envelope(
         Some("session/subscribed") => {
             let remote_last_seq = payload.get("lastSeq").and_then(Value::as_i64).unwrap_or(-1);
             if remote_last_seq > state.last_seq {
-                match fetch_history(server, session_id) {
+                let mut pages = Vec::new();
+                match fetch_history(server, session_id, &mut pages) {
                     Ok(history) => {
-                        for entry in history.events {
-                            let event = entry.get("event").unwrap_or(&entry);
-                            let view = entry.get("view");
-                            handle_session_event(event, view, events, state);
+                        // Reassemble aborted steps' partial text from the
+                        // caller-held page bytes, then replay in seq order.
+                        let mut replay_events = history.events;
+                        let message_steps: HashSet<(u64, u64)> = replay_events
+                            .iter()
+                            .filter_map(|event| match &event.kind {
+                                HistoryEventKind::Message { turn, step, .. } => {
+                                    Some((*turn, *step))
+                                }
+                                _ => None,
+                            })
+                            .collect();
+                        replay_events.extend(crate::deepseek_history::aggregate_orphan_deltas(
+                            &pages,
+                            &history.orphan_candidates,
+                            &message_steps,
+                        ));
+                        replay_events.sort_by_key(|event| event.seq);
+                        replay_events.dedup_by_key(|event| event.seq);
+                        for event in &replay_events {
+                            replay_history_event(event, events, state);
                         }
                         if let Some(values) = history.projection_values.as_ref() {
                             emit_projection_values(values, events);
@@ -690,7 +716,10 @@ fn handle_session_event(
             drop(turns);
             let reason = data.pointer("/reason/kind").and_then(Value::as_str);
             let success = matches!(reason, Some("completed" | "max-tokens"));
-            let summary = turn_end_summary(data, reason);
+            let summary = turn_end_summary(
+                reason,
+                data.pointer("/reason/error/message").and_then(Value::as_str),
+            );
             if !success && let Some(summary) = summary.as_ref() {
                 let _ = events.send(DriverEvent::Error(summary.clone()));
             }
@@ -782,6 +811,193 @@ fn handle_session_event(
             let _ = events.send(DriverEvent::AutoTitleUpdated(title));
         }
         _ => {}
+    }
+}
+
+/// Replays one typed history event (from `fetch_history`) into driver events,
+/// mirroring `handle_session_event` for the live stream. Text fields are
+/// indices into the snapshot's shared, deduplicated decode pool.
+fn replay_history_event(
+    event: &HistoryEvent,
+    events: &impl DriverEventSink,
+    state: &mut StreamState,
+) {
+    let seq = event.seq;
+    if i64::try_from(seq).is_ok_and(|seq| seq <= state.last_seq) {
+        return;
+    }
+    state.last_seq = i64::try_from(seq).unwrap_or(i64::MAX);
+    match &event.kind {
+        HistoryEventKind::TurnStart => {
+            if !state.turn_active {
+                state.turn_active = true;
+                let _ = events.send(DriverEvent::TurnStarted);
+            }
+        }
+        HistoryEventKind::TurnEnd { kind, error_message } => {
+            let mut turns = state.completed_turn_seqs.lock();
+            if turns.last().copied() != Some(seq) {
+                turns.push(seq);
+            }
+            drop(turns);
+            let reason = match kind {
+                TurnEndKind::Completed => Some("completed"),
+                TurnEndKind::Aborted => Some("aborted"),
+                TurnEndKind::Blocked => Some("blocked"),
+                TurnEndKind::Error => Some("error"),
+                TurnEndKind::MaxTokens => Some("max-tokens"),
+                TurnEndKind::Interrupted => Some("interrupted"),
+                TurnEndKind::Other => None,
+            };
+            let success = matches!(kind, TurnEndKind::Completed | TurnEndKind::MaxTokens);
+            let summary = turn_end_summary(reason, error_message.as_deref());
+            if !success && let Some(summary) = summary.as_ref() {
+                let _ = events.send(DriverEvent::Error(summary.clone()));
+            }
+            if state.turn_active {
+                state.turn_active = false;
+                let _ = events.send(DriverEvent::TurnFinished { success, summary });
+            }
+        }
+        // History replay is message-level: `assistant/chunk` deltas were
+        // already folded into the assembled `assistant/message`, so nothing
+        // is emitted for them and `streamed_steps` is never marked here.
+        HistoryEventKind::Message {
+            turn,
+            step,
+            texts: message_texts,
+            reasoning_texts,
+            usage,
+        } => {
+            if !state.streamed_steps.remove(&(*turn, *step)) {
+                for text in message_texts {
+                    let _ = events.send(DriverEvent::TextDelta(text.clone()));
+                }
+                for text in reasoning_texts {
+                    let _ = events.send(DriverEvent::ReasoningDelta(text.clone()));
+                }
+            }
+            if let Some(usage) = usage {
+                emit_typed_usage(*usage, events);
+            }
+        }
+        HistoryEventKind::ToolCall {
+            call_id,
+            name,
+            arguments,
+            view,
+        } => {
+            let arguments = match arguments {
+                Some(arguments) => serde_json::from_str(arguments)
+                    .unwrap_or_else(|_| Value::String(arguments.clone())),
+                None => Value::Null,
+            };
+            let presented = view.as_ref().and_then(|view| view.get("view"));
+            let title = presented
+                .and_then(|view| view.get("title"))
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+                .or_else(|| activity::input_title(Some(&arguments)))
+                .unwrap_or_else(|| name.clone());
+            let kind = presented
+                .and_then(presented_activity_kind)
+                .unwrap_or_else(|| super::support::classify_tool(name));
+            state.tools.insert(
+                call_id.clone(),
+                ToolCallState {
+                    name: name.clone(),
+                    title: title.clone(),
+                    kind,
+                    arguments: arguments.clone(),
+                },
+            );
+            let item = activity::tool_activity(
+                Some(call_id.clone()),
+                kind,
+                title,
+                Some(&arguments),
+                None,
+                presented,
+                false,
+                false,
+            );
+            let _ = events.send(DriverEvent::RichActivity(item));
+        }
+        HistoryEventKind::ToolResult {
+            call_id,
+            content,
+            failed,
+            view,
+        } => {
+            let stored = call_id.as_ref().and_then(|call_id| state.tools.remove(call_id));
+            let presented = view.as_ref().and_then(|view| view.get("view"));
+            let name = stored
+                .as_ref()
+                .map(|tool| tool.name.as_str())
+                .unwrap_or("tool");
+            let kind = stored
+                .as_ref()
+                .map(|tool| tool.kind)
+                .or_else(|| presented.and_then(presented_activity_kind))
+                .unwrap_or_else(|| super::support::classify_tool(name));
+            let title = presented
+                .and_then(|view| view.get("title"))
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+                .or_else(|| stored.as_ref().map(|tool| tool.title.clone()))
+                .unwrap_or_else(|| name.to_owned());
+            let arguments = stored.as_ref().map(|tool| &tool.arguments);
+            let output = content.as_ref();
+            let item = activity::tool_activity(
+                call_id.clone(),
+                kind,
+                title,
+                arguments,
+                output,
+                presented,
+                *failed,
+                true,
+            );
+            let _ = events.send(DriverEvent::RichActivity(item));
+        }
+        HistoryEventKind::TodoWrite { todos } => {
+            let item = activity::tool_activity(
+                Some(format!("deepseek-todo-{seq}")),
+                ActivityKind::Plan,
+                "Plan updated".into(),
+                None,
+                Some(todos),
+                None,
+                false,
+                true,
+            );
+            let _ = events.send(DriverEvent::RichActivity(item));
+        }
+        HistoryEventKind::RequestContext { context_window } => {
+            let window = context_window.filter(|window| *window > 0);
+            if window.is_some() {
+                let _ = events.send(DriverEvent::UsageUpdated {
+                    context_tokens: None,
+                    context_window: window,
+                });
+            }
+        }
+        HistoryEventKind::SessionTitle { title } => {
+            let title = title
+                .as_deref()
+                .map(str::trim)
+                .filter(|title| !title.is_empty())
+                .map(str::to_owned);
+            let _ = events.send(DriverEvent::AutoTitleUpdated(title));
+        }
+        HistoryEventKind::StepDelta { reasoning, text } => {
+            // An aborted step's partial output, restored as one delta.
+            let _ = events.send(if *reasoning {
+                DriverEvent::ReasoningDelta(text.clone())
+            } else {
+                DriverEvent::TextDelta(text.clone())
+            });
+        }
     }
 }
 
@@ -1168,6 +1384,19 @@ fn emit_usage(usage: Option<&Value>, events: &impl DriverEventSink) {
     .into_iter()
     .filter_map(|field| usage.get(field).and_then(Value::as_u64))
     .fold(0_u64, u64::saturating_add);
+    emit_usage_total(total, events);
+}
+
+fn emit_typed_usage(usage: TokenUsage, events: &impl DriverEventSink) {
+    let total = usage
+        .input_tokens
+        .saturating_add(usage.output_tokens)
+        .saturating_add(usage.cache_read_tokens)
+        .saturating_add(usage.cache_write_tokens);
+    emit_usage_total(total, events);
+}
+
+fn emit_usage_total(total: u64, events: &impl DriverEventSink) {
     if total > 0 {
         let _ = events.send(DriverEvent::UsageUpdated {
             context_tokens: Some(total),
@@ -1176,15 +1405,14 @@ fn emit_usage(usage: Option<&Value>, events: &impl DriverEventSink) {
     }
 }
 
-fn turn_end_summary(data: &Value, reason: Option<&str>) -> Option<String> {
+fn turn_end_summary(reason: Option<&str>, error_message: Option<&str>) -> Option<String> {
     match reason {
         Some("completed") => None,
         Some("max-tokens") => Some("DeepSeek Harness reached the model output limit".into()),
         Some("aborted") => Some("DeepSeek Harness turn was cancelled".into()),
         Some("blocked") => Some("DeepSeek Harness blocked the turn".into()),
         Some("error") => Some(
-            data.pointer("/reason/error/message")
-                .and_then(Value::as_str)
+            error_message
                 .unwrap_or("DeepSeek Harness turn failed")
                 .to_owned(),
         ),
@@ -1374,37 +1602,67 @@ fn apply_session_options(
     Ok(())
 }
 
+/// Fetches and merges every `session.history` page into a message-level
+/// snapshot. Raw page bytes are pushed into `pages` (owned by the caller),
+/// so they stay alive until the replay phase: the snapshot's orphan
+/// candidates reference positions inside them, and
+/// `deepseek_history::aggregate_orphan_deltas` reassembles aborted steps'
+/// partial text from the caller-held bytes right before replay.
 fn fetch_history(
     server: &PooledDeepSeekServer,
     session_id: &str,
+    pages: &mut Vec<Vec<u8>>,
 ) -> anyhow::Result<HistorySnapshot> {
-    let mut entries = Vec::new();
+    let mut events = Vec::new();
+    let mut orphan_candidates = Vec::new();
     let mut projection_values = None;
     let mut before_seq = None;
+    // Chunk events are dropped from `events` (history replay is message-level),
+    // so the fetch-wide last seq must come from the wire envelope seqs.
+    let mut fetched_last_seq = -1_i64;
     loop {
         let mut payload = json!({"sessionId": session_id, "maxMessages": 200});
         if let Some(before_seq) = before_seq {
             payload["beforeSeq"] = json!(before_seq);
         }
-        let page = server.rpc("session.history", payload)?;
+        let (bytes, rpc_id) = server.rpc_raw("session.history", payload)?;
+        // Typed, zero-copy page parse: text fields stay raw until the batch
+        // decode below, so a large page never builds a `serde_json::Value`
+        // tree.
+        let page = crate::deepseek_history::parse_history_response(&bytes, &rpc_id)
+            .context("could not read DeepSeek Harness session history")?;
         if projection_values.is_none() {
-            projection_values = page.pointer("/projections/values").cloned();
+            projection_values = page.projections.as_ref().and_then(|projections| {
+                serde_json::from_str::<Value>(projections.values.get()).ok()
+            });
         }
-        let page_entries = page
-            .get("events")
-            .and_then(Value::as_array)
-            .cloned()
-            .unwrap_or_default();
-        let oldest = page_entries
+        let oldest = page
+            .events
             .iter()
-            .filter_map(|entry| entry.pointer("/event/seq").and_then(Value::as_u64))
+            .filter_map(|entry| entry.event.as_ref().map(|event| event.seq))
             .min();
-        entries.extend(page_entries);
-        if !page
-            .get("hasMore")
-            .and_then(Value::as_bool)
-            .unwrap_or(false)
-        {
+        for entry in &page.events {
+            if let Some(event) = entry.event.as_ref() {
+                fetched_last_seq =
+                    fetched_last_seq.max(i64::try_from(event.seq).unwrap_or(i64::MAX));
+            }
+        }
+        events.extend(crate::deepseek_history::convert_page(&page.events));
+        // Record steps that streamed deltas without a same-page message; the
+        // page bytes live on in `pages` so their deltas can be reassembled at
+        // replay time.
+        let page_index = pages.len();
+        let page_base = bytes.as_ptr() as usize;
+        crate::deepseek_history::scan_orphan_candidates(
+            &page.events,
+            page_index,
+            page_base,
+            &mut orphan_candidates,
+        );
+        let has_more = page.has_more;
+        drop(page);
+        pages.push(bytes);
+        if !has_more {
             break;
         }
         let Some(oldest) = oldest.filter(|oldest| *oldest > 0) else {
@@ -1412,42 +1670,27 @@ fn fetch_history(
         };
         before_seq = Some(oldest);
     }
-    entries.sort_by_key(|entry| {
-        entry
-            .pointer("/event/seq")
-            .and_then(Value::as_u64)
-            .unwrap_or(u64::MAX)
-    });
-    entries.dedup_by_key(|entry| {
-        entry
-            .pointer("/event/seq")
-            .and_then(Value::as_u64)
-            .unwrap_or(u64::MAX)
-    });
+    events.sort_by_key(|event| event.seq);
+    events.dedup_by_key(|event| event.seq);
 
-    let mut last_seq = -1_i64;
     let mut last_turn_start = None;
     let mut last_turn_end = None;
     let mut completed_turn_seqs = Vec::new();
-    for entry in &entries {
-        let event = entry.get("event").unwrap_or(entry);
-        let Some(seq) = event.get("seq").and_then(Value::as_u64) else {
-            continue;
-        };
-        last_seq = last_seq.max(i64::try_from(seq).unwrap_or(i64::MAX));
-        match event.get("type").and_then(Value::as_str) {
-            Some("turn/start") => last_turn_start = Some(seq),
-            Some("turn/end") => {
-                last_turn_end = Some(seq);
-                completed_turn_seqs.push(seq);
+    for event in &events {
+        match &event.kind {
+            HistoryEventKind::TurnStart => last_turn_start = Some(event.seq),
+            HistoryEventKind::TurnEnd { .. } => {
+                last_turn_end = Some(event.seq);
+                completed_turn_seqs.push(event.seq);
             }
             _ => {}
         }
     }
     Ok(HistorySnapshot {
-        events: entries,
+        events,
+        orphan_candidates,
         projection_values,
-        last_seq,
+        last_seq: fetched_last_seq,
         turn_active: last_turn_start
             .is_some_and(|start| last_turn_end.is_none_or(|end| start > end)),
         completed_turn_seqs,
@@ -1631,5 +1874,352 @@ mod tests {
                 context_window: Some(8192)
             }
         ));
+    }
+
+    /// History replay is message-level: the old path streams one `TextDelta`
+    /// per token chunk, the new path one `TextDelta` per assembled message
+    /// block. The UI-visible result is identical, so equivalence is asserted
+    /// on the aggregate: concatenated text, concatenated reasoning, and the
+    /// order-preserved non-text events.
+    #[derive(Default)]
+    struct Aggregate {
+        text: String,
+        reasoning: String,
+        last_usage: Option<String>,
+        other: Vec<String>,
+    }
+
+    fn aggregate_driver_events(events: &[String]) -> Aggregate {
+        let mut aggregate = Aggregate::default();
+        for event in events {
+            // Debug output quotes the payload; strip the quotes so the
+            // concatenation compares content, not quoting granularity.
+            if let Some(payload) = event
+                .strip_prefix("TextDelta(\"")
+                .and_then(|e| e.strip_suffix("\")"))
+            {
+                aggregate.text.push_str(payload);
+            } else if let Some(payload) = event
+                .strip_prefix("ReasoningDelta(\"")
+                .and_then(|e| e.strip_suffix("\")"))
+            {
+                aggregate.reasoning.push_str(payload);
+            } else if event.starts_with("UsageUpdated") {
+                // The old path reports usage per usage-chunk AND per message;
+                // the new path per message only. The UI-visible final value
+                // is the last one.
+                aggregate.last_usage = Some(event.clone());
+            } else {
+                aggregate.other.push(event.clone());
+            }
+        }
+        aggregate
+    }
+
+    fn assert_aggregates_match(old: &Aggregate, new: &Aggregate, label: &str) {
+        assert_eq!(old.text, new.text, "{label}: message text differs");
+        assert_eq!(old.reasoning, new.reasoning, "{label}: reasoning differs");
+        assert_eq!(old.last_usage, new.last_usage, "{label}: usage differs");
+        assert_eq!(old.other, new.other, "{label}: non-text events differ");
+    }
+
+
+    fn mask_activity_ids(debug: &str) -> String {
+        fn is_hex(byte: u8) -> bool {
+            byte.is_ascii_hexdigit()
+        }
+        let bytes = debug.as_bytes();
+        let mut out = Vec::with_capacity(debug.len());
+        let mut copied = 0;
+        let mut index = 0;
+        while index + 40 <= bytes.len() {
+            if &bytes[index..index + 4] == b"id: "
+                && bytes[index + 12] == b'-'
+                && bytes[index + 17] == b'-'
+                && bytes[index + 22] == b'-'
+                && bytes[index + 27] == b'-'
+                && (0..36).all(|offset| {
+                    matches!(offset, 8 | 13 | 18 | 23) || is_hex(bytes[index + 4 + offset])
+                })
+            {
+                out.extend_from_slice(&bytes[copied..index]);
+                out.extend_from_slice(b"id: <id>");
+                index += 40;
+                copied = index;
+            } else {
+                index += 1;
+            }
+        }
+        out.extend_from_slice(&bytes[copied..]);
+        String::from_utf8(out).unwrap()
+    }
+
+    fn state_signature(state: &StreamState) -> String {
+        let mut tools = state
+            .tools
+            .iter()
+            .map(|(call_id, tool)| {
+                format!(
+                    "{call_id}:{}|{}|{:?}|{}",
+                    tool.name,
+                    tool.title,
+                    tool.kind,
+                    tool.arguments
+                )
+            })
+            .collect::<Vec<_>>();
+        tools.sort();
+        // `last_seq` is fetch-derived in production (the wire max seq), not a
+        // replay output, so it is excluded here: the new path skips chunk
+        // events during replay while the old path replays them, which would
+        // otherwise make the replay side-effect diverge.
+        format!(
+            "turn_active={} turns={:?} tools={:?}",
+            state.turn_active,
+            &*state.completed_turn_seqs.lock(),
+            tools
+        )
+    }
+
+    /// Drives both the old `Value`-based replay (`handle_session_event`) and
+    /// the typed history path (`replay_history_event`) over the captured
+    /// `session.history` pages in ~/Desktop/1.json..8.json and asserts they
+    /// produce the same aggregated driver events and stream state. Skipped
+    /// when the capture files are absent.
+    #[test]
+    fn typed_history_replay_matches_value_replay() {
+        use crate::deepseek_history::{
+            convert_page, parse_history_response,
+        };
+
+        /// Activity ids are random UUIDs; mask them so both paths compare equal.
+
+
+        let mut tested = 0;
+        for index in 1..=8 {
+            let path = format!("/Users/dzz/Desktop/{index}.json");
+            let Ok(bytes) = std::fs::read(&path) else {
+                continue;
+            };
+            tested += 1;
+
+            // Old path: parse the whole envelope into Value, extract events,
+            // sort/dedup by seq, replay through handle_session_event.
+            let envelope: Value = serde_json::from_slice(&bytes).unwrap();
+            let rpc_id = envelope.get("rpcId").and_then(Value::as_str).unwrap();
+            let value = envelope.pointer("/result/value").unwrap();
+            let mut entries = value
+                .get("events")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default();
+            entries.sort_by_key(|entry| {
+                entry
+                    .pointer("/event/seq")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(u64::MAX)
+            });
+            entries.dedup_by_key(|entry| {
+                entry
+                    .pointer("/event/seq")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(u64::MAX)
+            });
+            let (old_events, old_state) = {
+                let (events, event_rx, mut state) = harness();
+                for entry in &entries {
+                    let event = entry.get("event").unwrap_or(entry);
+                    let view = entry.get("view");
+                    handle_session_event(event, view, &events, &mut state);
+                }
+                drop(events);
+                let mut emitted = Vec::new();
+                while let Ok(event) = event_rx.try_recv() {
+                    emitted.push(mask_activity_ids(&format!("{event:?}")));
+                }
+                (emitted, state_signature(&state))
+            };
+
+            // New path: typed zero-copy parse, direct text decode, typed replay.
+            let (new_events, new_state) = {
+                let page = parse_history_response(&bytes, rpc_id).unwrap();
+                let mut events = convert_page(&page.events);
+                let mut candidates = Vec::new();
+                crate::deepseek_history::scan_orphan_candidates(
+                    &page.events,
+                    0,
+                    bytes.as_ptr() as usize,
+                    &mut candidates,
+                );
+                let message_steps: HashSet<(u64, u64)> = events
+                    .iter()
+                    .filter_map(|event| match &event.kind {
+                        HistoryEventKind::Message { turn, step, .. } => Some((*turn, *step)),
+                        _ => None,
+                    })
+                    .collect();
+                events.extend(crate::deepseek_history::aggregate_orphan_deltas(
+                    std::slice::from_ref(&bytes),
+                    &candidates,
+                    &message_steps,
+                ));
+                events.sort_by_key(|event| event.seq);
+                events.dedup_by_key(|event| event.seq);
+                let (sink, event_rx, mut state) = harness();
+                for event in &events {
+                    replay_history_event(event, &sink, &mut state);
+                }
+                drop(sink);
+                let mut emitted = Vec::new();
+                while let Ok(event) = event_rx.try_recv() {
+                    emitted.push(mask_activity_ids(&format!("{event:?}")));
+                }
+                (emitted, state_signature(&state))
+            };
+
+            // The old path replays every token delta; the new path replays
+            // assembled messages only.
+            assert!(
+                new_events.len() <= old_events.len(),
+                "{path}: message-level replay must not emit more events (old={} new={})",
+                old_events.len(),
+                new_events.len()
+            );
+            assert_aggregates_match(
+                &aggregate_driver_events(&old_events),
+                &aggregate_driver_events(&new_events),
+                &path,
+            );
+            assert_eq!(old_state, new_state, "{path}: stream state differs");
+        }
+        assert!(tested > 0, "no Desktop history capture files found");
+    }
+
+    /// Same equivalence check over all eight capture pages merged into ONE
+    /// fetch (the real resume path: several `session.history` requests are
+    /// pulled and merged, deduplicated by seq, then replayed).
+    #[test]
+    fn typed_history_merged_replay_matches_value_replay() {
+        use crate::deepseek_history::{
+            convert_page, parse_history_response,
+        };
+
+
+
+        // Realistic page order: the client pages backward with beforeSeq.
+        let order = [8, 5, 6, 1, 2, 7, 4, 3];
+        let mut loaded = Vec::new();
+        for index in order {
+            let path = format!("/Users/dzz/Desktop/{index}.json");
+            if let Ok(bytes) = std::fs::read(&path) {
+                loaded.push(bytes);
+            }
+        }
+        assert!(
+            loaded.len() == order.len(),
+            "expected all eight Desktop history capture files"
+        );
+
+        // Old path: per page Value parse, merge, sort/dedup by seq, replay.
+        let (old_events, old_state) = {
+            let mut entries = Vec::new();
+            for bytes in &loaded {
+                let envelope: Value = serde_json::from_slice(bytes).unwrap();
+                let value = envelope.pointer("/result/value").unwrap();
+                entries.extend(
+                    value
+                        .get("events")
+                        .and_then(Value::as_array)
+                        .cloned()
+                        .unwrap_or_default(),
+                );
+            }
+            entries.sort_by_key(|entry| {
+                entry
+                    .pointer("/event/seq")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(u64::MAX)
+            });
+            entries.dedup_by_key(|entry| {
+                entry
+                    .pointer("/event/seq")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(u64::MAX)
+            });
+            let (events, event_rx, mut state) = harness();
+            for entry in &entries {
+                let event = entry.get("event").unwrap_or(entry);
+                let view = entry.get("view");
+                handle_session_event(event, view, &events, &mut state);
+            }
+            drop(events);
+            let mut emitted = Vec::new();
+            while let Ok(event) = event_rx.try_recv() {
+                emitted.push(mask_activity_ids(&format!("{event:?}")));
+            }
+            (emitted, state_signature(&state))
+        };
+
+        // New path: per page typed parse + direct text decode, convert,
+        // merge, sort/dedup by seq, replay.
+        let (new_events, new_state) = {
+            let mut events = Vec::new();
+            let mut candidates = Vec::new();
+            for (page_index, bytes) in loaded.iter().enumerate() {
+                let rpc_id: String = {
+                    let envelope: Value = serde_json::from_slice(bytes).unwrap();
+                    envelope
+                        .get("rpcId")
+                        .and_then(Value::as_str)
+                        .unwrap()
+                        .to_owned()
+                };
+                let page = parse_history_response(bytes, &rpc_id).unwrap();
+                events.extend(convert_page(&page.events));
+                crate::deepseek_history::scan_orphan_candidates(
+                    &page.events,
+                    page_index,
+                    bytes.as_ptr() as usize,
+                    &mut candidates,
+                );
+            }
+            let message_steps: HashSet<(u64, u64)> = events
+                .iter()
+                .filter_map(|event| match &event.kind {
+                    HistoryEventKind::Message { turn, step, .. } => Some((*turn, *step)),
+                    _ => None,
+                })
+                .collect();
+            events.extend(crate::deepseek_history::aggregate_orphan_deltas(
+                &loaded,
+                &candidates,
+                &message_steps,
+            ));
+            events.sort_by_key(|event| event.seq);
+            events.dedup_by_key(|event| event.seq);
+            let (sink, event_rx, mut state) = harness();
+            for event in &events {
+                replay_history_event(event, &sink, &mut state);
+            }
+            drop(sink);
+            let mut emitted = Vec::new();
+            while let Ok(event) = event_rx.try_recv() {
+                emitted.push(mask_activity_ids(&format!("{event:?}")));
+            }
+            (emitted, state_signature(&state))
+        };
+
+        assert!(
+            new_events.len() <= old_events.len(),
+            "merged: message-level replay must not emit more events (old={} new={})",
+            old_events.len(),
+            new_events.len()
+        );
+        assert_aggregates_match(
+            &aggregate_driver_events(&old_events),
+            &aggregate_driver_events(&new_events),
+            "merged",
+        );
+        assert_eq!(old_state, new_state, "merged: stream state differs");
     }
 }
