@@ -327,6 +327,28 @@ impl DeepSeekServer {
         rpc_result_value(method, &response)
     }
 
+    /// Sends one request and returns the raw response body plus the `rpcId`
+    /// embedded in the request, so the caller can validate the envelope
+    /// without parsing the whole body into `serde_json::Value`. This matters
+    /// for large responses (a `session.history` page can be several MB).
+    pub(crate) fn rpc_raw(&self, method: &str, payload: Value) -> anyhow::Result<(Vec<u8>, String)> {
+        let rpc_id = format!("waku-{}", Uuid::new_v4());
+        let body = json!({
+            "type": "client-request",
+            "rpcId": rpc_id,
+            "method": method,
+            "payload": payload,
+        });
+        let bytes = crate::opencode_session::request_raw_on_port(
+            self.port,
+            "POST",
+            &format!("/api/{method}"),
+            Some(&body),
+            RPC_TIMEOUT,
+        )?;
+        Ok((bytes, rpc_id))
+    }
+
     pub(crate) fn respond(&self, rpc_id: &str, value: Value) -> anyhow::Result<()> {
         let body = json!({
             "type": "client-response",

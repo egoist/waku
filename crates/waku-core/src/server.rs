@@ -476,7 +476,7 @@ pub fn serve(
         match listener.accept() {
             Ok((stream, _)) => {
                 if active_connections
-                    .fetch_update(Ordering::AcqRel, Ordering::Acquire, |active| {
+                    .try_update(Ordering::AcqRel, Ordering::Acquire, |active| {
                         (active < MAX_CONNECTIONS).then_some(active + 1)
                     })
                     .is_err()
