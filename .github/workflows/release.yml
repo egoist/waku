@@ -85,13 +85,22 @@ jobs:
           restore-keys: |
             ubuntu-22.04-rust-1.96.0-release-
 
+      # `target/` is restored from the release cache, so the previous
+      # release's bundles are still sitting in `target/release` when this one
+      # starts. Cargo does not own them, so nothing else clears them.
+      - name: Clear stale bundles
+        run: rm -f target/release/waku-*.tar.gz
+
       - name: Bundle
         run: ./scripts/bundle-linux.sh
 
       - uses: actions/upload-artifact@v7
         with:
           name: linux-x86_64
-          path: target/release/waku-*-x86_64-unknown-linux-gnu.tar.gz
+          # Named exactly, not globbed: `if-no-files-found: error` is then a
+          # real check that this version built, rather than something an older
+          # bundle can satisfy.
+          path: target/release/waku-${{ needs.version.outputs.version }}-x86_64-unknown-linux-gnu.tar.gz
           if-no-files-found: error
 
   linux-arm64:
@@ -131,13 +140,19 @@ jobs:
           restore-keys: |
             ubuntu-22.04-arm-rust-1.96.0-release-
 
+      # `target/` is restored from the release cache, so the previous
+      # release's bundles are still sitting in `target/release` when this one
+      # starts. Cargo does not own them, so nothing else clears them.
+      - name: Clear stale bundles
+        run: rm -f target/release/waku-*.tar.gz
+
       - name: Bundle
         run: ./scripts/bundle-linux.sh
 
       - uses: actions/upload-artifact@v7
         with:
           name: linux-arm64
-          path: target/release/waku-*-aarch64-unknown-linux-gnu.tar.gz
+          path: target/release/waku-${{ needs.version.outputs.version }}-aarch64-unknown-linux-gnu.tar.gz
           if-no-files-found: error
 
   windows-x86_64:
@@ -169,6 +184,12 @@ jobs:
           restore-keys: |
             windows-latest-rust-1.96.0-release-
 
+      # `target/` is restored from the release cache, so the previous
+      # release's bundles are still sitting in `target/release` when this one
+      # starts. Cargo does not own them, so nothing else clears them.
+      - name: Clear stale bundles
+        run: Remove-Item -Force -ErrorAction SilentlyContinue target/release/waku-*.zip, target/release/Waku-*-Setup.exe
+
       - name: Bundle
         env:
           WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
@@ -179,8 +200,8 @@ jobs:
         with:
           name: windows-x86_64
           path: |
-            target/release/waku-*-x86_64-pc-windows-msvc.zip
-            target/release/Waku-*-x86_64-Setup.exe
+            target/release/waku-${{ needs.version.outputs.version }}-x86_64-pc-windows-msvc.zip
+            target/release/Waku-${{ needs.version.outputs.version }}-x86_64-Setup.exe
           if-no-files-found: error
 
   windows-arm64:
@@ -212,6 +233,12 @@ jobs:
           restore-keys: |
             windows-11-arm-rust-1.96.0-release-
 
+      # `target/` is restored from the release cache, so the previous
+      # release's bundles are still sitting in `target/release` when this one
+      # starts. Cargo does not own them, so nothing else clears them.
+      - name: Clear stale bundles
+        run: Remove-Item -Force -ErrorAction SilentlyContinue target/release/waku-*.zip, target/release/Waku-*-Setup.exe
+
       - name: Bundle
         env:
           WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
@@ -222,8 +249,8 @@ jobs:
         with:
           name: windows-arm64
           path: |
-            target/release/waku-*-aarch64-pc-windows-msvc.zip
-            target/release/Waku-*-aarch64-Setup.exe
+            target/release/waku-${{ needs.version.outputs.version }}-aarch64-pc-windows-msvc.zip
+            target/release/Waku-${{ needs.version.outputs.version }}-aarch64-Setup.exe
           if-no-files-found: error
 
   macos:
@@ -293,9 +320,9 @@ jobs:
         with:
           name: macos
           path: |
-            dist/Waku-*.dmg
-            dist/Waku-*.md
-            dist/Waku-*.zip
+            dist/Waku-${{ needs.version.outputs.version }}.dmg
+            dist/Waku-${{ needs.version.outputs.version }}.md
+            dist/Waku-${{ needs.version.outputs.version }}.zip
             dist/appcast.xml
           if-no-files-found: error
 
