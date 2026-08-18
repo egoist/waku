@@ -433,7 +433,16 @@ fn windows_shell_candidates() -> Vec<PathBuf> {
 /// Pick the user's configured login shell for an interactive terminal, with a
 /// platform shell as a final fallback when desktop launchers omit `SHELL`.
 pub fn default_terminal_shell() -> PathBuf {
-    default_shell_candidates()
+    let mut candidates = Vec::new();
+    // The shell the user chose outranks whatever `SHELL` was inherited from;
+    // see the note in waku-client's `unix_terminal_shell_candidates`. The
+    // environment probe below keeps its own order, since it wants the shell
+    // whose rc files produced this process's `PATH`.
+    #[cfg(unix)]
+    candidates.extend(account_default_shell());
+    candidates.extend(default_shell_candidates());
+
+    candidates
         .into_iter()
         .find(|shell| shell.is_file())
         .unwrap_or_else(default_terminal_shell_fallback)

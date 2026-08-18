@@ -1,7 +1,7 @@
 //! Client-host shell selection for the desktop's local terminal surface.
 
 use std::collections::HashSet;
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 
 #[cfg(unix)]
@@ -79,32 +79,49 @@ fn system_tool_directories() -> Vec<PathBuf> {
 }
 
 pub fn default_terminal_shell() -> PathBuf {
-    let mut candidates = Vec::new();
+    #[cfg(unix)]
+    let candidates = unix_terminal_shell_candidates(
+        account_default_shell(),
+        std::env::var_os("SHELL").as_deref(),
+    );
     // `SHELL` is a POSIX convention. On Windows it is set only by ported
     // toolchains such as Git Bash, and usually to an MSYS path that Win32
     // cannot open, so the native shells are resolved instead.
-    #[cfg(unix)]
-    {
-        candidates.extend(
-            std::env::var_os("SHELL")
-                .filter(|shell| !shell.is_empty())
-                .map(PathBuf::from),
-        );
-        if let Some(shell) = account_default_shell() {
-            candidates.push(shell);
-        }
-    }
-    #[cfg(target_os = "macos")]
-    candidates.push(PathBuf::from("/bin/zsh"));
-    #[cfg(target_os = "linux")]
-    candidates.extend([PathBuf::from("/bin/bash"), PathBuf::from("/bin/sh")]);
     #[cfg(windows)]
-    candidates.extend(windows_shell_candidates());
+    let candidates = windows_shell_candidates();
 
     candidates
         .into_iter()
         .find(|shell| shell.is_file())
         .unwrap_or_else(default_terminal_shell_fallback)
+}
+
+/// The account's login shell first, then `SHELL`.
+///
+/// `SHELL` describes whatever launched Waku — a desktop session, the dev
+/// watcher, a terminal profile pinned to a different shell — and on macOS it
+/// keeps the value the login session started with, so it goes stale the moment
+/// someone runs `chsh`. The passwd entry is the shell the user actually chose,
+/// which is what a terminal opened inside the app should be. `SHELL` still
+/// wins over the platform fallback, so an explicitly exported one is honored
+/// when the passwd entry is missing or points at something unusable.
+#[cfg(unix)]
+fn unix_terminal_shell_candidates(
+    account_shell: Option<PathBuf>,
+    shell_environment: Option<&OsStr>,
+) -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
+    candidates.extend(account_shell);
+    candidates.extend(
+        shell_environment
+            .filter(|shell| !shell.is_empty())
+            .map(PathBuf::from),
+    );
+    #[cfg(target_os = "macos")]
+    candidates.push(PathBuf::from("/bin/zsh"));
+    #[cfg(target_os = "linux")]
+    candidates.extend([PathBuf::from("/bin/bash"), PathBuf::from("/bin/sh")]);
+    candidates
 }
 
 /// PowerShell 7 first, then the in-box Windows PowerShell, then whatever
@@ -208,5 +225,36 @@ fn account_default_shell() -> Option<PathBuf> {
         }
         let bytes = unsafe { CStr::from_ptr(shell) }.to_bytes();
         return (!bytes.is_empty()).then(|| PathBuf::from(OsString::from_vec(bytes.to_vec())));
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_accounts_login_shell_outranks_an_inherited_shell_variable() {
+        let candidates = unix_terminal_shell_candidates(
+            Some(PathBuf::from("/opt/homebrew/bin/fish")),
+            Some(OsStr::new("/bin/zsh")),
+        );
+
+        assert_eq!(candidates[0], PathBuf::from("/opt/homebrew/bin/fish"));
+        assert_eq!(candidates[1], PathBuf::from("/bin/zsh"));
+    }
+
+    #[test]
+    fn an_exported_shell_is_still_used_when_the_account_has_none() {
+        let candidates = unix_terminal_shell_candidates(None, Some(OsStr::new("/bin/bash")));
+
+        assert_eq!(candidates[0], PathBuf::from("/bin/bash"));
+    }
+
+    #[test]
+    fn an_empty_shell_variable_is_ignored_and_a_platform_shell_remains() {
+        let candidates = unix_terminal_shell_candidates(None, Some(OsStr::new("")));
+
+        assert!(!candidates.is_empty());
+        assert!(!candidates.contains(&PathBuf::new()));
     }
 }
