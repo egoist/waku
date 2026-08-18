@@ -1678,8 +1678,8 @@ browser.start_hint:
   en: Enter a URL or search above — %{shortcut} focuses the address bar
 browser.unavailable:
   en: Browser unavailable
-browser.requires_macos:
-  en: The browser surface requires macOS
+browser.unavailable_on_platform:
+  en: The browser surface is not available on this platform yet
 
 find.bad_pattern:
   en: Bad pattern

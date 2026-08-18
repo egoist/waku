@@ -147,10 +147,32 @@ image = { version = "0.25", default-features = false, features = ["png"] }
 embed-resource = "3.0"
 
 [target.'cfg(target_os = "windows")'.dependencies]
+raw-window-handle = "0.6"
+# The browser surface. WebView2 is evergreen on Windows 10 and in-box on 11.
+# Waku drives it through `webview2-com` rather than wry because it needs the
+# *composition* controller, which renders into a DirectComposition visual
+# instead of a child HWND — see `browser::host` for why, and note that only
+# the environment can create one, so it cannot be reached from wry's
+# `WebViewExtWindows` after the fact.
+webview2-com = "0.38"
+# Same version GPUI is built against, so the portal's `IDCompositionVisual`
+# hands straight to `SetRootVisualTarget` with no ABI bridging. `windows-sys`
+# stays for the plain Win32 calls that do not need COM.
+windows = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_DirectComposition",
+    "Win32_System_Com",
+    "Win32_UI_WindowsAndMessaging",
+] }
+windows-core = "0.61"
 # GPUI does not read the Windows animation preference, so Waku asks
 # `SystemParametersInfoW` itself. Same major version as the one already in the
 # graph through GPUI.
-windows-sys = { version = "0.61", features = ["Win32_UI_WindowsAndMessaging"] }
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_WindowsAndMessaging",
+] }
 # Verifies the EdDSA signatures `generate_appcast` writes, so the Windows
 # updater trusts the same key Sparkle does on macOS.
 ed25519-dalek = "2"

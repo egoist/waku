@@ -861,7 +861,7 @@ browser.open_external: デフォルトのブラウザで開く
 browser.browse_web: ウェブを閲覧
 browser.start_hint: 上に URL または検索語句を入力してください — %{shortcut} でアドレスバーにフォーカス
 browser.unavailable: ブラウザを利用できません
-browser.requires_macos: ブラウザパネルは macOS でのみ利用できます
+browser.unavailable_on_platform: ブラウザパネルはこのプラットフォームではまだ利用できません
 
 find.bad_pattern: 無効なパターン
 find.no_results: 結果なし

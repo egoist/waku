@@ -1,7 +1,10 @@
 //! Client-host shell selection for the desktop's local terminal surface.
 
 use std::collections::HashSet;
-use std::ffi::{OsStr, OsString};
+use std::ffi::OsString;
+
+#[cfg(unix)]
+use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 
 #[cfg(unix)]

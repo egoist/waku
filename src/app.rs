@@ -2185,8 +2185,15 @@ impl Waku {
             }
         });
         // Enable GPUI's experimental overlay plane so deferred draws (menus,
-        // tooltips, popovers) composite above native child views — without it
-        // the browser surface's WKWebView would cover them.
+        // tooltips, popovers) composite above native content — without it the
+        // browser surface would cover them.
+        //
+        // Both backends of the pinned fork implement it, and both browser
+        // hosts render somewhere it can reach: a sibling NSView below GPUI's
+        // overlay layer on macOS, a DirectComposition visual between GPUI's
+        // base and overlay planes on Windows. When it is unavailable the
+        // surface falls back to freezing the page to a bitmap while an
+        // overlay is open.
         let scene_overlay_enabled = window.enable_scene_overlay().is_ok();
         let (updater_status, updater_events) = cx
             .try_global::<crate::updater::UpdaterState>()

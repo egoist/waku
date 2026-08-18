@@ -817,7 +817,7 @@ browser.open_external: 在默认浏览器中打开
 browser.browse_web: 浏览网页
 browser.start_hint: 在上方输入网址或搜索内容 — 按 %{shortcut} 聚焦地址栏
 browser.unavailable: 浏览器不可用
-browser.requires_macos: 浏览器面板仅支持 macOS
+browser.unavailable_on_platform: 浏览器面板尚不支持当前平台
 find.bad_pattern: 表达式无效
 find.no_results: 无结果
 find.result_count: "%{current} / %{total}"
