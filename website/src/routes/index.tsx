@@ -92,7 +92,7 @@ const FAQ = [
   },
   {
     q: 'What about Windows?',
-    a: 'Still planned. Waku runs natively on macOS and Linux today.',
+    a: 'Waku runs natively on Windows 10 and 11. Run the installer and it keeps itself up to date, same as macOS. The embedded browser and computer use are macOS-only for now.',
   },
   {
     q: 'What is the future plan?',
@@ -154,9 +154,15 @@ function DownloadMenu({
             >
               Linux (x86_64, arm64)
             </Menu.LinkItem>
-            <Menu.Item disabled className={itemClassName}>
-              Windows (soon)
-            </Menu.Item>
+            <Menu.LinkItem
+              href="https://github.com/egoist/waku/blob/main/docs/windows.md"
+              target="_blank"
+              rel="noreferrer"
+              closeOnClick
+              className={itemClassName}
+            >
+              Windows (x86_64, arm64)
+            </Menu.LinkItem>
           </Menu.Popup>
         </Menu.Positioner>
       </Menu.Portal>

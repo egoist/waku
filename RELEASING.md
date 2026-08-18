@@ -29,9 +29,9 @@ bun run release
   [`scripts/appcast.ts`](scripts/appcast.ts),
   [`scripts/changelog.ts`](scripts/changelog.ts).
 - GitHub Actions: [`.github/workflows/release.yml`](.github/workflows/release.yml)
-  builds Linux (x86_64, arm64) and macOS archives on a `v*` tag — or on a
-  manual **Run workflow**, which takes the version from `Cargo.toml` — and
-  opens a draft GitHub release;
+  builds Linux (x86_64, arm64), Windows (x86_64, arm64), and macOS archives on
+  a `v*` tag — or on a manual **Run workflow**, which takes the version from
+  `Cargo.toml` — and opens a draft GitHub release;
   [`.github/workflows/sync-release.yml`](.github/workflows/sync-release.yml)
   copies published assets into the R2 bucket.
 
@@ -159,6 +159,49 @@ Linux CI adds:
 - `waku-<version>-aarch64-unknown-linux-gnu.tar.gz`
 - `latest-linux.txt` — the version `install.sh` resolves "latest" to
 
+Windows CI adds:
+
+- `Waku-<version>-x86_64-Setup.exe`
+- `Waku-<version>-aarch64-Setup.exe`
+- `waku-<version>-x86_64-pc-windows-msvc.zip` (portable)
+- `waku-<version>-aarch64-pc-windows-msvc.zip` (portable)
+- `appcast-windows-x86_64.xml`, `appcast-windows-aarch64.xml`
+- `latest-windows.txt` — the version the download page resolves "latest" to
+
+[`scripts/bundle-windows.ts`](scripts/bundle-windows.ts) builds both, driving
+[`resources/windows/waku.iss`](resources/windows/waku.iss) through Inno Setup's
+`ISCC`. The installer is **per-user** (`PrivilegesRequired=lowest`,
+`%LOCALAPPDATA%\Programs\Waku`) — no elevation, which is exactly what lets the
+updater re-run it silently. The script signs the two executables and the
+installer with Authenticode when `WINDOWS_CERTIFICATE` and
+`WINDOWS_CERTIFICATE_PASSWORD` are set, and packages them unsigned otherwise,
+so a fork without a certificate can still cut a release at the cost of a
+SmartScreen warning.
+
+**Never change `AppId` in `waku.iss`.** It is how Windows recognizes an
+existing install; a new one turns every update into a second copy in
+Add/Remove Programs.
+
+#### The Windows update feed
+
+Windows has no Sparkle, so [`src/updater.rs`](src/updater.rs) runs the same
+contract itself: fetch the appcast, compare versions, download, verify the
+EdDSA signature, and hand the installer to Inno Setup with `/SILENT`. The
+installer closes Waku, replaces it, and starts it again.
+
+- **One feed per architecture.** A Sparkle appcast cannot say which binary an
+  item is for, and the client picks its feed at compile time.
+- **Same key as macOS.** `build.rs` reads `SUPublicEDKey` out of
+  `resources/Info.plist` and compiles it in, so the two platforms cannot drift
+  onto different keys.
+- [`scripts/appcast-windows.ts`](scripts/appcast-windows.ts) signs the feeds in
+  the draft-release job — the only one holding both installers. There is no
+  `sign_update` on Linux, so it signs with Node's Ed25519 over the same
+  `SPARKLE_PRIVATE_KEY`, and refuses to run when the key does not derive
+  `SUPublicEDKey` (signing with the wrong key ships a feed the app rejects).
+- The step pulls the live feeds down first and merges, so previously published
+  releases keep their entries.
+
 Both Linux jobs run on **Ubuntu 22.04**, and that choice is load-bearing: the
 binaries link against the build machine's glibc, so the runner sets the oldest
 distribution Waku can start on (2.35 — Ubuntu 22.04, Debian 12, Fedora 36).
@@ -169,9 +212,9 @@ The workflow opens (or updates) a **draft** GitHub release with those files and
 the matching `CHANGELOG.md` section. Publishing the GitHub release syncs the
 assets — including the signed `appcast.xml` — to R2.
 
-`appcast.xml` and `latest-linux.txt` are the bucket's two mutable pointers and
-upload with a short cache lifetime; everything else is versioned and cached
-forever. Linux users install from that bucket via
+`appcast.xml`, `latest-linux.txt`, and `latest-windows.txt` are the bucket's
+mutable pointers and upload with a short cache lifetime; everything else is
+versioned and cached forever. Linux users install from that bucket via
 [`website/public/install.sh`](website/public/install.sh), served at
 `https://waku.sh/install.sh` — see [docs/linux.md](docs/linux.md).
 
@@ -190,6 +233,8 @@ secrets first:
 | `APPLE_APP_SPECIFIC_PASSWORD` | app-specific password for that Apple ID |
 | `APPLE_TEAM_ID` | Developer Team ID |
 | `SPARKLE_PRIVATE_KEY` | EdDSA private key for `generate_appcast` |
+| `WINDOWS_CERTIFICATE` | optional; base64-encoded Authenticode `.pfx` |
+| `WINDOWS_CERTIFICATE_PASSWORD` | optional; password for that `.pfx` |
 | `R2_ACCOUNT_ID` | Cloudflare account id for the R2 API |
 | `R2_ACCESS_KEY_ID` | R2 Object Read & Write token |
 | `R2_SECRET_ACCESS_KEY` | matching secret |
@@ -248,10 +293,12 @@ secrets first:
   artifact name/extension — today's macOS names
   (`Waku-<v>.dmg`, `Waku-<v>.zip`, `appcast.xml`) must keep their URLs.
   Linux CI releases produce `waku-<v>-<target>.tar.gz` with
-  `scripts/bundle-linux.sh` and land in GitHub Releases, then R2 via the
-  sync workflow. Automatic Linux updates are not yet wired — `install.sh`
-  re-run is the upgrade path. Windows can later join with
-  `Waku-<v>-Setup.exe` + `appcast-windows.xml` (WinSparkle reads the same
-  appcast format). `src/updater.rs` is the per-platform seam, and everything
+  `scripts/bundle-linux.sh`, Windows CI produces `waku-<v>-<target>.zip` with
+  `scripts/bundle-windows.ts`, and both land in GitHub Releases, then R2 via
+  the sync workflow. Windows also ships `Waku-<v>-<arch>-Setup.exe` and updates
+  itself from `appcast-windows-<arch>.xml`. Automatic Linux updates are still
+  not wired — re-running `install.sh` is the upgrade path, and
+  `latest-linux.txt` is how a client learns what "latest" means.
+  `src/updater.rs` is the per-platform seam, and everything
   mac-specific in the existing release pipeline lives behind the Darwin guard
   in `scripts/release.ts` plus `scripts/bundle.sh`.

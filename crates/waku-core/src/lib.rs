@@ -50,6 +50,7 @@ pub mod usage_history;
 pub mod workspace;
 pub mod worktree;
 
+mod fs_ext;
 mod protocol;
 mod server;
 

@@ -18,6 +18,12 @@ The script installs into `~/.local` without root. See
 [docs/linux.md](docs/linux.md) for requirements, manual installation, and
 uninstalling.
 
+On Windows, run `Waku-<version>-<arch>-Setup.exe` from the
+[latest release](https://github.com/egoist/waku/releases/latest). It installs
+per-user and updates itself. A portable `.zip` is published alongside it. See
+[docs/windows.md](docs/windows.md) for requirements and what is not available
+there yet.
+
 ## Supported agents
 
 Waku works with:
@@ -85,10 +91,11 @@ replace the daemon without relaunching Waku Debug.
 
 ## Development
 
-Development is supported on macOS and Linux and requires
+Development is supported on macOS, Linux, and Windows and requires
 [Rust 1.96 or newer](https://www.rust-lang.org/tools/install) and
-[Bun](https://bun.sh/). Linux supports both Wayland and X11; install the native
-build prerequisites listed in [CONTRIBUTING.md](CONTRIBUTING.md) first.
+[Bun](https://bun.sh/). Linux supports both Wayland and X11, and Windows needs
+the MSVC toolchain; install the native build prerequisites listed in
+[CONTRIBUTING.md](CONTRIBUTING.md) first.
 
 ```sh
 bun install
@@ -97,7 +104,7 @@ bun run dev
 
 The embedded browser and experimental computer-use integration currently
 remain macOS-only. Agent sessions, projects, transcripts, skills, usage,
-diffs, file editing, and the terminal run natively on Linux.
+diffs, file editing, and the terminal run natively on Linux and Windows.
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for the development workflow and checks.
 Release maintainers should also read [RELEASING.md](RELEASING.md).

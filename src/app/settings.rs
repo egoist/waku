@@ -270,7 +270,11 @@ impl Waku {
             window,
             cx,
         );
-        let height = if cfg!(target_os = "macos") || left_window_controls.is_some() {
+        // The strip has to be tall enough for whichever chrome sits in it:
+        // macOS traffic lights, Linux client-side buttons, or — on Windows,
+        // where the buttons are on the far side — the matching content
+        // titlebar opposite it.
+        let height = if cfg!(target_os = "macos") || self.app_owns_window_controls(window) {
             48.0
         } else {
             12.0
@@ -2156,8 +2160,12 @@ impl Waku {
         id: &'static str,
         cx: &mut Context<Self>,
     ) -> Stateful<Div> {
-        div()
-            .id(id)
+        let region = div().id(id);
+        // Windows drags from the hit test rather than a mouse-move handler.
+        #[cfg(target_os = "windows")]
+        let region = region.window_control_area(gpui::WindowControlArea::Drag);
+
+        region
             .h(px(48.0))
             .flex_none()
             .on_click(|event, window, _| {

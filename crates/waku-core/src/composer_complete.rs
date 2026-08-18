@@ -653,7 +653,7 @@ pub fn list_project_files(root: &Path, cap: usize) -> Vec<FileEntry> {
 }
 
 fn git_listed_files(root: &Path, cap: usize) -> Option<Vec<String>> {
-    let output = std::process::Command::new("git")
+    let output = crate::command_env::plain_command("git")
         .arg("-C")
         .arg(root)
         .args([
@@ -1276,6 +1276,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    // Windows gates symlink creation behind Developer Mode.
+    #[cfg(unix)]
     #[test]
     fn symlinked_skills_and_command_dirs_are_discovered() {
         let root = std::env::temp_dir().join(format!("waku-symlink-{}", std::process::id()));

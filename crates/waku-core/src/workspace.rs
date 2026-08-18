@@ -6,7 +6,7 @@
 use std::collections::HashSet;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
-use std::process::{Command as ProcessCommand, Output};
+use std::process::Output;
 
 use anyhow::{Context as _, anyhow, bail};
 
@@ -402,7 +402,7 @@ fn branch_base(cwd: &Path) -> anyhow::Result<String> {
 }
 
 fn index_tree(cwd: &Path) -> anyhow::Result<String> {
-    let output = ProcessCommand::new("git")
+    let output = crate::command_env::plain_command("git")
         .args(["write-tree"])
         .current_dir(cwd)
         .output()
@@ -421,7 +421,7 @@ fn index_tree(cwd: &Path) -> anyhow::Result<String> {
 }
 
 fn diff_output(cwd: &Path, range: &DiffRange, modes: &[&str]) -> anyhow::Result<String> {
-    let output = ProcessCommand::new("git")
+    let output = crate::command_env::plain_command("git")
         .args([
             "-c",
             "core.quotePath=false",
@@ -445,7 +445,7 @@ fn diff_output(cwd: &Path, range: &DiffRange, modes: &[&str]) -> anyhow::Result<
 }
 
 fn ensure_repository(cwd: &Path) -> anyhow::Result<()> {
-    let output = ProcessCommand::new("git")
+    let output = crate::command_env::plain_command("git")
         .args(["rev-parse", "--is-inside-work-tree"])
         .current_dir(cwd)
         .output()
@@ -458,7 +458,7 @@ fn ensure_repository(cwd: &Path) -> anyhow::Result<()> {
 }
 
 fn resolve(cwd: &Path, revision: &str) -> Option<String> {
-    let output = ProcessCommand::new("git")
+    let output = crate::command_env::plain_command("git")
         .args(["rev-parse", "--verify", &format!("{revision}^{{commit}}")])
         .current_dir(cwd)
         .output()
@@ -475,7 +475,7 @@ where
     I: IntoIterator<Item = S>,
     S: AsRef<std::ffi::OsStr>,
 {
-    let output = ProcessCommand::new("git")
+    let output = crate::command_env::plain_command("git")
         .args(args)
         .current_dir(cwd)
         .output()
@@ -499,13 +499,12 @@ fn command_error(output: &Output) -> String {
 #[cfg(test)]
 mod tests {
     use std::fs;
-    use std::process::Command;
 
     use super::*;
     use uuid::Uuid;
 
     fn git_ok(cwd: &Path, args: &[&str]) {
-        let output = Command::new("git")
+        let output = crate::command_env::plain_command("git")
             .args(args)
             .current_dir(cwd)
             .output()

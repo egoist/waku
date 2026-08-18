@@ -598,7 +598,7 @@ mod tests {
     use super::*;
 
     fn run_git(cwd: &Path, args: &[&str]) {
-        let output = Command::new("git")
+        let output = crate::command_env::plain_command("git")
             .args(args)
             .current_dir(cwd)
             .output()

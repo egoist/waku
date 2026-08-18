@@ -3,8 +3,6 @@
 //! classification.
 
 use std::fs;
-
-use std::os::unix::fs::{PermissionsExt as _, symlink};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context as _, anyhow};
@@ -12,6 +10,7 @@ use serde_json::Value;
 
 use super::computer_use as computer_use_runtime;
 use crate::driver::DriverEventSender;
+use crate::fs_ext;
 use crate::model::{ActivityKind, ProviderKind};
 
 /// The context-window occupancy of one API call from a Claude-wire `usage`
@@ -181,7 +180,7 @@ fn build_grok_computer_use_config(
             grok_home.display()
         )
     })?;
-    fs::set_permissions(&grok_home, fs::Permissions::from_mode(0o700)).with_context(|| {
+    fs_ext::restrict_to_owner(&grok_home).with_context(|| {
         format!(
             "could not secure isolated Grok home {}",
             grok_home.display()
@@ -199,7 +198,7 @@ fn build_grok_computer_use_config(
             ) {
                 continue;
             }
-            symlink(entry.path(), grok_home.join(name)).with_context(|| {
+            fs_ext::symlink(&entry.path(), &grok_home.join(name)).with_context(|| {
                 format!(
                     "could not mirror Grok runtime resource {}",
                     entry.path().display()
