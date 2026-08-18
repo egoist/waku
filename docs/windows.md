@@ -33,6 +33,10 @@ Waku expects:
   can run in a VM — see Troubleshooting if the window comes up black.
 - **x86_64 or aarch64.**
 
+Nothing else: Waku links the C runtime statically, so there is no Visual C++
+redistributable to install first. That matters most on Arm devices, which
+rarely have the arm64 redistributable already.
+
 SmartScreen may warn about an unrecognized publisher on first launch when the
 release was not code-signed. Choose **More info → Run anyway**.
 

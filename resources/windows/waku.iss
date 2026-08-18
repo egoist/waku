@@ -4,7 +4,7 @@
 ; what lets the in-app updater re-run this silently without a UAC prompt.
 ; See RELEASING.md and docs/windows.md.
 ;
-; Built by scripts/bundle-windows.ps1, which supplies:
+; Built by scripts/bundle-windows.ts, which supplies:
 ;   /DAppVersion=<version>  /DArch=<x86_64|aarch64>
 ;   /DStageDir=<dir with the built executables>  /DOutputDir=<dir>
 
@@ -19,6 +19,15 @@
 #endif
 #ifndef OutputDir
   #define OutputDir "."
+#endif
+
+; An x64 build is worth allowing on Arm, where it runs emulated; an arm64
+; build on x64 is not, so refuse it up front rather than installing something
+; that cannot start.
+#if Arch == "aarch64"
+  #define Architectures "arm64"
+#else
+  #define Architectures "x64compatible"
 #endif
 
 [Setup]
@@ -43,6 +52,14 @@ SetupIconFile=AppIcon.ico
 Compression=lzma2/max
 SolidCompression=yes
 WizardStyle=modern
+ArchitecturesAllowed={#Architectures}
+ArchitecturesInstallIn64BitMode={#Architectures}
+; What docs/windows.md promises. Enforcing it here beats installing onto a
+; system that cannot run the result.
+MinVersion=10.0.17763
+; Two installers must not race — the updater can be triggered again while an
+; update is already applying.
+SetupMutex=WakuSetup
 ; No elevation, so an update never has to ask for it either.
 PrivilegesRequired=lowest
 DisableProgramGroupPage=yes

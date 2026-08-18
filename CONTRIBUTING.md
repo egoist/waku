@@ -84,8 +84,9 @@ bun scripts/bundle-windows.ts
 Both land under `target/release`. The zip holds the two executables side by
 side beneath one versioned directory — the layout Waku needs to find its
 daemon — and the installer is built from
-[`resources/windows/waku.iss`](resources/windows/waku.iss), so Inno Setup 6
-must be installed (`choco install innosetup`). Set `WINDOWS_CERTIFICATE`
+[`resources/windows/waku.iss`](resources/windows/waku.iss), so Inno Setup 6.3
+or newer must be installed (`choco install innosetup`) — the architecture
+gate uses identifiers added in 6.3. Set `WINDOWS_CERTIFICATE`
 (base64 `.pfx`) and `WINDOWS_CERTIFICATE_PASSWORD` to Authenticode-sign them;
 without those the script packages unsigned binaries and says so.
 [docs/windows.md](docs/windows.md) documents installing for users, and
