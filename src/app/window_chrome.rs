@@ -102,18 +102,6 @@ impl Waku {
             .into_any_element()
     }
 
-    /// Whether Waku, rather than the desktop, draws this window's minimize,
-    /// maximize, and close controls.
-    ///
-    /// Windows always does: GPUI creates the window without `WS_CAPTION`, so
-    /// there is no system titlebar for them to live in. Linux only does when
-    /// a Wayland compositor declines server-side decorations. macOS keeps its
-    /// native traffic lights inside the transparent titlebar.
-    pub(super) fn app_owns_window_controls(&self, window: &Window) -> bool {
-        cfg!(target_os = "windows")
-            || matches!(window.window_decorations(), Decorations::Client { .. })
-    }
-
     /// Render the window controls Waku owns: the desktop's configured button
     /// order when GPUI had to fall back from server-side to client-side
     /// decorations, and the platform order on Windows.
