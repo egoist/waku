@@ -211,6 +211,7 @@ struct MessageRewindRequest {
     workspace_client: waku_client::WorkspaceClient,
     session_id: Uuid,
     provider: ProviderKind,
+    claude_config_dir: Option<PathBuf>,
     provider_cursor: Option<ProviderResumeCursor>,
     session_title: String,
     /// Cursor has no native branch API, so its background helper needs the
@@ -415,6 +416,7 @@ fn perform_provider_rewind(
                         "session.rewind_title",
                         title = request.session_title.as_str()
                     ),
+                    config_dir: request.claude_config_dir.clone(),
                 },
             )?;
             Ok((None, Some(fork), None))
@@ -665,6 +667,7 @@ fn perform_response_fork(mut request: ResponseForkRequest) -> Result<PreparedRes
                         resume_at,
                         turn_count: request.provider_turn_count,
                         title: request.fork_title.clone(),
+                        config_dir: request.source.claude_config_dir.clone(),
                     },
                 )?;
                 Ok((fork.cursor, Some(fork.message_ids), None))
@@ -2203,6 +2206,7 @@ impl Waku {
         let previous_status = source.status;
         let previous_turn_count = source.turns.len();
         let provider = source.provider;
+        let claude_config_dir = source.claude_config_dir.clone();
         let provider_cursor = source.provider_cursor.clone();
         let session_title = source.display_title().to_owned();
         let cursor_source = (provider == ProviderKind::Cursor).then(|| source.clone());
@@ -2227,6 +2231,7 @@ impl Waku {
             workspace_client: waku_client::WorkspaceClient::new(self.daemon.client()),
             session_id,
             provider,
+            claude_config_dir,
             provider_cursor,
             session_title,
             cursor_source,
@@ -2640,6 +2645,7 @@ impl Waku {
                 context_window,
                 agent_preset,
                 computer_use_enabled: cfg!(target_os = "macos") && self.state.computer_use_enabled,
+                claude_config_dir: session.claude_config_dir.clone(),
                 provider_cursor: session.provider_cursor.clone(),
             },
             event_wake: self.event_wake_tx.clone(),

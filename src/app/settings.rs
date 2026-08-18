@@ -1737,6 +1737,399 @@ impl Waku {
                     .text_color(theme.text_ghost)
                     .child(SharedString::from(caption)),
             )
+            .when(kind == ProviderKind::Claude, |element| {
+                element.child(self.render_claude_accounts_settings(theme, cx))
+            })
+    }
+
+    fn render_claude_accounts_settings(&self, theme: Theme, cx: &mut Context<Self>) -> Div {
+        let accounts = std::iter::once((self.state.claude_default_account_alias.clone(), None))
+            .chain(
+                self.state
+                    .claude_accounts
+                    .iter()
+                    .map(|account| (account.alias.clone(), Some(account.config_dir.clone()))),
+            )
+            .collect::<Vec<_>>();
+        let mut rows = div().mt(px(8.0)).flex().flex_col();
+        for (index, (alias, config_dir)) in accounts.into_iter().enumerate() {
+            let identity = self.claude_account_identity(config_dir.clone(), cx);
+            let connected = identity
+                .as_deref()
+                .is_some_and(|identity| identity.as_ref().is_ok_and(|identity| identity.logged_in));
+            let detail = claude_account_detail(identity.as_deref());
+            let is_last = index == self.state.claude_accounts.len();
+            let renaming = self.claude_account_rename == Some(index);
+            let title = if renaming {
+                div()
+                    .h(px(22.0))
+                    .max_w(px(240.0))
+                    .px(px(5.0))
+                    .rounded(px(5.0))
+                    .border_1()
+                    .border_color(theme.accent)
+                    .bg(theme.inset)
+                    .flex()
+                    .items_center()
+                    .child(self.claude_account_alias_input.clone())
+                    .into_any_element()
+            } else {
+                div()
+                    .truncate()
+                    .text_size(px(12.0))
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(theme.text)
+                    .child(SharedString::from(alias))
+                    .into_any_element()
+            };
+            let edit = icon_button(
+                SharedString::from(format!("claude-account-rename-{index}")),
+                "icons/pencil.svg",
+                theme,
+            )
+            .tab_index(0)
+            .focus_visible(|style| style.border_1().border_color(theme.accent))
+            .on_click(cx.listener(move |this, _, window, cx| {
+                this.begin_claude_account_alias(index, window, cx);
+            }));
+            let sign_in_dir = config_dir.clone();
+            let sign_in_key_dir = config_dir.clone();
+            let sign_in = div()
+                .id(SharedString::from(format!(
+                    "claude-account-sign-in-{index}"
+                )))
+                .tab_index(0)
+                .focus_visible(|style| style.border_color(theme.accent))
+                .h(px(25.0))
+                .px(px(9.0))
+                .rounded(px(6.0))
+                .border_1()
+                .border_color(theme.border_strong)
+                .flex()
+                .items_center()
+                .cursor_default()
+                .text_size(px(10.5))
+                .text_color(theme.text_secondary)
+                .hover(|element| element.bg(theme.overlay))
+                .child(if connected { "Reconnect" } else { "Sign in" })
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.authenticate_claude_account(sign_in_dir.clone(), cx);
+                }))
+                .on_key_down(cx.listener(move |this, event: &KeyDownEvent, _, cx| {
+                    if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                        this.authenticate_claude_account(sign_in_key_dir.clone(), cx);
+                        cx.stop_propagation();
+                    }
+                }));
+            let row = div()
+                .py(px(9.0))
+                .flex()
+                .items_center()
+                .gap(px(10.0))
+                .when(!is_last, |element| {
+                    element.border_b_1().border_color(theme.border)
+                })
+                .child(
+                    div()
+                        .w(px(32.0))
+                        .h(px(32.0))
+                        .flex_none()
+                        .rounded(px(7.0))
+                        .bg(theme.overlay)
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .child(icon("icons/provider-claude.svg", 16.0, theme.text_tertiary)),
+                )
+                .child(
+                    div().flex_1().min_w_0().child(title).child(
+                        div()
+                            .mt(px(2.0))
+                            .truncate()
+                            .text_size(px(9.5))
+                            .text_color(theme.text_tertiary)
+                            .child(SharedString::from(detail)),
+                    ),
+                )
+                .when(!renaming, |element| element.child(edit))
+                .child(sign_in)
+                .when_some(config_dir.clone(), |element, remove_dir| {
+                    element.child(
+                        icon_button(
+                            SharedString::from(format!("claude-account-remove-{index}")),
+                            "icons/x.svg",
+                            theme,
+                        )
+                        .tab_index(0)
+                        .focus_visible(|style| style.border_1().border_color(theme.accent))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.remove_claude_account(&remove_dir, cx);
+                        })),
+                    )
+                });
+            rows = rows.child(if renaming {
+                div()
+                    .w_full()
+                    .child(row)
+                    .on_mouse_down_out(cx.listener(move |this, _, _, cx| {
+                        if this.claude_account_rename == Some(index) {
+                            this.commit_claude_account_alias(cx);
+                        }
+                    }))
+            } else {
+                div().w_full().child(row)
+            });
+        }
+
+        div()
+            .mt(px(14.0))
+            .pt(px(12.0))
+            .border_t_1()
+            .border_color(theme.border)
+            .flex()
+            .flex_col()
+            .gap(px(7.0))
+            .child(
+                div()
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(theme.text)
+                    .child("Claude accounts"),
+            )
+            .child(
+                div()
+                    .text_size(px(10.5))
+                    .line_height(px(15.0))
+                    .text_color(theme.text_tertiary)
+                    .child("Choose an account per task. Aliases are local to Waku; sign-in details come from Claude Code."),
+            )
+            .child(rows)
+            .child(
+                div()
+                    .id("add-claude-account")
+                    .tab_index(0)
+                    .focus_visible(|style| style.border_color(theme.accent))
+                    .h(px(29.0))
+                    .px(px(10.0))
+                    .rounded(px(7.0))
+                    .border_1()
+                    .border_color(theme.border_strong)
+                    .flex()
+                    .self_start()
+                    .items_center()
+                    .gap(px(6.0))
+                    .cursor_default()
+                    .hover(|element| element.bg(theme.overlay))
+                    .child(icon("icons/plus.svg", 11.0, theme.text_tertiary))
+                    .child("Add account")
+                    .on_click(cx.listener(|this, _, _, cx| this.add_claude_account(cx)))
+                    .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
+                        if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                            this.add_claude_account(cx);
+                            cx.stop_propagation();
+                        }
+                    })),
+            )
+    }
+
+    pub(super) fn claude_account_identity(
+        &self,
+        config_dir: Option<PathBuf>,
+        cx: &mut Context<Self>,
+    ) -> Option<Arc<Result<crate::usage::ClaudeAccountIdentity, String>>> {
+        match self
+            .claude_account_identities
+            .borrow_mut()
+            .read(&config_dir)
+        {
+            Query::Ready(identity) => Some(identity),
+            Query::Pending => None,
+            Query::Missing(token) => {
+                let Some(binary) = self
+                    .provider_probe(ProviderKind::Claude)
+                    .and_then(|probe| probe.path.clone())
+                else {
+                    self.claude_account_identities.borrow_mut().abandon(token);
+                    return None;
+                };
+                let daemon = self.daemon.client();
+                cx.spawn(async move |this, cx| {
+                    let result = cx
+                        .background_executor()
+                        .spawn(async move {
+                            match daemon.request(
+                                Uuid::nil(),
+                                Uuid::nil(),
+                                waku_client::Command::FetchClaudeAccountIdentity {
+                                    binary,
+                                    claude_config_dir: config_dir,
+                                },
+                            ) {
+                                Ok(waku_client::ResponsePayload::ClaudeAccountIdentity {
+                                    identity,
+                                }) => Ok(identity),
+                                Ok(_) => {
+                                    Err("the daemon returned an invalid account response".into())
+                                }
+                                Err(error) => Err(error.to_string()),
+                            }
+                        })
+                        .await;
+                    let _ = this.update(cx, |this, cx| {
+                        if this
+                            .claude_account_identities
+                            .borrow_mut()
+                            .fulfill(token, result)
+                        {
+                            cx.notify();
+                        }
+                    });
+                })
+                .detach();
+                None
+            }
+        }
+    }
+
+    fn begin_claude_account_alias(
+        &mut self,
+        index: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let alias = if index == 0 {
+            Some(self.state.claude_default_account_alias.clone())
+        } else {
+            self.state
+                .claude_accounts
+                .get(index - 1)
+                .map(|account| account.alias.clone())
+        };
+        let Some(alias) = alias else { return };
+        self.claude_account_rename = Some(index);
+        self.claude_account_alias_input.update(cx, |input, cx| {
+            input.set_content(alias, cx);
+            input.select_all_text(cx);
+        });
+        let focus = self.claude_account_alias_input.read(cx).focus();
+        window.on_next_frame(move |window, cx| window.focus(&focus, cx));
+        cx.notify();
+    }
+
+    pub(super) fn commit_claude_account_alias(&mut self, cx: &mut Context<Self>) {
+        let Some(index) = self.claude_account_rename.take() else {
+            return;
+        };
+        let alias = self
+            .claude_account_alias_input
+            .read(cx)
+            .content()
+            .trim()
+            .to_owned();
+        if alias.is_empty() {
+            cx.notify();
+            return;
+        }
+        if index == 0 {
+            self.state.claude_default_account_alias = alias;
+        } else if let Some(account) = self.state.claude_accounts.get_mut(index - 1) {
+            account.alias = alias;
+        } else {
+            return;
+        }
+        self.save();
+        cx.notify();
+    }
+
+    fn add_claude_account(&mut self, cx: &mut Context<Self>) {
+        let Some(home) = self.home_directory.as_ref() else {
+            self.show_toast("Your home directory is unavailable".to_owned());
+            return;
+        };
+        let config_dir = home
+            .join(".waku/claude-accounts")
+            .join(Uuid::new_v4().simple().to_string());
+        let alias = format!("Account {}", self.state.claude_accounts.len() + 2);
+        self.state.claude_accounts.push(ClaudeAccount {
+            alias,
+            config_dir: config_dir.clone(),
+        });
+        if let Some(session) = self.selected_session_mut()
+            && session.provider == ProviderKind::Claude
+            && !session.has_started()
+        {
+            session.claude_config_dir = Some(config_dir.clone());
+        }
+        self.save();
+        self.authenticate_claude_account(Some(config_dir), cx);
+        cx.notify();
+    }
+
+    fn remove_claude_account(&mut self, config_dir: &Path, cx: &mut Context<Self>) {
+        self.claude_account_rename = None;
+        self.claude_account_identities
+            .borrow_mut()
+            .invalidate(&Some(config_dir.to_owned()));
+        self.state
+            .claude_accounts
+            .retain(|account| account.config_dir != config_dir);
+        let mut changed = Vec::new();
+        for session in &mut self.state.sessions {
+            if !session.has_started() && session.claude_config_dir.as_deref() == Some(config_dir) {
+                session.claude_config_dir = None;
+                changed.push(session.id);
+            }
+        }
+        for session_id in changed {
+            self.state.mark_session_dirty(session_id);
+        }
+        self.save();
+        self.invalidate_composer_sources(cx);
+        cx.notify();
+    }
+
+    fn authenticate_claude_account(&mut self, config_dir: Option<PathBuf>, cx: &mut Context<Self>) {
+        let Some(binary) = self
+            .provider_probe(ProviderKind::Claude)
+            .and_then(|probe| probe.path.clone())
+        else {
+            self.show_toast("Claude Code is not installed".to_owned());
+            return;
+        };
+        self.show_toast("Opening Claude sign-in…".to_owned());
+        let identity_key = config_dir.clone();
+        let daemon = self.daemon.client();
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move {
+                    match daemon.request(
+                        Uuid::nil(),
+                        Uuid::nil(),
+                        waku_client::Command::AuthenticateClaudeAccount {
+                            binary,
+                            claude_config_dir: config_dir,
+                        },
+                    ) {
+                        Ok(waku_client::ResponsePayload::Ack) => Ok(()),
+                        Ok(_) => Err(anyhow::anyhow!(
+                            "the daemon returned an invalid authentication response"
+                        )),
+                        Err(error) => Err(error),
+                    }
+                })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                this.claude_account_identities
+                    .borrow_mut()
+                    .invalidate(&identity_key);
+                this.show_toast(match result {
+                    Ok(()) => "Claude account connected".to_owned(),
+                    Err(error) => error.to_string(),
+                });
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     fn toggle_provider_expanded(
@@ -2357,6 +2750,33 @@ fn permission_status_row(
                 ),
         )
         .child(status)
+}
+
+pub(super) fn claude_account_detail(
+    identity: Option<&Result<crate::usage::ClaudeAccountIdentity, String>>,
+) -> String {
+    match identity {
+        None => "Checking account…".to_owned(),
+        Some(Err(_)) => "Unable to read account details".to_owned(),
+        Some(Ok(identity)) if !identity.logged_in => "Not signed in".to_owned(),
+        Some(Ok(identity)) => {
+            let mut parts = Vec::new();
+            if let Some(email) = identity.email.as_deref() {
+                parts.push(email.to_owned());
+            }
+            if let Some(organization) = identity.organization_name.as_deref() {
+                parts.push(organization.to_owned());
+            }
+            if let Some(subscription) = identity.subscription_type.as_deref() {
+                parts.push(subscription.to_owned());
+            }
+            if parts.is_empty() {
+                "Signed in".to_owned()
+            } else {
+                parts.join("  ·  ")
+            }
+        }
+    }
 }
 
 #[cfg(test)]

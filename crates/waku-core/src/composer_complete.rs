@@ -201,12 +201,25 @@ fn builtin_claude_commands() -> Vec<SlashCommand> {
 /// first, so they win a same-scope name collision. Live processes may add
 /// more at runtime ([`merge_reported_commands`]): Claude's init handshake
 /// and ACP's `available_commands_update` for Cursor and Grok.
+#[cfg(test)]
 pub fn discover_slash_commands(provider: ProviderKind, project_root: &Path) -> Vec<SlashCommand> {
+    discover_slash_commands_for(provider, project_root, None)
+}
+
+pub fn discover_slash_commands_for(
+    provider: ProviderKind,
+    project_root: &Path,
+    selected_claude_config_dir: Option<&Path>,
+) -> Vec<SlashCommand> {
     let home = dirs::home_dir();
-    let claude_config_dir = std::env::var("CLAUDE_CONFIG_DIR")
-        .ok()
-        .map(PathBuf::from)
-        .filter(|path| path.is_absolute())
+    let claude_config_dir = selected_claude_config_dir
+        .map(Path::to_path_buf)
+        .or_else(|| {
+            std::env::var("CLAUDE_CONFIG_DIR")
+                .ok()
+                .map(PathBuf::from)
+                .filter(|path| path.is_absolute())
+        })
         .or_else(|| home.as_deref().map(|home| home.join(".claude")));
     let mut commands = Vec::new();
     match provider {

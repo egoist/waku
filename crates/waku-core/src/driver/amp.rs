@@ -95,6 +95,7 @@ impl AmpDriver {
             context_window: _,
             agent_preset: _,
             computer_use_enabled: _,
+            claude_config_dir: _,
             provider_cursor,
         } = options;
         if mode != RuntimeMode::FullAccess || interaction_mode != InteractionMode::Build {
@@ -575,6 +576,7 @@ mod tests {
                 context_window: None,
                 agent_preset: None,
                 computer_use_enabled: false,
+                claude_config_dir: None,
                 provider_cursor: None,
             },
             events,
@@ -634,6 +636,7 @@ mod tests {
                 context_window: None,
                 agent_preset: None,
                 computer_use_enabled: false,
+                claude_config_dir: None,
                 provider_cursor: None,
             },
             events,

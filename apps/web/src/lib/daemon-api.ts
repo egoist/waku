@@ -41,8 +41,12 @@ export const daemonKeys = {
     [...daemonKeys.providers(address), 'catalog', provider, binaryOverride] as const,
   providerDetection: (address: string, provider: ProviderKind) =>
     [...daemonKeys.providers(address), 'detection', provider] as const,
-  planUsage: (address: string, provider: ProviderKind) =>
-    ['daemon', address, 'plan-usage', provider] as const,
+  planUsage: (
+    address: string,
+    provider: ProviderKind,
+    claudeConfigDir: string | null = null,
+  ) =>
+    ['daemon', address, 'plan-usage', provider, claudeConfigDir] as const,
   skills: (address: string) => ['daemon', address, 'skills'] as const,
   usage: (address: string, window: UsageWindow) =>
     ['daemon', address, 'usage', JSON.stringify(window)] as const,
@@ -55,8 +59,12 @@ export const daemonKeys = {
   composerSources: (address: string) => ['daemon', address, 'composer-sources'] as const,
   composerFiles: (address: string, cwd: string) =>
     [...daemonKeys.composerSources(address), 'files', cwd] as const,
-  slashCommands: (address: string, provider: ProviderKind, cwd: string) =>
-    [...daemonKeys.composerSources(address), 'commands', provider, cwd] as const,
+  slashCommands: (
+    address: string,
+    provider: ProviderKind,
+    cwd: string,
+    claudeConfigDir: string | null = null,
+  ) => [...daemonKeys.composerSources(address), 'commands', provider, cwd, claudeConfigDir] as const,
   workspaceTree: (address: string, cwd: string, expanded: string[]) =>
     ['daemon', address, 'workspace-tree', cwd, ...[...expanded].sort()] as const,
   directory: (address: string, path: string | null) =>
@@ -207,6 +215,7 @@ export async function fetchPlanUsage(
   provider: ProviderKind,
   settings: DaemonSettings,
   version: string | null,
+  claudeConfigDir: string | null = null,
 ): Promise<PlanUsage | null> {
   const response = expectResponse(
     await client.request({
@@ -214,6 +223,7 @@ export async function fetchPlanUsage(
       provider,
       binaryOverride: settings.provider_binary_overrides?.[provider] ?? null,
       cliVersion: version,
+      claudeConfigDir,
     }),
     'planUsage',
   )
@@ -384,11 +394,13 @@ export async function discoverComposerCommands(
   client: WakuClient,
   provider: ProviderKind,
   projectRoot: string,
+  claudeConfigDir: string | null = null,
 ): Promise<SlashCommand[]> {
   const result = await workspaceRequest(client, {
     type: 'discoverSlashCommands',
     provider,
     project_root: projectRoot,
+    claude_config_dir: claudeConfigDir,
   })
   if (result.type !== 'slashCommands') {
     throw new Error('The daemon returned an unexpected slash-command response')

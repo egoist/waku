@@ -104,6 +104,7 @@ impl AcpDriver {
             context_window: _,
             agent_preset: _,
             computer_use_enabled,
+            claude_config_dir: _,
             provider_cursor,
         } = options;
         let fork_context = match &provider_cursor {
@@ -1727,6 +1728,7 @@ mod tests {
                 context_window: None,
                 agent_preset: None,
                 computer_use_enabled: false,
+                claude_config_dir: None,
                 provider_cursor: None,
             },
             events,

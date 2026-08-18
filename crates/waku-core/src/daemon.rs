@@ -230,11 +230,15 @@ impl Backend for WakuBackend {
                 provider,
                 binary_override,
                 cli_version,
+                claude_config_dir,
             } => {
                 let usage = match provider {
-                    crate::model::ProviderKind::Claude => Some(
-                        crate::usage::fetch_claude_plan_usage(cli_version.as_deref())?,
-                    ),
+                    crate::model::ProviderKind::Claude => {
+                        Some(crate::usage::fetch_claude_plan_usage_for(
+                            cli_version.as_deref(),
+                            claude_config_dir.as_deref(),
+                        )?)
+                    }
                     crate::model::ProviderKind::Codex => {
                         Some(crate::usage::fetch_codex_plan_usage()?)
                     }
@@ -255,6 +259,31 @@ impl Backend for WakuBackend {
                 };
                 Ok(ResponsePayload::PlanUsage { usage })
             }
+            Command::FetchClaudeAccountIdentity {
+                binary,
+                claude_config_dir,
+            } => Ok(ResponsePayload::ClaudeAccountIdentity {
+                identity: crate::usage::fetch_claude_account_identity(
+                    &binary,
+                    claude_config_dir.as_deref(),
+                )?,
+            }),
+            Command::AuthenticateClaudeAccount {
+                binary,
+                claude_config_dir,
+            } => {
+                if let Some(config_dir) = claude_config_dir.as_ref() {
+                    std::fs::create_dir_all(config_dir)?;
+                }
+                let mut command = crate::command_env::command(binary);
+                command.args(["auth", "login", "--claudeai"]);
+                if let Some(config_dir) = claude_config_dir.as_ref() {
+                    command.env("CLAUDE_CONFIG_DIR", config_dir);
+                }
+                let status = command.status()?;
+                anyhow::ensure!(status.success(), "Claude sign-in was cancelled");
+                Ok(ResponsePayload::Ack)
+            }
             Command::ProbeComputerPermissions { prompt } => {
                 Ok(ResponsePayload::ComputerPermissions {
                     permissions: crate::computer_use::probe_permissions(prompt)?,
@@ -265,11 +294,19 @@ impl Backend for WakuBackend {
                 project_roots,
             } => {
                 let rates = crate::usage_history::load_rate_table(&self.usage_rates_dir);
+                let additional_claude_roots = self
+                    .settings
+                    .get()
+                    .claude_accounts
+                    .into_iter()
+                    .map(|account| account.config_dir.join("projects"))
+                    .collect::<Vec<_>>();
                 let history = crate::usage_history::scan(
                     &mut self.usage_scan_cache.lock(),
                     &rates,
                     window,
                     &project_roots,
+                    &additional_claude_roots,
                 );
                 Ok(ResponsePayload::UsageHistory { history })
             }
@@ -576,6 +613,7 @@ impl Backend for WakuBackend {
                     context_window: options.context_window,
                     agent_preset: options.agent_preset,
                     computer_use_enabled: options.computer_use_enabled,
+                    claude_config_dir: options.claude_config_dir,
                     provider_cursor: options
                         .provider_cursor
                         .map(serde_json::from_value)
@@ -981,6 +1019,7 @@ impl WakuBackend {
                     resume_at,
                     turn_count: provider_turn_count,
                     title: fork_title.to_owned(),
+                    config_dir: source.claude_config_dir.clone(),
                 })?;
                 Ok((fork.cursor, fork.message_ids))
             }
@@ -1104,6 +1143,7 @@ impl WakuBackend {
                 context_window: source.context_window.clone(),
                 agent_preset: source.agent_preset.clone(),
                 computer_use_enabled: false,
+                claude_config_dir: source.claude_config_dir.clone(),
                 provider_cursor: source.provider_cursor.clone(),
             },
             event_sender,
@@ -1146,6 +1186,7 @@ impl WakuBackend {
                     resume_at: provider_resume_at,
                     turn_count: provider_turn_count,
                     title: format!("{} (rewind)", source.display_title()),
+                    config_dir: source.claude_config_dir.clone(),
                 })?;
                 Ok((Some(fork.cursor), fork.message_ids, false))
             }
@@ -1255,6 +1296,7 @@ impl WakuBackend {
                 context_window: source.context_window.clone(),
                 agent_preset: source.agent_preset.clone(),
                 computer_use_enabled: false,
+                claude_config_dir: source.claude_config_dir.clone(),
                 provider_cursor: source.provider_cursor.clone(),
             },
             event_sender,
@@ -1377,12 +1419,21 @@ fn fork_provider_session(
             resume_at,
             turn_count,
             title,
+            config_dir,
         } => {
             let source_resume_at = resume_at.map(Ok).unwrap_or_else(|| {
-                crate::claude_session::message_id_for_turn(&session_id, turn_count)
+                crate::claude_session::message_id_for_turn_for(
+                    config_dir.as_deref(),
+                    &session_id,
+                    turn_count,
+                )
             })?;
-            let fork =
-                crate::claude_session::fork_session_at(&session_id, &source_resume_at, &title)?;
+            let fork = crate::claude_session::fork_session_at_for(
+                config_dir.as_deref(),
+                &session_id,
+                &source_resume_at,
+                &title,
+            )?;
             let fork_resume_at = fork
                 .message_ids
                 .get(&source_resume_at)
@@ -1517,6 +1568,8 @@ fn handle_driver_command(
         | Command::UpdateSettings { .. }
         | Command::ProbeProvider { .. }
         | Command::FetchPlanUsage { .. }
+        | Command::FetchClaudeAccountIdentity { .. }
+        | Command::AuthenticateClaudeAccount { .. }
         | Command::ProbeComputerPermissions { .. }
         | Command::LoadUsageHistory { .. }
         | Command::LoadSkills { .. }

@@ -170,7 +170,11 @@ export function Composer({
   const cwd = sessionCwd(session, project)
   const branches = useWorkspaceBranches(cwd)
   const composerFiles = useComposerFiles(cwd)
-  const composerCommands = useComposerCommands(session.provider, cwd)
+  const composerCommands = useComposerCommands(
+    session.provider,
+    cwd,
+    session.claude_config_dir ?? null,
+  )
   const [prompt, setPrompt] = useState(initialComposerDraft?.text ?? '')
   const [attachments, setAttachments] = useState<MessageAttachment[]>(
     () => initialComposerDraft?.attachments ?? [],
@@ -1751,8 +1755,18 @@ function UsageMeter({
     : null
   const supportsPlanUsage = PLAN_USAGE_PROVIDERS.includes(session.provider)
   const plan = useQuery({
-    queryKey: daemonKeys.planUsage(config?.address ?? 'disconnected', session.provider),
-    queryFn: () => fetchPlanUsage(client!, session.provider, settings.data!, providerVersion),
+    queryKey: daemonKeys.planUsage(
+      config?.address ?? 'disconnected',
+      session.provider,
+      session.claude_config_dir ?? null,
+    ),
+    queryFn: () => fetchPlanUsage(
+      client!,
+      session.provider,
+      settings.data!,
+      providerVersion,
+      session.claude_config_dir ?? null,
+    ),
     enabled: open && Boolean(client && config && settings.data && supportsPlanUsage),
     staleTime: 30_000,
   })

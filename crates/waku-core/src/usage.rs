@@ -12,6 +12,7 @@
 //! app entity stores.
 
 use std::io::{BufRead as _, BufReader, Write as _};
+use std::path::Path;
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
@@ -30,7 +31,43 @@ const FALLBACK_CLI_VERSION: &str = "2.1.0";
 const CODEX_USAGE_URL: &str = "https://chatgpt.com/backend-api/wham/usage";
 const OPENCODE_GO_USAGE_URL: &str = "https://opencode.ai/zen/go/v1/usage";
 
-pub use waku_protocol::usage::{PlanUsage, PlanWindow, format_tokens, reset_label};
+pub use waku_protocol::usage::{
+    ClaudeAccountIdentity, PlanUsage, PlanWindow, format_tokens, reset_label,
+};
+
+/// Read the identity Claude Code reports for one isolated config directory.
+/// Blocking: callers must use the background executor.
+pub fn fetch_claude_account_identity(
+    binary: &Path,
+    config_dir: Option<&Path>,
+) -> anyhow::Result<ClaudeAccountIdentity> {
+    let mut command = crate::command_env::command(binary);
+    command.args(["auth", "status", "--json"]);
+    if let Some(config_dir) = config_dir {
+        command.env("CLAUDE_CONFIG_DIR", config_dir);
+    }
+    let output = command.output()?;
+    parse_claude_account_identity(&serde_json::from_slice(&output.stdout)?)
+}
+
+fn parse_claude_account_identity(body: &Value) -> anyhow::Result<ClaudeAccountIdentity> {
+    let logged_in = body
+        .get("loggedIn")
+        .and_then(Value::as_bool)
+        .ok_or_else(|| anyhow!("Claude auth status did not include loggedIn"))?;
+    Ok(ClaudeAccountIdentity {
+        logged_in,
+        email: body.get("email").and_then(Value::as_str).map(str::to_owned),
+        organization_name: body
+            .get("orgName")
+            .and_then(Value::as_str)
+            .map(str::to_owned),
+        subscription_type: body
+            .get("subscriptionType")
+            .and_then(Value::as_str)
+            .map(str::to_owned),
+    })
+}
 
 struct OauthCredentials {
     access_token: String,
@@ -40,8 +77,11 @@ struct OauthCredentials {
 
 /// Fetch the Claude account's plan usage. Blocking: keychain read, then one
 /// HTTPS round trip. Never call from the UI thread.
-pub fn fetch_claude_plan_usage(cli_version: Option<&str>) -> anyhow::Result<PlanUsage> {
-    let credentials = read_credentials()?;
+pub fn fetch_claude_plan_usage_for(
+    cli_version: Option<&str>,
+    config_dir: Option<&Path>,
+) -> anyhow::Result<PlanUsage> {
+    let credentials = read_credentials(config_dir)?;
     let user_agent = format!(
         "claude-code/{}",
         cli_version.unwrap_or(FALLBACK_CLI_VERSION)
@@ -518,7 +558,10 @@ pub fn openai_plan_label(plan: Option<&str>) -> Option<String> {
 /// The Claude Code OAuth blob: keychain on macOS, with the credentials file as
 /// the cross-platform fallback. Claude Code stores the macOS item via
 /// `security`, so `security` is on its ACL and this read does not prompt.
-fn read_credentials() -> anyhow::Result<OauthCredentials> {
+fn read_credentials(config_dir: Option<&Path>) -> anyhow::Result<OauthCredentials> {
+    if let Some(config_dir) = config_dir {
+        return parse_credentials(&credentials_file_payload_in(config_dir)?);
+    }
     #[cfg(target_os = "macos")]
     let payload = keychain_payload().or_else(|keychain_error| {
         credentials_file_payload()
@@ -550,6 +593,11 @@ fn credentials_file_payload() -> anyhow::Result<String> {
     let path = dirs::home_dir()
         .ok_or_else(|| anyhow!(tr!("usage_error.no_home_directory")))?
         .join(".claude/.credentials.json");
+    credentials_file_payload_in(path.parent().expect("credentials path has a parent"))
+}
+
+fn credentials_file_payload_in(config_dir: &Path) -> anyhow::Result<String> {
+    let path = config_dir.join(".credentials.json");
     std::fs::read_to_string(&path)
         .with_context(|| tr!("usage_error.read_file", path = path.display()))
 }
@@ -788,6 +836,24 @@ mod tests {
             subscription_type: subscription.map(str::to_owned),
             rate_limit_tier: tier.map(str::to_owned),
         }
+    }
+
+    #[test]
+    fn parses_claude_auth_identity() {
+        let identity = parse_claude_account_identity(&serde_json::json!({
+            "loggedIn": true,
+            "email": "avi@example.com",
+            "orgName": "Avi's workspace",
+            "subscriptionType": "max"
+        }))
+        .unwrap();
+
+        assert_eq!(identity.email.as_deref(), Some("avi@example.com"));
+        assert_eq!(
+            identity.organization_name.as_deref(),
+            Some("Avi's workspace")
+        );
+        assert_eq!(identity.subscription_type.as_deref(), Some("max"));
     }
 
     #[test]

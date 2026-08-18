@@ -6,6 +6,7 @@ use std::fs;
 
 use std::os::unix::fs::{PermissionsExt as _, symlink};
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 use anyhow::{Context as _, anyhow};
 use serde_json::Value;
@@ -34,6 +35,11 @@ pub(super) fn claude_context_tokens(usage: &Value) -> Option<u64> {
 
 #[derive(Clone)]
 pub(super) enum HeadlessComputerUseConfig {
+    Claude {
+        base: computer_use_runtime::ComputerUseConfig,
+        mcp_config: String,
+        instructions: String,
+    },
     OpenCode {
         base: computer_use_runtime::ComputerUseConfig,
         config_content: String,
@@ -55,6 +61,33 @@ impl HeadlessComputerUseRuntime {
     pub(super) fn start(provider: ProviderKind, events: DriverEventSender) -> anyhow::Result<Self> {
         let runtime = computer_use_runtime::ComputerUseRuntime::start(events)?;
         let config = match provider {
+            ProviderKind::Claude => {
+                let base = runtime.config.clone();
+                let mcp_config = serde_json::json!({
+                    "mcpServers": {
+                        "waku_js_repl": {
+                            "command": base.repl_path,
+                            "args": [],
+                            "env": {
+                                "WAKU_COMPUTER_USE_SERVER": base.server_path,
+                                "WAKU_COMPUTER_USE_PROCESS_DIRECTORY": base.process_directory,
+                            }
+                        }
+                    }
+                })
+                .to_string();
+                let instructions = fs::read_to_string(&base.skill_path).with_context(|| {
+                    format!(
+                        "could not read Waku Computer Use skill {}",
+                        base.skill_path.display()
+                    )
+                })?;
+                HeadlessComputerUseConfig::Claude {
+                    base,
+                    mcp_config,
+                    instructions,
+                }
+            }
             ProviderKind::OpenCode => {
                 let existing = match std::env::var("OPENCODE_CONFIG_CONTENT") {
                     Ok(content) => Some(content),
@@ -89,8 +122,31 @@ impl HeadlessComputerUseRuntime {
     pub(super) fn grok_home(&self) -> Option<&Path> {
         match &self.config {
             HeadlessComputerUseConfig::Grok { grok_home, .. } => Some(grok_home),
-            HeadlessComputerUseConfig::OpenCode { .. } => None,
+            HeadlessComputerUseConfig::Claude { .. }
+            | HeadlessComputerUseConfig::OpenCode { .. } => None,
         }
+    }
+}
+
+pub(super) fn configure_claude_computer_use_command(
+    command: &mut Command,
+    config: Option<&HeadlessComputerUseConfig>,
+) {
+    if let Some(HeadlessComputerUseConfig::Claude {
+        base,
+        mcp_config,
+        instructions,
+    }) = config
+    {
+        command
+            .args(["--mcp-config", mcp_config])
+            .args(["--append-system-prompt", instructions])
+            .arg("--chrome")
+            .env("WAKU_COMPUTER_USE_SERVER", &base.server_path)
+            .env(
+                "WAKU_COMPUTER_USE_PROCESS_DIRECTORY",
+                &base.process_directory,
+            );
     }
 }
 
@@ -458,6 +514,32 @@ mod tests {
             Some("existing-plugin")
         );
         assert!(value.pointer("/mcp/waku_computer_use").is_none());
+    }
+
+    #[test]
+    fn claude_computer_use_adds_mcp_instructions_and_chrome() {
+        let base = computer_use_config();
+        let config = HeadlessComputerUseConfig::Claude {
+            base,
+            mcp_config: r#"{"mcpServers":{"waku_js_repl":{}}}"#.into(),
+            instructions: "Use waku_js_repl.".into(),
+        };
+        let mut command = Command::new("claude");
+        configure_claude_computer_use_command(&mut command, Some(&config));
+        let args = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+
+        assert!(
+            args.windows(2)
+                .any(|pair| pair == ["--mcp-config", r#"{"mcpServers":{"waku_js_repl":{}}}"#])
+        );
+        assert!(
+            args.windows(2)
+                .any(|pair| pair == ["--append-system-prompt", "Use waku_js_repl."])
+        );
+        assert!(args.iter().any(|arg| arg == "--chrome"));
     }
 
     #[test]

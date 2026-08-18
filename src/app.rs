@@ -53,8 +53,8 @@ use crate::ui::tooltip::Tooltip;
 
 use crate::browser::BrowserView;
 use crate::persistence::{
-    ComposerDraftStore, ComposerDrafts, DEFAULT_RIGHT_PANEL_WIDTH, DEFAULT_SIDEBAR_WIDTH,
-    PersistedState, PersistedWindowState, StateStore,
+    ClaudeAccount, ComposerDraftStore, ComposerDrafts, DEFAULT_RIGHT_PANEL_WIDTH,
+    DEFAULT_SIDEBAR_WIDTH, PersistedState, PersistedWindowState, StateStore,
 };
 use crate::query::{Query, QueryCache};
 use crate::review_diff::{Snapshot as ReviewDiffSnapshot, Source as ReviewDiffSource};
@@ -1099,6 +1099,10 @@ pub struct Waku {
     /// override input below edits this provider's entry.
     expanded_provider_settings: Option<ProviderKind>,
     provider_path_input: Entity<ComposerInput>,
+    claude_account_rename: Option<usize>,
+    claude_account_alias_input: Entity<ComposerInput>,
+    claude_account_identities:
+        RefCell<QueryCache<Option<PathBuf>, Result<crate::usage::ClaudeAccountIdentity, String>>>,
     computer_permissions: ComputerPermissions,
     computer_permission_tx: Sender<Result<ComputerPermissions, String>>,
     computer_permission_events: Receiver<Result<ComputerPermissions, String>>,
@@ -1110,14 +1114,8 @@ pub struct Waku {
     /// Why a provider's last fetch failed, kept alongside stale data for the
     /// meter's tooltip. Cleared by that provider's next success.
     plan_usage_error: HashMap<ProviderKind, String>,
-    plan_usage_tx: Sender<(
-        ProviderKind,
-        Result<Option<crate::usage::PlanUsage>, String>,
-    )>,
-    plan_usage_events: Receiver<(
-        ProviderKind,
-        Result<Option<crate::usage::PlanUsage>, String>,
-    )>,
+    plan_usage_tx: Sender<PlanUsageEvent>,
+    plan_usage_events: Receiver<PlanUsageEvent>,
     plan_usage_pending: HashSet<ProviderKind>,
     /// Fetchable providers with no matching account credential. Unlike a
     /// request failure, this hides the plan section until a later refresh
@@ -1198,12 +1196,12 @@ pub struct Waku {
     commit_operation: Option<commit_dialog::CommitOperationState>,
     /// Slash commands discovered per (provider, project root). Filesystem
     /// walks live on the background executor; frames read the index below.
-    slash_commands: QueryCache<(ProviderKind, PathBuf), Vec<SlashCommand>>,
+    slash_commands: QueryCache<(ProviderKind, PathBuf, Option<PathBuf>), Vec<SlashCommand>>,
     /// The merged command list the autocomplete popup draws, and the key it
     /// was built for — a stale key means "no commands", never another
     /// provider's list.
     slash_command_index: Rc<Vec<SlashCommand>>,
-    slash_command_index_key: Option<(ProviderKind, PathBuf)>,
+    slash_command_index_key: Option<(ProviderKind, PathBuf, Option<PathBuf>)>,
     /// Workspace file index per project root, for `@` mentions.
     mention_files: QueryCache<PathBuf, Vec<FileEntry>>,
     mention_file_index: Rc<Vec<FileEntry>>,
@@ -1530,6 +1528,11 @@ pub struct Waku {
 }
 
 mod activity_diff;
+type PlanUsageEvent = (
+    ProviderKind,
+    Option<PathBuf>,
+    Result<Option<crate::usage::PlanUsage>, String>,
+);
 mod autocomplete;
 mod background_work;
 mod branches;
@@ -1934,6 +1937,11 @@ impl Waku {
                 .search_field()
                 .select_all_on_focus_click()
                 .placeholder(tr!("input.detected_automatically"))
+        });
+        let claude_account_alias_input = cx.new(|cx| {
+            ComposerInput::new(window, cx)
+                .search_field()
+                .select_all_on_focus_click()
         });
         let usage_project_filter = cx.new(|cx| {
             ComposerInput::new(window, cx)
@@ -2492,6 +2500,15 @@ impl Waku {
                 },
             )
             .detach();
+            cx.subscribe(
+                &claude_account_alias_input,
+                |this: &mut Self, _, event: &ComposerEvent, cx| match event {
+                    ComposerEvent::Submit(_) => this.commit_claude_account_alias(cx),
+                    ComposerEvent::Edited if this.claude_account_rename.is_some() => cx.notify(),
+                    _ => {}
+                },
+            )
+            .detach();
 
             // Like T3 Code's adapter subscriptions feeding its ingestion
             // worker, provider threads push an edge into this bounded wake
@@ -2651,6 +2668,9 @@ impl Waku {
                 provider_detection_checked_at: None,
                 expanded_provider_settings: None,
                 provider_path_input,
+                claude_account_rename: None,
+                claude_account_alias_input,
+                claude_account_identities: RefCell::new(QueryCache::new(8)),
                 computer_permissions: ComputerPermissions::default(),
                 computer_permission_tx,
                 computer_permission_events,

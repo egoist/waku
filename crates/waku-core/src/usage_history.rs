@@ -735,6 +735,7 @@ pub fn scan(
     rates: &RateTable,
     window: UsageWindow,
     project_roots: &[PathBuf],
+    additional_claude_roots: &[PathBuf],
 ) -> UsageHistory {
     let started = Instant::now();
     let (since_day, until_day) = window.bounds(Local::now().date_naive());
@@ -753,58 +754,63 @@ pub fn scan(
     let mut errors = Vec::new();
 
     for provider in UsageProvider::ALL {
-        let Some(root) = provider_root(provider) else {
-            continue;
-        };
-        if !root.is_dir() {
-            // Provider never used on this machine; zero usage, not an error.
-            continue;
+        let mut roots = provider_root(provider).into_iter().collect::<Vec<_>>();
+        if provider == UsageProvider::Claude {
+            roots.extend(additional_claude_roots.iter().cloned());
+            roots.sort_unstable();
+            roots.dedup();
         }
-        let mut files = Vec::new();
-        skipped_files += list_transcript_files(&root, mtime_cutoff_ms, &mut files);
-        if files.is_empty() && std::fs::read_dir(&root).is_err() {
-            errors.push(format!(
-                "{} transcripts at {} could not be read.",
-                provider.label(),
-                root.display()
-            ));
-            continue;
-        }
-        for (path, size, mtime_ms) in files {
-            scanned_files += 1;
-            let cached = cache.get(&path);
-            // Provider is part of the identity: if both providers were ever
-            // pointed at one directory, a hit parsed by the other parser must
-            // not be reused.
-            let records = match cached {
-                Some(entry)
-                    if entry.size == size
-                        && entry.mtime_ms == mtime_ms
-                        && entry.provider == provider =>
-                {
-                    &entry.records
-                }
-                _ => match read_transcript_records(&path, provider) {
-                    Some(records) => {
-                        &cache
-                            .entry(path)
-                            .insert_entry(FileCacheEntry {
-                                size,
-                                mtime_ms,
-                                provider,
-                                records,
-                            })
-                            .into_mut()
-                            .records
+        for root in roots {
+            if !root.is_dir() {
+                // Provider never used on this machine; zero usage, not an error.
+                continue;
+            }
+            let mut files = Vec::new();
+            skipped_files += list_transcript_files(&root, mtime_cutoff_ms, &mut files);
+            if files.is_empty() && std::fs::read_dir(&root).is_err() {
+                errors.push(format!(
+                    "{} transcripts at {} could not be read.",
+                    provider.label(),
+                    root.display()
+                ));
+                continue;
+            }
+            for (path, size, mtime_ms) in files {
+                scanned_files += 1;
+                let cached = cache.get(&path);
+                // Provider is part of the identity: if both providers were ever
+                // pointed at one directory, a hit parsed by the other parser must
+                // not be reused.
+                let records = match cached {
+                    Some(entry)
+                        if entry.size == size
+                            && entry.mtime_ms == mtime_ms
+                            && entry.provider == provider =>
+                    {
+                        &entry.records
                     }
-                    // A read failure is not an empty transcript: caching it
-                    // under this (size, mtime) would silently drop the file's
-                    // usage until it changes.
-                    None => continue,
-                },
-            };
-            for record in records {
-                aggregator.add(record, rates);
+                    _ => match read_transcript_records(&path, provider) {
+                        Some(records) => {
+                            &cache
+                                .entry(path)
+                                .insert_entry(FileCacheEntry {
+                                    size,
+                                    mtime_ms,
+                                    provider,
+                                    records,
+                                })
+                                .into_mut()
+                                .records
+                        }
+                        // A read failure is not an empty transcript: caching it
+                        // under this (size, mtime) would silently drop the file's
+                        // usage until it changes.
+                        None => continue,
+                    },
+                };
+                for record in records {
+                    aggregator.add(record, rates);
+                }
             }
         }
     }

@@ -190,6 +190,7 @@ impl CodexDriver {
             context_window: _,
             agent_preset: _,
             computer_use_enabled,
+            claude_config_dir: _,
             provider_cursor,
         } = options;
         let provider_session_id = match provider_cursor {

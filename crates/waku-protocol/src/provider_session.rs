@@ -15,6 +15,8 @@ pub enum ProviderSessionForkRequest {
         resume_at: Option<String>,
         turn_count: usize,
         title: String,
+        #[ts(type = "string | null")]
+        config_dir: Option<PathBuf>,
     },
     Amp {
         binary: PathBuf,

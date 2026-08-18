@@ -1297,6 +1297,7 @@ mod tests {
                         context_window: None,
                         agent_preset: None,
                         computer_use_enabled: false,
+                        claude_config_dir: None,
                         provider_cursor: None,
                     },
                 },
@@ -1364,6 +1365,7 @@ mod tests {
                         context_window: None,
                         agent_preset: None,
                         computer_use_enabled: false,
+                        claude_config_dir: None,
                         provider_cursor: None,
                     },
                 },
@@ -1891,6 +1893,7 @@ mod tests {
             context_window: None,
             agent_preset: None,
             computer_use_enabled: false,
+            claude_config_dir: None,
             provider_cursor: None,
         }
     }

@@ -82,6 +82,7 @@ pub struct ClaudeDriver {
     pending_user_inputs: Arc<Mutex<HashMap<String, Value>>>,
     mode: RuntimeMode,
     interaction_mode: InteractionMode,
+    _computer_use: Option<super::support::HeadlessComputerUseRuntime>,
 }
 
 /// The permission posture Claude is launched with.
@@ -123,6 +124,7 @@ fn wire_model(model: Option<&str>, context_window: Option<&str>) -> Option<Strin
 /// retitles and the rewind cursor.
 fn start_claude_title_refresh(
     title_refresh: &super::title_refresh::NativeTitleRefresh,
+    config_dir: Option<std::path::PathBuf>,
     session_id: &str,
     events: &DriverEventSender,
 ) {
@@ -131,7 +133,10 @@ fn start_claude_title_refresh(
         "waku-claude-title",
         vec![Duration::from_secs(5), Duration::from_secs(10)],
         events.clone(),
-        move || crate::claude_session::session_metadata(&session_id).map(|native| native.title),
+        move || {
+            crate::claude_session::session_metadata_for(config_dir.as_deref(), &session_id)
+                .map(|native| native.title)
+        },
     );
 }
 
@@ -180,7 +185,8 @@ impl ClaudeDriver {
             service_tier: _,
             context_window,
             agent_preset: _,
-            computer_use_enabled: _,
+            computer_use_enabled,
+            claude_config_dir,
             provider_cursor,
         } = options;
         let (resume_session_id, resume_at) = match provider_cursor {
@@ -205,6 +211,21 @@ impl ClaudeDriver {
         let mut command = crate::command_env::command(&binary);
         command.current_dir(&cwd);
         configure_stream_command(&mut command, mode, interaction_mode);
+        if let Some(config_dir) = claude_config_dir.as_ref() {
+            command.env("CLAUDE_CONFIG_DIR", config_dir);
+        }
+        let computer_use = computer_use_enabled
+            .then(|| {
+                super::support::HeadlessComputerUseRuntime::start(
+                    crate::model::ProviderKind::Claude,
+                    events.clone(),
+                )
+            })
+            .transpose()?;
+        super::support::configure_claude_computer_use_command(
+            &mut command,
+            computer_use.as_ref().map(|runtime| &runtime.config),
+        );
         let launch_model = wire_model(model.as_deref(), context_window.as_deref());
         if let Some(model) = launch_model.as_deref() {
             command.args(["--model", model]);
@@ -258,12 +279,14 @@ impl ClaudeDriver {
         let reader_session = session_id.clone();
         let reader_pending_task_stops = pending_task_stops.clone();
         let reader_pending_user_inputs = pending_user_inputs.clone();
+        let reader_config_dir = claude_config_dir.clone();
         let reader_thread = thread::Builder::new()
             .name("waku-claude-reader".into())
             .spawn(move || {
                 let mut state = ClaudeStreamState {
                     pending_task_stops: reader_pending_task_stops,
                     pending_user_inputs: reader_pending_user_inputs,
+                    config_dir: reader_config_dir,
                     ..ClaudeStreamState::default()
                 };
                 for line in BufReader::new(stdout).lines().map_while(Result::ok) {
@@ -289,6 +312,7 @@ impl ClaudeDriver {
         let writer_turn = turn_active;
         let writer_pending_task_stops = pending_task_stops;
         let writer_title_refresh = super::title_refresh::NativeTitleRefresh::default();
+        let writer_config_dir = claude_config_dir.clone();
         let title_session_id = session_id;
         thread::Builder::new()
             .name("waku-claude-writer".into())
@@ -302,6 +326,7 @@ impl ClaudeDriver {
                             *writer_turn.lock() = true;
                             start_claude_title_refresh(
                                 &writer_title_refresh,
+                                writer_config_dir.clone(),
                                 &title_session_id,
                                 &writer_events,
                             );
@@ -528,6 +553,7 @@ impl ClaudeDriver {
             pending_user_inputs,
             mode,
             interaction_mode,
+            _computer_use: computer_use,
         })
     }
 }
@@ -629,6 +655,7 @@ struct ClaudeStreamState {
     last_assistant_model: Option<String>,
     /// Last title copied from Claude's native transcript metadata.
     last_auto_title: Option<String>,
+    config_dir: Option<std::path::PathBuf>,
 }
 
 /// The context window of the model that served this turn, from the result
@@ -1302,7 +1329,9 @@ fn handle_message(
             // Claude writes its generated title and rewind checkpoint to the
             // same native transcript as the turn settles. Read it once, ahead
             // of TurnFinished, so that event's forced save includes both.
-            if let Ok(metadata) = crate::claude_session::session_metadata(session_id) {
+            if let Ok(metadata) =
+                crate::claude_session::session_metadata_for(state.config_dir.as_deref(), session_id)
+            {
                 if let Some(title) = metadata.title
                     && state.last_auto_title.as_deref() != Some(title.as_str())
                 {
@@ -1528,6 +1557,7 @@ mod tests {
                 context_window: None,
                 agent_preset: None,
                 computer_use_enabled: false,
+                claude_config_dir: None,
                 provider_cursor: None,
             },
             events,
@@ -1597,6 +1627,7 @@ mod tests {
                 context_window: None,
                 agent_preset: None,
                 computer_use_enabled: false,
+                claude_config_dir: None,
                 provider_cursor: None,
             },
             events,
@@ -1669,6 +1700,7 @@ mod tests {
             pending_user_inputs: Arc::new(Mutex::new(HashMap::new())),
             mode: RuntimeMode::FullAccess,
             interaction_mode: InteractionMode::Build,
+            _computer_use: None,
         };
 
         assert!(driver.supports_steer());

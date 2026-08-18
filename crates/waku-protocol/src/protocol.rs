@@ -12,6 +12,7 @@ use crate::persistence::{ComposerDraftChange, ComposerDrafts, SessionMessageMatc
 use crate::provider_session::{ProviderSessionFork, ProviderSessionForkRequest};
 use crate::settings::DaemonSettings;
 use crate::skills::SkillsCatalog;
+use crate::usage::ClaudeAccountIdentity;
 use crate::usage::PlanUsage;
 use crate::usage_history::{UsageHistory, UsageWindow};
 use crate::workspace::{WorkspaceOperation, WorkspaceResult};
@@ -134,6 +135,20 @@ pub enum Command {
         provider: ProviderKind,
         binary_override: Option<String>,
         cli_version: Option<String>,
+        #[ts(type = "string | null")]
+        claude_config_dir: Option<PathBuf>,
+    },
+    FetchClaudeAccountIdentity {
+        #[ts(type = "string")]
+        binary: PathBuf,
+        #[ts(type = "string | null")]
+        claude_config_dir: Option<PathBuf>,
+    },
+    AuthenticateClaudeAccount {
+        #[ts(type = "string")]
+        binary: PathBuf,
+        #[ts(type = "string | null")]
+        claude_config_dir: Option<PathBuf>,
     },
     ProbeComputerPermissions {
         prompt: bool,
@@ -252,6 +267,8 @@ pub struct WireDriverStartOptions {
     pub context_window: Option<String>,
     pub agent_preset: Option<String>,
     pub computer_use_enabled: bool,
+    #[ts(type = "string | null")]
+    pub claude_config_dir: Option<PathBuf>,
     pub provider_cursor: Option<Value>,
 }
 
@@ -372,6 +389,9 @@ pub enum ResponsePayload {
     },
     PlanUsage {
         usage: Option<PlanUsage>,
+    },
+    ClaudeAccountIdentity {
+        identity: ClaudeAccountIdentity,
     },
     ComputerPermissions {
         permissions: ComputerPermissions,

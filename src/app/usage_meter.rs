@@ -72,6 +72,10 @@ impl Waku {
                 .cloned()
                 .flatten();
             let binary_override = self.state.provider_binary_overrides.get(&provider).cloned();
+            let claude_config_dir = self
+                .selected_session()
+                .filter(|session| session.provider == ProviderKind::Claude)
+                .and_then(|session| session.claude_config_dir.clone());
             let daemon = self.daemon.client();
             cx.background_executor()
                 .spawn(async move {
@@ -82,6 +86,7 @@ impl Waku {
                             provider,
                             binary_override,
                             cli_version: claude_version,
+                            claude_config_dir: claude_config_dir.clone(),
                         },
                     ) {
                         Ok(waku_client::ResponsePayload::PlanUsage { usage }) => Ok(usage),
@@ -91,7 +96,11 @@ impl Waku {
                         Err(error) => Err(error),
                     };
                     if tx
-                        .send((provider, result.map_err(|error| format!("{error:#}"))))
+                        .send((
+                            provider,
+                            claude_config_dir,
+                            result.map_err(|error| format!("{error:#}")),
+                        ))
                         .is_ok()
                     {
                         signal_event_pump(&event_wake);
@@ -103,7 +112,14 @@ impl Waku {
 
     pub(super) fn drain_plan_usage_events(&mut self) -> bool {
         let mut changed = false;
-        while let Ok((provider, result)) = self.plan_usage_events.try_recv() {
+        while let Ok((provider, claude_config_dir, result)) = self.plan_usage_events.try_recv() {
+            let selected_claude_config_dir = self
+                .selected_session()
+                .filter(|session| session.provider == ProviderKind::Claude)
+                .and_then(|session| session.claude_config_dir.clone());
+            if provider == ProviderKind::Claude && claude_config_dir != selected_claude_config_dir {
+                continue;
+            }
             self.plan_usage_pending.remove(&provider);
             self.plan_usage_stale.remove(&provider);
             self.plan_usage_checked_at.insert(provider, Instant::now());
