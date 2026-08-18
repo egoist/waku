@@ -49,15 +49,15 @@ jobs:
             xdg-desktop-portal
 
       - name: Cache Cargo
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: ${{ runner.os }}-${{ runner.arch }}-rust-1.96.0-cargo-${{ hashFiles('Cargo.lock') }}
+          key: ${{ matrix.os }}-rust-1.96.0-cargo-${{ hashFiles('Cargo.lock') }}
           restore-keys: |
-            ${{ runner.os }}-${{ runner.arch }}-rust-1.96.0-cargo-
+            ${{ matrix.os }}-rust-1.96.0-cargo-
 
       - name: Run tests
         run: cargo test --locked

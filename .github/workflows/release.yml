@@ -75,20 +75,20 @@ jobs:
             pkg-config \
             xdg-desktop-portal
 
-      - uses: actions/cache@v4
+      - uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: ${{ runner.os }}-${{ runner.arch }}-rust-1.96.0-release-${{ hashFiles('Cargo.lock') }}
+          key: ubuntu-22.04-rust-1.96.0-release-${{ hashFiles('Cargo.lock') }}
           restore-keys: |
-            ${{ runner.os }}-${{ runner.arch }}-rust-1.96.0-release-
+            ubuntu-22.04-rust-1.96.0-release-
 
       - name: Bundle
         run: ./scripts/bundle-linux.sh
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: linux-x86_64
           path: target/release/waku-*-x86_64-unknown-linux-gnu.tar.gz
@@ -121,20 +121,20 @@ jobs:
             pkg-config \
             xdg-desktop-portal
 
-      - uses: actions/cache@v4
+      - uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: ${{ runner.os }}-${{ runner.arch }}-rust-1.96.0-release-${{ hashFiles('Cargo.lock') }}
+          key: ubuntu-22.04-arm-rust-1.96.0-release-${{ hashFiles('Cargo.lock') }}
           restore-keys: |
-            ${{ runner.os }}-${{ runner.arch }}-rust-1.96.0-release-
+            ubuntu-22.04-arm-rust-1.96.0-release-
 
       - name: Bundle
         run: ./scripts/bundle-linux.sh
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: linux-arm64
           path: target/release/waku-*-aarch64-unknown-linux-gnu.tar.gz
@@ -158,15 +158,15 @@ jobs:
       - name: Install create-dmg
         run: brew install create-dmg
 
-      - uses: actions/cache@v4
+      - uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: ${{ runner.os }}-${{ runner.arch }}-rust-1.96.0-release-${{ hashFiles('Cargo.lock') }}
+          key: macos-latest-rust-1.96.0-release-${{ hashFiles('Cargo.lock') }}
           restore-keys: |
-            ${{ runner.os }}-${{ runner.arch }}-rust-1.96.0-release-
+            macos-latest-rust-1.96.0-release-
 
       - name: Import Apple Developer Certificate
         env:
@@ -203,7 +203,7 @@ jobs:
           SPARKLE_PRIVATE_KEY: ${{ secrets.SPARKLE_PRIVATE_KEY }}
         run: bun run release --local
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: macos
           path: |
@@ -225,7 +225,7 @@ jobs:
 
       - uses: oven-sh/setup-bun@v2
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           path: artifacts
           merge-multiple: true
@@ -252,7 +252,7 @@ jobs:
             );
           '
 
-      - uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@v3
         with:
           draft: true
           # A manual run has no tag yet; publishing the draft creates this one
