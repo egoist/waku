@@ -51,7 +51,7 @@ jobs:
   linux-x86_64:
     name: Linux x86_64
     needs: version
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-22.04
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v6
@@ -97,7 +97,7 @@ jobs:
   linux-arm64:
     name: Linux arm64
     needs: version
-    runs-on: ubuntu-24.04-arm
+    runs-on: ubuntu-22.04-arm
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v6
@@ -230,6 +230,11 @@ jobs:
           path: artifacts
           merge-multiple: true
 
+      - name: Write the Linux version pointer
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+        run: echo "$VERSION" > artifacts/latest-linux.txt
+
       - name: Write release notes
         env:
           VERSION: ${{ needs.version.outputs.version }}
@@ -263,3 +268,4 @@ jobs:
             artifacts/*.md
             artifacts/*.zip
             artifacts/appcast.xml
+            artifacts/latest-linux.txt

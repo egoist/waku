@@ -157,10 +157,23 @@ Linux CI adds:
 
 - `waku-<version>-x86_64-unknown-linux-gnu.tar.gz`
 - `waku-<version>-aarch64-unknown-linux-gnu.tar.gz`
+- `latest-linux.txt` — the version `install.sh` resolves "latest" to
+
+Both Linux jobs run on **Ubuntu 22.04**, and that choice is load-bearing: the
+binaries link against the build machine's glibc, so the runner sets the oldest
+distribution Waku can start on (2.35 — Ubuntu 22.04, Debian 12, Fedora 36).
+Moving those jobs to a newer runner silently drops support for everything
+older.
 
 The workflow opens (or updates) a **draft** GitHub release with those files and
 the matching `CHANGELOG.md` section. Publishing the GitHub release syncs the
 assets — including the signed `appcast.xml` — to R2.
+
+`appcast.xml` and `latest-linux.txt` are the bucket's two mutable pointers and
+upload with a short cache lifetime; everything else is versioned and cached
+forever. Linux users install from that bucket via
+[`website/public/install.sh`](website/public/install.sh), served at
+`https://waku.sh/install.sh` — see [docs/linux.md](docs/linux.md).
 
 Publishing that GitHub release (or running **Sync release** from Actions)
 uploads the assets to the `waku-releases` R2 bucket. Configure these repository
@@ -236,7 +249,8 @@ secrets first:
   (`Waku-<v>.dmg`, `Waku-<v>.zip`, `appcast.xml`) must keep their URLs.
   Linux CI releases produce `waku-<v>-<target>.tar.gz` with
   `scripts/bundle-linux.sh` and land in GitHub Releases, then R2 via the
-  sync workflow. Automatic Linux updates are not yet wired. Windows can later join with
+  sync workflow. Automatic Linux updates are not yet wired — `install.sh`
+  re-run is the upgrade path. Windows can later join with
   `Waku-<v>-Setup.exe` + `appcast-windows.xml` (WinSparkle reads the same
   appcast format). `src/updater.rs` is the per-platform seam, and everything
   mac-specific in the existing release pipeline lives behind the Darwin guard

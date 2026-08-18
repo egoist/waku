@@ -58,6 +58,17 @@ The archive is written under `target/release` with an install-prefix layout
 not bundle system graphics libraries; distribution packages should declare
 those runtime dependencies normally.
 
+`website/public/install.sh` (served at `https://waku.sh/install.sh`) is what
+users run to install that archive. Point it at a local build to exercise it
+without publishing:
+
+```sh
+WAKU_BUNDLE_PATH=target/release/waku-<version>-<target>.tar.gz \
+  sh website/public/install.sh
+```
+
+[docs/linux.md](docs/linux.md) documents both paths for users.
+
 ## Making changes
 
 - Before starting work on anything larger than a bug fix, open an issue and

@@ -4,7 +4,19 @@ Waku is a fast, native desktop app for working with local coding agents. It is
 built in Rust with [GPUI](https://github.com/zed-industries/zed/tree/main/crates/gpui)
 and keeps projects, sessions, transcripts on your machine.
 
-[Download Waku](https://waku.sh)
+## Install
+
+On macOS, [download the signed `.dmg`](https://waku.sh). It updates itself.
+
+On Linux:
+
+```sh
+curl -fsSL https://waku.sh/install.sh | sh
+```
+
+The script installs into `~/.local` without root. See
+[docs/linux.md](docs/linux.md) for requirements, manual installation, and
+uninstalling.
 
 ## Supported agents
 
