@@ -69,7 +69,7 @@ settings.computer_use_keywords: 电脑操作 屏幕录制 辅助功能 应用 �
 settings.back: 返回
 settings.search: 搜索设置
 daemon.expose_title: 暴露由 Waku 管理的守护进程
-daemon.expose_description: 允许这台 Mac 之外的 Waku 客户端连接。更改此项只会重启守护进程。
+daemon.expose_description: 允许本机之外的 Waku 客户端连接。更改此项只会重启守护进程。
 daemon.status_local: 仅本机
 daemon.status_exposed: 已暴露
 daemon.status_restarting: 正在重启
@@ -84,13 +84,13 @@ daemon.allowed_origins_placeholder: https://waku.example.com, http://localhost:3
 daemon.apply: 应用
 daemon.restarting: 正在重启…
 daemon.credentials_title: 连接信息
-daemon.credentials_description: 在 Waku Web 中输入这些信息。此地址使用这台 Mac 的局域网主机名。
+daemon.credentials_description: 在 Waku Web 中输入这些信息。此地址使用本机的局域网主机名。
 daemon.websocket_url: WebSocket 地址
 daemon.token: 令牌
 daemon.reveal_token: 显示令牌
 daemon.hide_token: 隐藏令牌
 daemon.regenerate_token: 重新生成
-daemon.security_warning: 此令牌可完全访问这台 Mac 上的任务、文件、Git、附件和编程智能体。在私有网络之外请通过受信任的 TLS 代理使用 WSS。
+daemon.security_warning: 此令牌可完全访问本机上的任务、文件、Git、附件和编程智能体。在私有网络之外请通过受信任的 TLS 代理使用 WSS。
 daemon.external_title: 外部守护进程
 daemon.external_description: 此桌面应用连接到由 Waku 之外管理的守护进程。请在对应主机上配置监听地址、浏览器来源和令牌。
 daemon.web_external_description: Waku Web 连接到由浏览器之外管理的守护进程。请在对应主机上配置监听地址、浏览器来源和令牌。

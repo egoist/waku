@@ -73,8 +73,8 @@ settings.computer_use_keywords: コンピュータ 操作 画面収録 アクセ
 settings.back: 戻る
 settings.search: 設定を検索
 daemon.expose_title: 管理対象デーモンを公開
-daemon.expose_description: この Mac 以外の Waku クライアントから接続できるようにします。変更時はデーモンだけが再起動します。
-daemon.status_local: この Mac のみ
+daemon.expose_description: このマシン以外の Waku クライアントから接続できるようにします。変更時はデーモンだけが再起動します。
+daemon.status_local: このマシンのみ
 daemon.status_exposed: 公開中
 daemon.status_restarting: 再起動中
 daemon.connection_title: リスナーアクセス
@@ -88,13 +88,13 @@ daemon.allowed_origins_placeholder: https://waku.example.com, http://localhost:3
 daemon.apply: 適用
 daemon.restarting: 再起動中…
 daemon.credentials_title: 接続情報
-daemon.credentials_description: Waku Web に入力してください。URL にはこの Mac のローカルネットワーク用ホスト名が使われます。
+daemon.credentials_description: Waku Web に入力してください。URL にはこのマシンのローカルネットワーク用ホスト名が使われます。
 daemon.websocket_url: WebSocket URL
 daemon.token: トークン
 daemon.reveal_token: トークンを表示
 daemon.hide_token: トークンを隠す
 daemon.regenerate_token: 再生成
-daemon.security_warning: このトークンは、この Mac 上のタスク、ファイル、Git、添付ファイル、コーディングエージェントへの完全なアクセス権を持ちます。プライベートネットワーク外では信頼できる TLS プロキシ経由で WSS を使用してください。
+daemon.security_warning: このトークンは、このマシン上のタスク、ファイル、Git、添付ファイル、コーディングエージェントへの完全なアクセス権を持ちます。プライベートネットワーク外では信頼できる TLS プロキシ経由で WSS を使用してください。
 daemon.external_title: 外部デーモン
 daemon.external_description: このデスクトップは Waku の外部で管理されているデーモンに接続しています。リスナー、ブラウザオリジン、トークンは接続先ホストで設定してください。
 daemon.web_external_description: Waku Web はブラウザの外部で管理されているデーモンに接続します。リスナー、ブラウザオリジン、トークンは接続先ホストで設定してください。

@@ -143,7 +143,7 @@ settings.search:
 daemon.expose_title:
   en: Expose managed daemon
 daemon.expose_description:
-  en: Listen beyond this Mac so another Waku client can connect. Changing this restarts only the daemon.
+  en: Listen beyond this machine so another Waku client can connect. Changing this restarts only the daemon.
 daemon.status_local:
   en: Local only
 daemon.status_exposed:
@@ -173,7 +173,7 @@ daemon.restarting:
 daemon.credentials_title:
   en: Connection details
 daemon.credentials_description:
-  en: Enter these in Waku Web. The URL uses this Mac’s local network hostname.
+  en: Enter these in Waku Web. The URL uses this machine’s local network hostname.
 daemon.websocket_url:
   en: WebSocket URL
 daemon.token:
@@ -185,7 +185,7 @@ daemon.hide_token:
 daemon.regenerate_token:
   en: Regenerate
 daemon.security_warning:
-  en: The token grants full access to tasks, files, Git, attachments, and coding agents on this Mac. Use WSS through a trusted TLS proxy outside a private network.
+  en: The token grants full access to tasks, files, Git, attachments, and coding agents on this machine. Use WSS through a trusted TLS proxy outside a private network.
 daemon.external_title:
   en: External daemon
 daemon.external_description:
