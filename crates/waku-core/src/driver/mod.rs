@@ -1,7 +1,7 @@
 //! Local provider runtime owned by `waku-daemon`.
 
 mod acp;
-mod activity;
+pub(crate) mod activity;
 mod amp;
 mod claude;
 mod codex;
@@ -9,7 +9,7 @@ mod computer_use;
 mod deepseek;
 mod opencode;
 mod pi;
-mod support;
+pub(crate) mod support;
 mod title_refresh;
 
 use std::path::PathBuf;

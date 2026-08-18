@@ -499,6 +499,8 @@ skills.disable_named: 停用%{name}
 commands.init_description: 为此项目创建或更新 %{instructions_file}
 commands.review_description: 审查当前分支中尚未合并的更改
 commands.commit_description: 暂存并提交当前更改
+commands.resume_description: 继续在命令行中开始的会话
+commands.resume_argument: <会话>
 commands.fast_description: 切换快速模式
 commands.fast_enabled: 已启用快速模式
 commands.fast_disabled: 已关闭快速模式
@@ -635,6 +637,9 @@ errors.provider_complete_turn: "%{provider} 未能完成本轮任务"
 errors.pi_reported_error: Pi 报告了错误
 session.response_unavailable: 该回复已不可用
 session.response_cannot_fork: 目前无法从该回复派生任务
+session.resumed_note: 正在恢复 %{provider} 会话
+session.resume_scanning: 正在查找可恢复的会话
+session.resume_none_found: 该项目还没有记录任何 %{provider} 会话
 session.response_fork_in_progress: 请等待任务派生完成后再移除原任务
 session.response_cannot_copy: 无法将该回复复制到新任务中
 session.forked_with_checkpoint_warning: "任务已派生，但部分 Git 检查点未能复制：%{error}"

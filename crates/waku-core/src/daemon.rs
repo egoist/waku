@@ -495,6 +495,17 @@ impl Backend for WakuBackend {
                     result: fork_provider_session(request)?,
                 })
             }
+            Command::ListProviderSessions {
+                provider,
+                project_root,
+            } => Ok(ResponsePayload::ProviderSessions {
+                sessions: crate::provider_sessions::list(provider, &project_root),
+            }),
+            Command::ImportProviderSession { cursor } => {
+                Ok(ResponsePayload::ImportedProviderSession {
+                    records: crate::provider_sessions::import(cursor)?,
+                })
+            }
             Command::Workspace {
                 operation:
                     WorkspaceOperation::CaptureTurn {
@@ -1539,6 +1550,8 @@ fn handle_driver_command(
         | Command::ForkSessionFromResponse { .. }
         | Command::RewindSessionToMessage { .. }
         | Command::ForkProviderSession { .. }
+        | Command::ListProviderSessions { .. }
+        | Command::ImportProviderSession { .. }
         | Command::Workspace { .. }
         | Command::OpenTerminal { .. }
         | Command::WriteTerminal { .. }

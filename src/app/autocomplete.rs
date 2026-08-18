@@ -20,6 +20,7 @@ use gpui::{
     Anchor, App, Bounds, Font, KeyBinding, Pixels, StyledText, TextRun, anchored, deferred,
 };
 use nucleo_matcher::Matcher;
+use waku_client::provider_session::ResumableSession;
 
 use crate::composer_complete::{
     self, FILE_INDEX_CAP, FileEntry, Scored, SlashCommand, Trigger, TriggerKind,
@@ -49,6 +50,7 @@ pub fn init(cx: &mut App) {
 pub(super) enum AutocompleteRow {
     Command(Scored<SlashCommand>),
     File(Scored<FileEntry>),
+    Session(Scored<ResumableSession>),
 }
 
 /// Filter results for one (kind, query, source index) — the popup's rows are
@@ -114,6 +116,8 @@ impl Waku {
             self.slash_command_index_key = None;
             self.mention_file_index = Rc::new(Vec::new());
             self.mention_file_index_path = None;
+            self.resume_session_index = Rc::new(Vec::new());
+            self.resume_session_index_key = None;
             return;
         };
         let provider = self
@@ -124,6 +128,11 @@ impl Waku {
             .selected_session()
             .map(|session| session.available_commands.clone())
             .unwrap_or_default();
+        let resume_requested = {
+            let input = self.composer.read(cx);
+            composer_complete::detect_trigger(input.content(), input.cursor())
+                .is_some_and(|trigger| trigger.kind == TriggerKind::ResumeSession)
+        };
 
         let command_key = (provider, project_path.clone());
         match self.slash_commands.read(&command_key) {
@@ -131,7 +140,7 @@ impl Waku {
                 self.slash_command_index = Rc::new(composer_complete::merge_reported_commands(
                     &commands, &reported,
                 ));
-                self.slash_command_index_key = Some(command_key);
+                self.slash_command_index_key = Some(command_key.clone());
             }
             Query::Pending => {
                 // A scan for this exact key is in flight; anything drawn
@@ -175,6 +184,62 @@ impl Waku {
                 })
                 .detach();
             }
+        }
+
+        // Sessions a Waku task already holds are dropped here: the sidebar
+        // opens those, so offering them again would fork one CLI thread.
+        if provider.records_resumable_sessions() && resume_requested {
+            // Anything drawn before this key's scan lands must not be another
+            // project's list.
+            if self.resume_session_index_key.as_ref() != Some(&command_key) {
+                self.resume_session_index = Rc::new(Vec::new());
+                self.resume_session_index_key = None;
+            }
+            match self.resumable_sessions.read(&command_key) {
+                Query::Ready(sessions) => {
+                    let held = self
+                        .state
+                        .sessions
+                        .iter()
+                        .filter_map(|session| session.provider_cursor.as_ref())
+                        .map(ProviderResumeCursor::native_id)
+                        .collect::<HashSet<_>>();
+                    self.resume_session_index = Rc::new(
+                        sessions
+                            .iter()
+                            .filter(|session| !held.contains(session.cursor.native_id()))
+                            .cloned()
+                            .collect(),
+                    );
+                    self.resume_session_index_key = Some(command_key);
+                }
+                Query::Pending => {}
+                Query::Missing(token) => {
+                    let path = project_path.clone();
+                    let workspace = waku_client::WorkspaceClient::new(self.daemon.client());
+                    cx.spawn(async move |waku, cx| {
+                        let sessions = cx
+                            .background_executor()
+                            .spawn(async move {
+                                workspace
+                                    .list_provider_sessions(provider, &path)
+                                    .unwrap_or_default()
+                            })
+                            .await;
+                        waku.update(cx, |waku, cx| {
+                            if waku.resumable_sessions.fulfill(token, sessions) {
+                                waku.refresh_composer_sources(cx);
+                                cx.notify();
+                            }
+                        })
+                        .ok();
+                    })
+                    .detach();
+                }
+            }
+        } else {
+            self.resume_session_index = Rc::new(Vec::new());
+            self.resume_session_index_key = None;
         }
 
         match self.mention_files.read(&project_path) {
@@ -236,6 +301,8 @@ impl Waku {
                 .map(|session| session.provider)
                 .unwrap_or(self.state.last_provider);
             self.slash_commands.invalidate(&(provider, path.clone()));
+            self.resumable_sessions
+                .invalidate(&(provider, path.clone()));
             self.mention_files.invalidate(&path);
         }
         self.refresh_composer_sources(cx);
@@ -272,6 +339,7 @@ impl Waku {
         let source = match trigger.kind {
             TriggerKind::Command => Rc::as_ptr(&self.slash_command_index) as usize,
             TriggerKind::File => Rc::as_ptr(&self.mention_file_index) as usize,
+            TriggerKind::ResumeSession => Rc::as_ptr(&self.resume_session_index) as usize,
         };
         {
             let memo = self.composer_autocomplete.results.borrow();
@@ -298,6 +366,14 @@ impl Waku {
             )
             .into_iter()
             .map(AutocompleteRow::File)
+            .collect(),
+            TriggerKind::ResumeSession => composer_complete::filter_sessions(
+                &self.resume_session_index,
+                &trigger.query,
+                &mut matcher,
+            )
+            .into_iter()
+            .map(AutocompleteRow::Session)
             .collect(),
         };
         let rows = Rc::new(rows);
@@ -355,6 +431,16 @@ impl Waku {
         let insert = match row {
             AutocompleteRow::Command(scored) => format!("/{} ", scored.item.name),
             AutocompleteRow::File(scored) => format!("@{} ", scored.item.path),
+            // Choosing a session is the whole action, so the invocation
+            // leaves the composer rather than completing into text to send.
+            AutocompleteRow::Session(scored) => {
+                let session = scored.item.clone();
+                self.composer.update(cx, |input, cx| {
+                    input.replace_range(trigger.range.clone(), "", cx);
+                });
+                self.resume_provider_session(session, cx);
+                return;
+            }
         };
         if matches!(row, AutocompleteRow::Command(_)) {
             let mut submission = self.composer.read(cx).content().to_owned();
@@ -582,6 +668,34 @@ impl Waku {
                                 )),
                         )
                     })
+                    .into_any_element()
+            }
+            AutocompleteRow::Session(scored) => {
+                let session = &scored.item;
+                let modified = (session.modified_ms / 1_000).max(0) as u64;
+                let age = crate::model::unix_time().saturating_sub(modified);
+                base.child(icon("icons/rotate-cw.svg", 12.0, theme.text_tertiary))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .text_size(px(12.0))
+                            .child(matched_text(
+                                session.label.clone(),
+                                highlight_byte_ranges(&session.label, &scored.positions, 0),
+                                theme.text,
+                                theme.accent,
+                                font,
+                            )),
+                    )
+                    .child(
+                        div()
+                            .flex_none()
+                            .text_size(px(11.0))
+                            .text_color(theme.text_tertiary)
+                            .child(super::sidebar::format_time_ago(age)),
+                    )
                     .into_any_element()
             }
         }

@@ -6,6 +6,7 @@ use nucleo_matcher::pattern::{CaseMatching, Normalization, Pattern};
 use nucleo_matcher::{Matcher, Utf32Str};
 pub use waku_protocol::composer::{CommandScope, FileEntry, SlashCommand};
 use waku_protocol::model::{ProviderKind, ProviderModelOption, ReportedCommand};
+use waku_protocol::provider_session::ResumableSession;
 
 pub const FILTER_CAP: usize = 64;
 pub const FILE_INDEX_CAP: usize = 50_000;
@@ -14,7 +15,10 @@ pub const FILE_INDEX_CAP: usize = 50_000;
 pub enum TriggerKind {
     Command,
     File,
+    ResumeSession,
 }
+
+pub const RESUME_COMMAND: &str = "resume";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Trigger {
@@ -31,6 +35,16 @@ pub fn detect_trigger(text: &str, cursor: usize) -> Option<Trigger> {
     let line_start = text[..cursor].rfind('\n').map_or(0, |index| index + 1);
     let line_prefix = &text[line_start..cursor];
     if let Some(query) = line_prefix.strip_prefix('/') {
+        if let Some(session) = query
+            .strip_prefix(RESUME_COMMAND)
+            .and_then(|rest| rest.strip_prefix(char::is_whitespace))
+        {
+            return Some(Trigger {
+                kind: TriggerKind::ResumeSession,
+                query: session.to_owned(),
+                range: line_start..cursor,
+            });
+        }
         if !query.chars().any(char::is_whitespace) {
             return Some(Trigger {
                 kind: TriggerKind::Command,
@@ -50,6 +64,13 @@ pub fn detect_trigger(text: &str, cursor: usize) -> Option<Trigger> {
         kind: TriggerKind::File,
         query: token.strip_prefix('@')?.to_owned(),
         range: token_start..cursor,
+    })
+}
+
+pub fn is_resume_invocation(prompt: &str) -> bool {
+    prompt.trim_start().strip_prefix('/').is_some_and(|rest| {
+        rest.strip_prefix(RESUME_COMMAND)
+            .is_some_and(|rest| rest.is_empty() || rest.starts_with(char::is_whitespace))
     })
 }
 
@@ -216,22 +237,31 @@ fn filter_scored(
         .collect()
 }
 
+fn filter_items<T: Clone, F>(
+    items: &[T],
+    query: &str,
+    matcher: &mut Matcher,
+    label: F,
+) -> Vec<Scored<T>>
+where
+    F: for<'a> Fn(&'a T) -> &'a str,
+{
+    let labels = items.iter().map(label).collect::<Vec<_>>();
+    filter_scored(&labels, query, matcher, FILTER_CAP)
+        .into_iter()
+        .map(|(index, positions)| Scored {
+            item: items[index].clone(),
+            positions,
+        })
+        .collect()
+}
+
 pub fn filter_commands(
     commands: &[SlashCommand],
     query: &str,
     matcher: &mut Matcher,
 ) -> Vec<Scored<SlashCommand>> {
-    let names = commands
-        .iter()
-        .map(|command| command.name.as_str())
-        .collect::<Vec<_>>();
-    filter_scored(&names, query, matcher, FILTER_CAP)
-        .into_iter()
-        .map(|(index, positions)| Scored {
-            item: commands[index].clone(),
-            positions,
-        })
-        .collect()
+    filter_items(commands, query, matcher, |command| command.name.as_str())
 }
 
 pub fn filter_files(
@@ -239,17 +269,15 @@ pub fn filter_files(
     query: &str,
     matcher: &mut Matcher,
 ) -> Vec<Scored<FileEntry>> {
-    let paths = files
-        .iter()
-        .map(|file| file.path.as_str())
-        .collect::<Vec<_>>();
-    filter_scored(&paths, query, matcher, FILTER_CAP)
-        .into_iter()
-        .map(|(index, positions)| Scored {
-            item: files[index].clone(),
-            positions,
-        })
-        .collect()
+    filter_items(files, query, matcher, |file| file.path.as_str())
+}
+
+pub fn filter_sessions(
+    sessions: &[ResumableSession],
+    query: &str,
+    matcher: &mut Matcher,
+) -> Vec<Scored<ResumableSession>> {
+    filter_items(sessions, query, matcher, |session| session.label.as_str())
 }
 
 pub fn highlight_byte_ranges(
@@ -273,6 +301,28 @@ pub fn highlight_byte_ranges(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn resume_keeps_its_trigger_open_past_the_space_that_ends_other_commands() {
+        let trigger = detect_trigger("/resume parser", 14).expect("resume takes an argument");
+        assert_eq!(trigger.kind, TriggerKind::ResumeSession);
+        assert_eq!(trigger.query, "parser");
+        assert_eq!(trigger.range, 0..14);
+        assert_eq!(
+            detect_trigger("/resume", 7).map(|trigger| trigger.kind),
+            Some(TriggerKind::Command)
+        );
+        assert!(detect_trigger("/review the diff", 16).is_none());
+    }
+
+    #[test]
+    fn resume_is_recognized_only_as_a_whole_command() {
+        assert!(is_resume_invocation("/resume"));
+        assert!(is_resume_invocation("/resume 019f-thread"));
+        assert!(!is_resume_invocation("/resumes"));
+        assert!(!is_resume_invocation("resume the work"));
+        assert!(!is_resume_invocation("/review"));
+    }
 
     #[test]
     fn merged_command_picker_puts_builtins_first_and_skills_last() {

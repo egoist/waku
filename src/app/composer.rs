@@ -2078,6 +2078,21 @@ impl Waku {
         prompt: &str,
         cx: &mut Context<Self>,
     ) -> bool {
+        if let Some(provider) = self
+            .selected_session()
+            .map(|session| session.provider)
+            .filter(|provider| provider.records_resumable_sessions())
+            .filter(|_| crate::composer_complete::is_resume_invocation(prompt))
+        {
+            self.show_toast(match self.resume_session_index_key {
+                Some(_) => tr!(
+                    "session.resume_none_found",
+                    provider = provider.display_name()
+                ),
+                None => tr!("session.resume_scanning"),
+            });
+            return true;
+        }
         let Some(next_tier) = self.selected_session().and_then(|session| {
             if !crate::composer_complete::is_fast_mode_toggle_submission(
                 session.provider,

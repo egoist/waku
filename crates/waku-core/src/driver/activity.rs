@@ -8,7 +8,7 @@ use crate::model::{ActivityItem, ActivityKind};
 
 const MAX_ACTIVITY_CHARS: usize = 16_000;
 
-pub(super) fn tool_activity(
+pub(crate) fn tool_activity(
     source_id: Option<String>,
     kind: ActivityKind,
     title: String,
@@ -51,7 +51,26 @@ pub(super) fn tool_activity(
         .with_failed(failed)
 }
 
-pub(super) fn input_title(value: Option<&Value>) -> Option<String> {
+/// A tool row's title: whatever the call names itself, else the tool's name.
+/// The Agent tool names its work in `description`, so that counts too.
+pub(crate) fn tool_title(block: &Value, name: &str) -> String {
+    input_title(block.get("input"))
+        .or_else(|| {
+            (name.eq_ignore_ascii_case("task") || name.eq_ignore_ascii_case("agent"))
+                .then(|| {
+                    block
+                        .pointer("/input/description")
+                        .and_then(Value::as_str)
+                        .map(str::trim)
+                        .filter(|text| !text.is_empty())
+                        .map(str::to_owned)
+                })
+                .flatten()
+        })
+        .unwrap_or_else(|| name.to_owned())
+}
+
+pub(crate) fn input_title(value: Option<&Value>) -> Option<String> {
     let value = value?;
     value
         .get("title")

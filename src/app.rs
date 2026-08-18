@@ -39,6 +39,7 @@ use crate::model::{
     compact_path, unix_time, unix_time_millis,
 };
 use unicode_segmentation::UnicodeSegmentation;
+use waku_client::provider_session::ResumableSession;
 
 use crate::md::render::{
     Ctx as MarkdownCtx, MarkdownView, Metrics as MarkdownMetrics, Palette as MarkdownPalette,
@@ -1204,6 +1205,11 @@ pub struct Waku {
     /// provider's list.
     slash_command_index: Rc<Vec<SlashCommand>>,
     slash_command_index_key: Option<(ProviderKind, PathBuf)>,
+    /// Sessions `/resume` can attach to, per (provider, project root). Scanned
+    /// off-thread, already filtered to the ones no Waku task holds.
+    resumable_sessions: QueryCache<(ProviderKind, PathBuf), Vec<ResumableSession>>,
+    resume_session_index: Rc<Vec<ResumableSession>>,
+    resume_session_index_key: Option<(ProviderKind, PathBuf)>,
     /// Workspace file index per project root, for `@` mentions.
     mention_files: QueryCache<PathBuf, Vec<FileEntry>>,
     mention_file_index: Rc<Vec<FileEntry>>,
@@ -2310,6 +2316,14 @@ impl Waku {
                     }
                     ComposerEvent::Edited => {
                         this.schedule_composer_draft_save(cx);
+                        let input = this.composer.read(cx);
+                        if crate::composer_complete::detect_trigger(input.content(), input.cursor())
+                            .is_some_and(|trigger| {
+                                trigger.kind == crate::composer_complete::TriggerKind::ResumeSession
+                            })
+                        {
+                            this.refresh_composer_sources(cx);
+                        }
                         cx.notify();
                     }
                     ComposerEvent::Focus => {}
@@ -2707,6 +2721,9 @@ impl Waku {
                 slash_commands: QueryCache::new(2 * MAX_CACHED_WORKSPACES),
                 slash_command_index: Rc::new(Vec::new()),
                 slash_command_index_key: None,
+                resumable_sessions: QueryCache::new(2 * MAX_CACHED_WORKSPACES),
+                resume_session_index: Rc::new(Vec::new()),
+                resume_session_index_key: None,
                 mention_files: QueryCache::new(MAX_CACHED_WORKSPACES),
                 mention_file_index: Rc::new(Vec::new()),
                 mention_file_index_path: None,

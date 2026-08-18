@@ -9,14 +9,16 @@ use crate::attachments::{AttachmentUpload, StoredAttachment};
 use crate::computer_use::ComputerPermissions;
 use crate::model::{AgentSession, Project, ProviderKind, ProviderProbe, UserInputAnswer};
 use crate::persistence::{ComposerDraftChange, ComposerDrafts, SessionMessageMatch};
-use crate::provider_session::{ProviderSessionFork, ProviderSessionForkRequest};
+use crate::provider_session::{
+    ImportedSessionRecord, ProviderSessionFork, ProviderSessionForkRequest, ResumableSession,
+};
 use crate::settings::DaemonSettings;
 use crate::skills::SkillsCatalog;
 use crate::usage::PlanUsage;
 use crate::usage_history::{UsageHistory, UsageWindow};
 use crate::workspace::{WorkspaceOperation, WorkspaceResult};
 
-pub const PROTOCOL_VERSION: u32 = 3;
+pub const PROTOCOL_VERSION: u32 = 4;
 pub const MAX_WIRE_MESSAGE_BYTES: usize = 48 * 1024 * 1024;
 pub const DAEMON_TOKEN_ENV: &str = "WAKU_DAEMON_TOKEN";
 pub const DAEMON_ADDRESS_ENV: &str = "WAKU_DAEMON_ADDRESS";
@@ -215,6 +217,14 @@ pub enum Command {
     },
     ForkProviderSession {
         request: ProviderSessionForkRequest,
+    },
+    ListProviderSessions {
+        provider: ProviderKind,
+        #[ts(type = "string")]
+        project_root: PathBuf,
+    },
+    ImportProviderSession {
+        cursor: crate::model::ProviderResumeCursor,
     },
     Workspace {
         operation: WorkspaceOperation,
@@ -415,6 +425,12 @@ pub enum ResponsePayload {
     ProviderSessionForked {
         result: ProviderSessionFork,
     },
+    ProviderSessions {
+        sessions: Vec<ResumableSession>,
+    },
+    ImportedProviderSession {
+        records: Vec<ImportedSessionRecord>,
+    },
     SessionForked {
         session: AgentSession,
         checkpoint_warning: Option<String>,
@@ -499,7 +515,7 @@ mod tests {
 
         assert_eq!(json["type"], "forkSessionFromResponse");
         assert_eq!(json["turnCount"], 7);
-        assert_eq!(PROTOCOL_VERSION, 3);
+        assert_eq!(PROTOCOL_VERSION, 4);
     }
 
     #[test]
@@ -508,7 +524,7 @@ mod tests {
 
         assert_eq!(json["type"], "rewindSessionToMessage");
         assert_eq!(json["turnCount"], 4);
-        assert_eq!(PROTOCOL_VERSION, 3);
+        assert_eq!(PROTOCOL_VERSION, 4);
     }
 
     #[test]

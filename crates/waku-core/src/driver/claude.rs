@@ -1180,23 +1180,7 @@ fn handle_message(
                             .map(str::to_owned)
                             .unwrap_or_else(|| tr!("activity.tool"));
                         let kind = super::support::classify_tool(&wire_title);
-                        // The Agent tool names its work in `description`;
-                        // without this the row reads as a bare "Agent".
-                        let title = activity::input_title(block.get("input"))
-                            .or_else(|| {
-                                (wire_title.eq_ignore_ascii_case("task")
-                                    || wire_title.eq_ignore_ascii_case("agent"))
-                                .then(|| {
-                                    block
-                                        .pointer("/input/description")
-                                        .and_then(Value::as_str)
-                                        .map(str::trim)
-                                        .filter(|text| !text.is_empty())
-                                        .map(str::to_owned)
-                                })
-                                .flatten()
-                            })
-                            .unwrap_or_else(|| wire_title.clone());
+                        let title = activity::tool_title(block, &wire_title);
                         if let Some(id) = &id {
                             let command = block
                                 .pointer("/input/command")

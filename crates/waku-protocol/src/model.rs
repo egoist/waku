@@ -87,6 +87,12 @@ impl ProviderKind {
         }
     }
 
+    /// `true` when the CLI records a transcript on disk that `/resume` can
+    /// list and rebind a task to.
+    pub fn records_resumable_sessions(self) -> bool {
+        matches!(self, Self::Claude)
+    }
+
     pub fn supports_conversation_rollback(self) -> bool {
         matches!(
             self,
@@ -994,8 +1000,15 @@ impl AgentSession {
         true
     }
 
+    /// A bound cursor names one CLI's conversation, so the model may change
+    /// within that provider but never across providers.
     pub fn can_choose_model(&self, provider: ProviderKind) -> bool {
-        !self.status.is_busy() && (self.messages.is_empty() || self.provider == provider)
+        !self.status.is_busy()
+            && (self.messages.is_empty() || self.provider == provider)
+            && self
+                .provider_cursor
+                .as_ref()
+                .is_none_or(|cursor| cursor.provider() == provider)
     }
 
     pub fn migrate_legacy_state(&mut self) {
@@ -3738,6 +3751,19 @@ mod tests {
         session.push_message(MessageRole::User, "first turn");
         assert!(session.can_choose_model(ProviderKind::Codex));
         assert!(!session.can_choose_model(ProviderKind::Claude));
+    }
+
+    #[test]
+    fn model_selection_keeps_resumed_drafts_on_their_provider() {
+        let project = Project::from_path(PathBuf::from("/tmp/waku"));
+        let mut session = AgentSession::new(project.id, ProviderKind::Claude);
+        session.provider_cursor = Some(ProviderResumeCursor::from_session_id(
+            ProviderKind::Claude,
+            "session-id".into(),
+        ));
+
+        assert!(session.can_choose_model(ProviderKind::Claude));
+        assert!(!session.can_choose_model(ProviderKind::Codex));
     }
 
     #[test]

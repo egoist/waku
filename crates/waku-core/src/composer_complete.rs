@@ -8,7 +8,7 @@
 
 use std::collections::BTreeSet;
 use std::ops::Range;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use crate::model::{ProviderKind, ReportedCommand};
 use nucleo_matcher::pattern::{CaseMatching, Normalization, Pattern};
@@ -84,7 +84,6 @@ pub fn detect_trigger(text: &str, cursor: usize) -> Option<Trigger> {
 
 // ── Slash commands ─────────────────────────────────────────────────────────
 
-/// Where a command came from, in the order groups are listed.
 /// Waku's own built-ins. The shared commands are plain prompt templates Waku
 /// expands at submit, so they work over any transport — unlike a CLI's native
 /// built-ins, which only its own TUI understands. Provider-specific local
@@ -135,6 +134,15 @@ fn builtin_waku_commands(provider: ProviderKind) -> Vec<SlashCommand> {
         template: Some(template),
     })
     .collect::<Vec<_>>();
+    if provider.records_resumable_sessions() {
+        commands.push(SlashCommand {
+            name: "resume".to_owned(),
+            description: tr!("commands.resume_description"),
+            scope: CommandScope::Builtin,
+            argument_hint: Some(tr!("commands.resume_argument")),
+            template: None,
+        });
+    }
     if provider == ProviderKind::Codex {
         commands.push(SlashCommand {
             name: "fast".to_owned(),
@@ -203,11 +211,7 @@ fn builtin_claude_commands() -> Vec<SlashCommand> {
 /// and ACP's `available_commands_update` for Cursor and Grok.
 pub fn discover_slash_commands(provider: ProviderKind, project_root: &Path) -> Vec<SlashCommand> {
     let home = dirs::home_dir();
-    let claude_config_dir = std::env::var("CLAUDE_CONFIG_DIR")
-        .ok()
-        .map(PathBuf::from)
-        .filter(|path| path.is_absolute())
-        .or_else(|| home.as_deref().map(|home| home.join(".claude")));
+    let claude_config_dir = crate::claude_session::claude_config_dir();
     let mut commands = Vec::new();
     match provider {
         ProviderKind::Claude => {
@@ -1217,6 +1221,20 @@ mod tests {
                     "{} unexpectedly offers /fast",
                     provider.display_name()
                 );
+            }
+        }
+    }
+
+    #[test]
+    fn resume_builtin_is_claude_only() {
+        for provider in ProviderKind::ALL {
+            let resume = builtin_waku_commands(provider)
+                .into_iter()
+                .find(|command| command.name == "resume");
+            assert_eq!(resume.is_some(), provider == ProviderKind::Claude);
+            if let Some(resume) = resume {
+                assert_eq!(resume.scope, CommandScope::Builtin);
+                assert!(resume.template.is_none());
             }
         }
     }

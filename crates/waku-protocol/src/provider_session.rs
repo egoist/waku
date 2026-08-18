@@ -6,6 +6,24 @@ use ts_rs::TS;
 
 use crate::model::{AgentSession, ProviderResumeCursor};
 
+/// One provider-native session that a Waku task can resume.
+#[derive(Clone, Debug, Deserialize, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct ResumableSession {
+    pub cursor: ProviderResumeCursor,
+    pub label: String,
+    pub modified_ms: i64,
+}
+
+/// One piece of a provider transcript imported into a Waku task.
+#[derive(Clone, Debug, Deserialize, Serialize, TS)]
+#[serde(tag = "type", content = "value", rename_all = "camelCase")]
+pub enum ImportedSessionRecord {
+    Prompt(String),
+    Assistant(String),
+    Activity(crate::model::ActivityItem),
+}
+
 /// Daemon-host native-session operation used when no live driver can fork.
 #[derive(Clone, Debug, Deserialize, Serialize, TS)]
 #[serde(tag = "provider", rename_all = "camelCase")]
