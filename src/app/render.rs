@@ -1,3 +1,4 @@
+use super::window_chrome::{ClientCorners, ClientCornersExt};
 use super::*;
 
 fn should_render_empty_state(session: Option<&AgentSession>) -> bool {
@@ -325,6 +326,14 @@ impl Render for Waku {
                     .flex()
                     .flex_col()
                     .bg(theme.surface)
+                    // Whichever edge no panel covers is an edge this column
+                    // reaches, so it has to round those window corners itself.
+                    .when(panels.sidebar <= 0.0, |element| {
+                        element.rounded_client_corners(ClientCorners::Left, window)
+                    })
+                    .when(panels.right_panel <= 0.0, |element| {
+                        element.rounded_client_corners(ClientCorners::Right, window)
+                    })
                     .when(panels.sidebar > 0.0, |element| {
                         element.border_l_1().border_color(theme.sidebar_border)
                     })

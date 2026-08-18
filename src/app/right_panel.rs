@@ -1,6 +1,7 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
+use super::window_chrome::{ClientCorners, ClientCornersExt};
 use super::*;
 
 const TAB_SCROLL_FADE_WIDTH: f32 = 24.0;
@@ -2177,6 +2178,9 @@ impl Waku {
             .border_l_1()
             .border_color(theme.border_strong)
             .bg(theme.surface)
+            // Pinned to the window's right edge, so both right corners of a
+            // client-drawn frame are this panel's to round.
+            .rounded_client_corners(ClientCorners::Right, window)
             .relative()
             .child(self.render_right_panel_header(window, cx))
             .child(body)
