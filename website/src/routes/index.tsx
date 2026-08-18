@@ -23,7 +23,12 @@ import {
   TooltipProvider,
   TooltipTrigger,
 } from '@/components/ui/tooltip'
-import { FALLBACK_DOWNLOAD_URL, releaseQuery } from '@/lib/release'
+import {
+  FALLBACK_DOWNLOAD_URL,
+  WINDOWS_ARCHITECTURES,
+  releaseQuery,
+  windowsInstallerUrl,
+} from '@/lib/release'
 import type { ReactNode } from 'react'
 
 export const Route = createFileRoute('/')({
@@ -33,6 +38,9 @@ export const Route = createFileRoute('/')({
   },
   component: Home,
 })
+
+const WINDOWS_DOCS_URL =
+  'https://github.com/egoist/waku/blob/main/docs/windows.md'
 
 const PROVIDERS = [
   { slug: 'amp', label: 'Amp' },
@@ -110,12 +118,14 @@ function SectionLabel({ children }: { children: ReactNode }) {
 
 function DownloadMenu({
   downloadUrl,
+  version,
   size,
   align,
   className,
   showIcon = false,
 }: {
   downloadUrl: string
+  version?: string
   size: 'sm' | 'lg'
   align: 'start' | 'end'
   className?: string
@@ -154,15 +164,20 @@ function DownloadMenu({
             >
               Linux (x86_64, arm64)
             </Menu.LinkItem>
-            <Menu.LinkItem
-              href="https://github.com/egoist/waku/blob/main/docs/windows.md"
-              target="_blank"
-              rel="noreferrer"
-              closeOnClick
-              className={itemClassName}
-            >
-              Windows (x86_64, arm64)
-            </Menu.LinkItem>
+            {WINDOWS_ARCHITECTURES.map(({ arch, label }) => (
+              <Menu.LinkItem
+                key={arch}
+                href={
+                  version
+                    ? windowsInstallerUrl(version, arch)
+                    : WINDOWS_DOCS_URL
+                }
+                closeOnClick
+                className={itemClassName}
+              >
+                {label}
+              </Menu.LinkItem>
+            ))}
           </Menu.Popup>
         </Menu.Positioner>
       </Menu.Portal>
@@ -211,6 +226,7 @@ function Home() {
               </a>
               <DownloadMenu
                 downloadUrl={downloadUrl}
+                version={release?.version}
                 size="sm"
                 align="end"
               />
@@ -237,6 +253,7 @@ function Home() {
               <div className="mt-8 flex flex-wrap items-center gap-x-5 gap-y-3">
                 <DownloadMenu
                   downloadUrl={downloadUrl}
+                  version={release?.version}
                   size="lg"
                   className="h-10 px-4"
                   align="start"
@@ -325,6 +342,7 @@ function Home() {
               <div className="mt-6 flex flex-wrap items-center gap-x-5 gap-y-3">
                 <DownloadMenu
                   downloadUrl={downloadUrl}
+                  version={release?.version}
                   size="lg"
                   className="h-10 px-4"
                   align="start"
