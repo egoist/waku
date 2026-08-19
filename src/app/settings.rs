@@ -1673,6 +1673,7 @@ impl Waku {
     fn render_providers_settings(&self, cx: &mut Context<Self>) -> AnyElement {
         let theme = Theme::current(cx);
         let checking = self.provider_detection_remaining > 0;
+        let detection_known = self.provider_detection_checked_at.is_some();
         let checked_label = self
             .provider_detection_checked_at
             .filter(|_| !checking)
@@ -1732,7 +1733,14 @@ impl Waku {
                 theme.success
             };
 
-            let detail: AnyElement = if installed {
+            let detail: AnyElement = if !detection_known {
+                div()
+                    .w_full()
+                    .min_w_0()
+                    .truncate()
+                    .child(SharedString::from(tr!("common.checking")))
+                    .into_any_element()
+            } else if installed {
                 let mut parts = Vec::new();
                 if let Some(path) = binary_path {
                     parts.push(path);
@@ -1804,6 +1812,7 @@ impl Waku {
             let automatic_auth = crate::provider_setup::can_authenticate_automatically(kind);
             let probed_auth = crate::provider_setup::supports_auth_probe(kind);
             let setup_action = (!self.daemon.is_remote()
+                && (detection_known || setup_state.is_some())
                 && (!installed
                     || (!probed_auth && automatic_auth)
                     || (!automatic_auth && installed)

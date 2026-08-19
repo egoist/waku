@@ -2086,6 +2086,13 @@ impl Waku {
             return None;
         }
         if let Some(provider) = self.selected_session().map(|session| session.provider) {
+            if self.provider_detection_checked_at.is_none()
+                && !self.provider_setup.contains_key(&provider)
+            {
+                self.show_toast(tr!("common.checking"));
+                cx.notify();
+                return None;
+            }
             let installed = self
                 .provider_probe(provider)
                 .is_some_and(|probe| probe.installed);
@@ -2632,8 +2639,18 @@ impl Waku {
             .is_some_and(|probe| probe.installed);
         let auth_state = self.provider_auth.get(&provider);
         let setup_state = self.provider_setup.get(&provider);
+        // Startup probes are deliberately initialized as unavailable so no
+        // provider can be used before the daemon has checked the host. That
+        // placeholder is not evidence that a CLI is missing. Keep the
+        // composer still until the initial scan completes instead of flashing
+        // an install banner that disappears a moment later.
+        if !provider_setup_notice_can_render(
+            self.provider_detection_checked_at.is_some(),
+            setup_state.is_some(),
+        ) {
+            return None;
+        }
         let guided = crate::provider_setup::can_install_automatically(provider);
-        let probes_auth = crate::provider_setup::supports_auth_probe(provider);
         let remote = self.daemon.is_remote();
         let (title, description, action, pending) = match setup_state {
             Some(crate::provider_setup::ProviderSetupState::Installing) => (
@@ -2654,24 +2671,6 @@ impl Waku {
                 tr!("common.retry"),
                 false,
             ),
-            None if installed
-                && guided
-                && probes_auth
-                && matches!(
-                    auth_state,
-                    None | Some(crate::provider_setup::ProviderAuthState::Checking)
-                ) =>
-            {
-                (
-                    tr!("providers.checking_sign_in"),
-                    tr!(
-                        "providers.checking_sign_in_description",
-                        provider = provider.short_name()
-                    ),
-                    tr!("providers.checking_sign_in"),
-                    true,
-                )
-            }
             None if !installed && remote => (
                 tr!(
                     "providers.cli_required_title",
@@ -3895,6 +3894,15 @@ pub(super) fn merged_submission(prompt: &str, mentions: &[String]) -> Option<Str
         (true, false) => Some(mentions),
         (false, false) => Some(format!("{prompt} {mentions}")),
     }
+}
+
+/// A placeholder provider probe is intentionally unavailable until the daemon
+/// has inspected the host. It must not be rendered as a confirmed setup error.
+pub(super) fn provider_setup_notice_can_render(
+    detection_completed: bool,
+    setup_in_progress_or_failed: bool,
+) -> bool {
+    detection_completed || setup_in_progress_or_failed
 }
 
 fn focus_model_search(focus: FocusHandle, window: &mut Window) {

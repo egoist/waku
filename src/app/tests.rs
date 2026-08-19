@@ -1,6 +1,6 @@
 use super::composer::{
     ComposerSubmitAction, composer_submit_action, dropped_file_mention, merged_submission,
-    next_picker_highlight, visible_branch_entries,
+    next_picker_highlight, provider_setup_notice_can_render, visible_branch_entries,
 };
 use super::runtime::merge_remote_session_catalog;
 use super::settings::visible_settings_pages;
@@ -369,6 +369,13 @@ fn conversation_navigation_rail_visibility_requires_multiple_turns() {
     assert!(should_show_navigation_rail(20));
     assert!(!should_show_navigation_rail(1));
     assert!(!should_show_navigation_rail(0));
+}
+
+#[test]
+fn startup_provider_placeholders_never_flash_a_setup_notice() {
+    assert!(!provider_setup_notice_can_render(false, false));
+    assert!(provider_setup_notice_can_render(false, true));
+    assert!(provider_setup_notice_can_render(true, false));
 }
 
 #[test]
