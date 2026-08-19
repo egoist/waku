@@ -133,6 +133,12 @@ pub fn init(cx: &mut App) {
             Some("ComposerInput"),
         ),
         KeyBinding::new("ctrl-shift-right", SelectToNextWord, Some("ComposerInput")),
+        // The older clipboard chords, still the default on X11 and still what
+        // dictation and terminal tools send when they inject a paste rather
+        // than typing the text out character by character.
+        KeyBinding::new("shift-insert", Paste, Some("ComposerInput")),
+        KeyBinding::new("ctrl-insert", Copy, Some("ComposerInput")),
+        KeyBinding::new("shift-delete", Cut, Some("ComposerInput")),
     ]);
 }
 
