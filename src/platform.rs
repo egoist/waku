@@ -401,7 +401,7 @@ pub fn configure_sidebar_material(window: &Window, dark: bool) {
         }
 
         let (red, green, blue) = if dark {
-            (0x0C, 0x11, 0x15)
+            (0x18, 0x18, 0x18)
         } else {
             (0xFC, 0xFC, 0xFC)
         };

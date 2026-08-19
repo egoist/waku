@@ -100,10 +100,10 @@ impl Theme {
             sidebar: if cfg!(target_os = "macos") {
                 transparent_black()
             } else {
-                rgb(0x0C1115).into()
+                rgb(0x181818).into()
             },
-            sidebar_drag_background: rgb(0x0C1115).into(),
-            sidebar_item_background: rgb(0x222224).into(),
+            sidebar_drag_background: rgb(0x181818).into(),
+            sidebar_item_background: rgb(0x181818).into(),
             surface: rgb(0x171717).into(),
             raised: rgb(0x070A0F).into(),
             composer: rgb(0x070A0F).into(),
