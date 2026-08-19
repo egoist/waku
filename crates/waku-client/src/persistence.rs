@@ -48,6 +48,10 @@ fn default_analytics_enabled() -> bool {
     true
 }
 
+fn default_collapse_activity_groups() -> bool {
+    true
+}
+
 fn default_provider() -> ProviderKind {
     ProviderKind::Codex
 }
@@ -215,6 +219,7 @@ pub struct AppSettings {
     pub favorite_models: Vec<FavoriteModel>,
     pub theme: ThemePreference,
     pub language: AppLanguage,
+    pub collapse_activity_groups_by_default: bool,
     pub daemon_exposure: DaemonExposureSettings,
 }
 
@@ -225,6 +230,7 @@ impl Default for AppSettings {
             favorite_models: Vec::new(),
             theme: ThemePreference::System,
             language: AppLanguage::default(),
+            collapse_activity_groups_by_default: true,
             daemon_exposure: DaemonExposureSettings::default(),
         }
     }
@@ -291,6 +297,8 @@ pub struct PersistedState {
     pub theme: ThemePreference,
     #[serde(default)]
     pub language: AppLanguage,
+    #[serde(default = "default_collapse_activity_groups")]
+    pub collapse_activity_groups_by_default: bool,
     #[serde(default)]
     pub daemon_exposure: DaemonExposureSettings,
     #[serde(default = "default_sidebar_visibility")]
@@ -351,6 +359,7 @@ impl PersistedState {
             favorite_models: Vec::new(),
             theme: ThemePreference::System,
             language: AppLanguage::default(),
+            collapse_activity_groups_by_default: true,
             daemon_exposure: DaemonExposureSettings::default(),
             sidebar_visible: true,
             right_panel_visible: false,
@@ -467,6 +476,7 @@ impl PersistedState {
             favorite_models: self.favorite_models.clone(),
             theme: self.theme,
             language: self.language,
+            collapse_activity_groups_by_default: self.collapse_activity_groups_by_default,
             daemon_exposure: self.daemon_exposure.clone(),
         }
     }
@@ -496,6 +506,7 @@ impl PersistedState {
         self.favorite_models = settings.favorite_models;
         self.theme = settings.theme;
         self.language = settings.language;
+        self.collapse_activity_groups_by_default = settings.collapse_activity_groups_by_default;
         self.daemon_exposure = settings.daemon_exposure;
     }
 
@@ -991,6 +1002,14 @@ mod tests {
                 [configuration_directory().join("settings.json")]
             );
         }
+    }
+
+    #[test]
+    fn activity_groups_default_to_collapsed_in_partial_settings() {
+        let settings: AppSettings = serde_json::from_str(r#"{"theme":"dark"}"#).unwrap();
+
+        assert_eq!(settings.theme, ThemePreference::Dark);
+        assert!(settings.collapse_activity_groups_by_default);
     }
 
     #[test]
