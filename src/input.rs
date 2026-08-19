@@ -1279,10 +1279,11 @@ impl ComposerInput {
             return;
         };
         let text = match self.mode {
-            // A composer is one prompt — and a search box one query — so
-            // pasted line breaks become spaces.
-            FieldMode::Composer | FieldMode::Search => text.replace(['\n', '\r'], " "),
-            FieldMode::Code => text.replace('\r', ""),
+            // A search box is one query, so pasted line breaks become spaces.
+            FieldMode::Search => text.replace(['\n', '\r'], " "),
+            // A composer prompt keeps pasted line breaks, matching what
+            // shift-enter can type; only CR line endings are normalized.
+            FieldMode::Composer | FieldMode::Code => text.replace('\r', ""),
         };
         // A paste is its own undo step, never part of the typing around it —
         // the native NSTextView boundary, stricter than Zed's time grouping.
@@ -2458,10 +2459,10 @@ mod tests {
 
     use super::TokenClass;
     use super::{
-        ComposerInput, EditHistory, SearchPaint, UNDO_GROUP_INTERVAL, UNDO_HISTORY_CAP,
-        attachment_paste_entries, cursor_should_be_visible, input_text_runs, next_word_boundary,
-        previous_word_boundary, single_line_scroll, trimmed_splice, visual_row_count,
-        word_range_at,
+        ComposerInput, EditHistory, FieldMode, Paste, SearchPaint, UNDO_GROUP_INTERVAL,
+        UNDO_HISTORY_CAP, attachment_paste_entries, cursor_should_be_visible, input_text_runs,
+        next_word_boundary, previous_word_boundary, single_line_scroll, trimmed_splice,
+        visual_row_count, word_range_at,
     };
 
     struct InputHarness {
@@ -2506,6 +2507,31 @@ mod tests {
         cx.read_entity(&input, |input, _| {
             assert_eq!(input.content(), "hello\n world");
             assert_eq!(input.cursor(), 6);
+        });
+    }
+
+    #[gpui::test]
+    fn composer_paste_keeps_line_breaks_and_search_paste_flattens_them(cx: &mut TestAppContext) {
+        let (input, cx) = setup_input(cx, "", px(300.));
+
+        cx.update(|window, cx| {
+            cx.write_to_clipboard(ClipboardItem::new_string("one\r\ntwo\nthree".into()));
+            input.update(cx, |input, cx| input.paste(&Paste, window, cx));
+        });
+        cx.read_entity(&input, |input, _| {
+            assert_eq!(input.content(), "one\ntwo\nthree");
+        });
+
+        cx.update(|window, cx| {
+            cx.write_to_clipboard(ClipboardItem::new_string("one\ntwo\nthree".into()));
+            input.update(cx, |input, cx| {
+                input.mode = FieldMode::Search;
+                input.set_content(String::new(), cx);
+                input.paste(&Paste, window, cx);
+            });
+        });
+        cx.read_entity(&input, |input, _| {
+            assert_eq!(input.content(), "one two three");
         });
     }
 
