@@ -279,6 +279,21 @@ impl Waku {
                     self.composer_sources_stale = true;
                 }
             }
+            DriverEvent::ExternalUserMessage(message) => {
+                runtime.last_driver_error = None;
+                if let Some(session) = self.state.session_mut(session_id) {
+                    if session.active_turn_id().is_some() {
+                        session.push_user_message_with_presentation(message, None, Vec::new());
+                    } else {
+                        session.set_title_from_prompt(&message);
+                        session.begin_turn_with_presentation(message, None, Vec::new());
+                    }
+                    session.mark_active_turn_provider_started();
+                    session.status = SessionStatus::Working;
+                    session.updated_at = unix_time();
+                    self.state.mark_session_dirty(session_id);
+                }
+            }
             DriverEvent::TurnStarted => {
                 runtime.last_driver_error = None;
                 if let Some(session) = self.state.session_mut(session_id)
