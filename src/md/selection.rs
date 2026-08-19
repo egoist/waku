@@ -139,6 +139,23 @@ impl Selection {
         (!self.is_empty()).then(|| self.text())
     }
 
+    /// Selected spans belonging to one transcript row, preserving the stable
+    /// flattened-text ordinal and byte offsets used by the renderer.
+    pub fn spans_for_row(&self, row: &str) -> Vec<(usize, Range<usize>, Rc<str>, bool)> {
+        self.spans
+            .iter()
+            .filter(|span| span.key.row.as_ref() == row)
+            .map(|span| {
+                (
+                    span.key.index,
+                    span.range.clone(),
+                    span.text.clone(),
+                    span.block_break,
+                )
+            })
+            .collect()
+    }
+
     /// The full selected text, spans joined in document order.
     pub fn text(&self) -> String {
         let mut out = String::new();

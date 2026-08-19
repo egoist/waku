@@ -242,10 +242,17 @@ common.copied: 已复制
 common.copy_message: 复制消息
 common.copy_message_title: 复制消息
 common.copy_selection: 复制所选内容
+common.comment_on_selection: 评论所选内容…
 common.copy_to_composer: 复制到输入框
 common.copy_code: 复制代码
 common.cancel: 取消
 common.send: 发送
+annotations.count: "%{count} 条批注"
+annotations.show: 显示批注
+annotations.comment_placeholder: 添加评论…
+annotations.remove: 删除批注
+annotations.goto: 前往
+annotations.sent_heading: 批注
 session.fork_task: 从此处派生任务
 session.fork_task_title: 从此处派生任务
 session.forking_task: 正在派生任务…

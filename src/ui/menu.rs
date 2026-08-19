@@ -724,6 +724,20 @@ pub fn toggle_popover(
     open_menu(handle, anchor, SurfaceFocus::Content, true, window, cx);
 }
 
+/// Open a popover at the current pointer before its trigger has painted. This
+/// is used when a context-menu action creates the trigger and its content in
+/// the same interaction.
+pub fn open_popover_at_mouse(handle: &ContextMenuHandle, window: &mut Window, cx: &mut App) {
+    open_menu(
+        handle,
+        window.mouse_position(),
+        SurfaceFocus::Content,
+        true,
+        window,
+        cx,
+    );
+}
+
 /// The shared half of both dropdown surfaces: a trigger that records its bounds
 /// and toggles the handle, plus the open card deferred and anchored to it.
 fn anchored_surface<E>(

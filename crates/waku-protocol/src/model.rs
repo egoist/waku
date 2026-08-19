@@ -673,6 +673,8 @@ pub struct QueuedMessage {
     pub display_content: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub attachments: Vec<MessageAttachment>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub annotations: Vec<ComposerAnnotation>,
     pub created_at: u64,
 }
 
@@ -683,6 +685,7 @@ impl QueuedMessage {
             content: content.into(),
             display_content: None,
             attachments: Vec::new(),
+            annotations: Vec::new(),
             created_at: unix_time(),
         }
     }
@@ -696,6 +699,18 @@ impl QueuedMessage {
             display_content,
             attachments,
             ..Self::new(content)
+        }
+    }
+
+    pub fn with_annotations(
+        content: impl Into<String>,
+        display_content: Option<String>,
+        attachments: Vec<MessageAttachment>,
+        annotations: Vec<ComposerAnnotation>,
+    ) -> Self {
+        Self {
+            annotations,
+            ..Self::with_presentation(content, display_content, attachments)
         }
     }
 
@@ -1414,6 +1429,30 @@ pub struct MessageAttachment {
     /// name is retained for storage compatibility.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub blob_reference: Option<String>,
+}
+
+/// A pending note tied to quoted text from a transcript message. It lives in
+/// the composer draft until submission and is serialized into the provider
+/// prompt without cluttering the sent user bubble.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+pub struct ComposerAnnotation {
+    #[ts(type = "string")]
+    pub id: Uuid,
+    #[ts(type = "string")]
+    pub message_id: Uuid,
+    pub quote: String,
+    pub comment: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ranges: Vec<ComposerAnnotationRange>,
+}
+
+/// A stable byte range in one flattened Markdown text element. Element
+/// ordinals are scoped to the source message and survive virtualized remounts.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+pub struct ComposerAnnotationRange {
+    pub text_index: usize,
+    pub start: usize,
+    pub end: usize,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, TS)]

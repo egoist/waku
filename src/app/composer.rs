@@ -2112,13 +2112,27 @@ impl Waku {
             .iter()
             .map(|attachment| attachment.mention.clone())
             .collect::<Vec<_>>();
-        let submission = merged_submission(prompt, &mentions)?;
-        let display_content = (!attachments.is_empty()).then(|| prompt.trim().to_owned());
+        let mut submission = merged_submission(prompt, &mentions)?;
+        let annotations = std::mem::take(&mut self.composer_annotations);
+        annotations::append_annotations_to_prompt(&mut submission, &annotations);
+        let display_content = (!attachments.is_empty() || !annotations.is_empty()).then(|| {
+            let mut display = prompt.trim().to_owned();
+            annotations::append_annotations_to_display(
+                &mut display,
+                &annotations,
+                &tr!("annotations.sent_heading"),
+            );
+            display
+        });
+        self.active_annotation = None;
+        self.annotation_editor
+            .update(cx, |input, cx| input.clear(cx));
         self.discard_current_composer_draft(cx);
         Some(ComposerSubmission {
             prompt: submission,
             display_content,
             attachments,
+            annotations,
         })
     }
 
@@ -2166,6 +2180,8 @@ impl Waku {
             .into_iter()
             .map(ComposerAttachment::from)
             .collect();
+        self.composer_annotations = submission.annotations;
+        self.active_annotation = None;
         let content = submission.display_content.unwrap_or(submission.prompt);
         self.composer
             .update(cx, |input, cx| input.set_content(content, cx));
@@ -2637,6 +2653,9 @@ impl Waku {
                 .children(autocomplete)
                 .when(!self.composer_attachments.is_empty(), |card| {
                     card.child(self.render_composer_attachments(cx))
+                })
+                .when(!self.composer_annotations.is_empty(), |card| {
+                    card.child(self.render_composer_annotation_pill(cx))
                 })
                 .child(div().pt(px(2.0)).child(self.composer.clone()))
                 .child(
