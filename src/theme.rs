@@ -104,7 +104,7 @@ impl Theme {
             },
             sidebar_drag_background: rgb(0x0C1115).into(),
             sidebar_item_background: rgb(0x222224).into(),
-            surface: rgb(0x070A0F).into(),
+            surface: rgb(0x171717).into(),
             raised: rgb(0x070A0F).into(),
             composer: rgb(0x070A0F).into(),
             inset: rgb(0x0C1115).into(),
@@ -112,7 +112,7 @@ impl Theme {
             overlay: rgb(0x222224).into(),
             overlay_strong: rgb(0x222224).into(),
 
-            border: rgb(0x131519).into(),
+            border: rgb(0x232323).into(),
             border_strong: rgb(0x16191F).into(),
             sidebar_border: rgb(0x131519).into(),
 
