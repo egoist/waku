@@ -134,7 +134,7 @@ fn user_tool_directories(home: &Path) -> Vec<PathBuf> {
 
 #[cfg(windows)]
 fn user_tool_directories(home: &Path) -> Vec<PathBuf> {
-    vec![
+    let mut directories = vec![
         // npm's global prefix, where a `claude.cmd` shim lands.
         home.join("AppData/Roaming/npm"),
         // Vendor installers commonly use these per-user locations without
@@ -147,7 +147,14 @@ fn user_tool_directories(home: &Path) -> Vec<PathBuf> {
         home.join(".cargo/bin"),
         home.join("scoop/shims"),
         home.join("AppData/Local/Microsoft/WindowsApps"),
-    ]
+    ];
+    if let Some(local_app_data) = std::env::var_os("LOCALAPPDATA") {
+        // Match daemon-side discovery for the official Codex desktop app.
+        // Guided setup must see an existing CLI before deciding to download a
+        // second copy through npm.
+        directories.push(PathBuf::from(local_app_data).join("Programs/OpenAI/Codex/bin"));
+    }
+    directories
 }
 
 #[cfg(not(windows))]
@@ -354,5 +361,18 @@ mod tests {
 
         assert!(!candidates.is_empty());
         assert!(!candidates.contains(&PathBuf::new()));
+    }
+}
+
+#[cfg(all(test, windows))]
+mod windows_tests {
+    use super::*;
+
+    #[test]
+    fn tool_paths_include_the_official_codex_desktop_cli() {
+        let local_app_data = std::env::var_os("LOCALAPPDATA").expect("Windows local app data");
+        let paths = user_tool_directories(Path::new("C:\\Users\\example"));
+
+        assert!(paths.contains(&PathBuf::from(local_app_data).join("Programs/OpenAI/Codex/bin")));
     }
 }

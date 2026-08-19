@@ -519,6 +519,11 @@ fn user_tool_directories(home: &Path) -> Vec<PathBuf> {
         directories.push(local_app_data.join("Volta/bin"));
         directories.push(local_app_data.join("pnpm"));
         directories.push(local_app_data.join("Programs/nodejs"));
+        // The official Codex desktop installer exposes its bundled CLI here.
+        // Explorer-launched apps can retain a PATH from before Codex was
+        // installed, so probing this stable vendor directory is required even
+        // though the installer also adds it to the user's registry PATH.
+        directories.push(local_app_data.join("Programs/OpenAI/Codex/bin"));
     }
     directories
 }
@@ -1024,6 +1029,7 @@ mod tests {
             assert!(paths.contains(&local_app_data.join("Volta/bin")));
             assert!(paths.contains(&local_app_data.join("pnpm")));
             assert!(paths.contains(&local_app_data.join("Programs/nodejs")));
+            assert!(paths.contains(&local_app_data.join("Programs/OpenAI/Codex/bin")));
         }
         assert_eq!(
             paths
