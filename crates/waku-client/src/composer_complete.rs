@@ -5,7 +5,7 @@ use std::ops::Range;
 use nucleo_matcher::pattern::{CaseMatching, Normalization, Pattern};
 use nucleo_matcher::{Matcher, Utf32Str};
 pub use waku_protocol::composer::{CommandScope, FileEntry, SlashCommand};
-use waku_protocol::model::{ProviderKind, ProviderModelOption, ReportedCommand};
+use waku_protocol::model::{InteractionMode, ProviderKind, ProviderModelOption, ReportedCommand};
 
 pub const FILTER_CAP: usize = 64;
 pub const FILE_INDEX_CAP: usize = 50_000;
@@ -95,6 +95,63 @@ pub fn is_fast_mode_toggle_submission(
             command.name == "fast"
                 && command.scope == CommandScope::Builtin
                 && command.template.is_none()
+        })
+}
+
+/// Whether the prompt invokes Waku's Codex-only native Goal command. The
+/// objective remains provider-facing text; only the `/goal` marker is removed.
+pub fn is_goal_mode_submission(
+    provider: ProviderKind,
+    prompt: &str,
+    commands: &[SlashCommand],
+) -> bool {
+    if provider != ProviderKind::Codex {
+        return false;
+    }
+    let invocation = prompt.trim().strip_prefix('/').unwrap_or_default();
+    let name = invocation
+        .split_once(char::is_whitespace)
+        .map_or(invocation, |(name, _)| name);
+    name == "goal"
+        && commands.iter().any(|command| {
+            command.name == "goal"
+                && command.scope == CommandScope::Builtin
+                && command.template.is_none()
+        })
+}
+
+pub fn goal_objective(prompt: &str) -> Option<String> {
+    let invocation = prompt.trim().strip_prefix("/goal")?;
+    let objective = invocation.trim();
+    (!objective.is_empty()).then(|| objective.to_owned())
+}
+
+/// Resolve a portable Waku interaction-mode command. Looking up the resolved
+/// built-in preserves project/user command precedence for `/plan` and `/build`.
+pub fn interaction_mode_submission(
+    provider: ProviderKind,
+    prompt: &str,
+    commands: &[SlashCommand],
+) -> Option<InteractionMode> {
+    if !provider.supports_interaction_modes() {
+        return None;
+    }
+    let name = match prompt.trim() {
+        "/plan" => "plan",
+        "/build" => "build",
+        _ => return None,
+    };
+    commands
+        .iter()
+        .any(|command| {
+            command.name == name
+                && command.scope == CommandScope::Builtin
+                && command.template.is_none()
+        })
+        .then_some(if name == "plan" {
+            InteractionMode::Plan
+        } else {
+            InteractionMode::Build
         })
 }
 
@@ -329,6 +386,31 @@ mod tests {
     }
 
     #[test]
+    fn goal_submission_is_codex_only_and_requires_the_builtin() {
+        let builtin = command("goal", CommandScope::Builtin);
+        assert!(is_goal_mode_submission(
+            ProviderKind::Codex,
+            "/goal finish the migration",
+            std::slice::from_ref(&builtin),
+        ));
+        assert_eq!(
+            goal_objective(" /goal finish the migration ").as_deref(),
+            Some("finish the migration")
+        );
+        assert_eq!(goal_objective("/goal "), None);
+        assert!(!is_goal_mode_submission(
+            ProviderKind::Claude,
+            "/goal finish",
+            std::slice::from_ref(&builtin),
+        ));
+        assert!(!is_goal_mode_submission(
+            ProviderKind::Codex,
+            "/goal finish",
+            &[command("goal", CommandScope::Project)],
+        ));
+    }
+
+    #[test]
     fn fast_toggle_uses_the_models_concrete_service_tier_id() {
         let tiers = [ProviderModelOption::new("priority", "Fast")];
         assert_eq!(
@@ -340,6 +422,36 @@ mod tests {
             Some("default")
         );
         assert_eq!(toggled_fast_service_tier(None, &[]), None);
+    }
+
+    #[test]
+    fn interaction_mode_commands_are_recognized_only_when_supported_and_resolved() {
+        let plan = command("plan", CommandScope::Builtin);
+        let build = command("build", CommandScope::Builtin);
+        assert_eq!(
+            interaction_mode_submission(ProviderKind::Claude, "/plan ", &[plan.clone()]),
+            Some(InteractionMode::Plan)
+        );
+        assert_eq!(
+            interaction_mode_submission(ProviderKind::Codex, "/build", &[build]),
+            Some(InteractionMode::Build)
+        );
+        assert_eq!(
+            interaction_mode_submission(ProviderKind::Amp, "/plan", &[plan.clone()]),
+            None
+        );
+        assert_eq!(
+            interaction_mode_submission(
+                ProviderKind::Claude,
+                "/plan",
+                &[command("plan", CommandScope::Project)],
+            ),
+            None
+        );
+        assert_eq!(
+            interaction_mode_submission(ProviderKind::Claude, "/plan now", &[plan]),
+            None
+        );
     }
 
     fn command(name: &str, scope: CommandScope) -> SlashCommand {

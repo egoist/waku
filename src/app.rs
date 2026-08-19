@@ -12,10 +12,10 @@ use gpui::{
     Animation, AnimationExt, AnyElement, App, Bounds, ClipboardEntry, ClipboardItem, Context, Div,
     Entity, ExternalPaths, FocusHandle, Focusable, FontWeight, Hsla, IntoElement, KeyDownEvent,
     ListAlignment, ListOffset, ListState, MouseButton, MouseDownEvent, MouseMoveEvent,
-    MouseUpEvent, NavigationDirection, ObjectFit, PathPromptOptions, Pixels, Render, ScrollHandle,
-    SharedString, Stateful, StyleRefinement, TextRun, WeakEntity, Window, WindowBounds, canvas,
-    div, ease_out_quint, fill, font, img, linear_color_stop, linear_gradient, list, point,
-    prelude::*, pulsating_between, px, rgb,
+    MouseUpEvent, NavigationDirection, ObjectFit, PathBuilder, PathPromptOptions, Pixels, Render,
+    ScrollHandle, SharedString, Stateful, StyleRefinement, TextRun, WeakEntity, Window,
+    WindowBounds, canvas, div, ease_out_quint, fill, font, img, linear_color_stop, linear_gradient,
+    list, point, prelude::*, pulsating_between, px, rgb,
 };
 use uuid::Uuid;
 
@@ -30,14 +30,15 @@ use crate::git_branch::BranchSnapshot;
 use crate::input::{ComposerAttachmentPaste, ComposerEvent, ComposerInput};
 use crate::md;
 use crate::model::{
-    ActivityItem, ActivityKind, AgentSession, BackgroundWorkEvent, BackgroundWorkItem,
-    BackgroundWorkKey, BackgroundWorkKind, BackgroundWorkStatus, Checkpoint, CheckpointStatus,
-    ContextUsage, DriverEvent, FavoriteModel, InteractionMode, Message, MessageAttachment,
-    MessageRole, PendingPermission, Project, ProviderKind, ProviderModel, ProviderProbe,
-    ProviderResumeCursor, QueuedMessage, ReasoningBlock, RuntimeMode, SessionStatus,
+    ActivityItem, ActivityKind, ActivityPlanStepStatus, AgentSession, BackgroundWorkEvent,
+    BackgroundWorkItem, BackgroundWorkKey, BackgroundWorkKind, BackgroundWorkStatus, Checkpoint,
+    CheckpointStatus, ContextUsage, DriverEvent, FavoriteModel, InteractionMode, Message,
+    MessageAttachment, MessageRole, PendingPermission, Project, ProviderKind, ProviderModel,
+    ProviderProbe, ProviderResumeCursor, QueuedMessage, ReasoningBlock, RuntimeMode, SessionStatus,
     SessionWorkspace, TranscriptBlock, TurnStatus, UserInputAnswer, UserInputQuestion,
     compact_path, unix_time, unix_time_millis,
 };
+use crate::theme::{RADIUS_DF, RADIUS_LG, RADIUS_SM};
 use unicode_segmentation::UnicodeSegmentation;
 
 use crate::md::render::{
@@ -56,6 +57,7 @@ use crate::persistence::{
     ComposerDraftStore, ComposerDrafts, DEFAULT_RIGHT_PANEL_WIDTH, DEFAULT_SIDEBAR_WIDTH,
     PersistedState, PersistedWindowState, StateStore,
 };
+use crate::provider_setup::{ProviderAuthState, ProviderSetupEvent, ProviderSetupState};
 use crate::query::{Query, QueryCache};
 use crate::review_diff::{Snapshot as ReviewDiffSnapshot, Source as ReviewDiffSource};
 use crate::terminal::TerminalView;
@@ -68,9 +70,8 @@ use crate::ui::{
 use crate::{
     CancelTurn, CloseFind, CloseWindow, CopySelection, FindNext, FindPrevious, FocusComposer,
     NavigateBack, NavigateForward, NewProject, NewSession, OpenFind, OpenFindReplace, OpenSettings,
-    ReplaceAllMatches, SaveFile, ToggleCommandPalette, ToggleFindCaseSensitive, ToggleFindRegex,
-    ToggleFindWholeWord, ToggleFpsCounter, ToggleModelPicker, ToggleRightPanel, ToggleSidebar,
-    ToggleUsagePanel,
+    ReplaceAllMatches, SaveFile, ToggleFindCaseSensitive, ToggleFindRegex, ToggleFindWholeWord,
+    ToggleFpsCounter, ToggleModelPicker, ToggleRightPanel, ToggleSidebar, ToggleUsagePanel,
 };
 
 #[cfg(target_os = "macos")]
@@ -198,6 +199,17 @@ enum ModelPickerTab {
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+enum ModelPickerView {
+    #[default]
+    Summary,
+    Models,
+    Providers,
+    Effort,
+    Speed,
+    Context,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 enum BranchPickerMode {
     #[default]
     Browse,
@@ -212,6 +224,7 @@ enum BranchPickerAction {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum SettingsPage {
+    Profile,
     General,
     Providers,
     Skills,
@@ -224,7 +237,7 @@ enum SettingsPage {
 impl SettingsPage {
     /// Computer Use is still experimental, so only development builds expose
     /// its navigation entry points. Keeping this decision on the page itself
-    /// makes the Settings sidebar and command palette use the same gate.
+    /// keeps every settings navigation surface on the same gate.
     fn is_visible_in_navigation(self) -> bool {
         self != Self::ComputerUse || cfg!(all(debug_assertions, target_os = "macos"))
     }
@@ -328,6 +341,7 @@ struct ComposerSubmission {
     prompt: String,
     display_content: Option<String>,
     attachments: Vec<MessageAttachment>,
+    goal_objective: Option<String>,
 }
 
 impl ComposerSubmission {
@@ -336,11 +350,15 @@ impl ComposerSubmission {
             prompt,
             display_content: None,
             attachments: Vec::new(),
+            goal_objective: None,
         }
     }
 
     fn into_queued_message(self) -> QueuedMessage {
-        QueuedMessage::with_presentation(self.prompt, self.display_content, self.attachments)
+        let mut message =
+            QueuedMessage::with_presentation(self.prompt, self.display_content, self.attachments);
+        message.goal_objective = self.goal_objective;
+        message
     }
 
     fn from_queued_message(message: QueuedMessage) -> Self {
@@ -348,6 +366,7 @@ impl ComposerSubmission {
             prompt: message.content,
             display_content: message.display_content,
             attachments: message.attachments,
+            goal_objective: message.goal_objective,
         }
     }
 
@@ -723,6 +742,37 @@ struct RightPanelFileEditor {
     read_epoch: u64,
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+enum ReviewDiffDisplayMode {
+    #[default]
+    Expanded,
+    FilesOnly,
+}
+
+impl ReviewDiffDisplayMode {
+    fn item_count(self, snapshot: &ReviewDiffSnapshot) -> usize {
+        match self {
+            Self::Expanded => snapshot.lines.len(),
+            Self::FilesOnly => snapshot.files.len(),
+        }
+    }
+
+    fn scroll_target(self, snapshot: &ReviewDiffSnapshot, file_index: usize) -> Option<usize> {
+        let file = snapshot.files.get(file_index)?;
+        match self {
+            Self::Expanded => file.diff_line,
+            Self::FilesOnly => Some(file_index),
+        }
+    }
+
+    fn toggled(self) -> Self {
+        match self {
+            Self::Expanded => Self::FilesOnly,
+            Self::FilesOnly => Self::Expanded,
+        }
+    }
+}
+
 struct RightPanelSessionState {
     visible: bool,
     surfaces: Vec<RightPanelSurface>,
@@ -734,6 +784,7 @@ struct RightPanelSessionState {
     file_tree_width: f32,
     file_editors: HashMap<String, RightPanelFileEditor>,
     diff_source: ReviewDiffSource,
+    diff_display_mode: ReviewDiffDisplayMode,
     diff_snapshot: Option<Arc<ReviewDiffSnapshot>>,
     diff_selected_file: Option<usize>,
     diff_expanded_paths: HashSet<String>,
@@ -752,6 +803,7 @@ impl RightPanelSessionState {
             file_tree_width: DEFAULT_FILE_TREE_WIDTH,
             file_editors: HashMap::new(),
             diff_source: ReviewDiffSource::default(),
+            diff_display_mode: ReviewDiffDisplayMode::default(),
             diff_snapshot: None,
             diff_selected_file: None,
             diff_expanded_paths: HashSet::new(),
@@ -763,49 +815,6 @@ impl RightPanelSessionState {
             .remove(&session_id)
             .unwrap_or_else(|| Self::empty(false))
     }
-}
-
-/// One choice in the model-traits menu: a label plus a badge marking the
-/// provider's own default, so the current selection and the default read apart.
-fn traits_choice(theme: Theme, label: String, is_default: bool, selected: bool) -> MenuItem {
-    MenuItem::custom(move |_, _| {
-        div()
-            .w(px(190.0))
-            .py(px(2.0))
-            .flex()
-            .items_center()
-            .gap(px(10.0))
-            .child(
-                div()
-                    .min_w_0()
-                    .flex_1()
-                    .truncate()
-                    .text_color(theme.text_secondary)
-                    .child(label.clone()),
-            )
-            .when(is_default, |element| {
-                element.child(
-                    div()
-                        .h(px(16.0))
-                        .px(px(5.0))
-                        .flex_none()
-                        .rounded(px(4.0))
-                        .border_1()
-                        .border_color(theme.border_strong)
-                        .bg(theme.overlay)
-                        .flex()
-                        .items_center()
-                        .text_size(px(9.0))
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(theme.text_tertiary)
-                        .child(tr!("common.default")),
-                )
-            })
-            .when(selected, |element| {
-                element.child(icon("icons/check.svg", 11.0, theme.text_tertiary))
-            })
-            .into_any_element()
-    })
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -1050,9 +1059,9 @@ pub struct Waku {
     composer_drafts: ComposerDrafts,
     composer_draft_store: ComposerDraftStore,
     composer_draft_save_generation: u64,
-    command_palette: command_palette::CommandPaletteUi,
     model_search: Entity<ComposerInput>,
     settings_search: Entity<ComposerInput>,
+    profile_name_input: Entity<ComposerInput>,
     daemon_port_input: Entity<ComposerInput>,
     daemon_origins_input: Entity<ComposerInput>,
     daemon_reconfigure_pending: bool,
@@ -1095,6 +1104,16 @@ pub struct Waku {
     provider_detection_remaining: usize,
     /// When provider detection last completed, for the page's "Checked" label.
     provider_detection_checked_at: Option<Instant>,
+    /// Credential readiness for providers whose CLIs expose a stable status
+    /// command. Tokens remain provider-owned; Waku stores only this result.
+    provider_auth: HashMap<ProviderKind, ProviderAuthState>,
+    provider_auth_tx: Sender<(ProviderKind, anyhow::Result<bool>)>,
+    provider_auth_events: Receiver<(ProviderKind, anyhow::Result<bool>)>,
+    provider_auth_pending: HashSet<ProviderKind>,
+    /// Explicit user-started install/sign-in work on the local desktop host.
+    provider_setup: HashMap<ProviderKind, ProviderSetupState>,
+    provider_setup_tx: Sender<(ProviderKind, ProviderSetupEvent)>,
+    provider_setup_events: Receiver<(ProviderKind, ProviderSetupEvent)>,
     /// The provider row expanded on the Providers page, if any. The binary
     /// override input below edits this provider's entry.
     expanded_provider_settings: Option<ProviderKind>,
@@ -1168,6 +1187,8 @@ pub struct Waku {
     usage_chart_bounds: Rc<Cell<Option<gpui::Bounds<Pixels>>>>,
     computer_use_app_icons: RefCell<HashMap<String, Option<std::sync::Arc<gpui::Image>>>>,
     computer_use_app_icon_loads: RefCell<HashSet<String>>,
+    model_picker_view: ModelPickerView,
+    model_picker_focus: FocusHandle,
     model_picker_tab: ModelPickerTab,
     /// Keyboard cursor over the model picker's filtered rows. `None` means the
     /// keyboard has not moved yet, so `enter` takes the first row.
@@ -1259,7 +1280,10 @@ pub struct Waku {
     stream_state_dirty: bool,
     last_stream_save: Instant,
     /// User expansion overrides keyed by persisted transcript block index.
-    activities_expanded: HashMap<usize, bool>,
+    /// Disclosure state is keyed by the first activity's stable id rather than
+    /// a virtualized block index. Streaming may insert or regroup blocks, but
+    /// it must never override a section the reader explicitly opened.
+    activities_expanded: HashMap<Uuid, bool>,
     /// Per-item disclosure overrides. Reasoning starts open while live; tool
     /// details start closed, so the stored bool must preserve either choice.
     expanded_activity_items: HashMap<Uuid, bool>,
@@ -1278,9 +1302,13 @@ pub struct Waku {
     /// One stable field reused across sidebar rows so virtualization never
     /// replaces the focused editor while a rename is in progress.
     session_rename_input: Entity<ComposerInput>,
-    /// Date groups the user has folded in the sidebar. This is intentionally
-    /// runtime-only, like transcript disclosure state.
-    sidebar_collapsed_groups: HashSet<SessionDateGroup>,
+    /// Project folders the user has folded in the sidebar. This is
+    /// intentionally runtime-only, like transcript disclosure state.
+    sidebar_collapsed_projects: HashSet<Uuid>,
+    /// Stable focus identities for virtualized project rows and their
+    /// independent new-task controls.
+    sidebar_project_focuses: RefCell<HashMap<Uuid, FocusHandle>>,
+    sidebar_project_plus_focuses: RefCell<HashMap<Uuid, FocusHandle>>,
     sidebar_visible: bool,
     sidebar_width: f32,
     right_panel_visible: bool,
@@ -1295,6 +1323,10 @@ pub struct Waku {
     /// while one is running.
     sidebar_rendered_width: f32,
     right_panel_rendered_width: f32,
+    /// Last platform chrome state observed from a bounds transition. Pane
+    /// islands only need invalidation when caption state changes, not on every
+    /// interactive resize tick.
+    window_chrome_state: (bool, bool),
     fps_counter_visible: bool,
     panel_resize_drag: Option<PanelResizeDrag>,
     right_panel_session_states: HashMap<Uuid, RightPanelSessionState>,
@@ -1327,6 +1359,7 @@ pub struct Waku {
     /// query and toggles survive closing the bar; `open` says whether it shows.
     file_search: Option<file_search::FileSearch>,
     right_panel_diff_source: ReviewDiffSource,
+    right_panel_diff_display_mode: ReviewDiffDisplayMode,
     right_panel_diff_snapshot: Option<Arc<ReviewDiffSnapshot>>,
     right_panel_diff_loading: bool,
     right_panel_diff_error: Option<String>,
@@ -1533,7 +1566,6 @@ mod activity_diff;
 mod autocomplete;
 mod background_work;
 mod branches;
-mod command_palette;
 mod commit_dialog;
 mod components;
 mod composer;
@@ -1558,13 +1590,12 @@ pub use autocomplete::init as init_composer_autocomplete;
 use background_work::{
     BackgroundWorkRegistry, work_kind_icon, work_status_color, work_status_label,
 };
-pub use command_palette::init as init_command_palette;
 pub use commit_dialog::init as init_commit_dialog_keys;
 use components::*;
 pub use image_preview::init as init_image_preview_keys;
 pub use settings::init as init_settings_keys;
+use sidebar::SidebarRow;
 pub use sidebar::init as init_sidebar_keys;
-use sidebar::{SessionDateGroup, SidebarRow};
 pub use skills_page::init as init_skills_keys;
 use streaming::*;
 use transcript::*;
@@ -1880,11 +1911,6 @@ impl Waku {
                 .search_field()
                 .placeholder(tr!("user_input.other_placeholder"))
         });
-        let command_palette_search = cx.new(|cx| {
-            ComposerInput::new(window, cx)
-                .search_field()
-                .placeholder(tr!("command_palette.placeholder"))
-        });
         let model_search = cx.new(|cx| {
             ComposerInput::new(window, cx)
                 .search_field()
@@ -1904,6 +1930,15 @@ impl Waku {
             ComposerInput::new(window, cx)
                 .search_field()
                 .placeholder(tr!("settings.search"))
+        });
+        let profile_name = state.profile_name.clone();
+        let profile_name_input = cx.new(|cx| {
+            let mut input = ComposerInput::new(window, cx)
+                .search_field()
+                .select_all_on_focus_click()
+                .placeholder(tr!("profile.name_placeholder"));
+            input.set_content(profile_name, cx);
+            input
         });
         let daemon_port = state.daemon_exposure.port.to_string();
         let daemon_origins = state.daemon_exposure.allowed_origins_text();
@@ -2100,6 +2135,8 @@ impl Waku {
         let (provider_probe_tx, provider_probe_events) = unbounded();
         let (provider_version_tx, provider_version_events) = unbounded();
         let (provider_detection_tx, provider_detection_events) = unbounded();
+        let (provider_auth_tx, provider_auth_events) = unbounded();
+        let (provider_setup_tx, provider_setup_events) = unbounded();
         let (computer_permission_tx, computer_permission_events) = unbounded();
         let (plan_usage_tx, plan_usage_events) = unbounded();
         let (event_wake_tx, event_wake_events) = smol::channel::bounded(1);
@@ -2202,6 +2239,7 @@ impl Waku {
             .unwrap_or_default();
         let entity = cx.new(|cx| {
             let settings_focus = cx.focus_handle();
+            let model_picker_focus = cx.focus_handle();
             let onboarding_add_project_focus = cx.focus_handle();
             let onboarding_projectless_focus = cx.focus_handle();
             let updater_button_focus = cx.focus_handle();
@@ -2241,6 +2279,11 @@ impl Waku {
 
             cx.observe_window_bounds(window, |this: &mut Self, window, cx| {
                 this.capture_window_state(window, cx);
+                let chrome_state = (window.is_fullscreen(), window.is_maximized());
+                if this.window_chrome_state != chrome_state {
+                    this.window_chrome_state = chrome_state;
+                    cx.notify();
+                }
             })
             .detach();
 
@@ -2258,6 +2301,15 @@ impl Waku {
                     // back to the window is the moment to re-read them.
                     if this.settings_page == Some(SettingsPage::Skills) {
                         this.ensure_skills_catalog(true, cx);
+                    }
+                    // Browser sign-in completes while Waku is inactive. The
+                    // first frame back should promote the provider to ready
+                    // without asking the user to press Refresh.
+                    if this
+                        .provider_probe(ProviderKind::Codex)
+                        .is_some_and(|probe| probe.installed)
+                    {
+                        this.request_provider_auth_probe(ProviderKind::Codex);
                     }
                 }
             })
@@ -2398,16 +2450,6 @@ impl Waku {
             )
             .detach();
             cx.subscribe(
-                &command_palette_search,
-                |this: &mut Self, search, event: &ComposerEvent, cx| {
-                    if matches!(event, ComposerEvent::Edited) {
-                        let query = search.read(cx).content().to_owned();
-                        this.command_palette_query_edited(&query, cx);
-                    }
-                },
-            )
-            .detach();
-            cx.subscribe(
                 &branch_search,
                 |this: &mut Self, search, event: &ComposerEvent, cx| {
                     if matches!(event, ComposerEvent::Edited)
@@ -2439,6 +2481,17 @@ impl Waku {
                     if matches!(event, ComposerEvent::Edited) {
                         cx.notify();
                     }
+                },
+            )
+            .detach();
+            cx.subscribe(
+                &profile_name_input,
+                |this: &mut Self, _, event: &ComposerEvent, cx| match event {
+                    ComposerEvent::Submit(_) | ComposerEvent::SubmitSteer(_) => {
+                        this.commit_profile_name(cx)
+                    }
+                    ComposerEvent::Edited => cx.notify(),
+                    ComposerEvent::Focus | ComposerEvent::BackspaceOnEmpty => {}
                 },
             )
             .detach();
@@ -2618,11 +2671,11 @@ impl Waku {
                 composer_drafts,
                 composer_draft_store,
                 composer_draft_save_generation: 0,
-                command_palette: command_palette::CommandPaletteUi::new(command_palette_search),
                 model_search,
                 branch_search,
                 branch_create_input,
                 settings_search,
+                profile_name_input,
                 daemon_port_input,
                 daemon_origins_input,
                 daemon_reconfigure_pending: false,
@@ -2656,6 +2709,13 @@ impl Waku {
                 provider_detection_events,
                 provider_detection_remaining: 0,
                 provider_detection_checked_at: None,
+                provider_auth: HashMap::new(),
+                provider_auth_tx,
+                provider_auth_events,
+                provider_auth_pending: HashSet::new(),
+                provider_setup: HashMap::new(),
+                provider_setup_tx,
+                provider_setup_events,
                 expanded_provider_settings: None,
                 provider_path_input,
                 computer_permissions: ComputerPermissions::default(),
@@ -2689,6 +2749,8 @@ impl Waku {
                 usage_chart_bounds: Rc::default(),
                 computer_use_app_icons: RefCell::new(HashMap::new()),
                 computer_use_app_icon_loads: RefCell::new(HashSet::new()),
+                model_picker_view: ModelPickerView::Summary,
+                model_picker_focus,
                 model_picker_tab,
                 model_picker_highlight: None,
                 model_picker_scroll: ScrollHandle::new(),
@@ -2738,7 +2800,9 @@ impl Waku {
                 session_navigation,
                 session_rename: None,
                 session_rename_input,
-                sidebar_collapsed_groups: HashSet::new(),
+                sidebar_collapsed_projects: HashSet::new(),
+                sidebar_project_focuses: RefCell::new(HashMap::new()),
+                sidebar_project_plus_focuses: RefCell::new(HashMap::new()),
                 sidebar_visible,
                 sidebar_width,
                 right_panel_visible,
@@ -2751,6 +2815,7 @@ impl Waku {
                 } else {
                     0.0
                 },
+                window_chrome_state: (window.is_fullscreen(), window.is_maximized()),
                 fps_counter_visible: false,
                 panel_resize_drag: None,
                 right_panel_session_states: HashMap::new(),
@@ -2776,6 +2841,7 @@ impl Waku {
                 right_panel_file_editors: HashMap::new(),
                 file_search: None,
                 right_panel_diff_source: ReviewDiffSource::default(),
+                right_panel_diff_display_mode: ReviewDiffDisplayMode::default(),
                 right_panel_diff_snapshot: None,
                 right_panel_diff_loading: false,
                 right_panel_diff_error: None,

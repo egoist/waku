@@ -11,6 +11,7 @@ use chrono::{Datelike, Local, NaiveDate};
 use gpui::{PathBuilder, relative};
 
 use super::*;
+use crate::usage::reset_label;
 use crate::usage_history::{
     self, MONTHLY_WINDOW, MonthSlice, PricingStatus, ProjectSlice, ProviderDay, UsageHistory,
     UsageProvider, UsageWindow, WINDOW_CHOICES,
@@ -48,6 +49,9 @@ impl Waku {
         self.settings_scroll.set_offset(gpui::Point::default());
         if page == SettingsPage::Usage {
             self.ensure_usage_history(false, cx);
+            self.plan_usage_stale
+                .extend(usage_meter::PLAN_USAGE_PROVIDERS);
+            self.maybe_refresh_plan_usage(cx);
         }
         if page == SettingsPage::Skills {
             self.ensure_skills_catalog(false, cx);
@@ -191,7 +195,8 @@ impl Waku {
                     element.flex_1().min_h_0().pb(px(16.0))
                 },
             )
-            .child(self.render_usage_header(range, pending, &theme, cx));
+            .child(self.render_usage_header(range, pending, &theme, cx))
+            .child(self.render_plan_usage_overview(&theme));
 
         let Some(history) = history else {
             // First scan (or a window-shape switch) still in flight: a
@@ -256,6 +261,148 @@ impl Waku {
         .into_any_element()
     }
 
+    fn refresh_all_usage(&mut self, cx: &mut Context<Self>) {
+        self.ensure_usage_history(true, cx);
+        for provider in usage_meter::PLAN_USAGE_PROVIDERS {
+            self.plan_usage_checked_at.remove(&provider);
+            self.plan_usage_stale.insert(provider);
+        }
+        self.maybe_refresh_plan_usage(cx);
+        cx.notify();
+    }
+
+    fn render_plan_usage_overview(&self, theme: &Theme) -> AnyElement {
+        let now = unix_time() as i64;
+        let mut cards = div().mt(px(16.0)).flex().flex_wrap().gap(px(10.0));
+        for provider in usage_meter::PLAN_USAGE_PROVIDERS {
+            if !self.provider_enabled(provider)
+                && !self.plan_usage.contains_key(&provider)
+                && !self.plan_usage_error.contains_key(&provider)
+            {
+                continue;
+            }
+            let plan = self.plan_usage.get(&provider);
+            let pending = self.plan_usage_pending.contains(&provider);
+            let unconfigured = self.plan_usage_unconfigured.contains(&provider);
+            let error = self.plan_usage_error.get(&provider);
+            let plan_name = plan
+                .and_then(|usage| usage.plan_label.as_deref())
+                .unwrap_or_else(|| provider.short_name());
+            let mut card = div()
+                .id(SharedString::from(format!("plan-usage-{}", provider.id())))
+                .min_w(px(220.0))
+                .flex_1()
+                .p(px(12.0))
+                .rounded(px(RADIUS_DF))
+                .border_1()
+                .border_color(theme.border)
+                .bg(theme.raised)
+                .flex()
+                .flex_col()
+                .gap(px(9.0))
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(7.0))
+                        .child(icon(
+                            provider_icon(provider),
+                            13.0,
+                            provider_color(theme, provider),
+                        ))
+                        .child(
+                            div()
+                                .min_w_0()
+                                .flex_1()
+                                .truncate()
+                                .text_size(px(12.0))
+                                .font_weight(FontWeight::MEDIUM)
+                                .text_color(theme.text)
+                                .child(SharedString::from(plan_name.to_owned())),
+                        )
+                        .when(pending, |row| {
+                            row.child(motion::spin(icon(
+                                "icons/loader-circle.svg",
+                                11.0,
+                                theme.text_tertiary,
+                            )))
+                        }),
+                );
+            if let Some(plan) = plan {
+                for window in &plan.windows {
+                    let remaining = (100.0 - window.percent).clamp(0.0, 100.0);
+                    card = card.child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap(px(6.0))
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap(px(7.0))
+                                    .child(
+                                        div()
+                                            .min_w_0()
+                                            .flex_1()
+                                            .truncate()
+                                            .text_size(px(10.5))
+                                            .text_color(theme.text_secondary)
+                                            .child(SharedString::from(window.label.clone())),
+                                    )
+                                    .children(window.resets_at.map(|reset| {
+                                        div()
+                                            .flex_none()
+                                            .text_size(px(9.5))
+                                            .text_color(theme.text_ghost)
+                                            .child(SharedString::from(reset_label(reset, now)))
+                                    }))
+                                    .child(
+                                        div()
+                                            .flex_none()
+                                            .text_size(px(10.5))
+                                            .font_weight(FontWeight::MEDIUM)
+                                            .text_color(theme.text)
+                                            .child(SharedString::from(tr!(
+                                                "usage.remaining_percent",
+                                                percent = format!("{remaining:.0}")
+                                            ))),
+                                    ),
+                            )
+                            .child(usage_meter::meter_bar(theme, window.percent)),
+                    );
+                }
+            } else {
+                let status = if unconfigured {
+                    tr!("usage.sign_in_for_limits")
+                } else if let Some(error) = error {
+                    tr!("usage.unavailable", error = error)
+                } else {
+                    tr!("usage.fetching_limits")
+                };
+                card = card.child(
+                    div()
+                        .text_size(px(10.5))
+                        .line_height(px(15.0))
+                        .text_color(theme.text_tertiary)
+                        .child(SharedString::from(status)),
+                );
+            }
+            cards = cards.child(card);
+        }
+        div()
+            .child(
+                div()
+                    .mt(px(16.0))
+                    .text_size(px(11.0))
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(theme.text_secondary)
+                    .child(tr!("usage.account_limits")),
+            )
+            .child(cards)
+            .into_any_element()
+    }
+
     /// The range caption plus the view switcher, the window selector (when
     /// the view honors it), and the refresh control.
     fn render_usage_header(
@@ -268,10 +415,12 @@ impl Waku {
         let monthly = self.usage_view == UsageViewMode::Monthly;
 
         let mut view_options = div()
-            .rounded(px(7.0))
+            .rounded(px(RADIUS_DF))
             .border_1()
             .border_color(theme.border_strong)
+            .p(px(1.0))
             .flex()
+            .gap(px(1.0))
             .overflow_hidden();
         for (view, label) in [
             (UsageViewMode::Daily, tr!("usage.daily")),
@@ -286,12 +435,13 @@ impl Waku {
                         label.to_ascii_lowercase()
                     )))
                     .tab_index(0)
-                    .focus_visible(|style| style.border_1().border_color(theme.accent))
-                    .h(px(26.0))
-                    .px(px(11.0))
+                    .focus_visible(|style| style.border_1().border_color(theme.ring))
+                    .h(px(24.0))
+                    .px(px(10.0))
+                    .rounded(px(RADIUS_SM))
                     .flex()
                     .items_center()
-                    .cursor_default()
+                    .cursor_pointer()
                     .text_size(px(10.5))
                     .text_color(if selected {
                         theme.text
@@ -305,6 +455,12 @@ impl Waku {
                     .child(label)
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.set_usage_view(view, cx);
+                    }))
+                    .on_key_down(cx.listener(move |this, event: &KeyDownEvent, _, cx| {
+                        if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                            this.set_usage_view(view, cx);
+                            cx.stop_propagation();
+                        }
                     })),
             );
         }
@@ -357,10 +513,10 @@ impl Waku {
         let refresh = div()
             .id("usage-refresh")
             .tab_index(0)
-            .focus_visible(|style| style.border_color(theme.accent))
+            .focus_visible(|style| style.border_color(theme.ring))
             .h(px(28.0))
             .px(px(8.0))
-            .rounded(px(7.0))
+            .rounded(px(RADIUS_DF))
             .border_1()
             .border_color(theme.border_strong)
             .flex()
@@ -374,7 +530,7 @@ impl Waku {
             }))
             .child(refresh_glyph)
             .on_click(cx.listener(|this, _, _, cx| {
-                this.ensure_usage_history(true, cx);
+                this.refresh_all_usage(cx);
             }));
 
         let range_label = if monthly {
@@ -455,7 +611,7 @@ impl Waku {
                     .child(
                         div()
                             .text_size(px(30.0))
-                            .font_weight(FontWeight::MEDIUM)
+                            .font_weight(FontWeight::NORMAL)
                             .text_color(theme.text)
                             .child(SharedString::from(headline)),
                     )
@@ -527,13 +683,13 @@ impl Waku {
                         div()
                             .h(px(4.0))
                             .w_full()
-                            .rounded_full()
+                            .rounded(px(RADIUS_LG))
                             .bg(theme.overlay_strong)
                             .child(
                                 div()
                                     .h_full()
                                     .w(relative((share as f32).clamp(0.0, 1.0)))
-                                    .rounded_full()
+                                    .rounded(px(RADIUS_LG))
                                     .bg(color),
                             ),
                     )
@@ -566,7 +722,7 @@ impl Waku {
     ) -> Div {
         let metric = self.usage_metric;
         let mut toggle = div()
-            .rounded(px(7.0))
+            .rounded(px(RADIUS_DF))
             .border_1()
             .border_color(theme.border_strong)
             .flex()
@@ -580,7 +736,7 @@ impl Waku {
                 div()
                     .id(SharedString::from(format!("usage-metric-{label}")))
                     .tab_index(0)
-                    .focus_visible(|style| style.border_1().border_color(theme.accent))
+                    .focus_visible(|style| style.border_1().border_color(theme.ring))
                     .h(px(22.0))
                     .px(px(9.0))
                     .flex()
@@ -642,7 +798,7 @@ impl Waku {
                             .min_w_0()
                             .truncate()
                             .text_size(px(12.5))
-                            .font_weight(FontWeight::MEDIUM)
+                            .font_weight(FontWeight::NORMAL)
                             .text_color(theme.text)
                             .child(match metric {
                                 UsageMetric::Cost => tr!("usage.daily_cost"),
@@ -886,7 +1042,7 @@ impl Waku {
             .min_w(px(0.0))
             .h(px(CHART_HEIGHT))
             .tab_index(0)
-            .focus_visible(|style| style.border_1().border_color(theme.accent))
+            .focus_visible(|style| style.border_1().border_color(theme.ring))
             .on_mouse_move(cx.listener(move |this, event: &MouseMoveEvent, _, cx| {
                 let Some(bounds) = this.usage_chart_bounds.get() else {
                     return;
@@ -966,7 +1122,7 @@ impl Waku {
     ) -> Div {
         let breakdown = self.usage_breakdown;
         let mut toggle = div()
-            .rounded(px(7.0))
+            .rounded(px(RADIUS_DF))
             .border_1()
             .border_color(theme.border_strong)
             .flex()
@@ -980,7 +1136,7 @@ impl Waku {
                 div()
                     .id(SharedString::from(format!("usage-breakdown-{label}")))
                     .tab_index(0)
-                    .focus_visible(|style| style.border_1().border_color(theme.accent))
+                    .focus_visible(|style| style.border_1().border_color(theme.ring))
                     .h(px(22.0))
                     .px(px(9.0))
                     .flex()
@@ -1021,7 +1177,7 @@ impl Waku {
                         div()
                             .flex_1()
                             .text_size(px(12.5))
-                            .font_weight(FontWeight::MEDIUM)
+                            .font_weight(FontWeight::NORMAL)
                             .text_color(theme.text)
                             .child(tr!("usage.breakdown")),
                     )
@@ -1145,7 +1301,7 @@ impl Waku {
             .flex_1()
             .min_h_0()
             .pb(px(8.0))
-            .rounded(px(13.0))
+            .rounded(px(RADIUS_DF))
             .bg(theme.raised)
             .flex()
             .flex_col()
@@ -1166,7 +1322,7 @@ impl Waku {
                             .child(
                                 div()
                                     .text_size(px(13.5))
-                                    .font_weight(FontWeight::MEDIUM)
+                                    .font_weight(FontWeight::NORMAL)
                                     .text_color(theme.text)
                                     .child(tr!("usage.by_project")),
                             )
@@ -1180,7 +1336,7 @@ impl Waku {
                                         div()
                                             .flex_none()
                                             .text_size(px(11.5))
-                                            .font_weight(FontWeight::MEDIUM)
+                                            .font_weight(FontWeight::NORMAL)
                                             .text_color(theme.text)
                                             .child(SharedString::from(usage_headline_value(
                                                 history, by_cost,
@@ -1305,7 +1461,7 @@ impl Waku {
                     .child(
                         div()
                             .text_size(px(13.0))
-                            .font_weight(FontWeight::MEDIUM)
+                            .font_weight(FontWeight::NORMAL)
                             .text_color(theme.text)
                             .child(SharedString::from(name)),
                     )
@@ -1324,7 +1480,7 @@ impl Waku {
                         div()
                             .flex_none()
                             .text_size(px(14.0))
-                            .font_weight(FontWeight::MEDIUM)
+                            .font_weight(FontWeight::NORMAL)
                             .text_color(theme.text)
                             .child(SharedString::from(usage_value_label(
                                 project.cost_usd,
@@ -1380,13 +1536,13 @@ impl Waku {
         let model_count = top_models.len() as u64;
         let id = id.into();
         let handle = self.menu_handle(id.clone(), cx);
-        let open_models = handle.is_open().then(|| Rc::new(top_models.to_vec()));
+        let open_models = handle.is_visible().then(|| Rc::new(top_models.to_vec()));
         let trigger = div()
             .id(SharedString::from(format!("{id}-trigger")))
             .h(px(22.0))
             .max_w(px(300.0))
             .px(px(6.0))
-            .rounded(px(5.0))
+            .rounded(px(RADIUS_SM))
             .flex_none()
             .flex()
             .items_center()
@@ -1394,7 +1550,7 @@ impl Waku {
             .cursor_default()
             .text_size(px(9.5))
             .text_color(theme.text_tertiary)
-            .focus_visible(|style| style.border_1().border_color(theme.accent))
+            .focus_visible(|style| style.border_1().border_color(theme.ring))
             .when(handle.is_open(), |element| element.bg(theme.overlay_strong))
             .hover(|element| element.bg(theme.overlay))
             .tooltip(Tooltip::text(SharedString::from(tr!(
@@ -1454,7 +1610,7 @@ fn usage_notices(history: &UsageHistory, theme: &Theme) -> Div {
         .mt(px(14.0))
         .px(px(12.0))
         .py(px(8.0))
-        .rounded(px(8.0))
+        .rounded(px(RADIUS_DF))
         .border_1()
         .border_color(theme.border)
         .flex()
@@ -1507,7 +1663,7 @@ fn usage_chart_readout(
         .min_w(px(150.0))
         .px(px(9.0))
         .py(px(7.0))
-        .rounded(px(8.0))
+        .rounded(px(RADIUS_DF))
         .border_1()
         .border_color(theme.border_strong)
         .bg(theme.raised)
@@ -1855,7 +2011,7 @@ fn usage_quality_panel(history: &UsageHistory, theme: &Theme) -> Div {
         .child(
             div()
                 .text_size(px(12.5))
-                .font_weight(FontWeight::MEDIUM)
+                .font_weight(FontWeight::NORMAL)
                 .text_color(theme.text)
                 .child(tr!("usage.cost_quality")),
         )
@@ -1895,7 +2051,7 @@ fn usage_skeleton(view: UsageViewMode, theme: &Theme) -> AnyElement {
             .h(px(height))
             .w(px(width))
             .flex_none()
-            .rounded(px(height / 2.0))
+            .rounded(px(RADIUS_LG))
             .bg(theme.overlay_strong)
     };
     let track = || {
@@ -1903,7 +2059,7 @@ fn usage_skeleton(view: UsageViewMode, theme: &Theme) -> AnyElement {
             .h(px(4.0))
             .w_full()
             .flex_none()
-            .rounded_full()
+            .rounded(px(RADIUS_LG))
             .bg(theme.overlay_strong)
     };
 
@@ -1968,7 +2124,7 @@ fn usage_skeleton(view: UsageViewMode, theme: &Theme) -> AnyElement {
                             div()
                                 .h(px(CHART_HEIGHT))
                                 .w_full()
-                                .rounded(px(8.0))
+                                .rounded(px(RADIUS_DF))
                                 .bg(theme.overlay),
                         )
                         .child(
@@ -2003,7 +2159,7 @@ fn usage_skeleton(view: UsageViewMode, theme: &Theme) -> AnyElement {
             let mut card = div()
                 .mt(px(20.0))
                 .px(px(20.0))
-                .rounded(px(13.0))
+                .rounded(px(RADIUS_DF))
                 .bg(theme.raised)
                 .flex()
                 .flex_col()
@@ -2028,7 +2184,7 @@ fn usage_skeleton(view: UsageViewMode, theme: &Theme) -> AnyElement {
                                     .h(px(26.0))
                                     .w(px(240.0))
                                     .flex_none()
-                                    .rounded(px(7.0))
+                                    .rounded(px(RADIUS_DF))
                                     .bg(theme.overlay_strong),
                             )
                         }),
@@ -2103,7 +2259,7 @@ fn usage_list_header(theme: &Theme, title: String, caption: String, total: Strin
                 .child(
                     div()
                         .text_size(px(13.5))
-                        .font_weight(FontWeight::MEDIUM)
+                        .font_weight(FontWeight::NORMAL)
                         .text_color(theme.text)
                         .child(title),
                 )
@@ -2120,7 +2276,7 @@ fn usage_list_header(theme: &Theme, title: String, caption: String, total: Strin
             div()
                 .flex_none()
                 .text_size(px(15.0))
-                .font_weight(FontWeight::MEDIUM)
+                .font_weight(FontWeight::NORMAL)
                 .text_color(theme.text)
                 .child(SharedString::from(total)),
         )
@@ -2159,7 +2315,7 @@ fn usage_split_bar(
     let mut bar = div()
         .h_full()
         .w(relative(length))
-        .rounded_full()
+        .rounded(px(RADIUS_LG))
         .overflow_hidden()
         .flex();
     if sum > 0.0 {
@@ -2177,7 +2333,7 @@ fn usage_split_bar(
     div()
         .h(px(4.0))
         .w_full()
-        .rounded_full()
+        .rounded(px(RADIUS_LG))
         .bg(theme.overlay)
         .child(bar)
 }
@@ -2455,7 +2611,7 @@ fn usage_month_list(
         .flex_1()
         .min_h_0()
         .pb(px(8.0))
-        .rounded(px(13.0))
+        .rounded(px(RADIUS_DF))
         .bg(theme.raised)
         .flex()
         .flex_col()
@@ -2524,7 +2680,7 @@ fn usage_month_row(
                 .child(
                     div()
                         .text_size(px(13.0))
-                        .font_weight(FontWeight::MEDIUM)
+                        .font_weight(FontWeight::NORMAL)
                         .text_color(theme.text)
                         .child(SharedString::from(format_month(month.first_day))),
                 )
@@ -2541,7 +2697,7 @@ fn usage_month_row(
                     div()
                         .flex_none()
                         .text_size(px(14.0))
-                        .font_weight(FontWeight::MEDIUM)
+                        .font_weight(FontWeight::NORMAL)
                         .text_color(theme.text)
                         .child(SharedString::from(usage_value_label(
                             month.cost_usd,

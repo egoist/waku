@@ -8,6 +8,14 @@ use anyhow::{Context as _, anyhow, bail};
 use waku_protocol::{DAEMON_TOKEN_ENV, DaemonReady, PROTOCOL_VERSION};
 
 fn main() -> anyhow::Result<()> {
+    let mut raw_arguments = std::env::args_os().skip(1);
+    if raw_arguments.next().as_deref()
+        == Some(std::ffi::OsStr::new(
+            waku_core::driver::WINDOWS_ACP_LAUNCHER_ARGUMENT,
+        ))
+    {
+        return run_acp_child(raw_arguments);
+    }
     let arguments = Arguments::parse(std::env::args().skip(1))?;
     let token =
         std::env::var(DAEMON_TOKEN_ENV).context("Waku daemon authentication token is missing")?;
@@ -60,6 +68,36 @@ fn main() -> anyhow::Result<()> {
             allow_shutdown: arguments.parent_pid.is_some(),
         },
     )
+}
+
+/// Set the ACP child's working directory without a shell. Paths and arguments
+/// stay as OS strings all the way into `Command`, so spaces and metacharacters
+/// cannot turn into code.
+fn run_acp_child(mut arguments: impl Iterator<Item = std::ffi::OsString>) -> anyhow::Result<()> {
+    let cwd = arguments
+        .next()
+        .map(std::path::PathBuf::from)
+        .ok_or_else(|| anyhow!("the ACP launcher requires a working directory"))?;
+    let binary = arguments
+        .next()
+        .map(std::path::PathBuf::from)
+        .ok_or_else(|| anyhow!("the ACP launcher requires an executable"))?;
+    let status = std::process::Command::new(&binary)
+        .args(arguments)
+        .current_dir(&cwd)
+        .status()
+        .with_context(|| {
+            format!(
+                "could not launch ACP executable {} in {}",
+                binary.display(),
+                cwd.display()
+            )
+        })?;
+    if status.success() {
+        Ok(())
+    } else {
+        bail!("ACP executable exited with {status}")
+    }
 }
 
 fn ensure_bind_allowed(address: SocketAddr, allow_non_loopback: bool) -> anyhow::Result<()> {

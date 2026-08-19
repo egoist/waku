@@ -161,8 +161,36 @@ settings.automatic_updates_description: 在后台检查新版本，并在发现�
 settings.share_anonymous_usage_data: 分享匿名使用数据
 settings.share_anonymous_usage_data_description: 分享功能使用情况和可靠性数据，帮助改进 Waku。不会包含提示词、回复、项目名称、文件路径等个人信息
 providers.coding_agents: 编程智能体
-providers.description: Waku 调用安装在这台电脑上的智能体命令行工具。请先安装相应工具或完成登录，然后刷新
+providers.description: Waku 在底层使用本地智能体 CLI。开始任务前，可在此安装并完成身份验证
 providers.web_description: Waku 调用安装在守护进程主机上的智能体命令行工具。请先安装相应工具或完成登录，然后刷新
+providers.cli_required: Waku 需要 %{command} CLI，但尚未安装
+providers.cli_required_title: 需要 %{provider} CLI
+providers.cli_required_description: Waku 在底层使用 %{provider} 运行此任务。安装后只需完成一次该提供商的设置
+providers.install_and_sign_in: 安装并登录
+providers.install: 安装
+providers.install_guide: 安装指南
+providers.configure: 配置
+providers.installing: 正在安装…
+providers.installing_cli: 正在安装 %{provider} CLI
+providers.installing_cli_description: Waku 正在为当前用户安装官方 CLI
+providers.sign_in: 登录
+providers.finish_sign_in: 完成 %{provider} 登录
+providers.finish_sign_in_description: 请在 CLI 打开的浏览器窗口中完成操作；Waku 会自动检测结果
+providers.waiting_for_sign_in: 等待登录…
+providers.sign_in_required: "%{provider} 需要登录"
+providers.sign_in_required_description: 只需验证一次 CLI，Waku 无需接触您的凭据即可使用它
+providers.checking_sign_in: 正在检查登录状态
+providers.checking_sign_in_description: 正在验证此电脑上的 %{provider} CLI 身份验证状态
+providers.signed_out: 已退出登录
+providers.ready: 已就绪
+providers.sign_in_needs_attention: 登录需要处理
+providers.setup_needs_attention: 设置需要处理
+providers.setup_complete: "%{provider} 已安装、登录并可使用"
+providers.install_complete: "%{provider} 已安装；服务商凭据仍由 CLI 管理"
+providers.setup_failed: "服务商设置失败：%{error}"
+providers.setup_before_starting: 开始此任务前，请先设置 %{provider}
+providers.provider_settings: 服务商设置
+providers.remote_setup_required: 请在所连接的守护进程主机上安装并验证 %{provider}，然后刷新服务商列表
 providers.check_failed: "无法检查 %{command}：%{error}"
 providers.show_settings: 显示 %{provider} 设置
 providers.hide_settings: 隐藏 %{provider} 设置
@@ -214,6 +242,7 @@ sidebar.minutes_ago: "%{count} 分钟前"
 sidebar.hours_ago: "%{count} 小时前"
 sidebar.days_ago: "%{count} 天前"
 sidebar.unknown_project: 未知项目
+sidebar.new_task_in_project: 在 %{project} 中新建任务
 sidebar.close: 关闭侧边栏
 sidebar.hide: 隐藏侧边栏
 sidebar.open: 打开侧边栏
@@ -432,6 +461,13 @@ models.standard: 标准
 models.reasoning: 推理强度
 models.service_tier: 服务等级
 models.context_window: 上下文窗口
+models.model: 模型
+models.provider: 服务商
+models.new_task: 新任务
+models.effort: 推理强度
+models.speed: 速度
+models.back: 返回
+models.unavailable: 不可用
 model_option.none: 无
 model_option.minimal: 最低
 model_option.low: 低
@@ -499,6 +535,11 @@ commands.init_description: 为此项目创建或更新 %{instructions_file}
 commands.review_description: 审查当前分支中尚未合并的更改
 commands.commit_description: 暂存并提交当前更改
 commands.fast_description: 切换快速模式
+commands.goal_description: 让 Codex 持续工作直到目标完成
+commands.goal_argument_hint: 目标
+commands.goal_requires_objective: 请在 /goal 后输入目标
+commands.plan_description: 切换到规划模式
+commands.build_description: 切换到构建模式
 commands.fast_enabled: 已启用快速模式
 commands.fast_disabled: 已关闭快速模式
 commands.claude_compact: 总结对话以释放上下文空间
@@ -520,6 +561,8 @@ composer.queue_followup: 排队为后续消息（⏎）
 composer.message: 消息
 composer.queue_placeholder: 添加后续消息…
 composer.prompt_placeholder: 让 Waku 构建些什么…
+composer.attach_files: 添加图片或文件
+composer.agent_mode: 智能体
 composer.attach_daemon: 从守护进程主机附加文件或文件夹
 composer.attach_daemon_title: 从守护进程主机附加
 composer.stop: 停止
@@ -549,6 +592,7 @@ project.add_project: 添加项目
 errors.remote_project_picker: 添加守护进程主机上的项目需要远程路径选择器，但该功能尚不可用
 session.stopped: 已停止
 session.turn_completed: 本轮已完成
+session.provider_finished_without_response: "%{provider} 已结束，但未返回回复"
 session.stopped_before_response: 智能体在返回回复前停止了
 session.codex_exited_before_response: Codex app-server 在返回回复前退出了
 session.steer_rejected: 无法向智能体补充指示（%{error}）；消息已排队，将作为后续消息发送
@@ -790,6 +834,8 @@ diff.preparing_review: 正在准备审阅…
 diff.loading_description: 正在捕获一致的 Git 快照以供审阅
 diff.unavailable: 无法查看更改
 diff.refresh: 刷新更改
+diff.show_file_list: 显示文件列表
+diff.show_expanded_diffs: 显示展开的差异
 diff.refresh_failed: "无法刷新更改：%{error}"
 diff.truncated: 大型差异 · 仅显示前 50,000 行
 diff.unmodified_lines: "%{count} 行未更改"
@@ -989,3 +1035,19 @@ usage_error.curl_did_not_finish: curl 未能完成请求
 usage_error.curl_failed: "curl 失败：%{error}"
 usage_error.unknown_error: 未知错误
 usage_error.curl_no_status: curl 未返回 HTTP 状态行
+settings.profile: 个人资料
+settings.profile_keywords: 个人资料 姓名 头像 照片 图片 账户 侧边栏
+common.save: 保存
+usage.account_limits: 账户限额
+usage.remaining_percent: "剩余 %{percent}%"
+usage.sign_in_for_limits: 登录此提供商以查看限额和重置时间。
+usage.fetching_limits: 正在获取最新限额…
+profile.default_name: Waku 用户
+profile.title: 侧边栏个人资料
+profile.description: 设置侧边栏个人资料菜单中显示的姓名和照片。
+profile.name_placeholder: 你的姓名
+profile.choose_photo: 选择照片
+profile.change_photo: 更换照片
+profile.unsupported_image: 请选择 PNG、JPEG、GIF 或 WebP 图片。
+profile.image_too_large: 图片必须小于 20 MB。
+profile.image_error: "无法保存个人资料图片：%{error}"

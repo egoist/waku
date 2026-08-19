@@ -1437,7 +1437,7 @@ impl Waku {
         }
     }
 
-    pub(super) fn drain_provider_detection_events(&mut self) -> bool {
+    pub(super) fn drain_provider_detection_events(&mut self, _cx: &mut Context<Self>) -> bool {
         let mut changed = false;
         let mut installed_providers = Vec::new();
         while let Ok(probe) = self.provider_detection_events.try_recv() {
@@ -1468,14 +1468,249 @@ impl Waku {
                 installed_providers.push(provider);
             } else {
                 self.provider_versions.remove(&provider);
+                self.provider_auth.remove(&provider);
+                self.provider_auth_pending.remove(&provider);
             }
             changed = true;
+        }
+        for &provider in &installed_providers {
+            self.request_provider_auth_probe(provider);
         }
         for provider in installed_providers {
             self.request_provider_model_discovery(provider);
         }
         if changed {
             self.request_provider_version_probes();
+        }
+        changed
+    }
+
+    /// Query a provider-owned credential status command off-thread. Waku
+    /// records only ready/signed-out state and never reads credential files.
+    pub(super) fn request_provider_auth_probe(&mut self, provider: ProviderKind) {
+        if !crate::provider_setup::supports_auth_probe(provider) {
+            // Providers such as OpenCode own API/provider credentials rather
+            // than exposing a stable CLI login probe. Clear any state left by
+            // an older build so the composer can never present a fake sign-in
+            // flow for them.
+            self.provider_auth_pending.remove(&provider);
+            self.provider_auth.remove(&provider);
+            return;
+        }
+        if self.daemon.is_remote()
+            || self.provider_auth_pending.contains(&provider)
+            || matches!(
+                self.provider_setup.get(&provider),
+                Some(
+                    crate::provider_setup::ProviderSetupState::Installing
+                        | crate::provider_setup::ProviderSetupState::Authenticating
+                )
+            )
+        {
+            return;
+        }
+        let Some(binary) = self
+            .provider_probe(provider)
+            .filter(|probe| probe.installed)
+            .and_then(|probe| probe.path.clone())
+        else {
+            self.provider_auth.remove(&provider);
+            return;
+        };
+        self.provider_auth_pending.insert(provider);
+        self.provider_auth
+            .insert(provider, crate::provider_setup::ProviderAuthState::Checking);
+        let tx = self.provider_auth_tx.clone();
+        let event_wake = self.event_wake_tx.clone();
+        if let Err(error) = std::thread::Builder::new()
+            .name(format!("waku-{}-auth-probe", provider.id()))
+            .spawn(move || {
+                let result = crate::provider_setup::probe_authentication(provider, &binary);
+                if tx.send((provider, result)).is_ok() {
+                    signal_event_pump(&event_wake);
+                }
+            })
+        {
+            self.provider_auth_pending.remove(&provider);
+            self.provider_auth.insert(
+                provider,
+                crate::provider_setup::ProviderAuthState::Failed(error.to_string()),
+            );
+        }
+    }
+
+    pub(super) fn start_provider_setup(&mut self, provider: ProviderKind, cx: &mut Context<Self>) {
+        if self.daemon.is_remote() {
+            self.show_toast(tr!(
+                "providers.remote_setup_required",
+                provider = provider.short_name()
+            ));
+            cx.notify();
+            return;
+        }
+        if matches!(
+            self.provider_setup.get(&provider),
+            Some(
+                crate::provider_setup::ProviderSetupState::Installing
+                    | crate::provider_setup::ProviderSetupState::Authenticating
+            )
+        ) {
+            return;
+        }
+
+        let existing_binary = self
+            .provider_probe(provider)
+            .filter(|probe| probe.installed)
+            .and_then(|probe| probe.path.clone());
+        if existing_binary.is_none() && !crate::provider_setup::can_install_automatically(provider)
+        {
+            cx.open_url(crate::provider_setup::setup_url(provider));
+            return;
+        }
+        if existing_binary.is_some()
+            && !crate::provider_setup::can_authenticate_automatically(provider)
+        {
+            cx.open_url(crate::provider_setup::setup_url(provider));
+            return;
+        }
+        let initial_state = if existing_binary.is_some() {
+            crate::provider_setup::ProviderSetupState::Authenticating
+        } else {
+            crate::provider_setup::ProviderSetupState::Installing
+        };
+        self.provider_setup.insert(provider, initial_state);
+        self.provider_auth_pending.remove(&provider);
+        let was_detected = existing_binary.is_some();
+        let tx = self.provider_setup_tx.clone();
+        let event_wake = self.event_wake_tx.clone();
+        let spawn = std::thread::Builder::new()
+            .name(format!("waku-{}-setup", provider.id()))
+            .spawn(move || {
+                let result = (|| {
+                    let binary = match existing_binary {
+                        Some(binary) => binary,
+                        None => match crate::command_env::find_executable(provider.command()) {
+                            Some(binary) => binary,
+                            None => crate::provider_setup::install(provider)?,
+                        },
+                    };
+                    let can_authenticate =
+                        crate::provider_setup::can_authenticate_automatically(provider);
+                    if !was_detected
+                        && can_authenticate
+                        && tx
+                            .send((provider, ProviderSetupEvent::Authenticating))
+                            .is_ok()
+                    {
+                        signal_event_pump(&event_wake);
+                    }
+                    if !was_detected
+                        && !can_authenticate
+                        && tx
+                            .send((provider, ProviderSetupEvent::OpenSetupGuide))
+                            .is_ok()
+                    {
+                        signal_event_pump(&event_wake);
+                    }
+                    let signed_in = if crate::provider_setup::supports_auth_probe(provider) {
+                        crate::provider_setup::probe_authentication(provider, &binary)?
+                    } else {
+                        false
+                    };
+                    if can_authenticate && !signed_in {
+                        crate::provider_setup::authenticate(provider, &binary)?;
+                    }
+                    Ok(())
+                })();
+                if tx
+                    .send((provider, ProviderSetupEvent::Finished(result)))
+                    .is_ok()
+                {
+                    signal_event_pump(&event_wake);
+                }
+            });
+        if let Err(error) = spawn {
+            let error = error.to_string();
+            self.provider_setup.insert(
+                provider,
+                crate::provider_setup::ProviderSetupState::Failed(error.clone()),
+            );
+            self.show_toast(tr!("providers.setup_failed", error = error));
+        }
+        cx.notify();
+    }
+
+    pub(super) fn drain_provider_auth_events(&mut self) -> bool {
+        let mut changed = false;
+        while let Ok((provider, result)) = self.provider_auth_events.try_recv() {
+            self.provider_auth_pending.remove(&provider);
+            if !crate::provider_setup::supports_auth_probe(provider) {
+                self.provider_auth.remove(&provider);
+                changed = true;
+                continue;
+            }
+            let state = match result {
+                Ok(true) => crate::provider_setup::ProviderAuthState::SignedIn,
+                Ok(false) => crate::provider_setup::ProviderAuthState::SignedOut,
+                Err(error) => crate::provider_setup::ProviderAuthState::Failed(error.to_string()),
+            };
+            self.provider_auth.insert(provider, state);
+            changed = true;
+        }
+        changed
+    }
+
+    pub(super) fn drain_provider_setup_events(&mut self, cx: &mut Context<Self>) -> bool {
+        let mut changed = false;
+        while let Ok((provider, event)) = self.provider_setup_events.try_recv() {
+            match event {
+                ProviderSetupEvent::Authenticating => {
+                    self.provider_setup.insert(
+                        provider,
+                        crate::provider_setup::ProviderSetupState::Authenticating,
+                    );
+                }
+                ProviderSetupEvent::OpenSetupGuide => {
+                    cx.open_url(crate::provider_setup::setup_url(provider));
+                }
+                ProviderSetupEvent::Finished(Ok(())) => {
+                    self.provider_setup.remove(&provider);
+                    if crate::provider_setup::supports_auth_probe(provider) {
+                        self.provider_auth
+                            .insert(provider, crate::provider_setup::ProviderAuthState::SignedIn);
+                        self.show_success_toast(tr!(
+                            "providers.setup_complete",
+                            provider = provider.short_name()
+                        ));
+                    } else {
+                        self.provider_auth_pending.remove(&provider);
+                        self.provider_auth.remove(&provider);
+                        self.show_success_toast(tr!(
+                            "providers.install_complete",
+                            provider = provider.short_name()
+                        ));
+                    }
+                    self.refresh_provider_detection(Some(provider));
+                }
+                ProviderSetupEvent::Finished(Err(error)) => {
+                    let error = error.to_string();
+                    self.provider_setup.insert(
+                        provider,
+                        crate::provider_setup::ProviderSetupState::Failed(error.clone()),
+                    );
+                    if crate::provider_setup::supports_auth_probe(provider) {
+                        self.provider_auth.insert(
+                            provider,
+                            crate::provider_setup::ProviderAuthState::Failed(error.clone()),
+                        );
+                    } else {
+                        self.provider_auth_pending.remove(&provider);
+                        self.provider_auth.remove(&provider);
+                    }
+                    self.show_toast(tr!("providers.setup_failed", error = error));
+                }
+            }
+            changed = true;
         }
         changed
     }
@@ -2089,6 +2324,7 @@ impl Waku {
                 prompt: provider_prompt,
                 display_content,
                 attachments: edit.attachments,
+                goal_objective: None,
             },
             cx,
         );
@@ -3151,7 +3387,13 @@ impl Waku {
                 .unwrap_or(prompt);
         let mut failed_to_start = false;
         match driver {
-            Ok(driver) => driver.prompt(driver_prompt),
+            Ok(driver) => {
+                if let Some(objective) = submission.goal_objective {
+                    driver.prompt_with_goal(driver_prompt, objective);
+                } else {
+                    driver.prompt(driver_prompt);
+                }
+            }
             Err(error) => {
                 failed_to_start = true;
                 let message = tr!("errors.start_agent", error = error);
@@ -3197,7 +3439,9 @@ impl Waku {
         if self.drain_driver_events(cx)
             | self.drain_provider_probe_events()
             | self.drain_provider_version_events()
-            | self.drain_provider_detection_events()
+            | self.drain_provider_detection_events(cx)
+            | self.drain_provider_auth_events()
+            | self.drain_provider_setup_events(cx)
             | self.drain_computer_permission_events()
             | self.drain_plan_usage_events()
             | self.drain_task_state_sync_events(cx)

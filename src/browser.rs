@@ -26,6 +26,7 @@
 
 use std::rc::Rc;
 
+use crate::theme::{RADIUS_DF, RADIUS_LG, Theme};
 use gpui::{
     App, Context, Div, Entity, FocusHandle, Focusable, HitboxBehavior, IntoElement, ObjectFit,
     Render, SharedString, Stateful, Subscription, Window, canvas, div, img, prelude::*, px,
@@ -34,7 +35,6 @@ use gpui::{
 use gpui::{AsyncApp, ForegroundExecutor, WeakEntity};
 
 use crate::input::{ComposerEvent, ComposerInput};
-use crate::theme::Theme;
 use crate::ui::icon;
 use crate::ui::text_field::TextField;
 use crate::ui::tooltip::Tooltip;
@@ -1990,12 +1990,12 @@ impl BrowserView {
         let base = div()
             .id(id)
             .size(px(26.0))
-            .rounded(px(6.0))
+            .rounded(px(RADIUS_DF))
             .flex_none()
             .flex()
             .items_center()
             .justify_center()
-            .cursor_default();
+            .cursor_pointer();
         if !enabled {
             return base.child(icon(icon_path, 14.0, theme.text_ghost));
         }
@@ -2099,7 +2099,7 @@ impl BrowserView {
                                 .left_0()
                                 .h(px(2.0))
                                 .w(gpui::relative(progress as f32))
-                                .rounded_full()
+                                .rounded(px(RADIUS_LG))
                                 .bg(theme.accent),
                         )
                     }),
@@ -2130,7 +2130,7 @@ impl BrowserView {
                 div()
                     .mt(px(14.0))
                     .text_size(px(13.0))
-                    .font_weight(gpui::FontWeight::MEDIUM)
+                    .font_weight(gpui::FontWeight::NORMAL)
                     .text_color(theme.text)
                     .child(tr!("browser.browse_web")),
             )
@@ -2165,7 +2165,7 @@ impl BrowserView {
                 div()
                     .mt(px(14.0))
                     .text_size(px(13.0))
-                    .font_weight(gpui::FontWeight::MEDIUM)
+                    .font_weight(gpui::FontWeight::NORMAL)
                     .text_color(theme.text)
                     .child(tr!("browser.unavailable")),
             )

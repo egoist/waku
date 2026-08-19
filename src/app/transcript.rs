@@ -564,16 +564,8 @@ pub(super) fn navigation_rail_fade_visibility(
     (scrolled > threshold, max_offset - scrolled > threshold)
 }
 
-pub(super) fn should_show_navigation_rail(
-    transcript_scrollable: bool,
-    turn_count: usize,
-    chat_viewport_width: f32,
-) -> bool {
-    let content_left = ((chat_viewport_width - CONTENT_MAX_WIDTH) / 2.0).max(20.0);
-    let rail_right = NAVIGATION_RAIL_LEFT + NAVIGATION_RAIL_WIDTH;
-    transcript_scrollable
-        && turn_count >= 2
-        && content_left >= rail_right + NAVIGATION_RAIL_CONTENT_GAP
+pub(super) fn should_show_navigation_rail(turn_count: usize) -> bool {
+    turn_count >= 2
 }
 
 /// A provider can split one assistant response into several ordered text

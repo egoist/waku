@@ -341,10 +341,8 @@ pub fn titlebar_double_click(window: &Window) {
     }
 }
 
-/// Match Cursor's macOS glass window stack without asking GPUI's transparent
-/// Metal target to blend two translucent quads. The semantic tint is a native
-/// view above active Sidebar vibrancy; GPUI paints clear sidebar chrome and one
-/// translucent interaction layer above it.
+/// Install the Nucleus muted surface above macOS Sidebar vibrancy while GPUI
+/// keeps the corresponding sidebar surface transparent.
 #[cfg(target_os = "macos")]
 pub fn configure_sidebar_material(window: &Window, dark: bool) {
     use objc2::{MainThreadMarker, MainThreadOnly};
@@ -371,11 +369,17 @@ pub fn configure_sidebar_material(window: &Window, dark: bool) {
         let Some(native_window) = view.window() else {
             return;
         };
-        let background = if dark {
-            NSColor::colorWithSRGBRed_green_blue_alpha(0.0, 0.0, 0.0, 0.25)
+        let (background_red, background_green, background_blue) = if dark {
+            (0x07, 0x0A, 0x0F)
         } else {
-            NSColor::colorWithSRGBRed_green_blue_alpha(1.0, 1.0, 1.0, 0.0)
+            (0xFF, 0xFF, 0xFF)
         };
+        let background = NSColor::colorWithSRGBRed_green_blue_alpha(
+            background_red as f64 / 255.0,
+            background_green as f64 / 255.0,
+            background_blue as f64 / 255.0,
+            1.0,
+        );
         native_window.setBackgroundColor(Some(&background));
 
         let Some(content_view) = native_window.contentView() else {
@@ -396,8 +400,17 @@ pub fn configure_sidebar_material(window: &Window, dark: bool) {
             return;
         }
 
-        let channel = if dark { 0x18 } else { 0xF3 } as f64 / 255.0;
-        let tint = NSColor::colorWithSRGBRed_green_blue_alpha(channel, channel, channel, 0.92);
+        let (red, green, blue) = if dark {
+            (0x0C, 0x11, 0x15)
+        } else {
+            (0xFC, 0xFC, 0xFC)
+        };
+        let tint = NSColor::colorWithSRGBRed_green_blue_alpha(
+            red as f64 / 255.0,
+            green as f64 / 255.0,
+            blue as f64 / 255.0,
+            1.0,
+        );
 
         SIDEBAR_TINT_VIEW.with_borrow_mut(|slot| {
             let needs_new_view = slot.as_ref().is_none_or(|tint_view| {

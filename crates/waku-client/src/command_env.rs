@@ -1,10 +1,10 @@
 //! Client-host shell selection for the desktop's local terminal surface.
 
 use std::collections::HashSet;
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
+use std::io;
+use std::process::{Child, Command, Output, Stdio};
 
-#[cfg(unix)]
-use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 
 #[cfg(unix)]
@@ -30,6 +30,95 @@ pub fn executable_search_path() -> Option<OsString> {
     std::env::join_paths(directories).ok()
 }
 
+/// Resolve a client-host executable using the same augmented PATH as the
+/// integrated terminal. This is intentionally client-side: guided provider
+/// setup is available only when the desktop owns the local daemon.
+pub fn find_executable(name: &str) -> Option<PathBuf> {
+    let candidate = Path::new(name);
+    if candidate.components().count() > 1 {
+        return resolve_executable_file(candidate);
+    }
+    executable_search_path()
+        .as_deref()
+        .map(std::env::split_paths)
+        .into_iter()
+        .flatten()
+        .find_map(|directory| resolve_executable_file(&directory.join(name)))
+}
+
+fn resolve_executable_file(candidate: &Path) -> Option<PathBuf> {
+    if candidate.is_file() {
+        return Some(candidate.to_path_buf());
+    }
+    #[cfg(windows)]
+    {
+        let stem = candidate.file_name()?.to_owned();
+        for extension in executable_extensions() {
+            let mut name = stem.clone();
+            name.push(extension);
+            let candidate = candidate.with_file_name(name);
+            if candidate.is_file() {
+                return Some(candidate);
+            }
+        }
+    }
+    None
+}
+
+#[cfg(windows)]
+fn executable_extensions() -> Vec<OsString> {
+    const DEFAULT_PATHEXT: &str = ".COM;.EXE;.BAT;.CMD";
+    let configured = std::env::var("PATHEXT").unwrap_or_default();
+    let configured = if configured.trim().is_empty() {
+        DEFAULT_PATHEXT
+    } else {
+        configured.as_str()
+    };
+    configured
+        .split(';')
+        .map(str::trim)
+        .filter(|extension| extension.starts_with('.'))
+        .map(OsString::from)
+        .collect()
+}
+
+/// Build a hidden child process with the client host's augmented tool PATH.
+pub fn command(program: impl AsRef<OsStr>) -> Command {
+    let mut command = Command::new(program);
+    if let Some(path) = executable_search_path() {
+        command.env("PATH", path);
+    }
+    detach_console(&mut command);
+    command
+}
+
+/// Spawn without flashing a console window on Windows.
+pub fn spawn(command: &mut Command) -> io::Result<Child> {
+    detach_console(command);
+    command.spawn()
+}
+
+/// Collect a hidden child process's output.
+pub fn output(command: &mut Command) -> io::Result<Output> {
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    spawn(command)?.wait_with_output()
+}
+
+fn detach_console(command: &mut Command) {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt as _;
+
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
+    #[cfg(not(windows))]
+    let _ = command;
+}
+
 /// Where per-user package managers put the provider CLIs, in case the
 /// inherited `PATH` predates the install.
 #[cfg(not(windows))]
@@ -48,6 +137,12 @@ fn user_tool_directories(home: &Path) -> Vec<PathBuf> {
     vec![
         // npm's global prefix, where a `claude.cmd` shim lands.
         home.join("AppData/Roaming/npm"),
+        // Vendor installers commonly use these per-user locations without
+        // updating an already-running desktop process's inherited PATH.
+        home.join(".local/bin"),
+        home.join(".cursor/bin"),
+        home.join(".grok/bin"),
+        home.join(".opencode/bin"),
         home.join(".bun/bin"),
         home.join(".cargo/bin"),
         home.join("scoop/shims"),

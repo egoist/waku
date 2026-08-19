@@ -2,7 +2,7 @@ use super::right_panel::{DiffRowStyle, render_diff_code_row};
 use super::*;
 use base64::Engine as _;
 
-const CHANGED_FILES_PREVIEW_LIMIT: usize = 3;
+const CHANGED_FILES_PREVIEW_LIMIT: usize = 4;
 /// Keep one virtualized transcript row bounded even when a generator touches
 /// hundreds of files. The full immutable list remains one click away in the
 /// right panel.
@@ -12,7 +12,7 @@ const CHANGED_FILES_EXPANDED_LIMIT: usize = 12;
 const ACTIVITY_DIFF_MAX_HEIGHT: f32 = 400.0;
 /// Aligns a hunk separator with the line numbers in the rows below it; see
 /// `DiffRowStyle::ACTIVITY`.
-const ACTIVITY_DIFF_GUTTER_WIDTH: f32 = 52.0;
+const ACTIVITY_DIFF_GUTTER_WIDTH: f32 = 91.0;
 
 #[derive(Clone, Debug)]
 struct ConversationNavigationRailSnapshot {
@@ -168,7 +168,6 @@ impl Waku {
     pub(super) fn render_transcript(
         &self,
         window: &mut Window,
-        chat_viewport_width: f32,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         self.prefetch_checkpoint_refs(cx);
@@ -183,7 +182,11 @@ impl Waku {
         // asks when the thumb is let go: did the reader come to rest on the
         // tail?
         let scrollbar_dragging = self.transcript_scrollbar.is_grabbed();
-        if self.transcript_scrollbar_dragging.replace(scrollbar_dragging) != scrollbar_dragging {
+        if self
+            .transcript_scrollbar_dragging
+            .replace(scrollbar_dragging)
+            != scrollbar_dragging
+        {
             if scrollbar_dragging {
                 self.transcript_anchor_following.set(false);
                 self.transcript_is_scrolled.set(true);
@@ -260,7 +263,7 @@ impl Waku {
                         .track_focus(&focus)
                         .tab_index(0)
                         .size(px(32.0))
-                        .rounded_full()
+                        .rounded(px(RADIUS_LG))
                         .border_1()
                         .border_color(theme.border_strong)
                         .bg(theme.composer)
@@ -269,7 +272,7 @@ impl Waku {
                         .items_center()
                         .justify_center()
                         .cursor_default()
-                        .focus_visible(|style| style.border_color(theme.accent))
+                        .focus_visible(|style| style.border_color(theme.ring))
                         .hover(|style| style.bg(theme.raised))
                         .active(|style| style.bg(theme.overlay_strong))
                         .child(icon("icons/arrow-down.svg", 16.0, theme.text))
@@ -289,11 +292,7 @@ impl Waku {
         let navigation_rail = NAVIGATION_RAIL_ENABLED.then(|| {
             let viewport_size = viewport_bounds.size;
             let navigation_turns = self.navigation_turns();
-            let navigation_rail_visible = should_show_navigation_rail(
-                transcript_scrollable,
-                navigation_turns.len(),
-                chat_viewport_width,
-            );
+            let navigation_rail_visible = should_show_navigation_rail(navigation_turns.len());
             let scroll_top_row = transcript_rows.logical_scroll_top().item_ix;
             let turn_rows = navigation_turns
                 .iter()
@@ -586,11 +585,10 @@ impl Render for ConversationNavigationRail {
                 .w(px(320.0))
                 .max_h(px(preview_height))
                 .overflow_hidden()
-                .rounded(px(14.0))
+                .rounded(px(RADIUS_DF))
                 .border_1()
                 .border_color(theme.border_strong)
                 .bg(theme.raised)
-                .shadow_lg()
                 .px(px(15.0))
                 .py(px(12.0))
                 .flex()
@@ -602,7 +600,7 @@ impl Render for ConversationNavigationRail {
                         .truncate()
                         .text_size(px(14.0))
                         .line_height(px(20.0))
-                        .font_weight(FontWeight::SEMIBOLD)
+                        .font_weight(FontWeight::NORMAL)
                         .text_color(theme.text)
                         .child(SharedString::from(turn.prompt.clone())),
                 )
@@ -657,11 +655,7 @@ impl ConversationNavigationRail {
         let prominent =
             active_turn_index == Some(turn_index) || emphasized_turn_index == Some(turn_index);
         let tick_color = if prominent {
-            if theme.is_dark {
-                rgb(0xFFFFFF).into()
-            } else {
-                theme.text
-            }
+            theme.text
         } else {
             theme.text_ghost.opacity(NAVIGATION_RAIL_INACTIVE_OPACITY)
         };
@@ -671,7 +665,7 @@ impl ConversationNavigationRail {
         ));
         let tick = div()
             .h(px(NAVIGATION_RAIL_TICK_HEIGHT))
-            .rounded_full()
+            .rounded(px(RADIUS_LG))
             .bg(tick_color)
             .with_animation(
                 animation_id,
@@ -688,7 +682,7 @@ impl ConversationNavigationRail {
             .flex_none()
             .flex()
             .items_center()
-            .cursor_default()
+            .cursor_pointer()
             .on_hover(cx.listener(move |this, hovering: &bool, _, cx| {
                 if *hovering {
                     this.hovered_turn = Some(message_id);
@@ -712,10 +706,10 @@ impl ConversationNavigationRail {
                     .pl(px(2.0))
                     .flex()
                     .items_center()
-                    .rounded(px(4.0))
+                    .rounded(px(RADIUS_SM))
                     .track_focus(&focus_handle)
                     .tab_index(turn_index as isize)
-                    .focus_visible(|style| style.border_1().border_color(theme.accent))
+                    .focus_visible(|style| style.border_1().border_color(theme.ring))
                     .on_key_down(cx.listener(move |this, event, window, cx| {
                         this.navigation_rail_key_down(message_id, event, window, cx);
                     }))
@@ -846,8 +840,16 @@ impl Waku {
         current: bool,
         cx: &mut Context<Self>,
     ) {
+        let activity_key = self
+            .selected_transcript_blocks()
+            .get(block_index)
+            .and_then(|block| block.activities.first())
+            .map(|activity| activity.id);
+        let Some(activity_key) = activity_key else {
+            return;
+        };
         self.toggle_block_disclosure(block_index, cx, |this| {
-            this.activities_expanded.insert(block_index, !current);
+            this.activities_expanded.insert(activity_key, !current);
         });
     }
 
@@ -890,7 +892,7 @@ impl Waku {
             .tab_index(0)
             .size(px(20.0))
             .flex_none()
-            .rounded(px(5.0))
+            .rounded(px(RADIUS_SM))
             .flex()
             .items_center()
             .justify_center()
@@ -1411,22 +1413,18 @@ impl Waku {
             )))
             .track_focus(&review_focus)
             .tab_index(0)
-            .h(px(28.0))
-            .px(px(10.0))
-            .rounded(px(7.0))
-            .border_1()
-            .border_color(theme.border_strong)
+            .h(px(24.0))
+            .px(px(6.0))
+            .rounded(px(RADIUS_SM))
             .flex()
             .items_center()
-            .gap(px(5.0))
-            .cursor_default()
+            .cursor_pointer()
             .text_size(px(11.5))
-            .font_weight(FontWeight::MEDIUM)
+            .font_weight(FontWeight::NORMAL)
             .text_color(theme.text_secondary)
-            .focus_visible(|style| style.border_color(theme.accent))
+            .focus_visible(|style| style.bg(theme.overlay_strong).text_color(theme.text))
             .hover(|style| style.bg(theme.overlay_strong).text_color(theme.text))
             .active(|style| style.bg(theme.overlay))
-            .child(icon("icons/file-diff.svg", 12.0, theme.text_tertiary))
             .child(tr_cow!("transcript.review_changes"))
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.open_turn_diff(turn_id, cx);
@@ -1447,67 +1445,50 @@ impl Waku {
             .id(SharedString::from(format!("changed-files-card-{turn_id}")))
             .w_full()
             .min_w_0()
-            .rounded(px(12.0))
+            .rounded(px(RADIUS_DF))
             .border_1()
-            .border_color(theme.border_strong)
-            .bg(theme.overlay)
+            .border_color(theme.sidebar_border)
+            .bg(theme.sidebar_drag_background)
             .tab_index(0)
             .tab_group()
             .tab_stop(false)
             .overflow_hidden()
             .child(
                 div()
-                    .min_h(px(58.0))
+                    .h(px(40.0))
                     .px(px(12.0))
-                    .py(px(9.0))
                     .flex()
                     .items_center()
-                    .gap(px(10.0))
-                    .child(
-                        div()
-                            .size(px(36.0))
-                            .flex_none()
-                            .rounded(px(9.0))
-                            .bg(theme.overlay_strong)
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .child(icon("icons/file-diff.svg", 16.0, theme.text_tertiary)),
-                    )
+                    .gap(px(8.0))
+                    .child(icon("icons/file-diff.svg", 13.0, theme.text_tertiary))
                     .child(
                         div()
                             .min_w_0()
                             .flex_1()
-                            .flex()
-                            .flex_col()
-                            .gap(px(2.0))
-                            .child(
-                                div()
-                                    .truncate()
-                                    .text_size(px(12.5))
-                                    .font_weight(FontWeight::MEDIUM)
-                                    .text_color(theme.text)
-                                    .child(title),
-                            )
-                            .child(
-                                div()
-                                    .flex()
-                                    .items_center()
-                                    .gap(px(6.0))
-                                    .text_size(px(11.0))
-                                    .line_height(px(14.0))
-                                    .child(
-                                        div()
-                                            .text_color(theme.success)
-                                            .child(format!("+{additions}")),
-                                    )
-                                    .child(
-                                        div()
-                                            .text_color(theme.danger)
-                                            .child(format!("-{deletions}")),
-                                    ),
-                            ),
+                            .truncate()
+                            .text_size(px(12.5))
+                            .font_weight(FontWeight::NORMAL)
+                            .text_color(theme.text)
+                            .child(title),
                     )
+                    .when(additions > 0, |header| {
+                        header.child(
+                            div()
+                                .flex_none()
+                                .text_size(px(10.5))
+                                .text_color(theme.success)
+                                .child(format!("+{additions}")),
+                        )
+                    })
+                    .when(deletions > 0, |header| {
+                        header.child(
+                            div()
+                                .flex_none()
+                                .text_size(px(10.5))
+                                .text_color(theme.danger)
+                                .child(format!("-{deletions}")),
+                        )
+                    })
                     .child(review),
             );
 
@@ -1526,6 +1507,11 @@ impl Waku {
                     .flex()
                     .items_center()
                     .gap(px(8.0))
+                    .child(icon(
+                        super::right_panel::file_icon_for_path(&file.path),
+                        12.0,
+                        theme.text_tertiary,
+                    ))
                     .child(
                         div()
                             .id(SharedString::from(format!(
@@ -1583,9 +1569,9 @@ impl Waku {
                     .flex()
                     .items_center()
                     .gap(px(6.0))
-                    .cursor_default()
+                    .cursor_pointer()
                     .text_size(px(11.5))
-                    .font_weight(FontWeight::MEDIUM)
+                    .font_weight(FontWeight::NORMAL)
                     .text_color(theme.text_secondary)
                     .focus_visible(|style| style.bg(theme.overlay_strong))
                     .hover(|style| style.bg(theme.overlay_strong).text_color(theme.text))
@@ -1662,7 +1648,7 @@ impl Waku {
                     .cursor_default()
                     .text_size(px(11.5))
                     .line_height(px(16.0))
-                    .font_weight(FontWeight::MEDIUM)
+                    .font_weight(FontWeight::NORMAL)
                     .text_color(theme.text_tertiary)
                     .child(SharedString::from(label))
                     .child(icon(
@@ -1682,33 +1668,29 @@ impl Waku {
             .into_any_element()
     }
 
-    /// The live turn's closing row: pulsing dots and "Working for Ns". It is
-    /// on screen from the moment the prompt lands — before the provider has
-    /// produced a single chunk — and stays below whatever streams in until
-    /// the turn settles into its "Worked for N" fold.
+    /// The live turn's sole compact status. A reasoning disclosure owns the
+    /// same label during its live phase, so this row disappears rather than
+    /// rendering a second status below it.
     fn render_working_indicator_row(&self, theme: &Theme) -> AnyElement {
-        let elapsed = self
-            .selected_session()
-            .and_then(|session| session.turns.last())
-            .filter(|turn| turn.status == TurnStatus::Running)
-            .map(|turn| unix_time().saturating_sub(turn.started_at))
-            .unwrap_or(0);
+        if self
+            .selected_runtime()
+            .is_some_and(|runtime| runtime.stream_phase == Some(StreamPhase::Reasoning))
+        {
+            return div().h(px(0.0)).into_any_element();
+        }
         div()
             .h(px(22.0))
             .flex()
             .items_center()
-            .gap(px(8.0))
-            .child(working_wave_dots(theme.text_tertiary))
             .child(
                 div()
                     .text_size(px(11.5))
                     .line_height(px(16.0))
-                    .font_weight(FontWeight::MEDIUM)
-                    .text_color(theme.text_tertiary)
-                    .child(SharedString::from(tr!(
-                        "transcript.working_for",
-                        duration = format_working_elapsed(elapsed)
-                    ))),
+                    .font_weight(FontWeight::NORMAL)
+                    .child(shimmering_text(
+                        SharedString::from(tr!("transcript.thinking")),
+                        theme.text_tertiary,
+                    )),
             )
             .into_any_element()
     }
@@ -1754,11 +1736,6 @@ impl Waku {
                     .get(block_index)
                     .is_some_and(|block| block.turn_id == Some(turn_id))
             });
-        let expanded = self
-            .activities_expanded
-            .get(&block_index)
-            .copied()
-            .unwrap_or(live_turn);
         let live_reasoning_id = (self
             .selected_runtime()
             .is_some_and(|runtime| runtime.stream_phase == Some(StreamPhase::Reasoning))
@@ -1774,7 +1751,26 @@ impl Waku {
                 .map(|activity| activity.id)
         })
         .flatten();
+        let live_structured_work = live_turn
+            && activities.iter().any(|activity| {
+                matches!(activity.kind, ActivityKind::FileChange | ActivityKind::Plan)
+            });
+        let activity_key = activities.first().map(|activity| activity.id);
+        let expanded = activity_key
+            .and_then(|activity_key| self.activities_expanded.get(&activity_key).copied())
+            .unwrap_or(live_structured_work);
         let header_title = activity_header_title(activities, live_turn, live_reasoning_id);
+        let header_title = if live_reasoning_id.is_some() {
+            shimmering_text(SharedString::from(header_title), theme.text_secondary)
+        } else {
+            div()
+                .min_w_0()
+                .truncate()
+                .font_weight(FontWeight::NORMAL)
+                .text_color(theme.text_secondary)
+                .child(SharedString::from(header_title))
+                .into_any_element()
+        };
         let header_focus =
             self.transcript_control_focus(format!("activity-toggle-{block_index}"), cx);
         let cluster = div()
@@ -1796,17 +1792,10 @@ impl Waku {
                     .gap(px(6.0))
                     .text_size(px(12.5))
                     .line_height(px(16.0))
-                    .cursor_default()
+                    .cursor_pointer()
                     .focus_visible(|style| style.text_color(theme.text))
                     .hover(|style| style.text_color(theme.text))
-                    .child(
-                        div()
-                            .min_w_0()
-                            .truncate()
-                            .font_weight(FontWeight::MEDIUM)
-                            .text_color(theme.text_secondary)
-                            .child(SharedString::from(header_title)),
-                    )
+                    .child(header_title)
                     .child(icon(
                         if expanded {
                             "icons/chevron-down.svg"
@@ -1830,9 +1819,9 @@ impl Waku {
             return cluster.into_any_element();
         }
         // `Theme::overlay` is 5% alpha and GPUI's `opacity` multiplies it.
-        let activity_surface = theme.surface.blend(theme.overlay.opacity(0.7));
-        let activity_hover_surface = theme.surface.blend(theme.overlay);
-        let activity_active_surface = theme.surface.blend(theme.overlay_strong.opacity(0.72));
+        let activity_surface = theme.sidebar_drag_background;
+        let activity_hover_surface = activity_surface.blend(theme.overlay);
+        let activity_active_surface = activity_surface.blend(theme.overlay_strong.opacity(0.72));
         let mut items = div()
             .w_full()
             .min_w_0()
@@ -1843,8 +1832,12 @@ impl Waku {
             .border_color(theme.border)
             .flex()
             .flex_col()
-            .gap(px(8.0));
+            .gap(px(4.0));
         for activity in activities {
+            if activity.kind == ActivityKind::Plan && !activity.plan_steps.is_empty() {
+                items = items.child(self.render_activity_plan_card(activity, theme));
+                continue;
+            }
             let id = activity.id;
             let background_work = self
                 .state
@@ -1864,7 +1857,7 @@ impl Waku {
                     .tab_index(0)
                     .h(px(20.0))
                     .px(px(6.0))
-                    .rounded(px(5.0))
+                    .rounded(px(RADIUS_SM))
                     .border_1()
                     .border_color(theme.border_strong)
                     .flex_none()
@@ -1873,7 +1866,7 @@ impl Waku {
                     .cursor_default()
                     .text_size(px(9.5))
                     .text_color(color)
-                    .focus_visible(|style| style.border_color(theme.accent))
+                    .focus_visible(|style| style.border_color(theme.ring))
                     .hover(|style| style.bg(theme.overlay_strong))
                     .child(work_status_label(status))
                     .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
@@ -1910,7 +1903,7 @@ impl Waku {
             // open it. A change touching several names each file in the diff
             // below, and each of those rows opens its own.
             let open_file_button = match activity.file_changes.as_slice() {
-                [change] if activity.kind == ActivityKind::FileChange => {
+                [change] if activity_shows_diff(activity) => {
                     Some(self.render_activity_open_file_button(
                         format!("activity-open-{id}"),
                         change.path.clone(),
@@ -1930,15 +1923,18 @@ impl Waku {
                     .expanded_activity_items
                     .get(&id)
                     .copied()
-                    .unwrap_or(reasoning_live);
+                    // Once live reasoning is visible, keep it visible for the
+                    // rest of the active turn. A phase change to a command or
+                    // edit must not collapse what the reader is inspecting.
+                    .unwrap_or(reasoning.is_some() && live_turn);
             let item_focus = self.transcript_control_focus(format!("activity-item-{id}"), cx);
             let mut item = div()
                 .w_full()
                 .min_w_0()
                 .overflow_hidden()
-                .rounded(px(9.0))
+                .rounded(px(RADIUS_DF))
                 .border_1()
-                .border_color(theme.border_strong)
+                .border_color(theme.sidebar_border)
                 .bg(activity_surface)
                 .flex()
                 .flex_col()
@@ -1947,15 +1943,15 @@ impl Waku {
                         .id(SharedString::from(format!("activity-item-{id}")))
                         // The parent owns a 1px border on each edge, so a
                         // 28px row makes the visible activity header 30px.
-                        .h(px(28.0))
-                        .px(px(8.0))
+                        .h(px(26.0))
+                        .px(px(7.0))
                         .flex()
                         .items_center()
-                        .gap(px(8.0))
-                        .rounded_tl(px(8.0))
-                        .rounded_tr(px(8.0))
+                        .gap(px(6.0))
+                        .rounded_tl(px(RADIUS_DF))
+                        .rounded_tr(px(RADIUS_DF))
                         .when(!item_expanded, |element| {
-                            element.rounded_bl(px(8.0)).rounded_br(px(8.0))
+                            element.rounded_bl(px(RADIUS_DF)).rounded_br(px(RADIUS_DF))
                         })
                         .text_size(px(12.0))
                         .line_height(px(16.0))
@@ -1963,7 +1959,7 @@ impl Waku {
                             element
                                 .track_focus(&item_focus)
                                 .tab_index(0)
-                                .cursor_default()
+                                .cursor_pointer()
                                 .focus_visible(|element| element.bg(activity_hover_surface))
                                 .hover(|element| element.bg(activity_hover_surface))
                                 .active(|element| element.bg(activity_active_surface))
@@ -1976,7 +1972,7 @@ impl Waku {
                         .child(
                             div()
                                 .flex_none()
-                                .font_weight(FontWeight::SEMIBOLD)
+                                .font_weight(FontWeight::NORMAL)
                                 .text_color(theme.text_secondary)
                                 .child(SharedString::from(action_label)),
                         )
@@ -2161,7 +2157,7 @@ impl Waku {
                     .w_full()
                     .min_w_0()
                     .border_t_1()
-                    .border_color(theme.border_strong)
+                    .border_color(theme.border)
                     .px(px(12.0))
                     .py(px(8.0))
                     .flex()
@@ -2196,7 +2192,7 @@ impl Waku {
                                 .justify_between()
                                 .child(
                                     div()
-                                        .font_weight(FontWeight::MEDIUM)
+                                        .font_weight(FontWeight::NORMAL)
                                         .text_color(theme.text_secondary)
                                         .child(label),
                                 )
@@ -2209,7 +2205,7 @@ impl Waku {
                                                 section_kind.id()
                                             )))
                                             .size(px(20.0))
-                                            .rounded(px(5.0))
+                                            .rounded(px(RADIUS_SM))
                                             .flex()
                                             .items_center()
                                             .justify_center()
@@ -2346,6 +2342,132 @@ impl Waku {
         cluster.child(items).into_any_element()
     }
 
+    /// Codex's turn plan is already normalized by the driver. Keep this card
+    /// deliberately non-interactive: it is live status, not a disclosure, and
+    /// every state remains legible without relying on color or animation.
+    fn render_activity_plan_card(&self, activity: &ActivityItem, theme: &Theme) -> AnyElement {
+        let completed = activity
+            .plan_steps
+            .iter()
+            .filter(|step| step.status == ActivityPlanStepStatus::Completed)
+            .count();
+        let active = activity
+            .plan_steps
+            .iter()
+            .any(|step| step.status == ActivityPlanStepStatus::InProgress);
+        let mut steps = div()
+            .w_full()
+            .min_w_0()
+            .px(px(10.0))
+            .pb(px(8.0))
+            .flex()
+            .flex_col()
+            .gap(px(2.0));
+        for step in &activity.plan_steps {
+            let (foreground, marker) = match step.status {
+                ActivityPlanStepStatus::Completed => (
+                    theme.text_ghost,
+                    div()
+                        .size(px(15.0))
+                        .flex_none()
+                        .rounded(px(99.0))
+                        .border_1()
+                        .border_color(theme.text_ghost)
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .child(icon("icons/check.svg", 9.0, theme.text_ghost))
+                        .into_any_element(),
+                ),
+                ActivityPlanStepStatus::InProgress => (
+                    theme.text,
+                    div()
+                        .size(px(15.0))
+                        .flex_none()
+                        .rounded(px(99.0))
+                        .border_1()
+                        .border_color(theme.text_secondary)
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .child(icon("icons/chevron-right.svg", 8.0, theme.text))
+                        .into_any_element(),
+                ),
+                ActivityPlanStepStatus::Pending => (
+                    theme.text_tertiary,
+                    div()
+                        .size(px(15.0))
+                        .flex_none()
+                        .rounded(px(99.0))
+                        .border_1()
+                        .border_color(theme.border_strong)
+                        .into_any_element(),
+                ),
+            };
+            steps = steps.child(
+                div()
+                    .min_h(px(24.0))
+                    .w_full()
+                    .min_w_0()
+                    .flex()
+                    .items_center()
+                    .gap(px(8.0))
+                    .child(marker)
+                    .child(
+                        div()
+                            .min_w_0()
+                            .flex_1()
+                            .text_size(px(11.5))
+                            .line_height(px(16.0))
+                            .text_color(foreground)
+                            .child(SharedString::from(step.step.clone())),
+                    ),
+            );
+        }
+
+        div()
+            .w_full()
+            .min_w_0()
+            .rounded(px(RADIUS_DF))
+            .border_1()
+            .border_color(theme.sidebar_border)
+            .bg(theme.sidebar_drag_background)
+            .overflow_hidden()
+            .child(
+                div()
+                    .h(px(34.0))
+                    .px(px(10.0))
+                    .flex()
+                    .items_center()
+                    .gap(px(8.0))
+                    .child(if active {
+                        pulse_dot(7.0, theme.accent)
+                    } else {
+                        div()
+                            .size(px(7.0))
+                            .rounded(px(99.0))
+                            .bg(theme.text_ghost)
+                            .into_any_element()
+                    })
+                    .child(
+                        div()
+                            .flex_1()
+                            .text_size(px(12.5))
+                            .font_weight(FontWeight::NORMAL)
+                            .text_color(theme.text)
+                            .child(tr_cow!("activity.todos")),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(11.5))
+                            .text_color(theme.text_tertiary)
+                            .child(format!("{completed}/{}", activity.plan_steps.len())),
+                    ),
+            )
+            .child(steps)
+            .into_any_element()
+    }
+
     /// The diff for an expanded file-change activity.
     ///
     /// Rows bleed to the card's edges so a changed line reads as a band, and
@@ -2412,7 +2534,7 @@ impl Waku {
             .max_h(px(ACTIVITY_DIFF_MAX_HEIGHT))
             .overflow_hidden()
             .border_t_1()
-            .border_color(theme.border_strong)
+            .border_color(theme.border)
             .child(rows)
             .child(activity_scroll_fade(
                 viewport.scroll_handle.clone(),
@@ -2461,7 +2583,7 @@ impl Waku {
                     .border_b_1()
                     .border_color(theme.border)
                     .text_color(theme.text_secondary)
-                    .font_weight(FontWeight::MEDIUM)
+                    .font_weight(FontWeight::NORMAL)
                     .child(
                         div()
                             .min_w_0()
@@ -2732,7 +2854,7 @@ fn render_activity_image(
             .max_w(gpui::relative(1.0))
             .max_h(px(ACTIVITY_IMAGE_HEIGHT))
             .mt(px(8.0))
-            .rounded(px(4.0))
+            .rounded(px(RADIUS_SM))
             .object_fit(ObjectFit::Contain)
             .into_any_element();
     }
@@ -2745,7 +2867,7 @@ fn render_activity_image(
             .max_w(gpui::relative(1.0))
             .h(px(80.0))
             .mt(px(8.0))
-            .rounded(px(4.0))
+            .rounded(px(RADIUS_SM))
             .bg(theme.inset)
             .flex()
             .items_center()
@@ -2763,7 +2885,7 @@ fn render_activity_image(
     .max_w(gpui::relative(1.0))
     .max_h(px(ACTIVITY_IMAGE_HEIGHT))
     .mt(px(8.0))
-    .rounded(px(4.0))
+    .rounded(px(RADIUS_SM))
     .object_fit(ObjectFit::Contain)
     .into_any_element()
 }

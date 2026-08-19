@@ -12,12 +12,99 @@ pub mod text_field;
 pub mod tooltip;
 
 use crate::model::{ActivityKind, ProviderKind, SessionStatus};
-use crate::theme::Theme;
+use crate::theme::{RADIUS_DF, RADIUS_LG, Theme};
 
-/// A monochrome icon from the embedded set, tinted via text color.
+/// Resolve Waku's semantic icon names onto one Hugeicons stroke family.
+/// Provider marks and polychrome file-type logos remain authored assets.
+fn icon_path(path: &'static str) -> &'static str {
+    if path.starts_with("icons/provider-") || path.starts_with("icons/file-types/") {
+        return path;
+    }
+
+    match path {
+        "icons/alert.svg" => "hugeicons/alert-circle.svg",
+        "icons/appearance.svg" => "hugeicons/paint-board.svg",
+        "icons/arrow-down.svg" => "hugeicons/arrow-down-01.svg",
+        "icons/arrow-left.svg" => "hugeicons/arrow-left-01.svg",
+        "icons/arrow-right.svg" => "hugeicons/arrow-right-01.svg",
+        "icons/arrow-up.svg" => "hugeicons/arrow-up-01.svg",
+        "icons/arrow-up-right.svg" => "hugeicons/arrow-up-right-01.svg",
+        "icons/block.svg" => "hugeicons/unavailable.svg",
+        "icons/bot.svg" => "hugeicons/robot-01.svg",
+        "icons/case-sensitive.svg" => "hugeicons/text-font.svg",
+        "icons/chart-column.svg" => "hugeicons/chart-column.svg",
+        "icons/check.svg" => "hugeicons/tick-02.svg",
+        "icons/changes.svg" => "hugeicons/git-compare.svg",
+        "icons/cloud-upload.svg" => "hugeicons/cloud-upload.svg",
+        "icons/collapse.svg" => "hugeicons/arrow-shrink.svg",
+        "icons/chevron-down.svg" => "hugeicons/arrow-down-01.svg",
+        "icons/chevron-right.svg" => "hugeicons/arrow-right-01.svg",
+        "icons/chevron-up.svg" => "hugeicons/arrow-up-01.svg",
+        "icons/chevrons-up-down.svg" => "hugeicons/arrow-up-down.svg",
+        "icons/command.svg" => "hugeicons/command.svg",
+        "icons/compose.svg" => "hugeicons/edit-02.svg",
+        "icons/copy.svg" => "hugeicons/copy-01.svg",
+        "icons/corner-down-right.svg" => "hugeicons/arrow-turn-forward.svg",
+        "icons/cursor-spark.svg" => "hugeicons/cursor-magic-selection-02.svg",
+        "icons/download.svg" => "hugeicons/download-01.svg",
+        "icons/expand.svg" => "hugeicons/arrow-expand.svg",
+        "icons/ellipsis.svg" => "hugeicons/more-horizontal.svg",
+        "icons/eye.svg" => "hugeicons/view.svg",
+        "icons/eye-off.svg" => "hugeicons/view-off.svg",
+        "icons/external-link.svg" => "hugeicons/link-square-02.svg",
+        "icons/file.svg" => "hugeicons/file-01.svg",
+        "icons/folder.svg" => "hugeicons/folder-01.svg",
+        "icons/folder-new.svg" => "hugeicons/folder-add.svg",
+        "icons/file-bottom-left-arrow.svg" => "hugeicons/file-download.svg",
+        "icons/file-diff.svg" => "hugeicons/file-edit.svg",
+        "icons/fork.svg" => "hugeicons/git-fork.svg",
+        "icons/git-branch.svg" => "hugeicons/git-branch.svg",
+        "icons/git-commit-horizontal.svg" => "hugeicons/git-commit.svg",
+        "icons/history-back.svg" => "hugeicons/arrow-left-02.svg",
+        "icons/history-forward.svg" => "hugeicons/arrow-right-02.svg",
+        "icons/globe.svg" => "hugeicons/globe-02.svg",
+        "icons/github.svg" => "hugeicons/github.svg",
+        "icons/hexagon.svg" => "hugeicons/hexagon.svg",
+        "icons/info.svg" => "hugeicons/information-circle.svg",
+        "icons/laptop.svg" => "hugeicons/laptop.svg",
+        "icons/list.svg" => "hugeicons/task-01.svg",
+        "icons/loader-circle.svg" => "hugeicons/loading-03.svg",
+        "icons/lock.svg" => "hugeicons/lock.svg",
+        "icons/lock-open.svg" => "hugeicons/square-unlock-02.svg",
+        "icons/package.svg" => "hugeicons/package.svg",
+        "icons/panel-left.svg" => "hugeicons/sidebar-left.svg",
+        "icons/panel-right.svg" => "hugeicons/sidebar-right.svg",
+        "icons/paperclip.svg" => "hugeicons/attachment-01.svg",
+        "icons/pencil.svg" => "hugeicons/edit-02.svg",
+        "icons/plus.svg" => "hugeicons/add-01.svg",
+        "icons/queue.svg" => "hugeicons/queue-01.svg",
+        "icons/regex.svg" => "hugeicons/code.svg",
+        "icons/replace.svg" | "icons/replace-all.svg" => "hugeicons/search-replace.svg",
+        "icons/rewind.svg" => "hugeicons/undo-02.svg",
+        "icons/rotate-cw.svg" => "hugeicons/rotate-clockwise.svg",
+        "icons/search.svg" => "hugeicons/search-01.svg",
+        "icons/send.svg" => "hugeicons/sent-02.svg",
+        "icons/server.svg" => "hugeicons/server-stack-01.svg",
+        "icons/settings.svg" => "hugeicons/settings-01.svg",
+        "icons/profile.svg" => "hugeicons/user-circle.svg",
+        "icons/slash.svg" => "hugeicons/code.svg",
+        "icons/sparkle.svg" => "hugeicons/sparkles.svg",
+        "icons/star.svg" | "icons/star-filled.svg" => "hugeicons/star.svg",
+        "icons/stop.svg" | "icons/stop-filled.svg" => "hugeicons/stop.svg",
+        "icons/terminal.svg" | "icons/terminal-square.svg" => "hugeicons/command-line.svg",
+        "icons/trash.svg" => "hugeicons/delete-02.svg",
+        "icons/whole-word.svg" => "hugeicons/text-font.svg",
+        "icons/wrench.svg" => "hugeicons/wrench-01.svg",
+        "icons/x.svg" => "hugeicons/cancel-01.svg",
+        "icons/zap.svg" => "hugeicons/flash.svg",
+        _ => panic!("unmapped native icon: {path}"),
+    }
+}
+
+/// A monochrome Hugeicons glyph tinted via GPUI text color.
 pub fn icon(path: &'static str, size: f32, color: Hsla) -> Svg {
     svg()
-        .path(path)
+        .path(icon_path(path))
         .w(px(size))
         .h(px(size))
         .flex_none()
@@ -37,11 +124,11 @@ pub fn icon_button(id: impl Into<ElementId>, path: &'static str, theme: Theme) -
     div()
         .id(id)
         .size(px(22.0))
-        .rounded(px(6.0))
+        .rounded(px(RADIUS_DF))
         .flex()
         .items_center()
         .justify_center()
-        .cursor_default()
+        .cursor_pointer()
         .hover(|element| element.bg(theme.overlay))
         .active(|element| element.bg(theme.overlay_strong))
         .child(icon(path, 13.0, theme.text_tertiary))
@@ -123,13 +210,13 @@ where
     let base = div()
         .id(id)
         .tab_index(0)
-        .focus_visible(|style| style.border_color(theme.accent))
+        .focus_visible(|style| style.border_color(theme.ring))
         .w(px(36.0))
         .h(px(20.0))
         .p(px(2.0))
         .flex_none()
-        .rounded_full()
-        .cursor_default()
+        .rounded(px(RADIUS_LG))
+        .cursor_pointer()
         .when(disabled, |element| element.opacity(0.55))
         .bg(if on { theme.inverse } else { theme.inset })
         .border_1()
@@ -141,11 +228,17 @@ where
         .flex()
         .items_center()
         .when(on, |element| element.justify_end())
-        .child(div().w(px(14.0)).h(px(14.0)).rounded_full().bg(if on {
-            theme.on_inverse
-        } else {
-            theme.text_tertiary
-        }));
+        .child(
+            div()
+                .w(px(14.0))
+                .h(px(14.0))
+                .rounded(px(RADIUS_LG))
+                .bg(if on {
+                    theme.on_inverse
+                } else {
+                    theme.text_tertiary
+                }),
+        );
 
     if disabled {
         base
@@ -191,7 +284,7 @@ pub fn provider_icon(provider: ProviderKind) -> &'static str {
 pub fn status_color(theme: &Theme, status: SessionStatus) -> Hsla {
     match status {
         SessionStatus::Idle => theme.text_ghost,
-        SessionStatus::Connecting | SessionStatus::Working => theme.accent,
+        SessionStatus::Connecting | SessionStatus::Working => theme.warning,
         SessionStatus::Waiting => theme.warning,
         SessionStatus::Failed => theme.danger,
     }
@@ -238,6 +331,7 @@ pub struct MenuChip {
     disabled: bool,
     height: Option<Pixels>,
     background: Option<Hsla>,
+    full_radius: bool,
 }
 
 impl MenuChip {
@@ -252,6 +346,7 @@ impl MenuChip {
             disabled: false,
             height: None,
             background: None,
+            full_radius: false,
         }
     }
 
@@ -267,6 +362,13 @@ impl MenuChip {
     /// it doesn't read as a filled pill.
     pub fn background(mut self, background: Hsla) -> Self {
         self.background = Some(background);
+        self
+    }
+
+    /// Use the pill radius for compact controls embedded in the composer.
+    /// Dropdowns elsewhere keep the standard control radius.
+    pub fn full_radius(mut self) -> Self {
+        self.full_radius = true;
         self
     }
 
@@ -328,14 +430,18 @@ impl RenderOnce for MenuChip {
                 .height
                 .unwrap_or(if self.outlined { px(30.0) } else { px(24.0) }))
             .px(if self.outlined { px(10.0) } else { px(7.0) })
-            .rounded(if self.outlined { px(7.0) } else { px(6.0) })
+            .rounded(px(if self.full_radius {
+                RADIUS_LG
+            } else {
+                RADIUS_DF
+            }))
             .flex()
             .items_center()
             .gap(px(6.0))
             .text_size(px(11.5))
             .line_height(px(14.0))
-            .cursor_default()
-            .focus_visible(|style| style.border_1().border_color(theme.accent))
+            .when(!self.disabled, |element| element.cursor_pointer())
+            .focus_visible(|style| style.border_1().border_color(theme.ring))
             .when(self.outlined, |element| {
                 element
                     .border_1()
@@ -346,7 +452,9 @@ impl RenderOnce for MenuChip {
             .when(!self.disabled, |element| {
                 element.hover(|element| element.bg(theme.overlay))
             })
-            .when(self.disabled, |element| element.opacity(0.7))
+            .when(self.disabled, |element| {
+                element.text_color(theme.text_ghost)
+            })
             .when_some(self.icon, |element, (path, color)| {
                 element.child(icon(path, 10.5, color))
             })
@@ -418,8 +526,8 @@ impl RenderOnce for ProjectNameSelector {
         self.base
             .relative()
             .flex_none()
-            .cursor_default()
-            .focus_visible(|style| style.border_1().border_color(theme.accent))
+            .cursor_pointer()
+            .focus_visible(|style| style.border_1().border_color(theme.ring))
             .child(self.label)
             .child(
                 canvas(
@@ -450,19 +558,47 @@ mod tests {
         use crate::assets::Assets;
         use crate::model::{ActivityKind, ProviderKind};
         use gpui::AssetSource;
+        use gpui_hugeicons::HugeiconsAssets;
 
         let mut paths = vec![
+            "icons/alert.svg",
+            "icons/appearance.svg",
+            "icons/arrow-down.svg",
             "icons/panel-left.svg",
+            "icons/paperclip.svg",
             "icons/plus.svg",
             "icons/arrow-left.svg",
             "icons/arrow-right.svg",
             "icons/arrow-up.svg",
+            "icons/arrow-up-right.svg",
+            "icons/block.svg",
+            "icons/bot.svg",
+            "icons/case-sensitive.svg",
             "icons/stop.svg",
+            "icons/stop-filled.svg",
             "icons/check.svg",
+            "icons/changes.svg",
+            "icons/cloud-upload.svg",
+            "icons/collapse.svg",
+            "icons/command.svg",
+            "icons/compose.svg",
             "icons/copy.svg",
+            "icons/corner-down-right.svg",
+            "icons/cursor-spark.svg",
+            "icons/download.svg",
+            "icons/expand.svg",
+            "icons/ellipsis.svg",
+            "icons/eye.svg",
+            "icons/eye-off.svg",
+            "icons/external-link.svg",
+            "icons/file.svg",
+            "icons/file-bottom-left-arrow.svg",
             "icons/rewind.svg",
             "icons/fork.svg",
             "icons/git-branch.svg",
+            "icons/git-commit-horizontal.svg",
+            "icons/history-back.svg",
+            "icons/history-forward.svg",
             "icons/chart-column.svg",
             "icons/chevron-down.svg",
             "icons/chevron-right.svg",
@@ -473,9 +609,22 @@ mod tests {
             "icons/laptop.svg",
             "icons/file-diff.svg",
             "icons/globe.svg",
-            "icons/alert.svg",
+            "icons/github.svg",
+            "icons/hexagon.svg",
+            "icons/info.svg",
+            "icons/list.svg",
+            "icons/loader-circle.svg",
             "icons/lock.svg",
             "icons/lock-open.svg",
+            "icons/queue.svg",
+            "icons/regex.svg",
+            "icons/replace.svg",
+            "icons/replace-all.svg",
+            "icons/search.svg",
+            "icons/send.svg",
+            "icons/server.svg",
+            "icons/settings.svg",
+            "icons/slash.svg",
             "icons/star.svg",
             "icons/star-filled.svg",
             "icons/sparkle.svg",
@@ -485,7 +634,12 @@ mod tests {
             "icons/bot.svg",
             "icons/rotate-cw.svg",
             "icons/package.svg",
+            "icons/pencil.svg",
+            "icons/terminal.svg",
+            "icons/terminal-square.svg",
             "icons/trash.svg",
+            "icons/whole-word.svg",
+            "icons/wrench.svg",
         ];
         for provider in ProviderKind::ALL {
             paths.push(provider_icon(provider));
@@ -503,10 +657,12 @@ mod tests {
         ] {
             paths.push(activity_icon(kind));
         }
+        let assets = HugeiconsAssets::with_fallback(Assets);
         for path in paths {
+            let resolved = icon_path(path);
             assert!(
-                Assets.load(path).unwrap().is_some(),
-                "missing embedded icon: {path}"
+                assets.load(resolved).unwrap().is_some(),
+                "missing resolved icon: {path} -> {resolved}"
             );
         }
     }

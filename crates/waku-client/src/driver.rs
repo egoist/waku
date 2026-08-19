@@ -45,6 +45,10 @@ impl DriverHandle {
         self.inner.prompt(prompt);
     }
 
+    pub fn prompt_with_goal(&self, prompt: String, objective: String) {
+        self.inner.prompt_with_goal(prompt, objective);
+    }
+
     pub fn supports_steer(&self) -> bool {
         self.inner.supports_steer()
     }
@@ -104,6 +108,9 @@ impl DriverHandle {
 
 pub trait DriverControl: Send + Sync {
     fn prompt(&self, prompt: String);
+    fn prompt_with_goal(&self, prompt: String, _objective: String) {
+        self.prompt(prompt);
+    }
     fn supports_steer(&self) -> bool {
         false
     }

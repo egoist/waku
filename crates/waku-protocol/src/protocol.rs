@@ -86,6 +86,10 @@ pub enum Command {
     Prompt {
         prompt: String,
     },
+    GoalPrompt {
+        prompt: String,
+        objective: String,
+    },
     Steer {
         prompt: String,
     },

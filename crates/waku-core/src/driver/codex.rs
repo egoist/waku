@@ -22,10 +22,10 @@ use crate::driver::{
     DriverControl, DriverEventSender, DriverEventSink, DriverStartOptions, SessionOptions,
 };
 use crate::model::{
-    ActivityItem, ActivityKind, BackgroundWorkEvent, BackgroundWorkItem, BackgroundWorkKey,
-    BackgroundWorkKind, BackgroundWorkStatus, DriverEvent, InteractionMode, PermissionOption,
-    ProviderResumeCursor, RuntimeMode, UserInputAnswer, UserInputOption, UserInputQuestion,
-    unix_time_millis,
+    ActivityItem, ActivityKind, ActivityPlanStep, ActivityPlanStepStatus, BackgroundWorkEvent,
+    BackgroundWorkItem, BackgroundWorkKey, BackgroundWorkKind, BackgroundWorkStatus, DriverEvent,
+    InteractionMode, PermissionOption, ProviderResumeCursor, RuntimeMode, UserInputAnswer,
+    UserInputOption, UserInputQuestion, unix_time_millis,
 };
 
 const DISABLE_EXTERNAL_COMPUTER_USE_PLUGIN: &str =
@@ -38,9 +38,16 @@ const DISABLE_EXTERNAL_COMPUTER_USE_MCP: &str = "mcp_servers.computer-use.enable
 const DISABLE_EXTERNAL_COMPUTER_USE_SKILL: &str =
     r#"skills.config=[{name="computer-use:computer-use",enabled=false}]"#;
 const DISABLE_CODEX_NODE_REPL: &str = "mcp_servers.node_repl.enabled=false";
+const GOAL_SET_REQUEST_ID: &str = "waku-goal-set";
+const CODEX_GOAL_OBJECTIVE_MAX_CHARS: usize = 4_000;
+const ABBREVIATED_GOAL_SUFFIX: &str = "\n\nWaku abbreviated this native goal only to fit Codex's 4,000-character limit. Continue until every requirement in the full user message that started this goal is completed and verified.";
 
 enum CommandMessage {
     Prompt(String),
+    GoalPrompt {
+        prompt: String,
+        objective: String,
+    },
     Steer(String),
     Cancel,
     Respond {
@@ -406,6 +413,53 @@ impl CodexDriver {
                             let mut params = turn_start_params(
                                 &thread_id,
                                 text,
+                                approval_policy,
+                                approvals_reviewer,
+                                sandbox,
+                            );
+                            if let Some(model) = model.as_deref() {
+                                params["model"] = json!(model);
+                            }
+                            if let Some(reasoning_effort) = reasoning_effort.as_deref() {
+                                params["effort"] = json!(reasoning_effort);
+                            }
+                            if let Some(service_tier) = service_tier.as_deref() {
+                                params["serviceTier"] = json!(service_tier);
+                            }
+                            json!({
+                                "method": "turn/start",
+                                "id": next_request_id,
+                                "params": params
+                            })
+                        }
+                        CommandMessage::GoalPrompt { prompt, objective } => {
+                            let Some(thread_id) = wait_for_thread_id(&writer_thread_id) else {
+                                let _ = writer_events.send(DriverEvent::Error(tr!(
+                                    "errors.codex_thread_open_incomplete"
+                                )));
+                                continue;
+                            };
+                            {
+                                let mut title = writer_title_generation.lock();
+                                if title.enabled && !title.launched && title.pending.is_none() {
+                                    title.pending = Some(CodexTitleRequest {
+                                        prompt: prompt.clone(),
+                                    });
+                                }
+                            }
+                            let goal_request = goal_set_request(&thread_id, &objective);
+                            if let Err(error) = write_json_line(&mut stdin, &goal_request) {
+                                let _ = writer_events.send(DriverEvent::Error(tr!(
+                                    "errors.provider_transport_write",
+                                    provider = "Codex",
+                                    error = error
+                                )));
+                                continue;
+                            }
+                            next_request_id += 1;
+                            let mut params = turn_start_params(
+                                &thread_id,
+                                prompt,
                                 approval_policy,
                                 approvals_reviewer,
                                 sandbox,
@@ -837,6 +891,38 @@ fn turn_start_params(
     })
 }
 
+fn goal_set_request(thread_id: &str, objective: &str) -> Value {
+    let objective = bounded_goal_objective(objective);
+    json!({
+        "method": "thread/goal/set",
+        "id": GOAL_SET_REQUEST_ID,
+        "params": {
+            "threadId": thread_id,
+            "objective": objective,
+            "status": "active"
+        }
+    })
+}
+
+fn bounded_goal_objective(objective: &str) -> String {
+    if objective.chars().count() <= CODEX_GOAL_OBJECTIVE_MAX_CHARS {
+        return objective.to_owned();
+    }
+
+    let prefix_limit =
+        CODEX_GOAL_OBJECTIVE_MAX_CHARS.saturating_sub(ABBREVIATED_GOAL_SUFFIX.chars().count());
+    let mut prefix = objective.chars().take(prefix_limit).collect::<String>();
+    if let Some(boundary) = prefix.rfind(char::is_whitespace) {
+        prefix.truncate(boundary);
+    }
+    prefix.push_str(ABBREVIATED_GOAL_SUFFIX);
+    prefix
+}
+
+fn should_finish_codex_turn(goal_active: bool, turn_status: &str) -> bool {
+    !goal_active || turn_status != "completed"
+}
+
 fn toml_string(value: &str) -> String {
     serde_json::to_string(value).expect("a filesystem path is always valid JSON")
 }
@@ -844,6 +930,12 @@ fn toml_string(value: &str) -> String {
 impl DriverControl for CodexDriver {
     fn prompt(&self, prompt: String) {
         let _ = self.commands.send(CommandMessage::Prompt(prompt));
+    }
+
+    fn prompt_with_goal(&self, prompt: String, objective: String) {
+        let _ = self
+            .commands
+            .send(CommandMessage::GoalPrompt { prompt, objective });
     }
 
     fn supports_steer(&self) -> bool {
@@ -1197,6 +1289,7 @@ struct CodexStreamState {
     citation_numbers: HashMap<String, usize>,
     citation_buffer: String,
     next_citation_number: usize,
+    goal_active: bool,
 }
 
 impl CodexStreamState {
@@ -1476,6 +1569,16 @@ fn handle_codex_message(
     // the same numeric ID as one of Waku's earlier requests. Only messages
     // without a method are responses to Waku-originated requests.
     let is_response = value.get("method").is_none();
+    if is_response && value.get("id").and_then(Value::as_str) == Some(GOAL_SET_REQUEST_ID) {
+        if let Some(error) = value.pointer("/error/message").and_then(Value::as_str) {
+            stream_state.goal_active = false;
+            let _ = events.send(DriverEvent::Error(error.to_owned()));
+        } else {
+            stream_state.goal_active =
+                value.pointer("/result/goal/status").and_then(Value::as_str) == Some("active");
+        }
+        return;
+    }
     let pending_background = is_response
         .then(|| value.get("id").and_then(Value::as_u64))
         .flatten()
@@ -1673,6 +1776,11 @@ fn handle_codex_message(
                 ));
             }
         }
+        "turn/plan/updated" => {
+            if let Some(activity) = codex_plan_activity(&params) {
+                let _ = events.send(DriverEvent::RichActivity(activity));
+            }
+        }
         "item/started" | "item/completed" => {
             if let Some(item) = params.get("item") {
                 stream_state.capture_citations(item);
@@ -1720,10 +1828,30 @@ fn handle_codex_message(
                 .pointer("/turn/error/message")
                 .and_then(Value::as_str)
                 .map(str::to_owned);
-            let _ = events.send(DriverEvent::TurnFinished {
-                success: status == "completed",
-                summary: error,
-            });
+            if should_finish_codex_turn(stream_state.goal_active, status) {
+                let _ = events.send(DriverEvent::TurnFinished {
+                    success: status == "completed",
+                    summary: error,
+                });
+            }
+        }
+        "thread/goal/updated" => {
+            let status = params.pointer("/goal/status").and_then(Value::as_str);
+            let was_active = stream_state.goal_active;
+            stream_state.goal_active = status == Some("active");
+            // Normally the model updates the goal before its turn completes.
+            // If the server reports the terminal goal state just after
+            // `turn/completed`, settle the Waku turn here instead of leaving
+            // its working indicator stranded.
+            if was_active && !stream_state.goal_active && turn_id.lock().is_none() {
+                let _ = events.send(DriverEvent::TurnFinished {
+                    success: status == Some("complete"),
+                    summary: None,
+                });
+            }
+        }
+        "thread/goal/cleared" => {
+            stream_state.goal_active = false;
         }
         "thread/name/updated" => {
             let current_thread_id = thread_id.lock().clone();
@@ -1897,6 +2025,56 @@ fn codex_plan_usage(snapshot: Option<&Value>) -> Option<crate::usage::PlanUsage>
         ),
         windows,
     })
+}
+
+/// Codex publishes the live task list as a turn notification rather than a
+/// normal thread item. Preserve its structured status so clients can render a
+/// real plan instead of exposing transport JSON or flattening it to one line.
+fn codex_plan_activity(params: &Value) -> Option<ActivityItem> {
+    let plan_steps = params
+        .get("plan")?
+        .as_array()?
+        .iter()
+        .filter_map(|step| {
+            let text = step.get("step")?.as_str()?.trim();
+            if text.is_empty() {
+                return None;
+            }
+            let status = match step.get("status").and_then(Value::as_str) {
+                Some("completed") => ActivityPlanStepStatus::Completed,
+                Some("inProgress") | Some("in_progress") => ActivityPlanStepStatus::InProgress,
+                _ => ActivityPlanStepStatus::Pending,
+            };
+            Some(ActivityPlanStep {
+                step: text.to_owned(),
+                status,
+            })
+        })
+        .collect::<Vec<_>>();
+    if plan_steps.is_empty() {
+        return None;
+    }
+
+    let source_id = params
+        .get("turnId")
+        .and_then(Value::as_str)
+        .map(|turn_id| format!("turn-plan-{turn_id}"));
+    let explanation = params
+        .get("explanation")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|explanation| !explanation.is_empty())
+        .map(str::to_owned);
+    Some(
+        ActivityItem::new(
+            source_id,
+            ActivityKind::Plan,
+            tr!("activity.plan_updated"),
+            explanation,
+            true,
+        )
+        .with_plan_steps(plan_steps),
+    )
 }
 
 fn codex_activity_kind(item: &Value) -> Option<ActivityKind> {
@@ -2375,6 +2553,35 @@ mod tests {
             codex_permissions(RuntimeMode::FullAccess, InteractionMode::Plan),
             ("never", "read-only", "user")
         );
+    }
+
+    #[test]
+    fn native_goal_request_activates_the_objective_for_the_open_thread() {
+        let request = goal_set_request("thread-1", "Finish the migration");
+        assert_eq!(request["method"], "thread/goal/set");
+        assert_eq!(request["id"], GOAL_SET_REQUEST_ID);
+        assert_eq!(request["params"]["threadId"], "thread-1");
+        assert_eq!(request["params"]["objective"], "Finish the migration");
+        assert_eq!(request["params"]["status"], "active");
+    }
+
+    #[test]
+    fn long_native_goals_keep_the_full_prompt_as_the_authority() {
+        let objective = "requirement ".repeat(500);
+        let request = goal_set_request("thread-1", &objective);
+        let bounded = request["params"]["objective"].as_str().unwrap();
+
+        assert!(bounded.chars().count() <= CODEX_GOAL_OBJECTIVE_MAX_CHARS);
+        assert!(bounded.starts_with("requirement requirement"));
+        assert!(bounded.ends_with(ABBREVIATED_GOAL_SUFFIX));
+        assert!(bounded.contains("full user message that started this goal"));
+    }
+
+    #[test]
+    fn active_goals_keep_completed_provider_turns_open_for_continuation() {
+        assert!(!should_finish_codex_turn(true, "completed"));
+        assert!(should_finish_codex_turn(true, "failed"));
+        assert!(should_finish_codex_turn(false, "completed"));
     }
 
     fn session_options(
@@ -2890,6 +3097,38 @@ mod tests {
         assert_eq!(
             codex_item_title(&nested_query),
             "Search for GPT-5.6 Luna official"
+        );
+    }
+
+    #[test]
+    fn turn_plan_notifications_preserve_structured_step_status() {
+        let activity = codex_plan_activity(&json!({
+            "threadId": "thread-1",
+            "turnId": "turn-1",
+            "explanation": "Implementation sequence",
+            "plan": [
+                {"step": "Inspect the transcript", "status": "completed"},
+                {"step": "Build the card", "status": "inProgress"},
+                {"step": "Validate the app", "status": "pending"}
+            ]
+        }))
+        .expect("structured plan activity");
+
+        assert_eq!(activity.kind, ActivityKind::Plan);
+        assert_eq!(activity.source_id.as_deref(), Some("turn-plan-turn-1"));
+        assert_eq!(activity.detail.as_deref(), Some("Implementation sequence"));
+        assert_eq!(activity.plan_steps.len(), 3);
+        assert_eq!(
+            activity.plan_steps[0].status,
+            ActivityPlanStepStatus::Completed
+        );
+        assert_eq!(
+            activity.plan_steps[1].status,
+            ActivityPlanStepStatus::InProgress
+        );
+        assert_eq!(
+            activity.plan_steps[2].status,
+            ActivityPlanStepStatus::Pending
         );
     }
 

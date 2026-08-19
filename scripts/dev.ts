@@ -36,6 +36,9 @@ async function build(target: BuildTarget): Promise<boolean> {
   }
 
   console.log(`[waku-dev] Building ${isMacOS ? "app bundle" : "app"}...`);
+  // Windows cannot replace a running executable. Stop Waku first so both the
+  // app binary and its supervised daemon are released before Cargo links.
+  if (process.platform === "win32") await stopApp();
   if (!(await buildDaemon())) {
     console.error("[waku-dev] Daemon build failed; keeping the current app open.");
     return false;

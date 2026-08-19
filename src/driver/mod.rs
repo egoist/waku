@@ -156,6 +156,10 @@ impl DriverControl for RemoteDriverControl {
         self.notify(waku_client::Command::Prompt { prompt });
     }
 
+    fn prompt_with_goal(&self, prompt: String, objective: String) {
+        self.notify(waku_client::Command::GoalPrompt { prompt, objective });
+    }
+
     fn supports_steer(&self) -> bool {
         self.supports_steer
     }

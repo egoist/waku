@@ -191,6 +191,8 @@ pub struct AppSettings {
     pub favorite_models: Vec<FavoriteModel>,
     pub theme: ThemePreference,
     pub language: AppLanguage,
+    pub profile_name: String,
+    pub profile_avatar_path: Option<PathBuf>,
 }
 
 impl Default for AppSettings {
@@ -200,6 +202,8 @@ impl Default for AppSettings {
             favorite_models: Vec::new(),
             theme: ThemePreference::System,
             language: AppLanguage::default(),
+            profile_name: String::new(),
+            profile_avatar_path: None,
         }
     }
 }
@@ -268,6 +272,10 @@ pub struct PersistedState {
     pub theme: ThemePreference,
     #[serde(default)]
     pub language: AppLanguage,
+    #[serde(default)]
+    pub profile_name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile_avatar_path: Option<PathBuf>,
     #[serde(default = "default_sidebar_visibility")]
     pub sidebar_visible: bool,
     #[serde(default = "default_right_panel_visibility")]
@@ -338,6 +346,8 @@ impl PersistedState {
             favorite_models: Vec::new(),
             theme: ThemePreference::System,
             language: AppLanguage::default(),
+            profile_name: String::new(),
+            profile_avatar_path: None,
             sidebar_visible: true,
             right_panel_visible: false,
             sidebar_width: DEFAULT_SIDEBAR_WIDTH,
@@ -371,9 +381,7 @@ impl PersistedState {
                 .reasoning_effort
                 .clone_from(&self.last_reasoning_effort);
             session.service_tier.clone_from(&self.last_service_tier);
-            session
-                .context_window
-                .clone_from(&self.last_context_window);
+            session.context_window.clone_from(&self.last_context_window);
         }
         session
     }
@@ -436,6 +444,8 @@ impl PersistedState {
             favorite_models: self.favorite_models.clone(),
             theme: self.theme,
             language: self.language,
+            profile_name: self.profile_name.clone(),
+            profile_avatar_path: self.profile_avatar_path.clone(),
         }
     }
 
@@ -473,6 +483,8 @@ impl PersistedState {
         self.favorite_models = settings.favorite_models;
         self.theme = settings.theme;
         self.language = settings.language;
+        self.profile_name = settings.profile_name;
+        self.profile_avatar_path = settings.profile_avatar_path;
     }
 
     pub fn apply_daemon_settings(&mut self, settings: crate::DaemonSettings) {
@@ -948,6 +960,15 @@ impl StateStore {
 
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    /// Stable app-owned directory for lightweight user profile assets. The
+    /// caller performs any filesystem work off the UI thread.
+    pub fn profile_directory(&self) -> PathBuf {
+        self.app_settings_path
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .join("profile")
     }
 
     fn open(&self) -> io::Result<Connection> {
@@ -2513,11 +2534,7 @@ mod tests {
         assert_eq!(restored.sessions[0].context_window.as_deref(), Some("1m"));
         assert_eq!(
             restored.model_traits_for(ProviderKind::Codex, "gpt-5.6-luna"),
-            (
-                Some("xhigh".into()),
-                Some("fast".into()),
-                Some("1m".into())
-            )
+            (Some("xhigh".into()), Some("fast".into()), Some("1m".into()))
         );
         assert_eq!(
             restored.sessions[0].runtime_mode,

@@ -956,13 +956,29 @@ impl Waku {
 
     /// Discovery is not requested here: launch already requested it for every
     /// installed provider, so tabs only ever switch between loaded lists.
+    pub(super) fn open_model_picker_provider(
+        &mut self,
+        provider: ProviderKind,
+        cx: &mut Context<Self>,
+    ) {
+        let new_task_project = self
+            .selected_session()
+            .filter(|session| !session.messages.is_empty() && session.provider != provider)
+            .map(|session| session.project_id);
+        if let Some(project_id) = new_task_project {
+            self.create_session_for(project_id, provider, cx);
+        }
+        self.select_model_picker_tab(ModelPickerTab::Provider(provider), cx);
+        self.model_picker_view = ModelPickerView::Models;
+        cx.notify();
+    }
+
     pub(super) fn select_model_picker_tab(&mut self, tab: ModelPickerTab, cx: &mut Context<Self>) {
         if self.model_picker_tab != tab {
             self.model_picker_tab = tab;
             if let ModelPickerTab::Provider(provider) = tab {
-                // Selecting a rail re-runs that provider's catalog discovery,
-                // so each tab is fresh when viewed without probing every
-                // provider on open.
+                // Selecting a provider re-runs its catalog discovery, so its
+                // model list is fresh without probing every provider on open.
                 self.refresh_provider_model_discovery(provider);
             }
             // A different tab renumbers the rows under the keyboard cursor,

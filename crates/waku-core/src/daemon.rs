@@ -1453,6 +1453,7 @@ fn handle_driver_command(
 ) -> anyhow::Result<ResponsePayload> {
     match command {
         Command::Prompt { prompt } => driver.prompt(prompt),
+        Command::GoalPrompt { prompt, objective } => driver.prompt_with_goal(prompt, objective),
         Command::Steer { prompt } => driver.steer(prompt),
         Command::Cancel => driver.cancel(),
         Command::CancelComputerUse => driver.cancel_computer_use(),

@@ -23,7 +23,13 @@ const SETTINGS_SEARCH_CONTEXT: &str = "SettingsSidebar > ComposerInput";
 
 /// The sidebar's rows in display order, each with the keyword haystack the
 /// search field filters against.
-const SETTINGS_PAGES: [(SettingsPage, &str, &str, &str); 7] = [
+const SETTINGS_PAGES: [(SettingsPage, &str, &str, &str); 8] = [
+    (
+        SettingsPage::Profile,
+        "settings.profile",
+        "icons/profile.svg",
+        "settings.profile_keywords",
+    ),
     (
         SettingsPage::General,
         "settings.general",
@@ -104,12 +110,12 @@ impl Waku {
             .key_context("Waku")
             .track_focus(&self.settings_focus)
             .on_action(|_: &CloseWindow, window, _| crate::platform::hide_window(window))
+            .on_action(cx.listener(Self::toggle_fullscreen_action))
             .on_action(cx.listener(Self::new_session_action))
             .on_action(cx.listener(Self::new_project_action))
             .on_action(cx.listener(Self::open_settings_action))
             .on_action(cx.listener(Self::toggle_sidebar_action))
             .on_action(cx.listener(Self::toggle_right_panel_action))
-            .on_action(cx.listener(Self::toggle_command_palette_action))
             .on_action(cx.listener(Self::toggle_fps_counter_action))
             .on_action(cx.listener(Self::navigate_back_action))
             .on_action(cx.listener(Self::navigate_forward_action))
@@ -120,7 +126,7 @@ impl Waku {
             .flex()
             .bg(theme.canvas)
             .text_color(theme.text)
-            .font_family(".SystemUIFont")
+            .font_family(crate::theme::FONT_SANS)
             .child(self.render_settings_sidebar(window, cx))
             .child(self.render_settings_content(window, cx))
             .into_any_element()
@@ -142,11 +148,11 @@ impl Waku {
                     )))
                     .h(px(36.0))
                     .px(px(11.0))
-                    .rounded(px(8.0))
+                    .rounded(px(RADIUS_DF))
                     .flex()
                     .items_center()
                     .gap(px(10.0))
-                    .cursor_default()
+                    .cursor_pointer()
                     .text_size(px(13.0))
                     .text_color(if selected {
                         theme.text
@@ -204,11 +210,11 @@ impl Waku {
                         .id("settings-back")
                         .h(px(34.0))
                         .px(px(9.0))
-                        .rounded(px(8.0))
+                        .rounded(px(RADIUS_DF))
                         .flex()
                         .items_center()
                         .gap(px(9.0))
-                        .cursor_default()
+                        .cursor_pointer()
                         .text_size(px(13.0))
                         .text_color(theme.text_secondary)
                         .hover(|element| element.bg(theme.overlay))
@@ -270,13 +276,14 @@ impl Waku {
             window,
             cx,
         );
+        let show_native_controls = cfg!(target_os = "macos") && !window.is_fullscreen();
         // Only as tall as whatever actually sits in it: macOS's native
         // traffic lights, or the client-side buttons a Linux desktop puts on
         // this side. Windows keeps all three on the far side, and a desktop
         // like GNOME keeps none here, so there is nothing to clear and the
         // strip is only somewhere to drag the window by — the content
         // column's own titlebar carries the rest of that job.
-        let height = if cfg!(target_os = "macos") || left_window_controls.is_some() {
+        let height = if show_native_controls || left_window_controls.is_some() {
             48.0
         } else {
             12.0
@@ -293,7 +300,11 @@ impl Waku {
                 self.window_drag_region(
                     div()
                         .id("settings-sidebar-traffic-light-drag-region")
-                        .w(px(TRAFFIC_LIGHT_CLEARANCE))
+                        .w(px(if show_native_controls {
+                            TRAFFIC_LIGHT_CLEARANCE
+                        } else {
+                            0.0
+                        }))
                         .h_full()
                         .flex_none(),
                     cx,
@@ -354,13 +365,21 @@ impl Waku {
         // rather than a glitch.
         let content_scrolled = !fills_viewport && self.settings_scroll.offset().y < px(-1.0);
 
+        let content_max_width = match page {
+            SettingsPage::Usage => SETTINGS_USAGE_MAX_WIDTH,
+            _ => SETTINGS_CONTENT_MAX_WIDTH,
+        };
+        let provider_content_width =
+            (f32::from(window.viewport_size().width) - DEFAULT_SIDEBAR_WIDTH - 64.0).max(320.0);
         let inner = div()
             .w_full()
-            .max_w(px(match page {
-                SettingsPage::Usage => SETTINGS_USAGE_MAX_WIDTH,
-                _ => SETTINGS_CONTENT_MAX_WIDTH,
-            }))
-            .mx_auto()
+            .min_w_0()
+            .when(page == SettingsPage::Providers, |element| {
+                element.w(px(provider_content_width))
+            })
+            .when(page != SettingsPage::Providers, |element| {
+                element.max_w(px(content_max_width))
+            })
             .when(fills_viewport, |element| {
                 element.h_full().min_h_0().flex().flex_col()
             })
@@ -369,9 +388,10 @@ impl Waku {
                     .pt(px(2.0))
                     .flex_none()
                     .text_size(px(18.0))
-                    .font_weight(FontWeight::MEDIUM)
+                    .font_weight(FontWeight::NORMAL)
                     .text_color(theme.text)
                     .child(match page {
+                        SettingsPage::Profile => tr!("settings.profile"),
                         SettingsPage::General => tr!("settings.general"),
                         SettingsPage::Providers => tr!("settings.providers"),
                         SettingsPage::Skills => tr!("settings.skills"),
@@ -382,6 +402,7 @@ impl Waku {
                     }),
             )
             .child(match page {
+                SettingsPage::Profile => self.render_profile_settings(cx),
                 SettingsPage::General => self.render_general_settings(cx),
                 SettingsPage::Providers => self.render_providers_settings(cx),
                 SettingsPage::Skills => self.render_skills_settings(cx),
@@ -413,12 +434,15 @@ impl Waku {
             .child(
                 div()
                     .flex_1()
+                    .min_w_0()
                     .min_h_0()
                     .relative()
+                    .overflow_hidden()
                     .child(
                         div()
                             .id("settings-content-scroll")
                             .size_full()
+                            .min_w_0()
                             .when(!fills_viewport, |element| {
                                 element
                                     .overflow_y_scroll()
@@ -429,7 +453,20 @@ impl Waku {
                                 element.min_h_0().flex().flex_col()
                             })
                             .px(px(32.0))
-                            .child(inner),
+                            // Center the capped column from a viewport-sized flex
+                            // wrapper. Auto margins on the intrinsically sized
+                            // provider rows let their trailing controls escape the
+                            // scroll viewport before flex shrink was resolved.
+                            .child(
+                                div()
+                                    .w_full()
+                                    .min_w_0()
+                                    .flex()
+                                    .when(page != SettingsPage::Providers, |element| {
+                                        element.justify_center()
+                                    })
+                                    .child(inner),
+                            ),
                     )
                     .when(!fills_viewport, |element| {
                         element.child(scrollbar::vertical(
@@ -461,12 +498,12 @@ impl Waku {
                     .w_full()
                     .px(px(20.0))
                     .py(px(14.0))
-                    .rounded(px(13.0))
+                    .rounded(px(RADIUS_DF))
                     .bg(theme.raised)
                     .child(
                         div()
                             .text_size(px(13.5))
-                            .font_weight(FontWeight::MEDIUM)
+                            .font_weight(FontWeight::NORMAL)
                             .text_color(theme.text)
                             .child(tr!("settings.local_by_default")),
                     )
@@ -486,7 +523,7 @@ impl Waku {
                     .min_h(px(60.0))
                     .px(px(20.0))
                     .py(px(12.0))
-                    .rounded(px(13.0))
+                    .rounded(px(RADIUS_DF))
                     .bg(theme.raised)
                     .flex()
                     .items_center()
@@ -498,7 +535,7 @@ impl Waku {
                             .child(
                                 div()
                                     .text_size(px(13.5))
-                                    .font_weight(FontWeight::MEDIUM)
+                                    .font_weight(FontWeight::NORMAL)
                                     .text_color(theme.text)
                                     .child(tr!("settings.share_anonymous_usage_data")),
                             )
@@ -530,7 +567,7 @@ impl Waku {
                         .min_h(px(60.0))
                         .px(px(20.0))
                         .py(px(12.0))
-                        .rounded(px(13.0))
+                        .rounded(px(RADIUS_DF))
                         .bg(theme.raised)
                         .flex()
                         .items_center()
@@ -542,7 +579,7 @@ impl Waku {
                                 .child(
                                     div()
                                         .text_size(px(13.5))
-                                        .font_weight(FontWeight::MEDIUM)
+                                        .font_weight(FontWeight::NORMAL)
                                         .text_color(theme.text)
                                         .child(tr!("settings.automatic_updates")),
                                 )
@@ -559,6 +596,247 @@ impl Waku {
                 )
             })
             .into_any_element()
+    }
+
+    fn render_profile_settings(&self, cx: &mut Context<Self>) -> AnyElement {
+        let theme = Theme::current(cx);
+        let typed_name = self.profile_name_input.read(cx).content().trim().to_owned();
+        let saved_name = self.state.profile_name.trim();
+        let name_changed = typed_name != saved_name;
+        let has_avatar = self.state.profile_avatar_path.is_some();
+        let save_button = div()
+            .id("save-profile-name")
+            .h(px(28.0))
+            .px(px(11.0))
+            .rounded(px(RADIUS_DF))
+            .flex()
+            .items_center()
+            .justify_center()
+            .text_size(px(11.5))
+            .font_weight(FontWeight::MEDIUM)
+            .bg(if name_changed {
+                theme.inverse
+            } else {
+                theme.overlay
+            })
+            .text_color(if name_changed {
+                theme.on_inverse
+            } else {
+                theme.text_ghost
+            })
+            .when(name_changed, |button| {
+                button
+                    .tab_index(0)
+                    .cursor_pointer()
+                    .hover(|style| style.bg(theme.primary_hover))
+                    .focus_visible(|style| style.border_1().border_color(theme.ring))
+                    .on_click(cx.listener(|this, _, _, cx| this.commit_profile_name(cx)))
+                    .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
+                        if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                            this.commit_profile_name(cx);
+                            cx.stop_propagation();
+                        }
+                    }))
+            })
+            .child(tr!("common.save"));
+        let choose_button = div()
+            .id("choose-profile-avatar")
+            .tab_index(0)
+            .h(px(28.0))
+            .px(px(10.0))
+            .rounded(px(RADIUS_DF))
+            .border_1()
+            .border_color(theme.border_strong)
+            .flex()
+            .items_center()
+            .gap(px(6.0))
+            .cursor_pointer()
+            .text_size(px(11.5))
+            .text_color(theme.text)
+            .hover(|style| style.bg(theme.overlay))
+            .active(|style| style.bg(theme.overlay_strong))
+            .focus_visible(|style| style.border_color(theme.ring))
+            .child(icon("icons/profile.svg", 13.0, theme.text_secondary))
+            .child(if has_avatar {
+                tr!("profile.change_photo")
+            } else {
+                tr!("profile.choose_photo")
+            })
+            .on_click(cx.listener(|this, _, _, cx| this.choose_profile_avatar(cx)))
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
+                if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                    this.choose_profile_avatar(cx);
+                    cx.stop_propagation();
+                }
+            }));
+        let remove_button = has_avatar.then(|| {
+            div()
+                .id("remove-profile-avatar")
+                .tab_index(0)
+                .h(px(28.0))
+                .px(px(9.0))
+                .rounded(px(RADIUS_DF))
+                .flex()
+                .items_center()
+                .cursor_pointer()
+                .text_size(px(11.5))
+                .text_color(theme.text_secondary)
+                .hover(|style| style.bg(theme.overlay).text_color(theme.text))
+                .focus_visible(|style| style.border_1().border_color(theme.ring))
+                .child(tr!("common.remove"))
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.state.profile_avatar_path = None;
+                    this.save();
+                    cx.notify();
+                }))
+                .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
+                    if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                        this.state.profile_avatar_path = None;
+                        this.save();
+                        cx.notify();
+                        cx.stop_propagation();
+                    }
+                }))
+        });
+
+        div()
+            .mt(px(15.0))
+            .w_full()
+            .px(px(20.0))
+            .py(px(18.0))
+            .rounded(px(RADIUS_DF))
+            .bg(theme.raised)
+            .flex()
+            .items_center()
+            .gap(px(18.0))
+            .child(self.render_profile_avatar(64.0, &theme))
+            .child(
+                div()
+                    .min_w_0()
+                    .flex_1()
+                    .child(
+                        div()
+                            .text_size(px(13.5))
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(theme.text)
+                            .child(tr!("profile.title")),
+                    )
+                    .child(
+                        div()
+                            .mt(px(4.0))
+                            .text_size(px(11.5))
+                            .line_height(px(16.0))
+                            .text_color(theme.text_secondary)
+                            .child(tr!("profile.description")),
+                    )
+                    .child(
+                        div()
+                            .mt(px(13.0))
+                            .flex()
+                            .items_center()
+                            .gap(px(8.0))
+                            .child(
+                                TextField::new(
+                                    "profile-name-field",
+                                    self.profile_name_input.clone(),
+                                )
+                                .flex_1()
+                                .max_w(px(360.0)),
+                            )
+                            .child(save_button),
+                    )
+                    .child(
+                        div()
+                            .mt(px(9.0))
+                            .flex()
+                            .items_center()
+                            .gap(px(6.0))
+                            .child(choose_button)
+                            .children(remove_button),
+                    ),
+            )
+            .into_any_element()
+    }
+
+    pub(super) fn commit_profile_name(&mut self, cx: &mut Context<Self>) {
+        let normalized: String = self
+            .profile_name_input
+            .read(cx)
+            .content()
+            .trim()
+            .graphemes(true)
+            .take(80)
+            .collect();
+        self.state.profile_name = normalized.clone();
+        self.profile_name_input
+            .update(cx, |input, cx| input.set_content(normalized, cx));
+        self.save();
+        cx.notify();
+    }
+
+    fn choose_profile_avatar(&mut self, cx: &mut Context<Self>) {
+        let receiver = cx.prompt_for_paths(PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: false,
+            prompt: Some(tr!("profile.choose_photo").into()),
+        });
+        let destination_directory = self.store.profile_directory();
+        cx.spawn(async move |this, cx| {
+            let Ok(Ok(Some(paths))) = receiver.await else {
+                return;
+            };
+            let Some(source) = paths.into_iter().next() else {
+                return;
+            };
+            if super::image_preview::image_format_for_name(
+                source
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or(""),
+            )
+            .is_none()
+            {
+                let _ = this.update(cx, |this, cx| {
+                    this.show_toast(tr!("profile.unsupported_image"));
+                    cx.notify();
+                });
+                return;
+            }
+            let extension = source
+                .extension()
+                .and_then(|extension| extension.to_str())
+                .unwrap_or("png")
+                .to_ascii_lowercase();
+            let destination =
+                destination_directory.join(format!("avatar-{}.{}", Uuid::new_v4(), extension));
+            let result = cx
+                .background_executor()
+                .spawn(async move {
+                    std::fs::create_dir_all(&destination_directory)
+                        .map_err(|error| error.to_string())?;
+                    let size = std::fs::metadata(&source)
+                        .map_err(|error| error.to_string())?
+                        .len();
+                    if size > 20 * 1024 * 1024 {
+                        return Err(tr!("profile.image_too_large"));
+                    }
+                    std::fs::copy(&source, &destination).map_err(|error| error.to_string())?;
+                    Ok(destination)
+                })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                match result {
+                    Ok(path) => {
+                        this.state.profile_avatar_path = Some(path);
+                        this.save();
+                    }
+                    Err(error) => this.show_toast(tr!("profile.image_error", error = error)),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     fn set_analytics_enabled(&mut self, enabled: bool, cx: &mut Context<Self>) {
@@ -587,12 +865,12 @@ impl Waku {
                 .w_full()
                 .px(px(20.0))
                 .py(px(16.0))
-                .rounded(px(13.0))
+                .rounded(px(RADIUS_DF))
                 .bg(theme.raised)
                 .child(
                     div()
                         .text_size(px(13.5))
-                        .font_weight(FontWeight::MEDIUM)
+                        .font_weight(FontWeight::NORMAL)
                         .text_color(theme.text)
                         .child(tr!("daemon.external_title")),
                 )
@@ -629,19 +907,19 @@ impl Waku {
             .tab_index(0)
             .h(px(29.0))
             .px(px(11.0))
-            .rounded(px(7.0))
+            .rounded(px(RADIUS_DF))
             .border_1()
             .border_color(theme.border_strong)
             .flex()
             .items_center()
             .justify_center()
-            .cursor_default()
             .text_size(px(10.5))
             .text_color(theme.text_secondary)
             .opacity(if apply_disabled { 0.55 } else { 1.0 })
-            .focus_visible(|style| style.border_color(theme.accent))
+            .focus_visible(|style| style.border_color(theme.ring))
             .when(!apply_disabled, |element| {
                 element
+                    .cursor_pointer()
                     .hover(|element| element.bg(theme.overlay))
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.apply_daemon_exposure_fields(cx);
@@ -669,16 +947,16 @@ impl Waku {
             .tab_index(0)
             .h(px(27.0))
             .px(px(9.0))
-            .rounded(px(6.0))
+            .rounded(px(RADIUS_DF))
             .border_1()
             .border_color(theme.border_strong)
             .flex()
             .items_center()
             .gap(px(5.0))
-            .cursor_default()
+            .cursor_pointer()
             .text_size(px(10.5))
             .text_color(theme.text_secondary)
-            .focus_visible(|style| style.border_color(theme.accent))
+            .focus_visible(|style| style.border_color(theme.ring))
             .hover(|element| element.bg(theme.overlay))
             .child(icon(
                 if url_copied {
@@ -717,15 +995,15 @@ impl Waku {
             .id("reveal-daemon-token")
             .tab_index(0)
             .size(px(27.0))
-            .rounded(px(6.0))
+            .rounded(px(RADIUS_DF))
             .border_1()
             .border_color(theme.border_strong)
             .flex()
             .items_center()
             .justify_center()
-            .cursor_default()
+            .cursor_pointer()
             .text_color(theme.text_secondary)
-            .focus_visible(|style| style.border_color(theme.accent))
+            .focus_visible(|style| style.border_color(theme.ring))
             .hover(|element| element.bg(theme.overlay))
             .active(|element| element.bg(theme.overlay_strong))
             .child(icon(
@@ -760,16 +1038,16 @@ impl Waku {
             .tab_index(0)
             .h(px(27.0))
             .px(px(9.0))
-            .rounded(px(6.0))
+            .rounded(px(RADIUS_DF))
             .border_1()
             .border_color(theme.border_strong)
             .flex()
             .items_center()
             .gap(px(5.0))
-            .cursor_default()
+            .cursor_pointer()
             .text_size(px(10.5))
             .text_color(theme.text_secondary)
-            .focus_visible(|style| style.border_color(theme.accent))
+            .focus_visible(|style| style.border_color(theme.ring))
             .hover(|element| element.bg(theme.overlay))
             .child(icon(
                 if token_copied {
@@ -804,18 +1082,18 @@ impl Waku {
             .tab_index(0)
             .h(px(27.0))
             .px(px(9.0))
-            .rounded(px(6.0))
+            .rounded(px(RADIUS_DF))
             .border_1()
             .border_color(theme.border_strong)
             .flex()
             .items_center()
-            .cursor_default()
             .text_size(px(10.5))
             .text_color(theme.text_secondary)
             .opacity(if pending { 0.55 } else { 1.0 })
-            .focus_visible(|style| style.border_color(theme.accent))
+            .focus_visible(|style| style.border_color(theme.ring))
             .when(!pending, |element| {
                 element
+                    .cursor_pointer()
                     .hover(|element| element.bg(theme.overlay))
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.regenerate_daemon_token(cx);
@@ -842,7 +1120,7 @@ impl Waku {
                     .min_h(px(66.0))
                     .px(px(20.0))
                     .py(px(13.0))
-                    .rounded(px(13.0))
+                    .rounded(px(RADIUS_DF))
                     .bg(theme.raised)
                     .flex()
                     .items_center()
@@ -859,7 +1137,7 @@ impl Waku {
                                     .child(
                                         div()
                                             .text_size(px(13.5))
-                                            .font_weight(FontWeight::MEDIUM)
+                                            .font_weight(FontWeight::NORMAL)
                                             .text_color(theme.text)
                                             .child(tr!("daemon.expose_title")),
                                     )
@@ -867,7 +1145,7 @@ impl Waku {
                                         div()
                                             .px(px(6.0))
                                             .py(px(2.0))
-                                            .rounded_full()
+                                            .rounded(px(RADIUS_LG))
                                             .text_size(px(9.5))
                                             .text_color(if enabled {
                                                 theme.success
@@ -902,12 +1180,12 @@ impl Waku {
                     div()
                         .px(px(20.0))
                         .py(px(15.0))
-                        .rounded(px(13.0))
+                        .rounded(px(RADIUS_DF))
                         .bg(theme.raised)
                         .child(
                             div()
                                 .text_size(px(13.5))
-                                .font_weight(FontWeight::MEDIUM)
+                                .font_weight(FontWeight::NORMAL)
                                 .text_color(theme.text)
                                 .child(tr!("daemon.connection_title")),
                         )
@@ -934,7 +1212,7 @@ impl Waku {
                                         .child(
                                             div()
                                                 .text_size(px(11.0))
-                                                .font_weight(FontWeight::MEDIUM)
+                                                .font_weight(FontWeight::NORMAL)
                                                 .text_color(theme.text)
                                                 .child(tr!("daemon.port")),
                                         )
@@ -971,7 +1249,7 @@ impl Waku {
                                         .child(
                                             div()
                                                 .text_size(px(11.0))
-                                                .font_weight(FontWeight::MEDIUM)
+                                                .font_weight(FontWeight::NORMAL)
                                                 .text_color(theme.text)
                                                 .child(tr!("daemon.allowed_origins")),
                                         )
@@ -1004,12 +1282,12 @@ impl Waku {
                     div()
                         .px(px(20.0))
                         .py(px(15.0))
-                        .rounded(px(13.0))
+                        .rounded(px(RADIUS_DF))
                         .bg(theme.raised)
                         .child(
                             div()
                                 .text_size(px(13.5))
-                                .font_weight(FontWeight::MEDIUM)
+                                .font_weight(FontWeight::NORMAL)
                                 .text_color(theme.text)
                                 .child(tr!("daemon.credentials_title")),
                         )
@@ -1092,7 +1370,7 @@ impl Waku {
                                 .mt(px(7.0))
                                 .px(px(10.0))
                                 .py(px(8.0))
-                                .rounded(px(8.0))
+                                .rounded(px(RADIUS_DF))
                                 .bg(theme.inset)
                                 .w_full()
                                 .min_w_0()
@@ -1323,7 +1601,7 @@ impl Waku {
             .w_full()
             .flex()
             .flex_col()
-            .rounded(px(13.0))
+            .rounded(px(RADIUS_DF))
             .overflow_hidden()
             .bg(theme.raised)
             .child(
@@ -1342,7 +1620,7 @@ impl Waku {
                             .child(
                                 div()
                                     .text_size(px(13.5))
-                                    .font_weight(FontWeight::MEDIUM)
+                                    .font_weight(FontWeight::NORMAL)
                                     .text_color(theme.text)
                                     .child(tr!("settings.theme")),
                             )
@@ -1374,7 +1652,7 @@ impl Waku {
                             .child(
                                 div()
                                     .text_size(px(13.5))
-                                    .font_weight(FontWeight::MEDIUM)
+                                    .font_weight(FontWeight::NORMAL)
                                     .text_color(theme.text)
                                     .child(tr!("language.title")),
                             )
@@ -1403,16 +1681,16 @@ impl Waku {
         let refresh = div()
             .id("refresh-providers")
             .tab_index(0)
-            .focus_visible(|style| style.border_color(theme.accent))
+            .focus_visible(|style| style.border_color(theme.ring))
             .h(px(28.0))
             .px(px(11.0))
-            .rounded(px(7.0))
+            .rounded(px(RADIUS_DF))
             .border_1()
             .border_color(theme.border_strong)
             .flex()
             .items_center()
             .gap(px(6.0))
-            .cursor_default()
+            .cursor_pointer()
             .text_size(px(10.5))
             .text_color(theme.text_secondary)
             .opacity(if checking { 0.6 } else { 1.0 })
@@ -1428,7 +1706,7 @@ impl Waku {
                 cx.notify();
             }));
 
-        let mut rows = div().mt(px(4.0)).flex().flex_col();
+        let mut rows = div().w_full().min_w_0().mt(px(4.0)).flex().flex_col();
         let provider_count = ProviderKind::ALL.len();
         for (index, kind) in ProviderKind::ALL.into_iter().enumerate() {
             let probe = self.provider_probe(kind);
@@ -1443,6 +1721,8 @@ impl Waku {
                 .get(&kind)
                 .and_then(|version| version.clone());
             let disabled = self.state.disabled_providers.contains(&kind);
+            let auth_state = self.provider_auth.get(&kind);
+            let setup_state = self.provider_setup.get(&kind);
 
             let dot_color = if !installed {
                 theme.text_ghost
@@ -1457,14 +1737,35 @@ impl Waku {
                 if let Some(path) = binary_path {
                     parts.push(path);
                 }
-                if disabled {
-                    parts.push(tr!("providers.disabled_for_new_tasks"));
-                } else if model_count > 0 {
+                if model_count > 0 {
                     parts.push(if model_count == 1 {
                         tr!("providers.model_count_one", count = model_count)
                     } else {
                         tr!("providers.model_count_many", count = model_count)
                     });
+                }
+                if disabled {
+                    parts.push(tr!("providers.disabled_for_new_tasks"));
+                }
+                if crate::provider_setup::supports_auth_probe(kind) {
+                    let auth = match auth_state {
+                        Some(crate::provider_setup::ProviderAuthState::Checking) => {
+                            Some(tr!("providers.checking_sign_in"))
+                        }
+                        Some(crate::provider_setup::ProviderAuthState::SignedOut) => {
+                            Some(tr!("providers.signed_out"))
+                        }
+                        Some(crate::provider_setup::ProviderAuthState::SignedIn) => {
+                            Some(tr!("providers.ready"))
+                        }
+                        Some(crate::provider_setup::ProviderAuthState::Failed(_)) => {
+                            Some(tr!("providers.sign_in_needs_attention"))
+                        }
+                        None => None,
+                    };
+                    if let Some(auth) = auth {
+                        parts.push(auth);
+                    }
                 }
                 div()
                     .truncate()
@@ -1472,10 +1773,11 @@ impl Waku {
                     .into_any_element()
             } else {
                 div()
-                    .flex()
-                    .items_baseline()
+                    .w_full()
+                    .min_w_0()
+                    .truncate()
                     .child(SharedString::from(tr!(
-                        "providers.not_detected_as",
+                        "providers.cli_required",
                         command = kind.command()
                     )))
                     .into_any_element()
@@ -1491,6 +1793,91 @@ impl Waku {
                 move |this, _, cx| this.set_provider_enabled(kind, disabled, cx),
             );
 
+            let setup_pending = matches!(
+                setup_state,
+                Some(
+                    crate::provider_setup::ProviderSetupState::Installing
+                        | crate::provider_setup::ProviderSetupState::Authenticating
+                )
+            );
+            let automatic_install = crate::provider_setup::can_install_automatically(kind);
+            let automatic_auth = crate::provider_setup::can_authenticate_automatically(kind);
+            let probed_auth = crate::provider_setup::supports_auth_probe(kind);
+            let setup_action = (!self.daemon.is_remote()
+                && (!installed
+                    || (!probed_auth && automatic_auth)
+                    || (!automatic_auth && installed)
+                    || matches!(
+                        auth_state,
+                        Some(
+                            crate::provider_setup::ProviderAuthState::SignedOut
+                                | crate::provider_setup::ProviderAuthState::Failed(_)
+                        )
+                    )
+                    || setup_state.is_some()))
+            .then(|| {
+                let (label, icon_path) = match setup_state {
+                    Some(crate::provider_setup::ProviderSetupState::Installing) => {
+                        (tr!("providers.installing"), "icons/loader-circle.svg")
+                    }
+                    Some(crate::provider_setup::ProviderSetupState::Authenticating) => (
+                        tr!("providers.waiting_for_sign_in"),
+                        "icons/loader-circle.svg",
+                    ),
+                    Some(crate::provider_setup::ProviderSetupState::Failed(_)) => {
+                        (tr!("common.retry"), "icons/rotate-cw.svg")
+                    }
+                    None if installed && automatic_auth => {
+                        (tr!("providers.sign_in"), "icons/external-link.svg")
+                    }
+                    None if installed => (tr!("providers.configure"), "icons/external-link.svg"),
+                    None if !automatic_install => {
+                        (tr!("providers.install_guide"), "icons/external-link.svg")
+                    }
+                    None if automatic_auth => {
+                        (tr!("providers.install_and_sign_in"), "icons/download.svg")
+                    }
+                    None => (tr!("providers.install"), "icons/download.svg"),
+                };
+                div()
+                    .id(SharedString::from(format!("provider-setup-{}", kind.id())))
+                    .tab_index(0)
+                    .h(px(28.0))
+                    .px(px(10.0))
+                    .rounded(px(RADIUS_DF))
+                    .border_1()
+                    .border_color(theme.border_strong)
+                    .flex()
+                    .flex_none()
+                    .items_center()
+                    .gap(px(6.0))
+                    .text_size(px(10.5))
+                    .text_color(theme.text_secondary)
+                    .focus_visible(|style| style.border_color(theme.ring))
+                    .when(!setup_pending, |button| {
+                        button
+                            .cursor_pointer()
+                            .hover(|element| element.bg(theme.overlay))
+                            .active(|element| element.bg(theme.overlay_strong))
+                    })
+                    .when(setup_pending, |button| button.opacity(0.7).cursor_default())
+                    .child(if setup_pending {
+                        motion::spin(icon(icon_path, 11.0, theme.text_tertiary))
+                    } else {
+                        icon(icon_path, 11.0, theme.text_tertiary).into_any_element()
+                    })
+                    .child(label)
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.start_provider_setup(kind, cx);
+                    }))
+                    .on_key_down(cx.listener(move |this, event: &KeyDownEvent, _, cx| {
+                        if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                            this.start_provider_setup(kind, cx);
+                            cx.stop_propagation();
+                        }
+                    }))
+            });
+
             let expanded = self.expanded_provider_settings == Some(kind);
             let expand_button = icon_button(
                 SharedString::from(format!("provider-expand-{}", kind.id())),
@@ -1502,12 +1889,14 @@ impl Waku {
                 theme,
             )
             .tab_index(0)
-            .focus_visible(|style| style.border_1().border_color(theme.accent))
+            .focus_visible(|style| style.border_1().border_color(theme.ring))
             .on_click(cx.listener(move |this, _, window, cx| {
                 this.toggle_provider_expanded(kind, window, cx);
             }));
 
             let header = div()
+                .w_full()
+                .min_w_0()
                 .flex()
                 .items_center()
                 .gap(px(12.0))
@@ -1517,7 +1906,7 @@ impl Waku {
                         .w(px(30.0))
                         .h(px(30.0))
                         .flex_none()
-                        .rounded(px(7.0))
+                        .rounded(px(RADIUS_DF))
                         .bg(theme.overlay)
                         .flex()
                         .items_center()
@@ -1534,7 +1923,7 @@ impl Waku {
                                 .right(px(-2.0))
                                 .w(px(10.0))
                                 .h(px(10.0))
-                                .rounded_full()
+                                .rounded(px(RADIUS_LG))
                                 .border_2()
                                 .border_color(theme.raised)
                                 .bg(dot_color),
@@ -1543,6 +1932,7 @@ impl Waku {
                 .child(
                     div()
                         .flex_1()
+                        .max_w(px(520.0))
                         .min_w_0()
                         .child(
                             div()
@@ -1552,7 +1942,7 @@ impl Waku {
                                 .child(
                                     div()
                                         .text_size(px(12.5))
-                                        .font_weight(FontWeight::MEDIUM)
+                                        .font_weight(FontWeight::NORMAL)
                                         .text_color(if installed {
                                             theme.text
                                         } else {
@@ -1578,11 +1968,14 @@ impl Waku {
                                 .child(detail),
                         ),
                 )
+                .children(setup_action)
                 .child(expand_button)
                 .when(installed, |element| element.child(toggle));
 
             rows = rows.child(
                 div()
+                    .w_full()
+                    .min_w_0()
                     .py(px(11.0))
                     .flex()
                     .flex_col()
@@ -1599,28 +1992,36 @@ impl Waku {
         div()
             .mt(px(15.0))
             .w_full()
+            .flex()
+            .flex_col()
             .px(px(20.0))
             .py(px(14.0))
-            .rounded(px(13.0))
+            .rounded(px(RADIUS_DF))
             .bg(theme.raised)
             .child(
                 div()
+                    .w_full()
+                    .min_w_0()
                     .flex()
                     .items_start()
                     .gap(px(20.0))
                     .child(
                         div()
                             .flex_1()
+                            .max_w(px(640.0))
                             .min_w_0()
                             .child(
                                 div()
                                     .text_size(px(13.5))
-                                    .font_weight(FontWeight::MEDIUM)
+                                    .font_weight(FontWeight::NORMAL)
                                     .text_color(theme.text)
                                     .child(tr!("providers.coding_agents")),
                             )
                             .child(
                                 div()
+                                    .w_full()
+                                    .min_w_0()
+                                    .truncate()
                                     .mt(px(5.0))
                                     .text_size(px(12.0))
                                     .line_height(px(18.0))
@@ -1678,16 +2079,16 @@ impl Waku {
                 kind.id()
             )))
             .tab_index(0)
-            .focus_visible(|style| style.border_color(theme.accent))
+            .focus_visible(|style| style.border_color(theme.ring))
             .h(px(29.0))
             .px(px(10.0))
-            .rounded(px(7.0))
+            .rounded(px(RADIUS_DF))
             .border_1()
             .border_color(theme.border_strong)
             .flex()
             .flex_none()
             .items_center()
-            .cursor_default()
+            .cursor_pointer()
             .text_size(px(10.5))
             .text_color(theme.text_secondary)
             .hover(|element| element.bg(theme.overlay))
@@ -1707,7 +2108,7 @@ impl Waku {
             .child(
                 div()
                     .text_size(px(11.5))
-                    .font_weight(FontWeight::MEDIUM)
+                    .font_weight(FontWeight::NORMAL)
                     .text_color(theme.text)
                     .child(tr!("providers.binary_path")),
             )
@@ -1890,9 +2291,9 @@ impl Waku {
                                 .w(px(32.0))
                                 .h(px(32.0))
                                 .flex_none()
-                                .rounded(px(7.0))
+                                .rounded(px(RADIUS_DF))
                                 .when_some(app_icon, |element, app_icon| {
-                                    element.child(img(app_icon).size_full().rounded(px(7.0)))
+                                    element.child(img(app_icon).size_full().rounded(px(RADIUS_DF)))
                                 }),
                         )
                         .child(
@@ -1902,7 +2303,7 @@ impl Waku {
                                 .child(
                                     div()
                                         .text_size(px(12.0))
-                                        .font_weight(FontWeight::MEDIUM)
+                                        .font_weight(FontWeight::NORMAL)
                                         .text_color(theme.text)
                                         .child(SharedString::from(grant.app_name.clone())),
                                 )
@@ -1920,12 +2321,12 @@ impl Waku {
                                 .id(SharedString::from(format!("revoke-computer-app-{key}")))
                                 .h(px(25.0))
                                 .px(px(9.0))
-                                .rounded(px(6.0))
+                                .rounded(px(RADIUS_DF))
                                 .border_1()
                                 .border_color(theme.border_strong)
                                 .flex()
                                 .items_center()
-                                .cursor_default()
+                                .cursor_pointer()
                                 .text_size(px(10.5))
                                 .text_color(theme.text_secondary)
                                 .hover(|element| element.bg(theme.overlay).text_color(theme.danger))
@@ -1948,7 +2349,7 @@ impl Waku {
                 div()
                     .px(px(20.0))
                     .py(px(14.0))
-                    .rounded(px(13.0))
+                    .rounded(px(RADIUS_DF))
                     .bg(theme.raised)
                     .flex()
                     .items_center()
@@ -1960,7 +2361,7 @@ impl Waku {
                             .child(
                                 div()
                                     .text_size(px(13.5))
-                                    .font_weight(FontWeight::MEDIUM)
+                                    .font_weight(FontWeight::NORMAL)
                                     .text_color(theme.text)
                                     .child(tr!("computer_use.allow_apps")),
                             )
@@ -1986,12 +2387,12 @@ impl Waku {
                 div()
                     .px(px(20.0))
                     .py(px(14.0))
-                    .rounded(px(13.0))
+                    .rounded(px(RADIUS_DF))
                     .bg(theme.raised)
                     .child(
                         div()
                             .text_size(px(13.5))
-                            .font_weight(FontWeight::MEDIUM)
+                            .font_weight(FontWeight::NORMAL)
                             .text_color(theme.text)
                             .child(tr!("computer_use.macos_access")),
                     )
@@ -2027,13 +2428,13 @@ impl Waku {
                                 .id("recheck-computer-permissions")
                                 .h(px(28.0))
                                 .px(px(11.0))
-                                .rounded(px(7.0))
+                                .rounded(px(RADIUS_DF))
                                 .border_1()
                                 .border_color(theme.border_strong)
                                 .text_color(theme.text_secondary)
                                 .flex()
                                 .items_center()
-                                .cursor_default()
+                                .cursor_pointer()
                                 .text_size(px(10.5))
                                 .opacity(if pending { 0.6 } else { 1.0 })
                                 .child(if pending {
@@ -2051,12 +2452,12 @@ impl Waku {
                 div()
                     .px(px(20.0))
                     .py(px(14.0))
-                    .rounded(px(13.0))
+                    .rounded(px(RADIUS_DF))
                     .bg(theme.raised)
                     .child(
                         div()
                             .text_size(px(13.5))
-                            .font_weight(FontWeight::MEDIUM)
+                            .font_weight(FontWeight::NORMAL)
                             .text_color(theme.text)
                             .child(tr!("computer_use.always_allowed_apps")),
                     )
@@ -2250,13 +2651,9 @@ impl Waku {
         self.usage_project_filter.update(cx, |input, cx| {
             input.set_placeholder(tr!("input.filter_projects"), cx)
         });
-        self.refresh_command_palette_localized_text(cx);
         self.refresh_file_search_localized_text(cx);
         for browser in self.right_panel_browsers.values() {
             browser.update(cx, |browser, cx| browser.refresh_localized_text(cx));
-        }
-        for terminal in self.right_panel_terminals.values() {
-            terminal.update(cx, |terminal, cx| terminal.refresh_localized_text(cx));
         }
         for probe in &mut self.probes {
             probe.models = crate::model_catalog::fallback_models(probe.provider);
@@ -2310,7 +2707,7 @@ fn permission_status_row(
             .id(id)
             .h(px(25.0))
             .px(px(4.0))
-            .rounded(px(6.0))
+            .rounded(px(RADIUS_DF))
             .flex()
             .items_center()
             .gap(px(5.0))
@@ -2324,12 +2721,12 @@ fn permission_status_row(
             .id(id)
             .h(px(25.0))
             .px(px(9.0))
-            .rounded(px(6.0))
+            .rounded(px(RADIUS_DF))
             .border_1()
             .border_color(theme.border_strong)
             .flex()
             .items_center()
-            .cursor_default()
+            .cursor_pointer()
             .text_size(px(10.0))
             .text_color(theme.text_secondary)
             .hover(|element| element.bg(theme.overlay).text_color(theme.text))
@@ -2354,7 +2751,7 @@ fn permission_status_row(
                 .child(
                     div()
                         .text_size(px(11.5))
-                        .font_weight(FontWeight::MEDIUM)
+                        .font_weight(FontWeight::NORMAL)
                         .text_color(theme.text)
                         .child(name),
                 )

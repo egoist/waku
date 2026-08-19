@@ -10,4 +10,8 @@ export type QueuedMessage = { id: string, content: string,
  * The text typed before Waku appended provider-facing attachment
  * mentions. `None` is the legacy/plain-message representation.
  */
-display_content?: string | null, attachments?: Array<MessageAttachment>, created_at: number, };
+display_content?: string | null, attachments?: Array<MessageAttachment>,
+/**
+ * A Codex objective that must be activated before this message starts.
+ */
+goal_objective?: string | null, created_at: number, };

@@ -439,7 +439,7 @@ pub(super) fn work_status_color(status: BackgroundWorkStatus, theme: Theme) -> H
     match status {
         BackgroundWorkStatus::Starting
         | BackgroundWorkStatus::Running
-        | BackgroundWorkStatus::Monitoring => theme.accent,
+        | BackgroundWorkStatus::Monitoring => theme.warning,
         BackgroundWorkStatus::Completed => theme.success,
         BackgroundWorkStatus::Failed | BackgroundWorkStatus::Lost => theme.danger,
         BackgroundWorkStatus::Stopping | BackgroundWorkStatus::Stopped => theme.text_tertiary,
@@ -726,18 +726,13 @@ impl Waku {
         let trigger = div()
             .id("environment-summary-trigger")
             .size(px(28.0))
-            .rounded(px(7.0))
+            .rounded(px(RADIUS_DF))
             .flex_none()
             .flex()
             .items_center()
             .justify_center()
-            .cursor_default()
-            .focus_visible(|style| {
-                style
-                    .bg(theme.overlay)
-                    .border_1()
-                    .border_color(theme.accent)
-            })
+            .cursor_pointer()
+            .focus_visible(|style| style.bg(theme.overlay).border_1().border_color(theme.ring))
             .hover(|style| style.bg(theme.overlay))
             .when(handle.is_open(), |style| style.bg(theme.overlay_strong))
             .tooltip(Tooltip::text(if summary.is_empty() {
@@ -745,7 +740,7 @@ impl Waku {
             } else {
                 summary
             }))
-            .child(icon("icons/info.svg", 15.0, theme.text_tertiary));
+            .child(icon("icons/ellipsis.svg", 15.0, theme.text_tertiary));
         let git_status = change_counts.map(|(additions, deletions)| {
             let focus = self.transcript_control_focus("header-git-status", cx);
             div()
@@ -754,20 +749,15 @@ impl Waku {
                 .tab_index(0)
                 .h(px(28.0))
                 .px(px(7.0))
-                .rounded(px(7.0))
+                .rounded(px(RADIUS_DF))
                 .flex_none()
                 .flex()
                 .items_center()
                 .gap(px(6.0))
                 .cursor_default()
                 .text_size(px(12.5))
-                .font_weight(FontWeight::MEDIUM)
-                .focus_visible(|style| {
-                    style
-                        .bg(theme.overlay)
-                        .border_1()
-                        .border_color(theme.accent)
-                })
+                .font_weight(FontWeight::NORMAL)
+                .focus_visible(|style| style.bg(theme.overlay).border_1().border_color(theme.ring))
                 .hover(|style| style.bg(theme.overlay))
                 .active(|style| style.bg(theme.overlay_strong))
                 .when(additions > 0, |button| {
@@ -896,20 +886,20 @@ impl Waku {
                     .tab_index(0)
                     .h(px(26.0))
                     .px(px(9.0))
-                    .rounded(px(6.0))
+                    .rounded(px(RADIUS_DF))
                     .border_1()
                     .border_color(theme.border_strong)
                     .flex_none()
                     .flex()
                     .items_center()
                     .gap(px(5.0))
-                    .cursor_default()
+                    .cursor_pointer()
                     .text_size(px(10.5))
-                    .font_weight(FontWeight::MEDIUM)
+                    .font_weight(FontWeight::NORMAL)
                     .text_color(theme.text_secondary)
                     .hover(|style| style.bg(theme.danger.opacity(0.10)))
                     .active(|style| style.bg(theme.danger.opacity(0.16)))
-                    .focus_visible(|style| style.border_color(theme.accent))
+                    .focus_visible(|style| style.border_color(theme.ring))
                     .tooltip(Tooltip::text(tr!("background.stop")))
                     .child(icon("icons/stop-filled.svg", 11.0, theme.danger))
                     .child(tr!("background.stop"))
@@ -934,7 +924,7 @@ impl Waku {
             .w_full()
             .flex()
             .flex_col()
-            .rounded(px(9.0))
+            .rounded(px(RADIUS_DF))
             .border_1()
             .border_color(theme.border)
             .overflow_hidden()
@@ -963,7 +953,7 @@ impl Waku {
                                 div()
                                     .truncate()
                                     .text_size(px(12.0))
-                                    .font_weight(FontWeight::MEDIUM)
+                                    .font_weight(FontWeight::NORMAL)
                                     .text_color(theme.text)
                                     .child(item.title.clone()),
                             )
@@ -974,7 +964,11 @@ impl Waku {
                                     .gap(px(5.0))
                                     .text_size(px(10.0))
                                     .text_color(theme.text_tertiary)
-                                    .child(rendered_work_status_icon(item.status, 9.0, status_color))
+                                    .child(rendered_work_status_icon(
+                                        item.status,
+                                        9.0,
+                                        status_color,
+                                    ))
                                     .child(work_status_label(item.status))
                                     .child("·")
                                     .child(work_elapsed(item)),
@@ -1100,7 +1094,7 @@ impl Waku {
                     div()
                         .relative()
                         .max_h(px(320.0))
-                        .rounded(px(6.0))
+                        .rounded(px(RADIUS_DF))
                         .overflow_hidden()
                         .bg(theme.terminal)
                         .child(md::render::frame_reset(selection.clone()))
@@ -1227,12 +1221,11 @@ fn render_background_summary_card(
         .id("background-summary-card")
         .track_focus(handle.focus_handle())
         .w(px(300.0))
-        .rounded(px(12.0))
+        .rounded(px(RADIUS_DF))
         .border_1()
         .border_color(theme.border_strong)
         .overflow_hidden()
         .bg(theme.raised)
-        .shadow_lg()
         .child(content)
         .into_any_element()
 }
@@ -1342,12 +1335,12 @@ fn render_environment_action_row(
         .min_h(px(32.0))
         .w_full()
         .px(px(8.0))
-        .rounded(px(8.0))
+        .rounded(px(RADIUS_DF))
         .flex()
         .items_center()
         .gap(px(10.0))
-        .cursor_default()
-        .focus_visible(|style| style.border_1().border_color(theme.accent))
+        .when(enabled, |row| row.cursor_pointer())
+        .focus_visible(|style| style.border_1().border_color(theme.ring))
         .when(enabled, |row| {
             row.hover(|style| style.bg(theme.overlay_strong))
         })
@@ -1447,12 +1440,12 @@ fn render_background_summary_row(
             .track_focus(&entry.stop_focus)
             .tab_index(0)
             .size(px(24.0))
-            .rounded(px(6.0))
+            .rounded(px(RADIUS_DF))
             .flex_none()
             .flex()
             .items_center()
             .justify_center()
-            .cursor_default()
+            .cursor_pointer()
             .opacity(0.0)
             .group_hover(group_name.clone(), |style| style.opacity(1.0))
             .hover(|style| style.bg(theme.overlay_strong))
@@ -1461,7 +1454,7 @@ fn render_background_summary_row(
                     .opacity(1.0)
                     .bg(theme.raised)
                     .border_1()
-                    .border_color(theme.accent)
+                    .border_color(theme.ring)
             })
             .tooltip(Tooltip::text(tr!("background.stop")))
             .child(icon("icons/stop-filled.svg", 12.0, theme.text_tertiary))
@@ -1507,12 +1500,12 @@ fn render_background_summary_row(
         .h(px(32.0))
         .w_full()
         .px(px(8.0))
-        .rounded(px(8.0))
+        .rounded(px(RADIUS_DF))
         .flex()
         .items_center()
         .gap(px(9.0))
         .cursor_default()
-        .focus_visible(|style| style.border_1().border_color(theme.accent))
+        .focus_visible(|style| style.border_1().border_color(theme.ring))
         .hover(|style| style.bg(theme.overlay_strong))
         .child(icon(
             work_kind_icon(item.key.kind),

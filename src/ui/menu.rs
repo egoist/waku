@@ -25,12 +25,14 @@
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
+use std::time::Duration;
 
 use gpui::{
-    AnyElement, App, Bounds, Display, Element, ElementId, FocusHandle, FontWeight, GlobalElementId,
-    InspectorElementId, InteractiveElement, IntoElement, KeyDownEvent, LayoutId, MouseButton,
-    MouseDownEvent, ParentElement, Pixels, Point, Position, RenderOnce, SharedString, Size, Style,
-    Styled, Window, actions, anchored, canvas, deferred, div, prelude::FluentBuilder, px,
+    Animation, AnimationExt, AnyElement, App, Bounds, Display, Element, ElementId, FocusHandle,
+    FontWeight, GlobalElementId, InspectorElementId, InteractiveElement, IntoElement, KeyDownEvent,
+    LayoutId, MouseButton, MouseDownEvent, ParentElement, Pixels, Point, Position, RenderOnce,
+    SharedString, Size, Style, Styled, Window, actions, anchored, canvas, deferred, div,
+    ease_out_quint, prelude::FluentBuilder, px, quadratic,
 };
 
 actions!(
@@ -50,6 +52,9 @@ const MENU_CONTEXT: &str = "WakuMenu";
 
 /// Vertical gap between a trigger and its anchored card.
 const TRIGGER_GAP: f32 = 4.0;
+const MENU_OPEN_DURATION: Duration = Duration::from_millis(140);
+const MENU_CLOSE_DURATION: Duration = Duration::from_millis(100);
+const MENU_TRAVEL: f32 = 3.0;
 
 /// A text field inside an open panel, such as a picker's filter box.
 ///
@@ -77,7 +82,7 @@ pub fn init(cx: &mut App) {
     ]);
 }
 
-use crate::theme::Theme;
+use crate::theme::{RADIUS_DF, Theme};
 use crate::ui::icon;
 
 /// One row of a menu.
@@ -179,9 +184,23 @@ impl MenuItem {
 }
 
 /// Where an open menu is anchored, in window coordinates.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+enum MenuTransitionPhase {
+    #[default]
+    Opening,
+    Closing,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct MenuTransition {
+    phase: MenuTransitionPhase,
+    generation: u64,
+}
+
 #[derive(Debug, Default)]
 struct MenuState {
     open: Option<Point<Pixels>>,
+    transition: MenuTransition,
     /// Keyboard cursor over focusable entries.
     highlighted: Option<usize>,
     /// A dropdown/popover trigger toggles its own surface on left click. The
@@ -234,6 +253,14 @@ impl ContextMenuHandle {
     }
 
     pub fn is_open(&self) -> bool {
+        let state = self.state.borrow();
+        state.open.is_some() && state.transition.phase != MenuTransitionPhase::Closing
+    }
+
+    /// Whether the surface is still mounted, including its short closing tail.
+    /// Expensive menu data should use this instead of [`Self::is_open`] so it
+    /// remains available until the fade has actually retired.
+    pub fn is_visible(&self) -> bool {
         self.state.borrow().open.is_some()
     }
 
@@ -261,16 +288,51 @@ impl ContextMenuHandle {
     }
 
     pub fn close(&self, window: &mut Window, cx: &mut App) {
-        let was_open = {
+        let generation = {
             let mut state = self.state.borrow_mut();
-            let was_open = state.open.is_some();
-            state.open = None;
+            if state.open.is_none() || state.transition.phase == MenuTransitionPhase::Closing {
+                return;
+            }
             state.highlighted = None;
             state.trigger_click_toggles = false;
-            was_open
+            state.transition.generation = state.transition.generation.wrapping_add(1);
+            state.transition.phase = MenuTransitionPhase::Closing;
+            state.transition.generation
         };
-        if was_open {
+        if cx.reduce_motion() {
+            self.finish_close(generation, window, cx);
+            return;
+        }
+
+        window.refresh();
+        let handle = self.clone();
+        let window_handle = window.window_handle();
+        cx.spawn(async move |cx| {
+            cx.background_executor()
+                .timer(MENU_CLOSE_DURATION + Duration::from_millis(16))
+                .await;
+            let _ = window_handle.update(cx, |_, window, cx| {
+                handle.finish_close(generation, window, cx);
+            });
+        })
+        .detach();
+    }
+
+    fn finish_close(&self, generation: u64, window: &mut Window, cx: &mut App) {
+        let closed = {
+            let mut state = self.state.borrow_mut();
+            if state.open.is_none()
+                || state.transition.phase != MenuTransitionPhase::Closing
+                || state.transition.generation != generation
+            {
+                return;
+            }
+            state.open = None;
+            true
+        };
+        if closed {
             self.notify_toggle(false, window, cx);
+            window.refresh();
         }
     }
 
@@ -298,18 +360,21 @@ impl ContextMenuHandle {
         trigger_click_toggles: bool,
         window: &mut Window,
         cx: &mut App,
-    ) {
-        let was_open = {
+    ) -> u64 {
+        let (was_visible, generation) = {
             let mut state = self.state.borrow_mut();
-            let was_open = state.open.is_some();
+            let was_visible = state.open.is_some();
             state.open = Some(position);
             state.highlighted = None;
             state.trigger_click_toggles = trigger_click_toggles;
-            was_open
+            state.transition.generation = state.transition.generation.wrapping_add(1);
+            state.transition.phase = MenuTransitionPhase::Opening;
+            (was_visible, state.transition.generation)
         };
-        if !was_open {
+        if !was_visible {
             self.notify_toggle(true, window, cx);
         }
+        generation
     }
 }
 
@@ -341,14 +406,56 @@ fn open_menu(
     // Runs the toggle observers, which is where a content-focusing surface
     // schedules its own focus. Ours is scheduled after, so it would win — only
     // request it when the card is what should end up focused.
-    handle.open_at(position, trigger_click_toggles, window, cx);
+    let generation = handle.open_at(position, trigger_click_toggles, window, cx);
     if focus_target == SurfaceFocus::Card {
         let focus = handle.focus.clone();
+        let state = handle.state.clone();
         window.on_next_frame(move |window, _| {
-            window.on_next_frame(move |window, cx| window.focus(&focus, cx));
+            window.on_next_frame(move |window, cx| {
+                let current = state.borrow();
+                if current.open.is_some()
+                    && current.transition.phase != MenuTransitionPhase::Closing
+                    && current.transition.generation == generation
+                {
+                    window.focus(&focus, cx);
+                }
+            });
         });
     }
     window.refresh();
+}
+
+fn animated_surface(child: AnyElement, handle: &ContextMenuHandle, align: MenuAlign) -> AnyElement {
+    let transition = handle.state.borrow().transition;
+    let animation = match transition.phase {
+        MenuTransitionPhase::Opening => {
+            Animation::new(MENU_OPEN_DURATION).with_easing(ease_out_quint())
+        }
+        MenuTransitionPhase::Closing => Animation::new(MENU_CLOSE_DURATION).with_easing(quadratic),
+    };
+    let travel = if align.above() {
+        MENU_TRAVEL
+    } else {
+        -MENU_TRAVEL
+    };
+    let animation_id = SharedString::from(format!("menu-transition-{}", transition.generation));
+
+    div()
+        .relative()
+        .child(child)
+        .with_animation(
+            animation_id,
+            animation,
+            move |surface, delta| match transition.phase {
+                MenuTransitionPhase::Opening => surface
+                    .top(px(travel * (1.0 - delta)))
+                    .opacity(0.82 + 0.18 * delta),
+                MenuTransitionPhase::Closing => {
+                    surface.top(px(travel * delta)).opacity(1.0 - delta)
+                }
+            },
+        )
+        .into_any_element()
 }
 
 /// A zero-cost canvas that records its parent's bounds into the handle.
@@ -769,7 +876,7 @@ where
     trigger
         .child(
             deferred(FloatingSurface::new(
-                card(handle),
+                animated_surface(card(handle), handle, align),
                 trigger_bounds,
                 align,
                 px(TRIGGER_GAP),
@@ -876,11 +983,16 @@ where
                 anchored()
                     .position(position)
                     .snap_to_window_with_margin(px(8.0))
-                    .child(MenuCard {
-                        id,
-                        handle: handle.clone(),
-                        items: Rc::new(items),
-                    }),
+                    .child(animated_surface(
+                        MenuCard {
+                            id,
+                            handle: handle.clone(),
+                            items: Rc::new(items),
+                        }
+                        .into_any_element(),
+                        handle,
+                        MenuAlign::BelowLeft,
+                    )),
             )
             .with_priority(1),
         )
@@ -922,11 +1034,11 @@ impl RenderOnce for MenuCard {
             .min_w(px(176.0))
             .max_w(px(320.0))
             .py(px(4.0))
-            .rounded(px(9.0))
+            .rounded(px(RADIUS_DF))
+            .overflow_hidden()
             .border_1()
-            .border_color(theme.border_strong)
+            .border_color(theme.border)
             .bg(theme.raised)
-            .shadow_lg()
             .flex()
             .flex_col()
             .on_key_down({
@@ -952,7 +1064,7 @@ impl RenderOnce for MenuCard {
                     .pb(px(2.0))
                     .text_size(px(10.0))
                     .line_height(px(14.0))
-                    .font_weight(FontWeight::MEDIUM)
+                    .font_weight(FontWeight::NORMAL)
                     .text_color(theme.text_tertiary)
                     .child(label)
                     .into_any_element(),
@@ -976,7 +1088,7 @@ impl RenderOnce for MenuCard {
                         (!disabled).then_some(on_click),
                     )
                     .text_color(color)
-                    .when(selected, |element| element.font_weight(FontWeight::MEDIUM))
+                    .when(selected, |element| element.font_weight(FontWeight::NORMAL))
                     .when_some(item_icon, |element, path| {
                         element.child(icon(path, 12.0, color))
                     })
@@ -1026,7 +1138,7 @@ fn row(
         .mx(px(4.0))
         .px(px(8.0))
         .min_h(px(26.0))
-        .rounded(px(6.0))
+        .rounded(px(RADIUS_DF))
         .flex()
         .items_center()
         .gap(px(8.0))
@@ -1035,9 +1147,12 @@ fn row(
         .when(highlighted, |element| element.bg(highlight))
         .when_some(on_click, |element, on_click| {
             element
-                .cursor_default()
+                .cursor_pointer()
                 .hover(move |element| element.bg(hover))
                 .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+                    if !handle.is_open() {
+                        return;
+                    }
                     handle.close(window, cx);
                     on_click(window, cx);
                     window.refresh();
@@ -1085,6 +1200,9 @@ fn on_menu_key(
     window: &mut Window,
     cx: &mut App,
 ) {
+    if !handle.is_open() {
+        return;
+    }
     let key = event.keystroke.key.as_str();
     if key == "escape" {
         handle.close(window, cx);

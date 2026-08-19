@@ -542,19 +542,19 @@ impl Waku {
                 .h(px(44.0))
                 .w_full()
                 .px(px(12.0))
-                .rounded(px(9.0))
+                .rounded(px(RADIUS_DF))
                 .flex()
                 .items_center()
                 .gap(px(10.0))
                 .cursor_default()
-                .focus_visible(|style| style.border_1().border_color(theme.accent))
+                .focus_visible(|style| style.border_1().border_color(theme.ring))
                 .when(include_enabled, |row| {
                     row.hover(|style| style.bg(theme.overlay))
                 })
                 .child(
                     div()
                         .size(px(15.0))
-                        .rounded(px(4.0))
+                        .rounded(px(RADIUS_SM))
                         .border_1()
                         .border_color(if include_unstaged {
                             theme.border_strong
@@ -592,7 +592,7 @@ impl Waku {
                         .items_center()
                         .gap(px(6.0))
                         .text_size(px(13.5))
-                        .font_weight(FontWeight::MEDIUM)
+                        .font_weight(FontWeight::NORMAL)
                         .child(
                             div()
                                 .text_color(theme.success)
@@ -698,7 +698,7 @@ impl Waku {
             .w_full()
             .max_w(px(420.0))
             .overflow_hidden()
-            .rounded(px(18.0))
+            .rounded(px(RADIUS_DF))
             .bg(theme.composer)
             .shadow_xl()
             .flex()
@@ -751,17 +751,12 @@ impl Waku {
                     .child(push),
             );
 
-        let scrim = if theme.is_dark {
-            gpui::hsla(0.0, 0.0, 0.0, 0.34)
-        } else {
-            gpui::hsla(0.0, 0.0, 0.0, 0.16)
-        };
         let layer = div()
             .id("commit-dialog-layer")
             .absolute()
             .inset_0()
             .occlude()
-            .bg(scrim)
+            .bg(theme.scrim)
             .p(px(24.0))
             .flex()
             .items_center()
@@ -809,14 +804,14 @@ fn render_commit_action_row(
         .h(px(38.0))
         .w_full()
         .px(px(10.0))
-        .rounded(px(9.0))
+        .rounded(px(RADIUS_DF))
         .flex()
         .items_center()
         .gap(px(10.0))
         .cursor_default()
         .text_size(px(14.0))
         .text_color(foreground)
-        .focus_visible(|style| style.border_1().border_color(theme.accent))
+        .focus_visible(|style| style.border_1().border_color(theme.ring))
         .when(enabled, |row| {
             row.hover(|style| style.bg(theme.overlay_strong))
         })
@@ -828,7 +823,7 @@ fn render_commit_action_row(
                     .h(px(22.0))
                     .min_w(px(34.0))
                     .px(px(7.0))
-                    .rounded(px(11.0))
+                    .rounded(px(RADIUS_SM))
                     .flex_none()
                     .flex()
                     .items_center()
