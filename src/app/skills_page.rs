@@ -723,7 +723,7 @@ impl Waku {
                     .child(
                         div()
                             .text_size(px(9.5))
-                            .font_weight(FontWeight::SEMIBOLD)
+                            .font_weight(FontWeight::NORMAL)
                             .text_color(theme.text_tertiary)
                             .child(SharedString::from(label.to_uppercase())),
                     )
@@ -769,11 +769,11 @@ impl Waku {
                 div()
                     .id(SharedString::from(format!("skill-item-{}", skill.row_key)))
                     .tab_index(0)
-                    .focus_visible(|style| style.border_1().border_color(theme.accent))
+                    .focus_visible(|style| style.border_1().border_color(theme.ring))
                     .w_full()
                     .px(px(9.0))
                     .py(px(7.0))
-                    .rounded(px(8.0))
+                    .rounded(px(RADIUS_DF))
                     .cursor_default()
                     .when(selected, |element| {
                         element.bg(theme.sidebar_item_background)
@@ -789,7 +789,7 @@ impl Waku {
                             .w(px(26.0))
                             .h(px(26.0))
                             .flex_none()
-                            .rounded(px(6.0))
+                            .rounded(px(RADIUS_DF))
                             .bg(theme.overlay)
                             .flex()
                             .items_center()
@@ -817,7 +817,7 @@ impl Waku {
                                             .min_w_0()
                                             .truncate()
                                             .text_size(px(12.0))
-                                            .font_weight(FontWeight::MEDIUM)
+                                            .font_weight(FontWeight::NORMAL)
                                             .text_color(if enabled {
                                                 theme.text
                                             } else {
@@ -880,12 +880,12 @@ impl Waku {
                 skill.row_key
             )))
             .tab_index(0)
-            .focus_visible(|style| style.border_color(theme.accent))
+            .focus_visible(|style| style.border_color(theme.ring))
             .w(px(36.0))
             .h(px(20.0))
             .p(px(2.0))
             .flex_none()
-            .rounded_full()
+            .rounded(px(RADIUS_LG))
             .cursor_default()
             .bg(if enabled { theme.inverse } else { theme.inset })
             .border_1()
@@ -897,11 +897,17 @@ impl Waku {
             .flex()
             .items_center()
             .when(enabled, |element| element.justify_end())
-            .child(div().w(px(14.0)).h(px(14.0)).rounded_full().bg(if enabled {
-                theme.on_inverse
-            } else {
-                theme.text_tertiary
-            }))
+            .child(
+                div()
+                    .w(px(14.0))
+                    .h(px(14.0))
+                    .rounded(px(RADIUS_LG))
+                    .bg(if enabled {
+                        theme.on_inverse
+                    } else {
+                        theme.text_tertiary
+                    }),
+            )
             .on_click(cx.listener({
                 let dir = dir.clone();
                 move |this, _, _, cx| {
@@ -973,10 +979,10 @@ impl Waku {
             div()
                 .id(id)
                 .tab_index(0)
-                .focus_visible(|style| style.border_color(theme.accent))
+                .focus_visible(|style| style.border_color(theme.ring))
                 .h(px(26.0))
                 .px(px(10.0))
-                .rounded(px(6.0))
+                .rounded(px(RADIUS_DF))
                 .border_1()
                 .border_color(theme.border_strong)
                 .flex()
@@ -1055,10 +1061,10 @@ impl Waku {
                 skill.row_key
             )))
             .tab_index(0)
-            .focus_visible(|style| style.border_color(theme.accent))
+            .focus_visible(|style| style.border_color(theme.ring))
             .h(px(26.0))
             .px(px(10.0))
-            .rounded(px(6.0))
+            .rounded(px(RADIUS_DF))
             .border_1()
             .border_color(if armed {
                 theme.danger
@@ -1179,7 +1185,7 @@ impl Waku {
                             .w(px(38.0))
                             .h(px(38.0))
                             .flex_none()
-                            .rounded(px(9.0))
+                            .rounded(px(RADIUS_DF))
                             .bg(theme.overlay)
                             .flex()
                             .items_center()
@@ -1206,7 +1212,7 @@ impl Waku {
                                             .min_w_0()
                                             .truncate()
                                             .text_size(px(15.0))
-                                            .font_weight(FontWeight::MEDIUM)
+                                            .font_weight(FontWeight::NORMAL)
                                             .text_color(if enabled {
                                                 theme.text
                                             } else {
@@ -1307,7 +1313,7 @@ fn skills_empty_state(theme: &Theme) -> Div {
             div()
                 .w(px(44.0))
                 .h(px(44.0))
-                .rounded(px(11.0))
+                .rounded(px(RADIUS_LG))
                 .bg(theme.overlay)
                 .flex()
                 .items_center()
@@ -1317,7 +1323,7 @@ fn skills_empty_state(theme: &Theme) -> Div {
         .child(
             div()
                 .text_size(px(13.0))
-                .font_weight(FontWeight::MEDIUM)
+                .font_weight(FontWeight::NORMAL)
                 .text_color(theme.text)
                 .child(tr!("skills.empty_title")),
         )

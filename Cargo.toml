@@ -33,6 +33,7 @@ dirs = "6.0"
 # views — the browser surface's WKWebView. Drop back to upstream once the PR
 # merges.
 gpui = { git = "https://github.com/egoist/zed", branch = "waku-webview" }
+gpui-hugeicons = "0.1.0"
 gpui_platform = { git = "https://github.com/egoist/zed", branch = "waku-webview", features = [
     "font-kit",
     "wayland",
@@ -159,6 +160,7 @@ webview2-com = "0.38"
 # hands straight to `SetRootVisualTarget` with no ABI bridging. `windows-sys`
 # stays for the plain Win32 calls that do not need COM.
 windows = { version = "0.61", features = [
+    "Wdk_System_SystemServices",
     "Win32_Foundation",
     "Win32_Graphics_DirectComposition",
     "Win32_System_Com",
@@ -194,3 +196,4 @@ opt-level = 2
 # is the crates.io release plus the future-incompatibility fix only.
 [patch.crates-io]
 block = { git = "https://github.com/Dicklesworthstone/rust-block", rev = "b39ae859d1ee8e8cb5eef6a516471f1578d26b96" }
+gpui = { git = "https://github.com/egoist/zed", branch = "waku-webview" }

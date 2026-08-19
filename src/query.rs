@@ -154,32 +154,10 @@ impl<K: Clone + Eq + Hash, V> QueryCache<K, V> {
         true
     }
 
-    /// Abandons a fetch that failed, so a later read retries rather than
-    /// waiting on a result that will never come.
-    ///
-    /// Also used by debounced queries that become irrelevant before their
-    /// fetch starts. Abandoning removes only the matching generation, so a
-    /// newer request for the same key cannot be cancelled by an older token.
-    pub fn abandon(&mut self, token: FetchToken<K>) {
-        if self
-            .entries
-            .get(&token.key)
-            .is_some_and(|cached| cached.generation == token.generation)
-        {
-            self.entries.remove(&token.key);
-        }
-    }
-
     /// Drops a key's value and invalidates any fetch in flight for it.
     pub fn invalidate(&mut self, key: &K) {
         self.generation += 1;
         self.entries.remove(key);
-    }
-
-    /// Drops every cached value and invalidates all fetches in flight.
-    pub fn clear(&mut self) {
-        self.generation += 1;
-        self.entries.clear();
     }
 
     #[cfg(test)]
@@ -264,20 +242,6 @@ mod tests {
         assert!(!cache.fulfill(first, "stale".into()));
         assert!(cache.fulfill(second, "fresh".into()));
         assert_eq!(*cache.peek(&"a").unwrap(), "fresh");
-    }
-
-    #[test]
-    fn abandoning_lets_the_next_read_retry() {
-        let mut cache = cache();
-        let Query::Missing(token) = cache.read(&"a") else {
-            panic!()
-        };
-        cache.abandon(token);
-
-        assert!(
-            matches!(cache.read(&"a"), Query::Missing(_)),
-            "a failed fetch must not leave the key pending forever"
-        );
     }
 
     #[test]

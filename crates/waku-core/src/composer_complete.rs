@@ -136,13 +136,40 @@ fn builtin_waku_commands(provider: ProviderKind) -> Vec<SlashCommand> {
     })
     .collect::<Vec<_>>();
     if provider == ProviderKind::Codex {
-        commands.push(SlashCommand {
-            name: "fast".to_owned(),
-            description: tr!("commands.fast_description"),
-            scope: CommandScope::Builtin,
-            argument_hint: None,
-            template: None,
-        });
+        commands.extend([
+            SlashCommand {
+                name: "fast".to_owned(),
+                description: tr!("commands.fast_description"),
+                scope: CommandScope::Builtin,
+                argument_hint: None,
+                template: None,
+            },
+            SlashCommand {
+                name: "goal".to_owned(),
+                description: tr!("commands.goal_description"),
+                scope: CommandScope::Builtin,
+                argument_hint: Some(tr!("commands.goal_argument_hint")),
+                template: None,
+            },
+        ]);
+    }
+    if provider.supports_interaction_modes() {
+        commands.extend([
+            SlashCommand {
+                name: "plan".to_owned(),
+                description: tr!("commands.plan_description"),
+                scope: CommandScope::Builtin,
+                argument_hint: None,
+                template: None,
+            },
+            SlashCommand {
+                name: "build".to_owned(),
+                description: tr!("commands.build_description"),
+                scope: CommandScope::Builtin,
+                argument_hint: None,
+                template: None,
+            },
+        ]);
     }
     commands
 }
@@ -1203,20 +1230,48 @@ mod tests {
     }
 
     #[test]
-    fn fast_builtin_is_codex_only() {
+    fn codex_control_builtins_are_codex_only() {
         for provider in ProviderKind::ALL {
             let commands = builtin_waku_commands(provider);
-            let fast = commands.iter().find(|command| command.name == "fast");
+            let controls = ["fast", "goal"]
+                .map(|name| (name, commands.iter().find(|command| command.name == name)));
             if provider == ProviderKind::Codex {
-                let fast = fast.expect("Codex is missing /fast");
-                assert_eq!(fast.scope, CommandScope::Builtin);
-                assert!(fast.template.is_none());
+                for (name, command) in controls {
+                    let command = command.unwrap_or_else(|| panic!("Codex is missing /{name}"));
+                    assert_eq!(command.scope, CommandScope::Builtin);
+                    assert!(command.template.is_none());
+                }
             } else {
-                assert!(
-                    fast.is_none(),
-                    "{} unexpectedly offers /fast",
-                    provider.display_name()
-                );
+                for (name, command) in controls {
+                    assert!(
+                        command.is_none(),
+                        "{} unexpectedly offers /{name}",
+                        provider.display_name()
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn interaction_mode_commands_are_discovered_only_for_supported_providers() {
+        for provider in ProviderKind::ALL {
+            let commands = builtin_waku_commands(provider);
+            for name in ["plan", "build"] {
+                let command = commands.iter().find(|command| command.name == name);
+                if provider.supports_interaction_modes() {
+                    let command = command.unwrap_or_else(|| {
+                        panic!("{} is missing /{name}", provider.display_name())
+                    });
+                    assert_eq!(command.scope, CommandScope::Builtin);
+                    assert!(command.template.is_none());
+                } else {
+                    assert!(
+                        command.is_none(),
+                        "{} unexpectedly offers /{name}",
+                        provider.display_name()
+                    );
+                }
             }
         }
     }

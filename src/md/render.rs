@@ -37,7 +37,7 @@ use super::selection::{
     RegisteredText, SelectionRegistry, SelectionState, TextKey, line_range, word_range,
 };
 use super::veil::{RowVeil, apply_veil};
-use crate::theme::Theme;
+use crate::theme::{FONT_SANS, RADIUS_DF, RADIUS_LG, RADIUS_SM, Theme};
 use crate::ui::tooltip::Tooltip;
 
 /// Selection geometry: the laid-out text handle for one painted element.
@@ -99,7 +99,7 @@ impl Metrics {
     };
 }
 
-pub const SANS_FAMILY: &str = ".SystemUIFont";
+pub const SANS_FAMILY: &str = FONT_SANS;
 /// The bundled mono face. "SF Mono" only exists on machines that installed it
 /// with Xcode or Terminal, and silently falls back to the sans face when it
 /// does not — which reads as proportional code.
@@ -107,18 +107,18 @@ pub const MONO_FAMILY: &str = "JetBrains Mono";
 
 /// Inline-code wash geometry. Paint-only: the box overhangs the glyphs
 /// horizontally and insets vertically inside the line box.
-const CODE_WASH_RADIUS: f32 = 4.0;
+const CODE_WASH_RADIUS: f32 = RADIUS_SM;
 const CODE_WASH_PAD_X: f32 = 2.5;
 const CODE_WASH_INSET_Y: f32 = 1.5;
 
 /// Heading scale relative to body text, by level.
 fn heading_metrics(level: u8, metrics: &Metrics) -> (f32, f32, FontWeight) {
     let (scale, weight) = match level {
-        1 => (1.45, FontWeight::BOLD),
-        2 => (1.28, FontWeight::BOLD),
-        3 => (1.14, FontWeight::SEMIBOLD),
-        4 => (1.05, FontWeight::SEMIBOLD),
-        _ => (1.0, FontWeight::SEMIBOLD),
+        1 => (1.45, FontWeight::NORMAL),
+        2 => (1.28, FontWeight::NORMAL),
+        3 => (1.14, FontWeight::NORMAL),
+        4 => (1.05, FontWeight::NORMAL),
+        _ => (1.0, FontWeight::NORMAL),
     };
     let size = (metrics.text_size * scale).round();
     (size, (size * 1.42).round(), weight)
@@ -140,6 +140,7 @@ pub struct Palette {
     pub code_wash: Hsla,
     pub selection: Hsla,
     pub accent: Hsla,
+    pub ring: Hsla,
     pub added: Hsla,
     pub removed: Hsla,
     is_dark: bool,
@@ -159,6 +160,7 @@ impl Palette {
             code_wash: theme.code_wash,
             selection: theme.selection,
             accent: theme.accent,
+            ring: theme.ring,
             added: theme.success,
             removed: theme.danger,
             is_dark: theme.is_dark,
@@ -226,11 +228,7 @@ pub fn flatten(
         } else {
             SANS_FAMILY
         });
-        run_font.weight = if run.style.bold && base_weight < FontWeight::SEMIBOLD {
-            FontWeight::SEMIBOLD
-        } else {
-            base_weight
-        };
+        run_font.weight = base_weight;
         run_font.style = if run.style.italic {
             FontStyle::Italic
         } else {
@@ -998,8 +996,7 @@ fn markdown_capped<'a>(
         ctx.next_ordinal.set(block_ordinal_base(block_ix));
         children.push(render_block(block, &ctx));
         debug_assert!(
-            ctx.next_ordinal.get() - block_ordinal_base(block_ix)
-                < 1 << BLOCK_ORDINAL_STRIDE_BITS,
+            ctx.next_ordinal.get() - block_ordinal_base(block_ix) < 1 << BLOCK_ORDINAL_STRIDE_BITS,
             "a single block overflowed its ordinal stride"
         );
     }
@@ -1074,7 +1071,7 @@ fn render_block(block: &Block, ctx: &Ctx) -> AnyElement {
                     div()
                         .w(px(2.0))
                         .flex_none()
-                        .rounded_full()
+                        .rounded(px(RADIUS_LG))
                         .bg(ctx.palette.border),
                 )
                 .child(
@@ -1184,7 +1181,7 @@ fn checkbox(checked: bool, ctx: &Ctx) -> AnyElement {
         .size(px(box_size))
         .my(px(((ctx.metrics.line_height - box_size) / 2.0).max(0.0)))
         .flex_none()
-        .rounded(px(3.0))
+        .rounded(px(RADIUS_SM))
         .border_1()
         .border_color(if checked {
             ctx.palette.accent
@@ -1227,7 +1224,7 @@ fn render_image(url: &str, alt: &str, ctx: &Ctx) -> AnyElement {
             image
                 .max_w(relative(1.0))
                 .max_h(px(MAX_HEIGHT))
-                .rounded(px(6.0))
+                .rounded(px(RADIUS_DF))
                 .object_fit(gpui::ObjectFit::ScaleDown),
         )
         .when(!alt.trim().is_empty(), |element| {
@@ -1329,12 +1326,12 @@ fn render_code_block(language: Option<&str>, code: &str, ctx: &Ctx) -> AnyElemen
         .tab_index(0)
         .size(px(24.0))
         .flex_none()
-        .rounded(px(5.0))
+        .rounded(px(RADIUS_DF))
         .flex()
         .items_center()
         .justify_center()
         .cursor_default()
-        .focus_visible(|style| style.border_1().border_color(ctx.palette.accent))
+        .focus_visible(|style| style.border_1().border_color(ctx.palette.ring))
         .hover(|style| style.bg(ctx.palette.overlay))
         .child(crate::ui::icon(
             if copied {
@@ -1375,7 +1372,7 @@ fn render_code_block(language: Option<&str>, code: &str, ctx: &Ctx) -> AnyElemen
         .tab_stop(false)
         .w_full()
         .min_w_0()
-        .rounded(px(8.0))
+        .rounded(px(RADIUS_DF))
         .border_1()
         .border_color(ctx.palette.border)
         .bg(ctx.palette.inset)
@@ -1397,7 +1394,7 @@ fn render_code_block(language: Option<&str>, code: &str, ctx: &Ctx) -> AnyElemen
                         .truncate()
                         .text_size(px(10.0))
                         .line_height(px(14.0))
-                        .font_weight(FontWeight::MEDIUM)
+                        .font_weight(FontWeight::NORMAL)
                         .text_color(ctx.palette.ghost)
                         .when_some(label, |element, label| {
                             element.child(SharedString::from(label))
@@ -1492,7 +1489,7 @@ fn render_table(
     let mut table = div()
         .w_full()
         .min_w_0()
-        .rounded(px(8.0))
+        .rounded(px(RADIUS_DF))
         .border_1()
         .border_color(ctx.palette.border)
         .overflow_hidden()
@@ -1501,7 +1498,7 @@ fn render_table(
 
     if !header.is_empty() {
         table = table.child(
-            table_row(header, &widths, align, ctx, FontWeight::SEMIBOLD, true)
+            table_row(header, &widths, align, ctx, FontWeight::NORMAL, true)
                 .bg(ctx.palette.overlay),
         );
     }

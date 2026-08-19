@@ -519,9 +519,9 @@ pub enum FieldMode {
     Search,
 }
 
-/// Tallest a composer-mode field grows before its text scrolls under an
-/// overlay scrollbar instead of growing the card.
-const COMPOSER_MAX_HEIGHT: Pixels = px(300.);
+/// The composer stays a compact single-row control. Longer prompts scroll
+/// inside this viewport instead of changing the surrounding card's height.
+const COMPOSER_MAX_HEIGHT: Pixels = px(32.);
 
 pub struct ComposerInput {
     focus_handle: FocusHandle,
@@ -699,7 +699,7 @@ impl ComposerInput {
     /// Whether this field's right-click menu is open. The browser surface
     /// treats that as an overlay above its native webview.
     pub fn context_menu_open(&self) -> bool {
-        self.context_menu.is_open()
+        self.context_menu.is_visible()
     }
 
     fn context_menu_preserves_visual_focus(&self) -> bool {
@@ -2450,18 +2450,18 @@ mod tests {
     use std::path::PathBuf;
     use std::time::{Duration, Instant};
 
-    use gpui::{
-        ClipboardEntry, ClipboardItem, Context, Entity, EntityInputHandler, ExternalPaths, Image,
-        ImageFormat, Pixels, Render, TestAppContext, TextRun, Window, div, font, hsla, prelude::*,
-        px,
-    };
-
     use super::TokenClass;
     use super::{
         ComposerInput, EditHistory, SearchPaint, UNDO_GROUP_INTERVAL, UNDO_HISTORY_CAP,
         attachment_paste_entries, cursor_should_be_visible, input_text_runs, next_word_boundary,
         previous_word_boundary, single_line_scroll, trimmed_splice, visual_row_count,
         word_range_at,
+    };
+    use crate::theme::FONT_SANS;
+    use gpui::{
+        ClipboardEntry, ClipboardItem, Context, Entity, EntityInputHandler, ExternalPaths, Image,
+        ImageFormat, Pixels, Render, TestAppContext, TextRun, Window, div, font, hsla, prelude::*,
+        px,
     };
 
     struct InputHarness {
@@ -2956,7 +2956,7 @@ mod tests {
             12,
             TextRun {
                 len: 12,
-                font: font(".SystemUIFont"),
+                font: font(FONT_SANS),
                 color: plain,
                 background_color: None,
                 underline: None,
@@ -2999,7 +2999,7 @@ mod tests {
             10,
             TextRun {
                 len: 10,
-                font: font(".SystemUIFont"),
+                font: font(FONT_SANS),
                 color: hsla(0.0, 0.0, 1.0, 1.0),
                 background_color: None,
                 underline: None,
@@ -3049,7 +3049,7 @@ mod tests {
             20,
             TextRun {
                 len: 20,
-                font: font(".SystemUIFont"),
+                font: font(FONT_SANS),
                 color: plain,
                 background_color: None,
                 underline: None,

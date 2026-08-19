@@ -36,9 +36,11 @@ Waku works with:
 - OpenCode
 - Pi
 
-Install and authenticate at least one supported agent CLI before starting Waku.
 Waku detects available CLIs automatically and uses each provider's native
-structured protocol and session continuity.
+structured protocol and session continuity. Missing providers expose an
+install action in **Settings → Providers**; Waku uses each vendor's documented
+installer and then starts its browser sign-in or opens its provider-specific
+configuration guide. Manual binary paths remain available for custom installs.
 
 ## Highlights
 

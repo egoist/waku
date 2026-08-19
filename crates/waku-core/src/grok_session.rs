@@ -20,7 +20,7 @@ use crate::model::ProviderResumeCursor;
 const RPC_TIMEOUT: Duration = Duration::from_secs(30);
 
 pub fn generated_title(session_id: &str) -> anyhow::Result<Option<String>> {
-    generated_title_in(&grok_home_directory()?, session_id)
+    generated_title_in(&home_directory()?, session_id)
 }
 
 pub fn generated_title_in(grok_home: &Path, session_id: &str) -> anyhow::Result<Option<String>> {
@@ -98,15 +98,63 @@ fn fork_native_session(
 }
 
 fn find_session_directory(session_id: &str) -> anyhow::Result<PathBuf> {
-    find_session_directory_in(&grok_home_directory()?, session_id)
+    find_session_directory_in(&home_directory()?, session_id)
 }
 
-fn grok_home_directory() -> anyhow::Result<PathBuf> {
+pub(crate) fn home_directory() -> anyhow::Result<PathBuf> {
     std::env::var_os("GROK_HOME")
         .filter(|value| !value.is_empty())
         .map(PathBuf::from)
         .or_else(|| dirs::home_dir().map(|home| home.join(".grok")))
         .ok_or_else(|| anyhow!("Grok's home directory could not be located"))
+}
+
+/// Read the terminal diagnostic Grok persisted for one ACP prompt.
+///
+/// Current Grok builds persist their private `turn_completed` update before
+/// sending the companion `prompt_complete` notification, but do not reliably
+/// forward that update over the ACP transport. The driver runs this lookup on
+/// its background thread at turn completion so the UI can show the provider's
+/// real error instead of inventing a generic no-response message.
+pub(crate) fn latest_turn_error_in(
+    grok_home: &Path,
+    session_id: &str,
+    prompt_id: Option<&str>,
+) -> anyhow::Result<Option<String>> {
+    let updates_path = find_session_directory_in(grok_home, session_id)?.join("updates.jsonl");
+    let updates = read_json_lines(&updates_path)?;
+    for value in updates.iter().rev() {
+        let Some(update) = value.pointer("/params/update") else {
+            continue;
+        };
+        if update.get("sessionUpdate").and_then(Value::as_str) != Some("turn_completed") {
+            continue;
+        }
+        if let Some(prompt_id) = prompt_id
+            && update
+                .get("prompt_id")
+                .or_else(|| update.get("promptId"))
+                .and_then(Value::as_str)
+                != Some(prompt_id)
+        {
+            continue;
+        }
+        let stop_reason = update
+            .get("stop_reason")
+            .or_else(|| update.get("stopReason"))
+            .and_then(Value::as_str);
+        if !matches!(stop_reason, Some("error" | "failed")) {
+            return Ok(None);
+        }
+        return Ok(update
+            .get("agent_result")
+            .or_else(|| update.get("agentResult"))
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|message| !message.is_empty())
+            .map(str::to_owned));
+    }
+    Ok(None)
 }
 
 fn find_session_directory_in(grok_home: &Path, session_id: &str) -> anyhow::Result<PathBuf> {
@@ -381,6 +429,46 @@ mod tests {
         assert_eq!(
             generated_title_in(&root, &session_id).unwrap().as_deref(),
             Some("Fix provider task titles")
+        );
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn reads_the_matching_native_turn_error() {
+        let root = std::env::temp_dir().join(format!("waku-grok-error-{}", Uuid::new_v4()));
+        let session_id = Uuid::new_v4().to_string();
+        let session = root
+            .join("sessions")
+            .join("%2Ftmp%2Fproject")
+            .join(&session_id);
+        fs::create_dir_all(&session).unwrap();
+        fs::write(session.join("summary.json"), b"{}").unwrap();
+        let updates = [
+            json!({"params":{"update":{
+                "sessionUpdate":"turn_completed",
+                "prompt_id":"older-prompt",
+                "stop_reason":"error",
+                "agent_result":"older failure"
+            }}}),
+            json!({"params":{"update":{
+                "sessionUpdate":"turn_completed",
+                "prompt_id":"waku-prompt",
+                "stop_reason":"error",
+                "agent_result":"API error (status 402 Payment Required): Grok Build usage balance exhausted"
+            }}}),
+        ];
+        let serialized = updates
+            .iter()
+            .map(Value::to_string)
+            .collect::<Vec<_>>()
+            .join("\n");
+        fs::write(session.join("updates.jsonl"), serialized).unwrap();
+
+        assert_eq!(
+            latest_turn_error_in(&root, &session_id, Some("waku-prompt"))
+                .unwrap()
+                .as_deref(),
+            Some("API error (status 402 Payment Required): Grok Build usage balance exhausted")
         );
         fs::remove_dir_all(root).ok();
     }

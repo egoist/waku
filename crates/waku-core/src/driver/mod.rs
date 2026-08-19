@@ -12,6 +12,11 @@ mod pi;
 mod support;
 mod title_refresh;
 
+/// Hidden daemon entrypoint used to give ACP children a real working directory
+/// on Windows. The ACP SDK does not expose `current_dir`, and `/usr/bin/env -C`
+/// is only available on Unix.
+pub const WINDOWS_ACP_LAUNCHER_ARGUMENT: &str = "--waku-acp-launch";
+
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -85,6 +90,10 @@ impl DriverHandle {
         self.inner.prompt(prompt);
     }
 
+    pub fn prompt_with_goal(&self, prompt: String, objective: String) {
+        self.inner.prompt_with_goal(prompt, objective);
+    }
+
     /// Whether this transport can inject a user message into the currently
     /// running turn (steering) instead of starting a new one.
     pub fn supports_steer(&self) -> bool {
@@ -142,6 +151,9 @@ impl DriverHandle {
 
 pub trait DriverControl: Send + Sync {
     fn prompt(&self, prompt: String);
+    fn prompt_with_goal(&self, prompt: String, _objective: String) {
+        self.prompt(prompt);
+    }
     fn supports_steer(&self) -> bool {
         false
     }

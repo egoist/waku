@@ -108,6 +108,8 @@ language.description:
 
 settings.general:
   en: General
+settings.profile:
+  en: Profile
 settings.appearance:
   en: Appearance
 settings.providers:
@@ -120,6 +122,8 @@ settings.computer_use:
   en: Computer Use
 settings.general_keywords:
   en: general local projects conversations privacy analytics telemetry anonymous sharing updates automatic sparkle version
+settings.profile_keywords:
+  en: profile name avatar photo picture account identity sidebar
 settings.appearance_keywords:
   en: appearance theme system light dark language english chinese simplified
 settings.providers_keywords:
@@ -331,9 +335,65 @@ settings.share_anonymous_usage_data_description:
 providers.coding_agents:
   en: Coding agents
 providers.description:
-  en: Waku drives agent CLIs installed on this computer. Install or sign in with each agent's own CLI, then refresh
+  en: Waku uses local agent CLIs under the hood. Install and authenticate them here before starting a task
 providers.web_description:
   en: Waku drives agent CLIs installed on the daemon host. Install or sign in with each agent's own CLI, then refresh
+providers.cli_required:
+  en: Waku requires the %{command} CLI, which is not installed
+providers.cli_required_title:
+  en: "%{provider} CLI is required"
+providers.cli_required_description:
+  en: Waku uses %{provider} underneath to run this task. Install it and finish its provider setup once
+providers.install_and_sign_in:
+  en: Install & sign in
+providers.install:
+  en: Install
+providers.install_guide:
+  en: Install guide
+providers.configure:
+  en: Configure
+providers.installing:
+  en: Installing…
+providers.installing_cli:
+  en: "Installing %{provider} CLI"
+providers.installing_cli_description:
+  en: Waku is installing the official CLI for your user account
+providers.sign_in:
+  en: Sign in
+providers.finish_sign_in:
+  en: "Finish signing in to %{provider}"
+providers.finish_sign_in_description:
+  en: Complete the browser window that the CLI opened; Waku will detect it automatically
+providers.waiting_for_sign_in:
+  en: Waiting for sign-in…
+providers.sign_in_required:
+  en: "%{provider} needs sign-in"
+providers.sign_in_required_description:
+  en: Authenticate the CLI once, then Waku can use it without handling your credentials
+providers.checking_sign_in:
+  en: Checking sign-in
+providers.checking_sign_in_description:
+  en: Verifying the %{provider} CLI authentication on this computer
+providers.signed_out:
+  en: Signed out
+providers.ready:
+  en: Ready
+providers.sign_in_needs_attention:
+  en: Sign-in needs attention
+providers.setup_needs_attention:
+  en: Setup needs attention
+providers.setup_complete:
+  en: "%{provider} is installed, signed in, and ready"
+providers.install_complete:
+  en: "%{provider} is installed; its provider credentials remain managed by the CLI"
+providers.setup_failed:
+  en: "Provider setup failed: %{error}"
+providers.setup_before_starting:
+  en: "Set up %{provider} before starting this task"
+providers.provider_settings:
+  en: Provider settings
+providers.remote_setup_required:
+  en: Install and authenticate %{provider} on the connected daemon host, then refresh Providers
 providers.check_failed:
   en: "Could not check %{command}: %{error}"
 providers.show_settings:
@@ -408,6 +468,8 @@ common.copy:
   en: Copy
 common.remove:
   en: Remove
+common.save:
+  en: Save
 common.rename:
   en: Rename
 
@@ -440,6 +502,8 @@ sidebar.days_ago:
   en: "%{count}d"
 sidebar.unknown_project:
   en: Unknown project
+sidebar.new_task_in_project:
+  en: New task in %{project}
 sidebar.close:
   en: Close sidebar
 sidebar.hide:
@@ -716,6 +780,8 @@ activity.tool:
   en: Tool
 activity.plan_updated:
   en: Plan updated
+activity.todos:
+  en: To-dos
 activity.output_truncated:
   en: "\n\n… output truncated"
 activity.thought:
@@ -887,6 +953,20 @@ models.service_tier:
   en: Service Tier
 models.context_window:
   en: Context Window
+models.model:
+  en: Model
+models.provider:
+  en: Provider
+models.new_task:
+  en: New task
+models.effort:
+  en: Effort
+models.speed:
+  en: Speed
+models.back:
+  en: Back
+models.unavailable:
+  en: Unavailable
 
 model_option.none:
   en: None
@@ -1025,6 +1105,16 @@ commands.commit_description:
   en: Stage and commit the current changes
 commands.fast_description:
   en: Toggle fast mode
+commands.goal_description:
+  en: Keep Codex working until an objective is complete
+commands.goal_argument_hint:
+  en: objective
+commands.goal_requires_objective:
+  en: Add an objective after /goal
+commands.plan_description:
+  en: Switch to Plan mode
+commands.build_description:
+  en: Switch to Build mode
 commands.fast_enabled:
   en: Fast mode enabled
 commands.fast_disabled:
@@ -1070,6 +1160,10 @@ composer.queue_placeholder:
   en: Queue a follow-up…
 composer.prompt_placeholder:
   en: Ask Waku to build something…
+composer.attach_files:
+  en: Attach images or files
+composer.agent_mode:
+  en: Agent
 composer.attach_daemon:
   en: Attach a file or folder from the daemon host
 composer.attach_daemon_title:
@@ -1131,6 +1225,8 @@ session.stopped:
   en: Stopped
 session.turn_completed:
   en: Turn completed
+session.provider_finished_without_response:
+  en: "%{provider} finished without returning a response"
 session.stopped_before_response:
   en: The agent stopped before returning a response
 session.codex_exited_before_response:
@@ -1622,6 +1718,10 @@ diff.unavailable:
   en: Changes unavailable
 diff.refresh:
   en: Refresh changes
+diff.show_file_list:
+  en: Show file list
+diff.show_expanded_diffs:
+  en: Show expanded diffs
 diff.refresh_failed:
   en: "Could not refresh changes: %{error}"
 diff.truncated:
@@ -1936,6 +2036,14 @@ usage.context_window:
   en: Context window
 usage.plan_limits:
   en: Plan usage limits
+usage.account_limits:
+  en: Account limits
+usage.remaining_percent:
+  en: "%{percent}% left"
+usage.sign_in_for_limits:
+  en: Sign in to this provider to view limits and reset times.
+usage.fetching_limits:
+  en: Fetching the latest limits…
 usage.plan_limits_named:
   en: Plan usage limits · %{plan}
 usage.open_account_settings:
@@ -1972,6 +2080,25 @@ usage.resets_in_hours_minutes:
   en: Resets in %{hours} hr %{minutes} min
 usage.resets_date:
   en: Resets %{date}
+
+profile.default_name:
+  en: Waku User
+profile.title:
+  en: Sidebar profile
+profile.description:
+  en: Choose the name and photo shown in the sidebar profile menu.
+profile.name_placeholder:
+  en: Your name
+profile.choose_photo:
+  en: Choose photo
+profile.change_photo:
+  en: Change photo
+profile.unsupported_image:
+  en: Choose a PNG, JPEG, GIF, or WebP image.
+profile.image_too_large:
+  en: The image must be smaller than 20 MB.
+profile.image_error:
+  en: "Could not save profile image: %{error}"
 
 usage_error.signin_cannot_read:
   en: "%{provider} sign-in can't read usage (HTTP %{status}). Running a %{provider} turn refreshes it"

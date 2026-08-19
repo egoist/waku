@@ -2925,6 +2925,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "gpui-hugeicons"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "21f4b11211cfe4423caa92db21304f840a800e4f3ccfe10d6e60934deaa0acf3"
+dependencies = [
+ "anyhow",
+ "gpui",
+]
+
+[[package]]
 name = "gpui_linux"
 version = "0.1.0"
 source = "git+https://github.com/egoist/zed?branch=waku-webview#f9bad8941ea813982d6dfb10c0377ebf7716b3e7"
@@ -8303,6 +8313,7 @@ dependencies = [
  "futures",
  "futures-lite",
  "gpui",
+ "gpui-hugeicons",
  "gpui_platform",
  "image",
  "libc",

@@ -257,11 +257,11 @@ impl Waku {
             .id("usage-meter")
             .h(px(20.0))
             .px(px(5.0))
-            .rounded(px(5.0))
+            .rounded(px(RADIUS_SM))
             .flex()
             .items_center()
             .flex_none()
-            .cursor_default()
+            .cursor_pointer()
             .hover(|element| element.bg(theme.overlay))
             .when(handle.is_open(), |element| element.bg(theme.overlay_strong))
             .tooltip(Tooltip::text(tooltip))
@@ -383,11 +383,10 @@ fn usage_panel(
         .track_focus(handle.focus_handle())
         .w(px(320.0))
         .p(px(14.0))
-        .rounded(px(10.0))
+        .rounded(px(RADIUS_DF))
         .border_1()
         .border_color(theme.border_strong)
         .bg(theme.raised)
-        .shadow_lg()
         .flex()
         .flex_col()
         .gap(px(12.0))
@@ -457,7 +456,7 @@ fn usage_panel(
         panel = panel.child(match usage_url {
             Some(url) => header_row
                 .id("plan-usage-link")
-                .cursor_default()
+                .cursor_pointer()
                 .hover(|element| element.opacity(0.8))
                 .tooltip(Tooltip::text(tr!("usage.open_account_settings")))
                 .on_click(move |_, _, cx| cx.open_url(url))
@@ -541,7 +540,7 @@ fn plan_skeleton(theme: &Theme) -> AnyElement {
             .h(px(9.0))
             .w(px(width))
             .flex_none()
-            .rounded(px(4.5))
+            .rounded(px(RADIUS_SM))
             .bg(theme.overlay_strong)
     };
     let row = move |label_width: f32, value_width: f32| {
@@ -562,7 +561,7 @@ fn plan_skeleton(theme: &Theme) -> AnyElement {
                     .h(px(3.0))
                     .w_full()
                     .flex_none()
-                    .rounded_full()
+                    .rounded(px(RADIUS_LG))
                     .bg(theme.overlay_strong),
             )
     };
@@ -583,7 +582,7 @@ fn plan_skeleton(theme: &Theme) -> AnyElement {
 
 /// A quota bar: full-width track, fill proportional to `percent`. A lane in
 /// use keeps a visible sliver even under one percent.
-fn meter_bar(theme: &Theme, percent: f64) -> Div {
+pub(super) fn meter_bar(theme: &Theme, percent: f64) -> Div {
     let fraction = (percent / 100.0).clamp(0.0, 1.0) as f32;
     let fraction = if fraction > 0.0 {
         fraction.max(0.015)
@@ -601,7 +600,13 @@ fn meter_bar(theme: &Theme, percent: f64) -> Div {
         .h(px(3.0))
         .w_full()
         .flex_none()
-        .rounded_full()
+        .rounded(px(RADIUS_LG))
         .bg(theme.overlay_strong)
-        .child(div().h_full().w(relative(fraction)).rounded_full().bg(fill))
+        .child(
+            div()
+                .h_full()
+                .w(relative(fraction))
+                .rounded(px(RADIUS_LG))
+                .bg(fill),
+        )
 }

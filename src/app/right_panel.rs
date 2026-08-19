@@ -116,7 +116,15 @@ fn markdown_file_link_path(target: &str) -> Option<PathBuf> {
         return None;
     };
     let path = PathBuf::from(percent_decode_file_path(path));
-    path.is_absolute().then_some(path)
+    // Provider transcripts can contain paths from a daemon running on a
+    // different OS. A POSIX-rooted path has a root but is not considered
+    // `absolute` by Rust on Windows, even though it is absolute on the host
+    // that emitted it.
+    (path.is_absolute() || path.has_root()).then_some(path)
+}
+
+fn portable_relative_path(path: &Path) -> String {
+    path.to_string_lossy().replace('\\', "/")
 }
 
 fn normalized_path(path: &Path) -> PathBuf {
@@ -139,7 +147,7 @@ fn workspace_relative_file_path(workspace: &Path, target: &Path) -> Option<Strin
         if relative.as_os_str().is_empty() {
             return None;
         }
-        Some(relative.to_string_lossy().into_owned())
+        Some(portable_relative_path(relative))
     }
 
     let workspace = normalized_path(workspace);
@@ -298,27 +306,20 @@ fn review_diff_tree_rows(
 /// its space back to the code.
 #[derive(Clone, Copy)]
 pub(super) struct DiffRowStyle {
+    /// Combined width of the old/new line-number lanes. The explicit change
+    /// sign sits in its own narrow lane immediately after this gutter.
     gutter_width: f32,
     row_height: f32,
-    /// What to put in the gutter of a row that has no line number. Git always
-    /// reports positions, so this only comes up on a diff synthesized from a
-    /// provider's before/after text: there the `+`/`-` marker stands in, which
-    /// keeps the gutter from going blank and the meaning off color alone.
-    marker_fallback: bool,
 }
 
 impl DiffRowStyle {
     pub(super) const REVIEW: Self = Self {
-        gutter_width: 52.0,
+        gutter_width: 68.0,
         row_height: 20.0,
-        marker_fallback: false,
     };
     /// The same rows the Review tab draws, so an edit reads the same wherever
     /// it is opened.
-    pub(super) const ACTIVITY: Self = Self {
-        marker_fallback: true,
-        ..Self::REVIEW
-    };
+    pub(super) const ACTIVITY: Self = Self { ..Self::REVIEW };
 }
 
 /// Selection identity for one diff code row. Selection resolves a drag by
@@ -383,7 +384,6 @@ pub(super) fn render_diff_code_row(
         ),
         _ => (" ", None, None, None, theme.text_tertiary),
     };
-    let shown_line = line.new_line.or(line.old_line);
     let flat = review_diff_flat_text(line, theme);
     let selectable = md::render::selectable_flat_text(
         &flat,
@@ -398,10 +398,8 @@ pub(super) fn render_diff_code_row(
         .min_h(px(style.row_height))
         .self_stretch()
         .flex_none()
-        .pr(px(9.0))
         .flex()
         .items_start()
-        .justify_end()
         .border_r_1()
         .border_color(theme.border)
         .text_color(number_color)
@@ -409,17 +407,50 @@ pub(super) fn render_diff_code_row(
             gutter.bg(background)
         })
         .child(
-            shown_line
-                .map(|line| line.to_string())
-                .or_else(|| style.marker_fallback.then(|| marker.to_owned()))
-                .unwrap_or_default(),
+            div()
+                .w(px(style.gutter_width / 2.0))
+                .min_h(px(style.row_height))
+                .pr(px(6.0))
+                .flex_none()
+                .flex()
+                .items_start()
+                .justify_end()
+                .child(
+                    line.old_line
+                        .map(|line| line.to_string())
+                        .unwrap_or_default(),
+                ),
+        )
+        .child(
+            div()
+                .w(px(style.gutter_width / 2.0))
+                .min_h(px(style.row_height))
+                .pr(px(6.0))
+                .flex_none()
+                .flex()
+                .items_start()
+                .justify_end()
+                .child(
+                    line.new_line
+                        .map(|line| line.to_string())
+                        .unwrap_or_default(),
+                ),
         );
+    let sign = div()
+        .w(px(20.0))
+        .min_h(px(style.row_height))
+        .flex_none()
+        .flex()
+        .items_start()
+        .justify_center()
+        .text_color(number_color)
+        .child(marker);
     let body = div()
         .min_h(px(style.row_height))
         .self_stretch()
         .min_w_0()
         .flex_1()
-        .pl(px(12.0))
+        .pl(px(8.0))
         .flex()
         .items_start()
         .when_some(body_background, |body, background| body.bg(background))
@@ -438,6 +469,69 @@ pub(super) fn render_diff_code_row(
                 .whitespace_normal()
                 .child(selectable),
         );
+    let striped_deletion = line.kind == crate::review_diff::LineKind::Deletion;
+    let edge_bar = if let Some(color) = edge {
+        if striped_deletion {
+            canvas(
+                |_, _, _| (),
+                move |bounds, _, window, _| {
+                    // A deletion uses a real repeating hatch, not a single
+                    // diagonal gradient. Keep every segment inside the narrow
+                    // rail so wrapped rows do not bleed into the line gutter.
+                    window.paint_quad(fill(bounds, color.opacity(0.13)));
+                    let width = f32::from(bounds.size.width);
+                    let height = f32::from(bounds.size.height);
+                    let mut hatch = PathBuilder::stroke(px(1.0));
+                    let mut offset = -width;
+                    while offset <= height {
+                        let mut x0 = 0.0;
+                        let mut y0 = offset;
+                        let mut x1 = width;
+                        let mut y1 = offset + width;
+
+                        if y0 < 0.0 {
+                            x0 = -y0;
+                            y0 = 0.0;
+                        }
+                        if y1 > height {
+                            x1 -= y1 - height;
+                            y1 = height;
+                        }
+                        if x0 <= width && x1 >= 0.0 && x0 <= x1 {
+                            hatch
+                                .move_to(point(bounds.origin.x + px(x0), bounds.origin.y + px(y0)));
+                            hatch
+                                .line_to(point(bounds.origin.x + px(x1), bounds.origin.y + px(y1)));
+                        }
+                        offset += 4.0;
+                    }
+                    if let Ok(path) = hatch.build() {
+                        window.paint_path(path, color);
+                    }
+                },
+            )
+            .w(px(4.0))
+            .min_h(px(style.row_height))
+            .self_stretch()
+            .flex_none()
+            .into_any_element()
+        } else {
+            div()
+                .w(px(4.0))
+                .min_h(px(style.row_height))
+                .self_stretch()
+                .flex_none()
+                .bg(color)
+                .into_any_element()
+        }
+    } else {
+        div()
+            .w(px(4.0))
+            .min_h(px(style.row_height))
+            .self_stretch()
+            .flex_none()
+            .into_any_element()
+    };
     div()
         .id(SharedString::from(format!("{key_prefix}-row-{index}")))
         .w_full()
@@ -452,8 +546,9 @@ pub(super) fn render_diff_code_row(
         .font_family(md::render::MONO_FAMILY)
         .text_size(px(10.5))
         .line_height(px(style.row_height))
-        .when_some(edge, |row, edge| row.border_l_2().border_color(edge))
+        .child(edge_bar)
         .child(gutter)
+        .child(sign)
         .child(body)
         .into_any_element()
 }
@@ -728,7 +823,7 @@ fn visible_working_tree_entries(
             let expanded = is_dir && expanded_paths.contains(&absolute_path);
             let file_icon = (!is_dir).then(|| file_icon_for_name(&name));
             entries.push(WorkingTreeEntry {
-                relative_path: relative_path.to_string_lossy().into_owned(),
+                relative_path: portable_relative_path(&relative_path),
                 absolute_path: absolute_path.clone(),
                 name,
                 is_dir,
@@ -1117,15 +1212,14 @@ mod tests {
     /// positioned fall back to the row index.
     #[test]
     fn diff_row_selection_keys_are_unique_even_without_line_numbers() {
-        let positionless = crate::review_diff::from_file_changes(&[
-            crate::model::ActivityFileChange {
+        let positionless =
+            crate::review_diff::from_file_changes(&[crate::model::ActivityFileChange {
                 path: "a.md".into(),
                 additions: Some(2),
                 deletions: Some(0),
                 status: None,
                 diff: Some("@@\n+one\n+two\n \n+three\n".into()),
-            },
-        ]);
+            }]);
         let keys = positionless
             .lines
             .iter()
@@ -1178,6 +1272,47 @@ mod tests {
         .into_iter()
         .map(review_file)
         .collect()
+    }
+
+    #[test]
+    fn review_display_mode_uses_matching_item_count_and_file_target() {
+        let snapshot = crate::review_diff::from_file_changes(&[
+            crate::model::ActivityFileChange {
+                path: "src/one.rs".into(),
+                additions: Some(1),
+                deletions: Some(0),
+                status: None,
+                diff: Some("@@ -1 +1 @@\n-old\n+new\n".into()),
+            },
+            crate::model::ActivityFileChange {
+                path: "src/two.rs".into(),
+                additions: Some(1),
+                deletions: Some(0),
+                status: None,
+                diff: Some("@@ -1 +1 @@\n-before\n+after\n".into()),
+            },
+        ]);
+
+        assert_eq!(
+            ReviewDiffDisplayMode::Expanded.item_count(&snapshot),
+            snapshot.lines.len()
+        );
+        assert_eq!(
+            ReviewDiffDisplayMode::FilesOnly.item_count(&snapshot),
+            snapshot.files.len()
+        );
+        assert_eq!(
+            ReviewDiffDisplayMode::Expanded.scroll_target(&snapshot, 1),
+            snapshot.files[1].diff_line
+        );
+        assert_eq!(
+            ReviewDiffDisplayMode::FilesOnly.scroll_target(&snapshot, 1),
+            Some(1)
+        );
+        assert_eq!(
+            ReviewDiffDisplayMode::FilesOnly.scroll_target(&snapshot, 2),
+            None
+        );
     }
 
     #[test]
@@ -1633,6 +1768,7 @@ mod tests {
         terminal_state.surfaces = vec![RightPanelSurface::Terminal(terminal_id)];
         terminal_state.active_surface = Some(0);
         terminal_state.file_tree_width = 248.0;
+        terminal_state.diff_display_mode = ReviewDiffDisplayMode::FilesOnly;
         states.insert(session_with_terminal, terminal_state);
 
         let other_state = RightPanelSessionState::take_or_closed(&mut states, other_session);
@@ -1640,6 +1776,10 @@ mod tests {
         assert!(other_state.surfaces.is_empty());
         assert_eq!(other_state.active_surface, None);
         assert_eq!(other_state.file_tree_width, DEFAULT_FILE_TREE_WIDTH);
+        assert_eq!(
+            other_state.diff_display_mode,
+            ReviewDiffDisplayMode::Expanded
+        );
 
         let restored = RightPanelSessionState::take_or_closed(&mut states, session_with_terminal);
         assert!(restored.visible);
@@ -1649,6 +1789,7 @@ mod tests {
         );
         assert_eq!(restored.active_surface, Some(0));
         assert_eq!(restored.file_tree_width, 248.0);
+        assert_eq!(restored.diff_display_mode, ReviewDiffDisplayMode::FilesOnly);
     }
 
     #[test]
@@ -1817,6 +1958,7 @@ impl Waku {
             file_tree_width: self.right_panel_file_tree_width,
             file_editors: std::mem::take(&mut self.right_panel_file_editors),
             diff_source: self.right_panel_diff_source,
+            diff_display_mode: self.right_panel_diff_display_mode,
             diff_snapshot: self.right_panel_diff_snapshot.take(),
             diff_selected_file: self.right_panel_diff_selected_file.take(),
             diff_expanded_paths: std::mem::take(&mut self.right_panel_diff_expanded_paths),
@@ -1836,6 +1978,7 @@ impl Waku {
         self.right_panel_diff_generation = self.right_panel_diff_generation.wrapping_add(1);
         self.right_panel_diff_selection.clear();
         self.right_panel_diff_source = state.diff_source;
+        self.right_panel_diff_display_mode = state.diff_display_mode;
         self.right_panel_diff_snapshot = state.diff_snapshot;
         self.right_panel_diff_loading = false;
         self.right_panel_diff_error = None;
@@ -1844,11 +1987,13 @@ impl Waku {
         self.right_panel_diff_tree_cursor = None;
         self.right_panel_diff_tree_rows.borrow_mut().clear();
         self.right_panel_diff_tree_list_state.reset(0);
-        let line_count = self
+        let item_count = self
             .right_panel_diff_snapshot
             .as_ref()
-            .map_or(0, |snapshot| snapshot.lines.len());
-        self.right_panel_diff_list_state.reset(line_count);
+            .map_or(0, |snapshot| {
+                self.right_panel_diff_display_mode.item_count(snapshot)
+            });
+        self.right_panel_diff_list_state.reset(item_count);
     }
 
     fn reveal_right_panel_tab(&mut self, index: usize) {
@@ -2087,11 +2232,11 @@ impl Waku {
             .w(px(26.0))
             .h(px(26.0))
             .flex_none()
-            .rounded(px(6.0))
+            .rounded(px(RADIUS_DF))
             .flex()
             .items_center()
             .justify_center()
-            .cursor_default()
+            .cursor_pointer()
             .hover(|element| element.bg(theme.overlay))
             .active(|element| element.bg(theme.overlay_strong))
             .child(icon("icons/panel-right.svg", 14.0, theme.text_tertiary))
@@ -2226,8 +2371,10 @@ impl Waku {
     /// open. The native webview always draws over GPUI, so while this holds
     /// the live page swaps for a frozen snapshot.
     fn any_overlay_open(&self, cx: &App) -> bool {
-        self.menus.borrow().values().any(ContextMenuHandle::is_open)
-            || self.command_palette.is_open()
+        self.menus
+            .borrow()
+            .values()
+            .any(ContextMenuHandle::is_visible)
             || self.commit_dialog.is_some()
             || self.image_preview.is_some()
             || self.composer.read(cx).context_menu_open()
@@ -2362,12 +2509,12 @@ impl Waku {
                     .min_w(px(100.0))
                     .max_w(px(176.0))
                     .px(px(8.0))
-                    .rounded(px(6.0))
+                    .rounded(px(RADIUS_DF))
                     .flex_none()
                     .flex()
                     .items_center()
                     .gap(px(6.0))
-                    .cursor_default()
+                    .cursor_pointer()
                     .on_mouse_down(MouseButton::Left, |_, _, cx| {
                         cx.stop_propagation();
                     })
@@ -2400,7 +2547,7 @@ impl Waku {
                                 .id(SharedString::from(format!("right-panel-tab-dirty-{index}")))
                                 .size(px(7.0))
                                 .flex_none()
-                                .rounded_full()
+                                .rounded(px(RADIUS_LG))
                                 .bg(theme.warning)
                                 .tooltip(|window, cx| {
                                     Tooltip::new(tr!(
@@ -2417,7 +2564,7 @@ impl Waku {
                             .id(SharedString::from(format!("close-right-panel-tab-{index}")))
                             .w(px(16.0))
                             .h(px(16.0))
-                            .rounded(px(4.0))
+                            .rounded(px(RADIUS_SM))
                             .flex()
                             .items_center()
                             .justify_center()
@@ -2444,8 +2591,10 @@ impl Waku {
 
         let mut header = div()
             .id("right-panel-header")
-            .h(px(48.0))
+            .h(px(36.0))
             .flex_none()
+            .border_b_1()
+            .border_color(theme.border)
             .flex()
             .items_center()
             .gap(px(6.0))
@@ -2556,7 +2705,7 @@ impl Waku {
                     .child(
                         div()
                             .text_size(px(13.0))
-                            .font_weight(FontWeight::MEDIUM)
+                            .font_weight(FontWeight::NORMAL)
                             .text_color(theme.text)
                             .child(tr!("right_panel.open_surface")),
                     )
@@ -2622,22 +2771,22 @@ impl Waku {
             .flex_1()
             .min_w_0()
             .p(px(14.0))
-            .rounded(px(8.0))
+            .rounded(px(RADIUS_DF))
             .border_1()
             .border_color(theme.border_strong)
             .bg(theme.composer)
             .flex()
             .flex_col()
             .items_start()
-            .cursor_default()
-            .hover(|element| element.bg(theme.raised).border_color(theme.text_ghost))
+            .cursor_pointer()
+            .hover(|element| element.bg(theme.overlay))
             .active(|element| element.bg(theme.overlay_strong))
             .child(icon(icon_path, 18.0, theme.text_secondary))
             .child(
                 div()
                     .mt(px(12.0))
                     .text_size(px(12.5))
-                    .font_weight(FontWeight::MEDIUM)
+                    .font_weight(FontWeight::NORMAL)
                     .text_color(theme.text)
                     .child(label),
             )
@@ -2702,11 +2851,11 @@ impl Waku {
                 .mx(px(8.0))
                 .pl(px(8.0 + entry.depth as f32 * 16.0))
                 .pr(px(8.0))
-                .rounded(px(6.0))
+                .rounded(px(RADIUS_DF))
                 .flex()
                 .items_center()
                 .gap(px(6.0))
-                .cursor_default()
+                .cursor_pointer()
                 .when(selected, |element| element.bg(theme.overlay_strong))
                 .hover(|element| element.bg(theme.overlay))
                 .child(if is_dir {
@@ -2773,7 +2922,7 @@ impl Waku {
                             .flex_1()
                             .truncate()
                             .text_size(px(11.5))
-                            .font_weight(FontWeight::MEDIUM)
+                            .font_weight(FontWeight::NORMAL)
                             .text_color(theme.text_secondary)
                             .child(project_name),
                     ),
@@ -3445,6 +3594,37 @@ impl Waku {
                 (snapshot.additions, snapshot.deletions, snapshot.truncated)
             });
         let refresh_focus = self.transcript_control_focus("right-panel-diff-refresh", cx);
+        let display_mode = self.right_panel_diff_display_mode;
+        let display_mode_focus = self.transcript_control_focus("right-panel-diff-display-mode", cx);
+        let (display_mode_icon, display_mode_tooltip) = match display_mode {
+            ReviewDiffDisplayMode::Expanded => ("icons/collapse.svg", tr!("diff.show_file_list")),
+            ReviewDiffDisplayMode::FilesOnly => {
+                ("icons/expand.svg", tr!("diff.show_expanded_diffs"))
+            }
+        };
+        let display_mode_toggle = div()
+            .id("right-panel-diff-display-mode")
+            .track_focus(&display_mode_focus)
+            .tab_index(0)
+            .tab_stop(true)
+            .size(px(28.0))
+            .rounded(px(RADIUS_DF))
+            .flex_none()
+            .flex()
+            .items_center()
+            .justify_center()
+            .cursor_pointer()
+            .focus_visible(|style| style.border_1().border_color(theme.ring))
+            .hover(|style| style.bg(theme.overlay))
+            .child(icon(display_mode_icon, 12.0, theme.text_tertiary))
+            .tooltip(Tooltip::text(display_mode_tooltip))
+            .on_click(cx.listener(|this, _, _, cx| this.toggle_right_panel_diff_display_mode(cx)))
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
+                if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                    this.toggle_right_panel_diff_display_mode(cx);
+                    cx.stop_propagation();
+                }
+            }));
         let refresh_icon: AnyElement = if self.right_panel_diff_loading {
             motion::spin(icon("icons/loader-circle.svg", 12.0, theme.text_tertiary))
         } else {
@@ -3455,13 +3635,13 @@ impl Waku {
             .track_focus(&refresh_focus)
             .tab_index(0)
             .size(px(28.0))
-            .rounded(px(7.0))
+            .rounded(px(RADIUS_DF))
             .flex_none()
             .flex()
             .items_center()
             .justify_center()
-            .cursor_default()
-            .focus_visible(|style| style.border_1().border_color(theme.accent))
+            .cursor_pointer()
+            .focus_visible(|style| style.border_1().border_color(theme.ring))
             .hover(|style| style.bg(theme.overlay))
             .child(refresh_icon)
             .tooltip(|window, cx| Tooltip::new(tr!("diff.refresh")).build(window, cx))
@@ -3486,14 +3666,14 @@ impl Waku {
             .child(
                 div()
                     .text_size(px(11.5))
-                    .font_weight(FontWeight::MEDIUM)
+                    .font_weight(FontWeight::NORMAL)
                     .text_color(theme.success)
                     .child(format!("+{additions}")),
             )
             .child(
                 div()
                     .text_size(px(11.5))
-                    .font_weight(FontWeight::MEDIUM)
+                    .font_weight(FontWeight::NORMAL)
                     .text_color(theme.danger)
                     .child(format!("-{deletions}")),
             )
@@ -3506,6 +3686,7 @@ impl Waku {
                 )
             })
             .child(div().flex_1())
+            .child(display_mode_toggle)
             .child(refresh)
             .into_any_element()
     }
@@ -3538,7 +3719,7 @@ impl Waku {
                             .upgrade()
                             .map(|entity| {
                                 entity.update(cx, |this, cx| {
-                                    this.render_right_panel_diff_line(index, cx)
+                                    this.render_right_panel_diff_item(index, cx)
                                 })
                             })
                             .unwrap_or_else(|| div().into_any_element())
@@ -3550,6 +3731,53 @@ impl Waku {
                 &self.right_panel_diff_list_state,
                 &self.right_panel_diff_scrollbar,
             ))
+            .into_any_element()
+    }
+
+    fn render_right_panel_diff_item(&self, index: usize, cx: &mut Context<Self>) -> AnyElement {
+        match self.right_panel_diff_display_mode {
+            ReviewDiffDisplayMode::Expanded => self.render_right_panel_diff_line(index, cx),
+            ReviewDiffDisplayMode::FilesOnly => self.render_right_panel_diff_file_row(index, cx),
+        }
+    }
+
+    fn render_right_panel_diff_file_row(
+        &self,
+        file_index: usize,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let Some(file) = self
+            .right_panel_diff_snapshot
+            .as_ref()
+            .and_then(|snapshot| snapshot.files.get(file_index))
+        else {
+            return div().into_any_element();
+        };
+        let theme = Theme::current(cx);
+        div()
+            .w_full()
+            .min_w_0()
+            .h(px(32.0))
+            .px(px(12.0))
+            .flex()
+            .items_center()
+            .gap(px(8.0))
+            .border_b_1()
+            .border_color(theme.border)
+            .child(file_icon(file_icon_for_path(&file.path), 14.0))
+            .child(
+                div()
+                    .id(SharedString::from(format!(
+                        "review-diff-file-only-path-{file_index}"
+                    )))
+                    .min_w_0()
+                    .flex_1()
+                    .truncate()
+                    .text_size(px(11.5))
+                    .text_color(theme.text_secondary)
+                    .tooltip(Tooltip::text(file.path.clone()))
+                    .child(file.path.clone()),
+            )
             .into_any_element()
     }
 
@@ -3586,7 +3814,7 @@ impl Waku {
                         .flex_1()
                         .truncate()
                         .text_size(px(11.5))
-                        .font_weight(FontWeight::MEDIUM)
+                        .font_weight(FontWeight::NORMAL)
                         .text_color(theme.text_secondary)
                         .tooltip(Tooltip::text(file.path.clone()))
                         .child(file.path.clone()),
@@ -3652,8 +3880,8 @@ impl Waku {
                     .when(expandable, |label| {
                         label
                             .tab_index(0)
-                            .cursor_default()
-                            .focus_visible(|style| style.border_1().border_color(theme.accent))
+                            .cursor_pointer()
+                            .focus_visible(|style| style.border_1().border_color(theme.ring))
                             .hover(|style| {
                                 style
                                     .bg(theme.overlay_strong)
@@ -3801,12 +4029,12 @@ impl Waku {
             .flex()
             .items_center()
             .justify_center()
-            .cursor_default()
+            .cursor_pointer()
             .when(compact_half, |button| button.h(px(16.0)).flex_none())
             .when(border_bottom, |button| {
                 button.border_b_1().border_color(theme.border)
             })
-            .focus_visible(|style| style.border_1().border_color(theme.accent))
+            .focus_visible(|style| style.border_1().border_color(theme.ring))
             .hover(|style| style.bg(theme.overlay_strong))
             .active(|style| style.bg(theme.overlay))
             .tooltip(Tooltip::text(tooltip))
@@ -3846,8 +4074,20 @@ impl Waku {
         let Some(expansion) = expansion else {
             return;
         };
-        self.right_panel_diff_list_state
-            .splice(line_index..line_index + 1, expansion.replacement_count);
+        match self.right_panel_diff_display_mode {
+            ReviewDiffDisplayMode::Expanded => self
+                .right_panel_diff_list_state
+                .splice(line_index..line_index + 1, expansion.replacement_count),
+            ReviewDiffDisplayMode::FilesOnly => {
+                let item_count = self
+                    .right_panel_diff_snapshot
+                    .as_ref()
+                    .map_or(0, |snapshot| {
+                        self.right_panel_diff_display_mode.item_count(snapshot)
+                    });
+                self.right_panel_diff_list_state.reset(item_count);
+            }
+        }
         cx.notify();
     }
 
@@ -3901,7 +4141,7 @@ impl Waku {
                     .flex_1()
                     .min_h_0()
                     .relative()
-                    .focus_visible(|style| style.border_1().border_color(theme.accent))
+                    .focus_visible(|style| style.border_1().border_color(theme.ring))
                     .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
                         this.right_panel_diff_tree_key_down(event, window, cx)
                     }))
@@ -3964,11 +4204,11 @@ impl Waku {
                         .min_w_0()
                         .pl(px(7.0 + depth as f32 * 14.0))
                         .pr(px(7.0))
-                        .rounded(px(5.0))
+                        .rounded(px(RADIUS_SM))
                         .flex()
                         .items_center()
                         .gap(px(6.0))
-                        .cursor_default()
+                        .cursor_pointer()
                         .when(cursor, |row| row.bg(theme.overlay_strong))
                         .when(!cursor, |row| row.hover(|row| row.bg(theme.overlay)))
                         .child(icon(
@@ -3987,7 +4227,7 @@ impl Waku {
                                 .flex_1()
                                 .truncate()
                                 .text_size(px(11.0))
-                                .font_weight(FontWeight::MEDIUM)
+                                .font_weight(FontWeight::NORMAL)
                                 .text_color(theme.text_secondary)
                                 .child(name),
                         )
@@ -4029,11 +4269,11 @@ impl Waku {
                             .min_w_0()
                             .pl(px(23.0 + depth as f32 * 14.0))
                             .pr(px(7.0))
-                            .rounded(px(5.0))
+                            .rounded(px(RADIUS_SM))
                             .flex()
                             .items_center()
                             .gap(px(6.0))
-                            .cursor_default()
+                            .cursor_pointer()
                             .when(selected && cursor, |row| row.bg(theme.overlay_strong))
                             .when(selected ^ cursor, |row| row.bg(theme.overlay))
                             .when(!selected && !cursor, |row| {
@@ -4062,14 +4302,14 @@ impl Waku {
                                     .w(px(16.0))
                                     .h(px(16.0))
                                     .flex_none()
-                                    .rounded(px(4.0))
+                                    .rounded(px(RADIUS_SM))
                                     .border_1()
                                     .border_color(status_color.opacity(0.65))
                                     .flex()
                                     .items_center()
                                     .justify_center()
                                     .text_size(px(9.0))
-                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .font_weight(FontWeight::NORMAL)
                                     .text_color(status_color)
                                     .child(status),
                             )
@@ -4104,7 +4344,7 @@ impl Waku {
             .child(
                 div()
                     .text_size(px(13.0))
-                    .font_weight(FontWeight::MEDIUM)
+                    .font_weight(FontWeight::NORMAL)
                     .text_color(theme.text)
                     .child(title),
             )
@@ -4357,10 +4597,10 @@ impl Waku {
                                 snapshot.files.iter().position(|file| file.path == path)
                             })
                             .or_else(|| (!snapshot.files.is_empty()).then_some(0));
-                        let line_count = snapshot.lines.len();
+                        let item_count = waku.right_panel_diff_display_mode.item_count(&snapshot);
                         waku.right_panel_diff_snapshot = Some(Arc::new(snapshot));
                         waku.right_panel_diff_error = None;
-                        waku.right_panel_diff_list_state.reset(line_count);
+                        waku.right_panel_diff_list_state.reset(item_count);
                         waku.sync_right_panel_diff_tree_rows(cx);
                     }
                     Err(error) => {
@@ -4442,11 +4682,13 @@ impl Waku {
 
     fn select_right_panel_diff_file(&mut self, file_index: usize, cx: &mut Context<Self>) {
         self.right_panel_diff_selected_file = Some(file_index);
-        if let Some(line) = self
+        if let Some(target) = self
             .right_panel_diff_snapshot
             .as_ref()
-            .and_then(|snapshot| snapshot.files.get(file_index))
-            .and_then(|file| file.diff_line)
+            .and_then(|snapshot| {
+                self.right_panel_diff_display_mode
+                    .scroll_target(snapshot, file_index)
+            })
         {
             // `scroll_to_reveal_item` bottom-aligns targets below the viewport,
             // which can reveal only the file header and leave its diff body
@@ -4454,7 +4696,34 @@ impl Waku {
             // the header and expose the content immediately below it.
             self.right_panel_diff_list_state
                 .scroll_to(gpui::ListOffset {
-                    item_ix: line,
+                    item_ix: target,
+                    offset_in_item: px(0.0),
+                });
+        }
+        cx.notify();
+    }
+
+    fn toggle_right_panel_diff_display_mode(&mut self, cx: &mut Context<Self>) {
+        self.right_panel_diff_selection.clear();
+        self.right_panel_diff_display_mode = self.right_panel_diff_display_mode.toggled();
+        let item_count = self
+            .right_panel_diff_snapshot
+            .as_ref()
+            .map_or(0, |snapshot| {
+                self.right_panel_diff_display_mode.item_count(snapshot)
+            });
+        self.right_panel_diff_list_state.reset(item_count);
+        if let Some(target) = self.right_panel_diff_selected_file.and_then(|file_index| {
+            self.right_panel_diff_snapshot
+                .as_ref()
+                .and_then(|snapshot| {
+                    self.right_panel_diff_display_mode
+                        .scroll_target(snapshot, file_index)
+                })
+        }) {
+            self.right_panel_diff_list_state
+                .scroll_to(gpui::ListOffset {
+                    item_ix: target,
                     offset_in_item: px(0.0),
                 });
         }

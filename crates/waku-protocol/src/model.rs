@@ -121,6 +121,10 @@ impl ProviderKind {
             Self::Codex | Self::Cursor | Self::DeepSeek | Self::OpenCode | Self::Grok | Self::Pi
         )
     }
+
+    pub fn supports_interaction_modes(self) -> bool {
+        !matches!(self, Self::Amp | Self::Pi)
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
@@ -631,6 +635,9 @@ pub struct QueuedMessage {
     pub display_content: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub attachments: Vec<MessageAttachment>,
+    /// A Codex objective that must be activated before this message starts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub goal_objective: Option<String>,
     pub created_at: u64,
 }
 
@@ -641,6 +648,7 @@ impl QueuedMessage {
             content: content.into(),
             display_content: None,
             attachments: Vec::new(),
+            goal_objective: None,
             created_at: unix_time(),
         }
     }
@@ -1870,6 +1878,22 @@ impl ActivityFileChange {
     }
 }
 
+/// Provider-neutral state for one step in an agent-maintained plan.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub enum ActivityPlanStepStatus {
+    Pending,
+    InProgress,
+    Completed,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct ActivityPlanStep {
+    pub step: String,
+    pub status: ActivityPlanStepStatus,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize, TS)]
 pub struct ActivityItem {
     pub id: Uuid,
@@ -1894,6 +1918,11 @@ pub struct ActivityItem {
     /// patches on every frame.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub file_changes: Vec<ActivityFileChange>,
+    /// Structured plan state captured from provider plan notifications. The
+    /// transcript reads this prepared list directly; it never reparses raw
+    /// provider JSON while building visible rows.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub plan_steps: Vec<ActivityPlanStep>,
     /// Compact subject prepared from native tool input (a file, query,
     /// directory, or command). The row builder only formats this cached value.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1932,6 +1961,7 @@ impl ActivityItem {
             failed: false,
             complete,
             file_changes: Vec::new(),
+            plan_steps: Vec::new(),
             display_target,
             display_description: None,
             reasoning: None,
@@ -1966,6 +1996,11 @@ impl ActivityItem {
 
     pub fn with_image_urls(mut self, image_urls: Vec<String>) -> Self {
         self.image_urls = image_urls;
+        self
+    }
+
+    pub fn with_plan_steps(mut self, plan_steps: Vec<ActivityPlanStep>) -> Self {
+        self.plan_steps = plan_steps;
         self
     }
 
@@ -2060,6 +2095,17 @@ impl ActivityItem {
                 .take()
                 .and_then(normalize_command_activity_output);
         }
+        if self.kind == ActivityKind::Command
+            && self.arguments.as_deref().is_some_and(is_git_diff_command)
+            && let Some(output) = self.output.as_deref()
+        {
+            let changes = parse_patch_file_changes(output);
+            if !changes.is_empty() {
+                // This remains a read-only command. `file_changes` is only the
+                // prepared presentation model for its unified-diff output.
+                self.file_changes = changes;
+            }
+        }
     }
 }
 
@@ -2069,12 +2115,12 @@ fn normalize_command_activity_command(source: String) -> Option<String> {
         return None;
     }
     let Ok(value) = serde_json::from_str::<serde_json::Value>(source) else {
-        return Some(source.to_owned());
+        return normalize_presentable_command(source);
     };
     match &value {
-        serde_json::Value::String(command) => non_empty_activity_text(command),
+        serde_json::Value::String(command) => normalize_presentable_command(command),
         serde_json::Value::Array(parts) if parts.iter().all(|part| part.as_str().is_some()) => {
-            non_empty_activity_text(
+            normalize_presentable_command(
                 &parts
                     .iter()
                     .filter_map(serde_json::Value::as_str)
@@ -2084,10 +2130,38 @@ fn normalize_command_activity_command(source: String) -> Option<String> {
         }
         serde_json::Value::Object(_) => {
             find_activity_string(&value, &["command", "cmd", "script"], 0)
-                .and_then(|command| non_empty_activity_text(&command))
+                .and_then(|command| normalize_presentable_command(&command))
         }
-        _ => Some(source.to_owned()),
+        _ => normalize_presentable_command(source),
     }
+}
+
+/// Remove the host launcher from commands whose useful part is the script it
+/// was asked to execute. Providers often report the full absolute `pwsh.exe`
+/// path on Windows; showing that transport detail overwhelms the actual work.
+fn normalize_presentable_command(command: &str) -> Option<String> {
+    let command = command.trim();
+    let lower = command.to_ascii_lowercase();
+    let unwrapped = lower.find(" -command ").and_then(|offset| {
+        let launcher = &lower[..offset];
+        (launcher.contains("pwsh") || launcher.contains("powershell"))
+            .then(|| command[offset + " -command ".len()..].trim())
+    });
+    let command = unwrapped.unwrap_or(command).trim();
+    let command = if command.len() >= 2
+        && ((command.starts_with('\'') && command.ends_with('\''))
+            || (command.starts_with('"') && command.ends_with('"')))
+    {
+        &command[1..command.len() - 1]
+    } else {
+        command
+    };
+    non_empty_activity_text(command)
+}
+
+fn is_git_diff_command(command: &str) -> bool {
+    let command = command.trim_start().to_ascii_lowercase();
+    command == "git diff" || command.starts_with("git diff ")
 }
 
 fn normalize_command_activity_output(output: String) -> Option<String> {
@@ -3637,6 +3711,54 @@ mod tests {
             activity.file_changes[0].diff.as_deref(),
             Some("@@\n-old\n+new\n")
         );
+    }
+
+    #[test]
+    fn powershell_launcher_is_removed_from_the_presented_command() {
+        let activity = ActivityItem::new(
+            Some("exec-pwsh".into()),
+            ActivityKind::Command,
+            "Shell",
+            Some(r"C:\Users\Devraj\Downloads\waku".into()),
+            true,
+        )
+        .with_arguments(Some(
+            serde_json::json!({
+                "command": r#""C:\Users\Devraj\.cache\codex-runtimes\codex-primary-runtime\dependencies\native\powershell\pwsh.exe" -Command 'git diff -- crates/engine_protocol/src/messages.rs'"#,
+                "cwd": r"C:\Users\Devraj\Downloads\waku"
+            })
+            .to_string(),
+        ));
+
+        assert_eq!(
+            activity.arguments.as_deref(),
+            Some("git diff -- crates/engine_protocol/src/messages.rs")
+        );
+    }
+
+    #[test]
+    fn git_diff_output_uses_the_native_diff_model_without_becoming_an_edit() {
+        let activity = ActivityItem::new(
+            Some("exec-diff".into()),
+            ActivityKind::Command,
+            "Shell",
+            Some(r"C:\Users\Devraj\Downloads\waku".into()),
+            true,
+        )
+        .with_arguments(Some(
+            serde_json::json!({"command": "git diff -- src/auth.ts"}).to_string(),
+        ))
+        .with_output(Some(
+            "diff --git a/src/auth.ts b/src/auth.ts\n--- a/src/auth.ts\n+++ b/src/auth.ts\n@@ -12,3 +12,5 @@\n export function getToken() {\n-  return localStorage.token;\n+  const t = cookies.get(\"session\");\n+  return t;\n }\n"
+                .into(),
+        ));
+
+        assert_eq!(activity.kind, ActivityKind::Command);
+        assert_eq!(activity.file_changes.len(), 1);
+        assert_eq!(activity.file_changes[0].path, "src/auth.ts");
+        assert_eq!(activity.file_changes[0].additions, Some(2));
+        assert_eq!(activity.file_changes[0].deletions, Some(1));
+        assert!(activity.file_changes[0].diff.is_some());
     }
 
     #[test]

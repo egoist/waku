@@ -420,11 +420,10 @@ impl Waku {
                             .occlude()
                             .w(card_bounds.size.width)
                             .max_h(px(302.0))
-                            .rounded(px(11.0))
+                            .rounded(px(RADIUS_DF))
                             .border_1()
                             .border_color(theme.border_strong)
                             .bg(theme.raised)
-                            .shadow_lg()
                             .flex()
                             .flex_col()
                             .overflow_hidden()
@@ -454,11 +453,11 @@ impl Waku {
             .id(index)
             .h(px(30.0))
             .px(px(8.0))
-            .rounded(px(6.0))
+            .rounded(px(RADIUS_DF))
             .flex()
             .items_center()
             .gap(px(8.0))
-            .cursor_default()
+            .cursor_pointer()
             .when(highlighted, |element| element.bg(theme.overlay_strong))
             .hover(|element| element.bg(theme.overlay))
             .on_mouse_down(
@@ -470,11 +469,6 @@ impl Waku {
         match row {
             AutocompleteRow::Command(scored) => {
                 let command = &scored.item;
-                let icon_path = if command.scope == composer_complete::CommandScope::Skill {
-                    "icons/sparkle.svg"
-                } else {
-                    "icons/command.svg"
-                };
                 // Positions index the bare name; the drawn `/` shifts every
                 // byte range right by one.
                 let name_ranges = highlight_byte_ranges(&command.name, &scored.positions, 0)
@@ -482,56 +476,40 @@ impl Waku {
                     .map(|range| range.start + 1..range.end + 1)
                     .collect();
                 let mut name_font = font.clone();
-                name_font.weight = FontWeight::MEDIUM;
-                base.child(icon(icon_path, 12.0, theme.text_tertiary))
-                    .child(
+                name_font.weight = FontWeight::NORMAL;
+                base.child(
+                    div()
+                        .flex_none()
+                        .max_w(px(260.0))
+                        .truncate()
+                        .text_size(px(12.0))
+                        .child(matched_text(
+                            format!("/{}", command.name),
+                            name_ranges,
+                            theme.text,
+                            theme.accent,
+                            name_font,
+                        )),
+                )
+                .when_some(command.argument_hint.clone(), |element, hint| {
+                    element.child(
                         div()
                             .flex_none()
-                            .max_w(px(260.0))
-                            .truncate()
-                            .text_size(px(12.0))
-                            .child(matched_text(
-                                format!("/{}", command.name),
-                                name_ranges,
-                                theme.text,
-                                theme.accent,
-                                name_font,
-                            )),
-                    )
-                    .when_some(command.argument_hint.clone(), |element, hint| {
-                        element.child(
-                            div()
-                                .flex_none()
-                                .text_size(px(11.0))
-                                .text_color(theme.text_ghost)
-                                .child(hint),
-                        )
-                    })
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .truncate()
                             .text_size(px(11.0))
-                            .text_color(theme.text_tertiary)
-                            .child(SharedString::from(command.description.clone())),
+                            .text_color(theme.text_ghost)
+                            .child(hint),
                     )
-                    .child(
-                        div()
-                            .h(px(16.0))
-                            .px(px(5.0))
-                            .flex_none()
-                            .rounded(px(4.0))
-                            .border_1()
-                            .border_color(theme.border)
-                            .flex()
-                            .items_center()
-                            .text_size(px(9.0))
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(theme.text_tertiary)
-                            .child(command.scope.label()),
-                    )
-                    .into_any_element()
+                })
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .truncate()
+                        .text_size(px(11.0))
+                        .text_color(theme.text_tertiary)
+                        .child(SharedString::from(command.description.clone())),
+                )
+                .into_any_element()
             }
             AutocompleteRow::File(scored) => {
                 let file = &scored.item;
@@ -601,7 +579,7 @@ fn matched_text(
     // A step above either base weight in these rows — regular file paths and
     // medium command names both read as "a bit bolder", not shouting.
     let mut accent_font = font.clone();
-    accent_font.weight = FontWeight::SEMIBOLD;
+    accent_font.weight = FontWeight::NORMAL;
     let run = |len: usize, font: Font, color: Hsla| TextRun {
         len,
         font,

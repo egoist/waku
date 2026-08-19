@@ -129,10 +129,15 @@ impl AcpDriver {
         let computer_use = (provider == ProviderKind::Grok && computer_use_enabled)
             .then(|| super::support::HeadlessComputerUseRuntime::start(provider, events.clone()))
             .transpose()?;
-        let grok_title_home = computer_use
-            .as_ref()
-            .and_then(super::support::HeadlessComputerUseRuntime::grok_home)
-            .map(ToOwned::to_owned);
+        let grok_title_home = (provider == ProviderKind::Grok)
+            .then(|| {
+                computer_use
+                    .as_ref()
+                    .and_then(super::support::HeadlessComputerUseRuntime::grok_home)
+                    .map(ToOwned::to_owned)
+                    .or_else(|| crate::grok_session::home_directory().ok())
+            })
+            .flatten();
         let stderr_lines = Arc::new(Mutex::new(Vec::<String>::new()));
         let agent = sdk_agent(
             &binary,
@@ -216,14 +221,30 @@ fn sdk_agent(
     environment.append(&mut launch.env);
     environment.extend(computer_env);
 
-    // `AcpAgentConfig` deliberately contains only argv and environment. macOS
-    // `env -C` supplies the session cwd without a shell, preserving exact
-    // argument boundaries and the SDK's process-group lifecycle management.
-    let mut args = vec!["-C".to_owned(), cwd.to_owned(), binary.to_owned()];
-    args.extend(launch.args);
-    let config = AcpAgentConfig::new("/usr/bin/env")
-        .args(args)
-        .envs(environment);
+    // `AcpAgentConfig` deliberately contains only argv and environment. Unix
+    // `env -C` supplies the session cwd without a shell. Windows has no such
+    // executable, so the daemon re-enters through a hidden launcher that sets
+    // `current_dir` and forwards the exact argument vector without quoting it
+    // through cmd.exe or PowerShell.
+    #[cfg(not(windows))]
+    let config = {
+        let mut args = vec!["-C".to_owned(), cwd.to_owned(), binary.to_owned()];
+        args.extend(launch.args);
+        AcpAgentConfig::new("/usr/bin/env")
+            .args(args)
+            .envs(environment)
+    };
+    #[cfg(windows)]
+    let config = {
+        let launcher = windows_acp_launcher()?;
+        let mut args = vec![
+            super::WINDOWS_ACP_LAUNCHER_ARGUMENT.to_owned(),
+            cwd.to_owned(),
+            binary.to_owned(),
+        ];
+        args.extend(launch.args);
+        AcpAgentConfig::new(launcher).args(args).envs(environment)
+    };
     Ok(AcpAgent::new(config).with_debug(move |line, direction| {
         if direction != LineDirection::Stderr || line.trim().is_empty() {
             return;
@@ -234,6 +255,48 @@ fn sdk_agent(
         }
         lines.push(line.to_owned());
     }))
+}
+
+#[cfg(windows)]
+fn windows_acp_launcher() -> anyhow::Result<std::path::PathBuf> {
+    static LAUNCHER: std::sync::OnceLock<Result<std::path::PathBuf, String>> =
+        std::sync::OnceLock::new();
+    LAUNCHER
+        .get_or_init(|| {
+            let source = std::env::current_exe()
+                .context("locate the Waku ACP launcher")
+                .map_err(|error| error.to_string())?;
+            let directory = std::env::temp_dir().join("waku-acp-launchers");
+            std::fs::create_dir_all(&directory).map_err(|error| {
+                format!(
+                    "create ACP launcher directory {}: {error}",
+                    directory.display()
+                )
+            })?;
+            // Previous launchers are no longer needed once their ACP process
+            // exits. Locked copies belong to a live older daemon and are left
+            // alone until a later startup can remove them.
+            if let Ok(entries) = std::fs::read_dir(&directory) {
+                for entry in entries.flatten() {
+                    let _ = std::fs::remove_file(entry.path());
+                }
+            }
+            let target = directory.join(format!(
+                "waku-acp-launcher-{}-{}.exe",
+                std::process::id(),
+                uuid::Uuid::new_v4()
+            ));
+            std::fs::copy(&source, &target).map_err(|error| {
+                format!(
+                    "copy ACP launcher from {} to {}: {error}",
+                    source.display(),
+                    target.display()
+                )
+            })?;
+            Ok(target)
+        })
+        .clone()
+        .map_err(anyhow::Error::msg)
 }
 
 type PermissionResponder = Responder<RequestPermissionResponse>;
@@ -322,6 +385,7 @@ async fn run_sdk_connection(
     let pending_permissions: PendingPermissions = Arc::new(Mutex::new(HashMap::new()));
     let pending_user_inputs: PendingAcpUserInputs = Arc::new(Mutex::new(HashMap::new()));
     let prompt_requests = Arc::new(Mutex::new(PendingPrompts::default()));
+    let xai_turn_errors = Arc::new(Mutex::new(HashMap::<String, String>::new()));
     let title_refresh = super::title_refresh::NativeTitleRefresh::default();
     let auto_approve = mode != RuntimeMode::Ask;
 
@@ -346,22 +410,42 @@ async fn run_sdk_connection(
             {
                 let events = events.clone();
                 let prompt_requests = prompt_requests.clone();
+                let xai_turn_errors = xai_turn_errors.clone();
                 let grok_title_home = grok_title_home.clone();
                 let title_refresh = title_refresh.clone();
                 async move |notification: UntypedMessage, _connection| {
-                    if notification.method() == "_x.ai/session/prompt_complete" {
-                        if let Some(session_id) = finish_xai_prompt_complete(
-                            notification.params(),
-                            &prompt_requests,
-                            &events,
-                        ) {
-                            start_grok_title_refresh(
-                                grok_title_home.as_deref(),
-                                &session_id,
-                                &title_refresh,
-                                events.clone(),
-                            );
+                    match notification.method() {
+                        "_x.ai/session/update" => {
+                            if let Some(diagnostic) = xai_turn_error(notification.params()) {
+                                if let Some(session_id) = notification
+                                    .params()
+                                    .get("sessionId")
+                                    .and_then(Value::as_str)
+                                {
+                                    xai_turn_errors
+                                        .lock()
+                                        .insert(session_id.to_owned(), diagnostic.clone());
+                                }
+                                let _ = events.send(DriverEvent::Error(diagnostic));
+                            }
                         }
+                        "_x.ai/session/prompt_complete" => {
+                            if let Some(session_id) = finish_xai_prompt_complete(
+                                notification.params(),
+                                &prompt_requests,
+                                &xai_turn_errors,
+                                grok_title_home.as_deref(),
+                                &events,
+                            ) {
+                                start_grok_title_refresh(
+                                    grok_title_home.as_deref(),
+                                    &session_id,
+                                    &title_refresh,
+                                    events.clone(),
+                                );
+                            }
+                        }
+                        _ => {}
                     }
                     Ok(())
                 }
@@ -770,6 +854,8 @@ fn settle_prompt_request(prompt_requests: &Mutex<PendingPrompts>, request_id: &R
 fn finish_xai_prompt_complete(
     params: &Value,
     prompt_requests: &Mutex<PendingPrompts>,
+    turn_errors: &Mutex<HashMap<String, String>>,
+    grok_home: Option<&Path>,
     events: &DriverEventSender,
 ) -> Option<String> {
     let Some(session_id) = params.get("sessionId").and_then(Value::as_str) else {
@@ -782,6 +868,20 @@ fn finish_xai_prompt_complete(
     {
         return None;
     }
+    let diagnostic = turn_errors.lock().remove(session_id).or_else(|| {
+        grok_home.and_then(|home| {
+            crate::grok_session::latest_turn_error_in(home, session_id, prompt_id)
+                .ok()
+                .flatten()
+        })
+    });
+    if let Some(diagnostic) = diagnostic {
+        let _ = events.send(DriverEvent::TurnFinished {
+            success: false,
+            summary: Some(diagnostic),
+        });
+        return None;
+    }
 
     let stop_reason = match params.get("stopReason").and_then(Value::as_str) {
         Some("cancelled") => StopReason::Cancelled,
@@ -791,6 +891,30 @@ fn finish_xai_prompt_complete(
         _ => StopReason::EndTurn,
     };
     finish_prompt(Ok(PromptResponse::new(stop_reason)), events).then(|| session_id.to_owned())
+}
+
+fn xai_turn_error(params: &Value) -> Option<String> {
+    let update = params.get("update").unwrap_or(params);
+    if update.get("sessionUpdate").and_then(Value::as_str) != Some("turn_completed") {
+        return None;
+    }
+    let stop_reason = update
+        .get("stop_reason")
+        .or_else(|| update.get("stopReason"))
+        .and_then(Value::as_str);
+    if !matches!(stop_reason, Some("error" | "failed")) {
+        return None;
+    }
+    Some(
+        update
+            .get("agent_result")
+            .or_else(|| update.get("agentResult"))
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|text| !text.is_empty())
+            .unwrap_or("Grok Build stopped before returning a response")
+            .to_owned(),
+    )
 }
 
 fn start_grok_title_refresh(
@@ -1604,6 +1728,7 @@ mod tests {
     #[test]
     fn xai_prompt_complete_settles_a_missing_standard_response_once() {
         let requests = Mutex::new(PendingPrompts::default());
+        let turn_errors = Mutex::new(HashMap::new());
         let request_id = RequestId::Str("sdk-request".into());
         requests.lock().insert(
             request_id.clone(),
@@ -1620,6 +1745,8 @@ mod tests {
                     "stopReason": "end_turn"
                 }),
                 &requests,
+                &turn_errors,
+                None,
                 &events,
             ),
             Some("grok-session".into())
@@ -1649,6 +1776,57 @@ mod tests {
                 summary: None
             }
         ));
+    }
+
+    #[test]
+    fn grok_error_completion_preserves_the_native_diagnostic() {
+        let diagnostic = xai_turn_error(&json!({
+            "sessionId": "grok-session",
+            "update": {
+                "sessionUpdate": "turn_completed",
+                "stop_reason": "error",
+                "agent_result": "API error (status 402 Payment Required): Grok Build usage balance exhausted"
+            }
+        }))
+        .unwrap();
+        assert_eq!(
+            diagnostic,
+            "API error (status 402 Payment Required): Grok Build usage balance exhausted"
+        );
+
+        let requests = Mutex::new(PendingPrompts::default());
+        requests.lock().insert(
+            RequestId::Str("sdk-request".into()),
+            Some("waku-prompt".into()),
+            "grok-session".into(),
+        );
+        let turn_errors = Mutex::new(HashMap::from([(
+            "grok-session".to_owned(),
+            diagnostic.clone(),
+        )]));
+        let (events, event_rx) = crate::driver::test_event_channel();
+        assert_eq!(
+            finish_xai_prompt_complete(
+                &json!({
+                    "sessionId": "grok-session",
+                    "promptId": "waku-prompt",
+                    "stopReason": "end_turn"
+                }),
+                &requests,
+                &turn_errors,
+                None,
+                &events,
+            ),
+            None
+        );
+        assert!(matches!(
+            event_rx.try_recv().unwrap(),
+            DriverEvent::TurnFinished {
+                success: false,
+                summary: Some(summary)
+            } if summary == diagnostic
+        ));
+        assert!(turn_errors.lock().is_empty());
     }
 
     #[test]

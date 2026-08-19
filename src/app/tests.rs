@@ -1,6 +1,6 @@
 use super::composer::{
     ComposerSubmitAction, composer_submit_action, dropped_file_mention, merged_submission,
-    next_picker_highlight, visible_branch_entries,
+    next_picker_highlight, provider_setup_notice_can_render, visible_branch_entries,
 };
 use super::runtime::merge_remote_session_catalog;
 use super::settings::visible_settings_pages;
@@ -364,11 +364,18 @@ fn task_notification_tags_route_to_the_corresponding_task() {
 }
 
 #[test]
-fn conversation_navigation_rail_visibility_uses_all_three_gates() {
-    assert!(should_show_navigation_rail(true, 2, 872.0));
-    assert!(!should_show_navigation_rail(false, 2, 872.0));
-    assert!(!should_show_navigation_rail(true, 1, 872.0));
-    assert!(!should_show_navigation_rail(true, 2, 871.0));
+fn conversation_navigation_rail_visibility_requires_multiple_turns() {
+    assert!(should_show_navigation_rail(2));
+    assert!(should_show_navigation_rail(20));
+    assert!(!should_show_navigation_rail(1));
+    assert!(!should_show_navigation_rail(0));
+}
+
+#[test]
+fn startup_provider_placeholders_never_flash_a_setup_notice() {
+    assert!(!provider_setup_notice_can_render(false, false));
+    assert!(provider_setup_notice_can_render(false, true));
+    assert!(provider_setup_notice_can_render(true, false));
 }
 
 #[test]
@@ -1762,6 +1769,7 @@ fn settings_search_filters_pages_for_arrow_cycling() {
     // An empty query keeps every page in sidebar order, so the arrows cycle
     // the full navigation even before anything is typed.
     let mut all_pages = vec![
+        SettingsPage::Profile,
         SettingsPage::General,
         SettingsPage::Appearance,
         SettingsPage::Providers,
@@ -1929,13 +1937,14 @@ fn tab_cycle_walks_favorites_then_usable_providers_in_rail_order() {
         ]
     );
 
-    // A locked session cycles between favorites and its own provider only,
-    // even when that provider was switched off after the session started.
+    // A locked task keeps its switched-off provider and still exposes other
+    // installed providers, whose rows create a fresh task before selection.
     assert_eq!(
         visible_picker_tabs(&probes, &[ProviderKind::Claude], Some(ProviderKind::Claude)),
         vec![
             ModelPickerTab::Favorites,
             ModelPickerTab::Provider(ProviderKind::Claude),
+            ModelPickerTab::Provider(ProviderKind::Codex),
         ]
     );
 }

@@ -2,6 +2,8 @@
 use gpui::WindowButtonLayout;
 #[cfg(target_os = "windows")]
 use gpui::WindowControlArea;
+#[cfg(target_os = "linux")]
+use gpui::svg;
 use gpui::{
     AnyElement, BoxShadow, Context, Decorations, Div, Hsla, IntoElement, MouseButton, ResizeEdge,
     Tiling, Window, div, prelude::*, px, transparent_black,
@@ -10,12 +12,13 @@ use gpui::{
 use gpui::{KeyDownEvent, WindowButton};
 
 use super::Waku;
-use crate::theme::Theme;
+#[cfg(target_os = "linux")]
+use crate::theme::RADIUS_LG;
+use crate::theme::{RADIUS_DF, Theme};
 #[cfg(any(target_os = "linux", target_os = "windows"))]
-use crate::ui::{icon, tooltip::Tooltip};
+use crate::ui::tooltip::Tooltip;
 
 const CLIENT_FRAME_INSET: f32 = 10.0;
-const CLIENT_FRAME_ROUNDING: f32 = 10.0;
 
 #[derive(Clone, Copy)]
 pub(super) enum WindowControlSide {
@@ -33,13 +36,17 @@ impl Waku {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        if window.is_fullscreen() {
+            window.set_client_inset(px(0.0));
+            return content;
+        }
         let Decorations::Client { tiling } = window.window_decorations() else {
             window.set_client_inset(px(0.0));
             return content;
         };
 
         let inset = px(CLIENT_FRAME_INSET);
-        let rounding = px(CLIENT_FRAME_ROUNDING);
+        let rounding = px(RADIUS_DF);
         let border = px(1.0);
         let theme = Theme::current(cx);
         window.set_client_inset(inset);
@@ -111,6 +118,9 @@ impl Waku {
         window: &Window,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
+        if window.is_fullscreen() {
+            return None;
+        }
         #[cfg(target_os = "windows")]
         let buttons = {
             // Windows keeps all three on the right, in this order, and has no
@@ -152,7 +162,7 @@ impl Waku {
                 WindowControlSide::Left => "client-window-controls-left",
                 WindowControlSide::Right => "client-window-controls-right",
             };
-            let controls = buttons.into_iter().flatten().map(|button| {
+            let control_elements = buttons.into_iter().flatten().map(|button| {
                 let enabled = match button {
                     WindowButton::Minimize => supported.minimize && window.is_minimizable(),
                     WindowButton::Maximize => supported.maximize && window.is_resizable(),
@@ -161,20 +171,17 @@ impl Waku {
                 client_window_button(button, enabled, is_maximized, theme, cx)
             });
 
-            Some(
-                div()
-                    .id(side_id)
-                    .tab_group()
-                    .tab_stop(false)
-                    .h_full()
-                    .flex_none()
-                    .px(px(10.0))
-                    .flex()
-                    .items_center()
-                    .gap(px(8.0))
-                    .children(controls)
-                    .into_any_element(),
-            )
+            let controls = div()
+                .id(side_id)
+                .tab_group()
+                .tab_stop(false)
+                .h_full()
+                .flex_none()
+                .flex()
+                .items_center();
+            #[cfg(target_os = "linux")]
+            let controls = controls.px(px(10.0)).gap(px(8.0));
+            Some(controls.children(control_elements).into_any_element())
         }
 
         #[cfg(not(any(target_os = "linux", target_os = "windows")))]
@@ -193,27 +200,11 @@ fn client_window_button(
     theme: Theme,
     cx: &mut Context<Waku>,
 ) -> AnyElement {
-    let (id, icon_path, label) = match button {
-        WindowButton::Minimize => (
-            "client-window-minimize",
-            "icons/window-minimize.svg",
-            tr!("window.minimize"),
-        ),
-        WindowButton::Maximize if is_maximized => (
-            "client-window-restore",
-            "icons/window-restore.svg",
-            tr!("window.restore"),
-        ),
-        WindowButton::Maximize => (
-            "client-window-maximize",
-            "icons/window-maximize.svg",
-            tr!("window.maximize"),
-        ),
-        WindowButton::Close => (
-            "client-window-close",
-            "icons/x.svg",
-            tr!("menu.close_window"),
-        ),
+    let (id, label) = match button {
+        WindowButton::Minimize => ("client-window-minimize", tr!("window.minimize")),
+        WindowButton::Maximize if is_maximized => ("client-window-restore", tr!("window.restore")),
+        WindowButton::Maximize => ("client-window-maximize", tr!("window.maximize")),
+        WindowButton::Close => ("client-window-close", tr!("menu.close_window")),
     };
     let focus = cx.focus_handle();
     let icon_color = if enabled {
@@ -233,39 +224,82 @@ fn client_window_button(
         WindowButton::Close => WindowControlArea::Close,
     });
 
-    control
+    let control = control
         .track_focus(&focus)
         .tab_index(0)
         .tab_stop(true)
-        .size(px(26.0))
+        .occlude()
+        .group(id)
         .flex_none()
-        .rounded_full()
         .flex()
         .items_center()
         .justify_center()
         .cursor_default()
         .opacity(if enabled { 1.0 } else { 0.45 })
-        .focus_visible(|style| style.border_1().border_color(theme.accent))
+        .focus_visible(|style| style.border_1().border_color(theme.ring))
         .when(enabled, |control| {
             control
                 .hover(move |style| {
                     if button == WindowButton::Close {
-                        style.bg(theme.danger_soft)
+                        style.bg(theme.danger)
                     } else {
                         style.bg(theme.overlay)
                     }
                 })
-                .active(|style| style.bg(theme.overlay_strong))
+                .active(move |style| {
+                    if button == WindowButton::Close {
+                        style.bg(theme.danger.opacity(0.8))
+                    } else {
+                        style.bg(theme.overlay_strong)
+                    }
+                })
+        });
+    #[cfg(target_os = "windows")]
+    let control = control.w(px(36.0)).h_full();
+    #[cfg(target_os = "linux")]
+    let control = control.size(px(26.0)).rounded(px(RADIUS_LG));
+
+    let hovered_icon_color = if button == WindowButton::Close {
+        theme.on_inverse
+    } else {
+        theme.text
+    };
+    #[cfg(target_os = "windows")]
+    let glyph = div()
+        .font_family(windows_caption_font())
+        .text_size(px(10.0))
+        .text_color(icon_color)
+        .group_hover(id, move |glyph| glyph.text_color(hovered_icon_color))
+        .child(match button {
+            WindowButton::Minimize => "\u{e921}",
+            WindowButton::Maximize if is_maximized => "\u{e923}",
+            WindowButton::Maximize => "\u{e922}",
+            WindowButton::Close => "\u{e8bb}",
+        });
+    #[cfg(target_os = "linux")]
+    let glyph = svg()
+        .path(match button {
+            WindowButton::Minimize => "icons/window-minimize.svg",
+            WindowButton::Maximize if is_maximized => "icons/window-restore.svg",
+            WindowButton::Maximize => "icons/window-maximize.svg",
+            WindowButton::Close => "icons/x.svg",
         })
-        .tooltip(Tooltip::text(label))
-        .child(icon(icon_path, 14.0, icon_color))
+        .size(px(14.0))
+        .flex_none()
+        .text_color(icon_color)
+        .group_hover(id, move |glyph| glyph.text_color(hovered_icon_color));
+    let control = control.tooltip(Tooltip::text(label)).child(glyph);
+    #[cfg(target_os = "linux")]
+    let control = control
         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
         .on_click(move |_, window, cx| {
             cx.stop_propagation();
             if enabled {
                 activate_window_button(button, window);
             }
-        })
+        });
+
+    control
         .on_key_down(move |event: &KeyDownEvent, window, cx| {
             if enabled
                 && !event.keystroke.modifiers.modified()
@@ -276,6 +310,30 @@ fn client_window_button(
             }
         })
         .into_any_element()
+}
+
+#[cfg(target_os = "windows")]
+fn windows_caption_font() -> &'static str {
+    use windows::Wdk::System::SystemServices::RtlGetVersion;
+
+    let mut version = unsafe { std::mem::zeroed() };
+    let status = unsafe { RtlGetVersion(&mut version) };
+    if status.is_ok() && version.dwBuildNumber >= 22000 {
+        "Segoe Fluent Icons"
+    } else {
+        "Segoe MDL2 Assets"
+    }
+}
+
+impl Waku {
+    pub(super) fn toggle_fullscreen_action(
+        &mut self,
+        _: &crate::ToggleFullscreen,
+        window: &mut Window,
+        _: &mut Context<Self>,
+    ) {
+        window.toggle_fullscreen();
+    }
 }
 
 #[cfg(any(target_os = "linux", target_os = "windows"))]

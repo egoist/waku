@@ -215,6 +215,8 @@ pub struct AppSettings {
     pub favorite_models: Vec<FavoriteModel>,
     pub theme: ThemePreference,
     pub language: AppLanguage,
+    pub profile_name: String,
+    pub profile_avatar_path: Option<PathBuf>,
     pub daemon_exposure: DaemonExposureSettings,
 }
 
@@ -225,6 +227,8 @@ impl Default for AppSettings {
             favorite_models: Vec::new(),
             theme: ThemePreference::System,
             language: AppLanguage::default(),
+            profile_name: String::new(),
+            profile_avatar_path: None,
             daemon_exposure: DaemonExposureSettings::default(),
         }
     }
@@ -292,6 +296,10 @@ pub struct PersistedState {
     #[serde(default)]
     pub language: AppLanguage,
     #[serde(default)]
+    pub profile_name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile_avatar_path: Option<PathBuf>,
+    #[serde(default)]
     pub daemon_exposure: DaemonExposureSettings,
     #[serde(default = "default_sidebar_visibility")]
     pub sidebar_visible: bool,
@@ -351,6 +359,8 @@ impl PersistedState {
             favorite_models: Vec::new(),
             theme: ThemePreference::System,
             language: AppLanguage::default(),
+            profile_name: String::new(),
+            profile_avatar_path: None,
             daemon_exposure: DaemonExposureSettings::default(),
             sidebar_visible: true,
             right_panel_visible: false,
@@ -386,9 +396,7 @@ impl PersistedState {
                 .reasoning_effort
                 .clone_from(&self.last_reasoning_effort);
             session.service_tier.clone_from(&self.last_service_tier);
-            session
-                .context_window
-                .clone_from(&self.last_context_window);
+            session.context_window.clone_from(&self.last_context_window);
         }
         session
     }
@@ -469,6 +477,8 @@ impl PersistedState {
             favorite_models: self.favorite_models.clone(),
             theme: self.theme,
             language: self.language,
+            profile_name: self.profile_name.clone(),
+            profile_avatar_path: self.profile_avatar_path.clone(),
             daemon_exposure: self.daemon_exposure.clone(),
         }
     }
@@ -498,6 +508,8 @@ impl PersistedState {
         self.favorite_models = settings.favorite_models;
         self.theme = settings.theme;
         self.language = settings.language;
+        self.profile_name = settings.profile_name;
+        self.profile_avatar_path = settings.profile_avatar_path;
         self.daemon_exposure = settings.daemon_exposure;
     }
 
@@ -896,6 +908,15 @@ impl StateStore {
 
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    /// Stable app-owned directory for lightweight user profile assets. The
+    /// caller performs any filesystem work off the UI thread.
+    pub fn profile_directory(&self) -> PathBuf {
+        self.app_settings_path
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .join("profile")
     }
 
     fn read_app_settings(&self) -> io::Result<Option<AppSettings>> {

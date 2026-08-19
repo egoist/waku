@@ -141,6 +141,9 @@ impl Waku {
                     if !item.file_changes.is_empty() {
                         activity.file_changes = item.file_changes;
                     }
+                    if !item.plan_steps.is_empty() {
+                        activity.plan_steps = item.plan_steps;
+                    }
                     if item.display_target.is_some()
                         && (activity.display_target.is_none() || has_arguments)
                     {
@@ -476,16 +479,7 @@ impl Waku {
                 }
             }
             DriverEvent::TurnFinished { success, summary } => {
-                self.settle_foreground_work(
-                    session_id,
-                    if success {
-                        BackgroundWorkStatus::Completed
-                    } else {
-                        BackgroundWorkStatus::Failed
-                    },
-                );
                 let previous_kinds = self.snapshot_selected_transcript_rows(session_id);
-                runtime.last_driver_error = None;
                 // A settled turn moved the account's rate-limit needles; ask
                 // that provider's plan meter to refresh once its backoff
                 // allows.
@@ -509,6 +503,48 @@ impl Waku {
                 {
                     return true;
                 }
+                self.finish_streaming_assistant(session_id);
+                self.complete_turn_blocks(session_id);
+                runtime.stream_phase = None;
+                let needs_fallback = !self.turn_has_assistant_message(session_id);
+                let provider_name = self
+                    .state
+                    .sessions
+                    .iter()
+                    .find(|session| session.id == session_id)
+                    .map(|session| session.provider.short_name().to_owned())
+                    .unwrap_or_else(|| "Provider".to_owned());
+                let fallback_message = needs_fallback.then(|| {
+                    runtime
+                        .last_driver_error
+                        .take()
+                        .or(summary)
+                        .unwrap_or_else(|| {
+                            if success {
+                                tr!(
+                                    "session.provider_finished_without_response",
+                                    provider = provider_name
+                                )
+                            } else {
+                                tr!("session.stopped_before_response")
+                            }
+                        })
+                });
+                if !needs_fallback {
+                    runtime.last_driver_error = None;
+                }
+                // A provider reporting completion without any assistant
+                // content produced no answer. Keep the turn failed and
+                // show the provider's captured diagnostic when it supplied one.
+                let effective_success = success && !needs_fallback;
+                self.settle_foreground_work(
+                    session_id,
+                    if effective_success {
+                        BackgroundWorkStatus::Completed
+                    } else {
+                        BackgroundWorkStatus::Failed
+                    },
+                );
                 let task_notification = cx.active_window().is_none().then(|| {
                     self.state
                         .sessions
@@ -520,7 +556,7 @@ impl Waku {
                             } else {
                                 session.display_title().to_owned()
                             };
-                            let body = if success {
+                            let body = if effective_success {
                                 tr!("session.turn_completed")
                             } else {
                                 tr!("session.stopped")
@@ -528,37 +564,24 @@ impl Waku {
                             (title, body)
                         })
                 });
-                self.finish_streaming_assistant(session_id);
-                self.complete_turn_blocks(session_id);
-                runtime.stream_phase = None;
-                let needs_fallback = !self.turn_has_assistant_message(session_id);
                 if let Some(session) = self.state.session_mut(session_id) {
-                    session.status = if success {
+                    session.status = if effective_success {
                         SessionStatus::Idle
                     } else {
                         SessionStatus::Failed
                     };
-                    if needs_fallback {
-                        session.push_message(
-                            MessageRole::Assistant,
-                            summary.unwrap_or_else(|| {
-                                if success {
-                                    tr!("session.turn_completed")
-                                } else {
-                                    tr!("session.stopped_before_response")
-                                }
-                            }),
-                        );
+                    if let Some(message) = fallback_message {
+                        session.push_message(MessageRole::Assistant, message);
                     }
                 }
                 self.finish_active_turn_with_analytics(
                     session_id,
-                    if success {
+                    if effective_success {
                         TurnStatus::Completed
                     } else {
                         TurnStatus::Failed
                     },
-                    if success {
+                    if effective_success {
                         crate::analytics::TurnOutcome::Completed
                     } else {
                         crate::analytics::TurnOutcome::Failed
@@ -577,7 +600,7 @@ impl Waku {
                 runtime.computer_use_previews.clear();
                 runtime.driver.refresh_background_work();
                 self.capture_latest_turn_checkpoint_for(session_id);
-                if allow_queue_drain && success {
+                if allow_queue_drain && effective_success {
                     // Start the next queued follow-up once the runtime has
                     // been re-inserted so the same process is reused.
                     self.pending_queue_drains.push(session_id);

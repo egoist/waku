@@ -421,9 +421,8 @@ fn merge_windows_environment(mut environment: ShellEnvironment) -> Option<ShellE
         }
     }
     let mut seen = HashSet::new();
-    directories.retain(|directory| {
-        seen.insert(directory.as_os_str().to_string_lossy().to_lowercase())
-    });
+    directories
+        .retain(|directory| seen.insert(directory.as_os_str().to_string_lossy().to_lowercase()));
     if directories.is_empty() {
         return None;
     }
@@ -520,6 +519,11 @@ fn user_tool_directories(home: &Path) -> Vec<PathBuf> {
         directories.push(local_app_data.join("Volta/bin"));
         directories.push(local_app_data.join("pnpm"));
         directories.push(local_app_data.join("Programs/nodejs"));
+        // The official Codex desktop installer exposes its bundled CLI here.
+        // Explorer-launched apps can retain a PATH from before Codex was
+        // installed, so probing this stable vendor directory is required even
+        // though the installer also adds it to the user's registry PATH.
+        directories.push(local_app_data.join("Programs/OpenAI/Codex/bin"));
     }
     directories
 }
@@ -1025,6 +1029,7 @@ mod tests {
             assert!(paths.contains(&local_app_data.join("Volta/bin")));
             assert!(paths.contains(&local_app_data.join("pnpm")));
             assert!(paths.contains(&local_app_data.join("Programs/nodejs")));
+            assert!(paths.contains(&local_app_data.join("Programs/OpenAI/Codex/bin")));
         }
         assert_eq!(
             paths
@@ -1101,8 +1106,16 @@ mod tests {
             ]
         );
         assert!(environment.contains(&(OsString::from("FNM_DIR"), OsString::from("C:\\fnm"))));
-        assert!(!environment.iter().any(|(name, _)| name == OsStr::new("WAKU_USER_PATH")));
-        assert!(!environment.iter().any(|(name, _)| name == OsStr::new("WAKU_MACHINE_PATH")));
+        assert!(
+            !environment
+                .iter()
+                .any(|(name, _)| name == OsStr::new("WAKU_USER_PATH"))
+        );
+        assert!(
+            !environment
+                .iter()
+                .any(|(name, _)| name == OsStr::new("WAKU_MACHINE_PATH"))
+        );
     }
 
     #[cfg(windows)]
@@ -1216,5 +1229,3 @@ mod tests {
         let _ = fs::remove_dir(directory);
     }
 }
-
-

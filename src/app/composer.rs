@@ -49,17 +49,17 @@ impl Waku {
                     )))
                     .h(px(28.0))
                     .px(px(13.0))
-                    .rounded(px(7.0))
+                    .rounded(px(RADIUS_DF))
                     .flex()
                     .items_center()
                     .cursor_default()
                     .text_size(px(11.5))
-                    .font_weight(FontWeight::SEMIBOLD)
+                    .font_weight(FontWeight::NORMAL)
                     .when(allow, |element| {
                         element
                             .bg(theme.inverse)
                             .text_color(theme.on_inverse)
-                            .hover(|element| element.opacity(0.9))
+                            .hover(|element| element.bg(theme.primary_hover))
                     })
                     .when(!allow, |element| {
                         element
@@ -82,7 +82,7 @@ impl Waku {
                     .max_w(px(CONTENT_MAX_WIDTH))
                     .mx_auto()
                     .p(px(12.0))
-                    .rounded(px(12.0))
+                    .rounded(px(RADIUS_DF))
                     .border_1()
                     .border_color(theme.border_strong)
                     .bg(theme.raised)
@@ -96,7 +96,7 @@ impl Waku {
                             .child(
                                 div()
                                     .text_size(px(12.5))
-                                    .font_weight(FontWeight::MEDIUM)
+                                    .font_weight(FontWeight::NORMAL)
                                     .text_color(theme.text)
                                     .child(SharedString::from(permission.title.clone())),
                             ),
@@ -108,7 +108,7 @@ impl Waku {
                             .max_h(px(92.0))
                             .overflow_y_scroll()
                             .p(px(8.0))
-                            .rounded(px(7.0))
+                            .rounded(px(RADIUS_DF))
                             .bg(theme.inset)
                             .font_family(crate::md::render::MONO_FAMILY)
                             .text_size(px(10.5))
@@ -160,7 +160,7 @@ impl Waku {
                     .min_h(px(36.0))
                     .px(px(10.0))
                     .py(px(5.0))
-                    .rounded(px(8.0))
+                    .rounded(px(RADIUS_DF))
                     .border_1()
                     .border_color(if is_selected {
                         theme.accent.opacity(0.34)
@@ -176,7 +176,7 @@ impl Waku {
                     .items_center()
                     .gap(px(8.0))
                     .cursor_default()
-                    .focus_visible(|style| style.border_color(theme.accent))
+                    .focus_visible(|style| style.border_color(theme.ring))
                     .when(!is_selected, |row| {
                         row.hover(|style| style.border_color(theme.border).bg(theme.overlay_strong))
                     })
@@ -188,7 +188,7 @@ impl Waku {
                             .child(
                                 div()
                                     .text_size(px(11.5))
-                                    .font_weight(FontWeight::MEDIUM)
+                                    .font_weight(FontWeight::NORMAL)
                                     .text_color(theme.text)
                                     .child(SharedString::from(option.label.clone())),
                             )
@@ -235,14 +235,14 @@ impl Waku {
                 .tab_stop(true)
                 .h(px(26.0))
                 .px(px(8.0))
-                .rounded(px(6.0))
+                .rounded(px(RADIUS_DF))
                 .flex()
                 .items_center()
-                .cursor_default()
+                .cursor_pointer()
                 .text_size(px(10.5))
-                .font_weight(FontWeight::MEDIUM)
+                .font_weight(FontWeight::NORMAL)
                 .text_color(theme.text_tertiary)
-                .focus_visible(|style| style.border_1().border_color(theme.accent))
+                .focus_visible(|style| style.border_1().border_color(theme.ring))
                 .hover(|style| style.bg(theme.overlay).text_color(theme.text_secondary))
                 .active(|style| style.opacity(0.8))
                 .child(tr!("user_input.back"))
@@ -263,12 +263,12 @@ impl Waku {
             .tab_stop(can_continue)
             .h(px(26.0))
             .px(px(10.0))
-            .rounded(px(6.0))
+            .rounded(px(RADIUS_DF))
             .flex()
             .items_center()
-            .cursor_default()
+            .when(can_continue, |button| button.cursor_pointer())
             .text_size(px(10.5))
-            .font_weight(FontWeight::SEMIBOLD)
+            .font_weight(FontWeight::NORMAL)
             .bg(if can_continue {
                 theme.inverse
             } else {
@@ -281,8 +281,8 @@ impl Waku {
             })
             .when(can_continue, |button| {
                 button
-                    .focus_visible(|style| style.border_1().border_color(theme.accent))
-                    .hover(|style| style.opacity(0.9))
+                    .focus_visible(|style| style.border_1().border_color(theme.ring))
+                    .hover(|style| style.bg(theme.primary_hover))
                     .active(|style| style.opacity(0.8))
                     .on_click(cx.listener(|this, _, _, cx| this.advance_user_input(cx)))
                     .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
@@ -302,12 +302,12 @@ impl Waku {
             div()
                 .h(px(18.0))
                 .px(px(6.0))
-                .rounded(px(5.0))
+                .rounded(px(RADIUS_SM))
                 .bg(theme.overlay)
                 .flex()
                 .items_center()
                 .text_size(px(9.5))
-                .font_weight(FontWeight::MEDIUM)
+                .font_weight(FontWeight::NORMAL)
                 .text_color(theme.text_tertiary)
                 .child(tr!(
                     "user_input.progress",
@@ -325,10 +325,10 @@ impl Waku {
                 .px(px(14.0))
                 .pt(px(12.0))
                 .pb(px(10.0))
-                .rounded(px(13.0))
+                .rounded(px(RADIUS_DF))
                 .border_1()
-                .border_color(theme.border)
-                .bg(theme.composer)
+                .border_color(theme.sidebar_border)
+                .bg(theme.sidebar_item_background)
                 .tab_index(0)
                 .tab_group()
                 .tab_stop(false)
@@ -340,7 +340,7 @@ impl Waku {
                         .child(
                             div()
                                 .text_size(px(10.5))
-                                .font_weight(FontWeight::SEMIBOLD)
+                                .font_weight(FontWeight::NORMAL)
                                 .text_color(theme.text_tertiary)
                                 .child(SharedString::from(question.header.clone())),
                         )
@@ -351,7 +351,7 @@ impl Waku {
                         .mt(px(5.0))
                         .text_size(px(13.0))
                         .line_height(px(18.0))
-                        .font_weight(FontWeight::MEDIUM)
+                        .font_weight(FontWeight::NORMAL)
                         .text_color(theme.text)
                         .whitespace_normal()
                         .child(SharedString::from(question.question.clone())),
@@ -366,7 +366,7 @@ impl Waku {
                         }))
                         .h(px(34.0))
                         .px(px(10.0))
-                        .rounded(px(8.0))
+                        .rounded(px(RADIUS_DF))
                         .border_1()
                         .border_color(if has_custom {
                             theme.accent.opacity(0.34)
@@ -430,17 +430,17 @@ impl Waku {
                     )))
                     .h(px(29.0))
                     .px(px(13.0))
-                    .rounded(px(7.0))
+                    .rounded(px(RADIUS_DF))
                     .flex()
                     .items_center()
-                    .cursor_default()
+                    .cursor_pointer()
                     .text_size(px(11.5))
-                    .font_weight(FontWeight::SEMIBOLD)
+                    .font_weight(FontWeight::NORMAL)
                     .when(primary, |element| {
                         element
                             .bg(theme.inverse)
                             .text_color(theme.on_inverse)
-                            .hover(|element| element.opacity(0.9))
+                            .hover(|element| element.bg(theme.primary_hover))
                     })
                     .when(!primary, |element| {
                         element
@@ -463,7 +463,7 @@ impl Waku {
                 .max_w(px(CONTENT_MAX_WIDTH))
                 .mx_auto()
                 .p(px(13.0))
-                .rounded(px(12.0))
+                .rounded(px(RADIUS_DF))
                 .border_1()
                 .border_color(theme.warning.opacity(0.5))
                 .bg(theme.raised)
@@ -477,7 +477,7 @@ impl Waku {
                         .child(
                             div()
                                 .text_size(px(12.5))
-                                .font_weight(FontWeight::MEDIUM)
+                                .font_weight(FontWeight::NORMAL)
                                 .text_color(theme.text)
                                 .child(tr!("computer_use.allow_control", app = &target.app_name)),
                         ),
@@ -494,12 +494,12 @@ impl Waku {
                     div()
                         .mt(px(8.0))
                         .p(px(9.0))
-                        .rounded(px(8.0))
+                        .rounded(px(RADIUS_DF))
                         .bg(theme.inset)
                         .child(
                             div()
                                 .text_size(px(11.5))
-                                .font_weight(FontWeight::MEDIUM)
+                                .font_weight(FontWeight::NORMAL)
                                 .text_color(theme.text)
                                 .truncate()
                                 .child(SharedString::from(target.window_title.clone())),
@@ -594,7 +594,7 @@ impl Waku {
                         .w(px(304.0))
                         .h(px(220.0))
                         .p(px(6.0))
-                        .rounded(px(16.0))
+                        .rounded(px(RADIUS_DF))
                         .overflow_hidden()
                         .border_1()
                         .border_color(if is_top {
@@ -617,13 +617,13 @@ impl Waku {
                                     div()
                                         .w(px(27.0))
                                         .h(px(27.0))
-                                        .rounded(px(7.0))
+                                        .rounded(px(RADIUS_DF))
                                         .flex()
                                         .items_center()
                                         .justify_center()
                                         .bg(theme.overlay_strong)
                                         .text_size(px(11.0))
-                                        .font_weight(FontWeight::SEMIBOLD)
+                                        .font_weight(FontWeight::NORMAL)
                                         .text_color(theme.text_secondary)
                                         .child(SharedString::from(app_initial)),
                                 )
@@ -634,7 +634,7 @@ impl Waku {
                                         .child(
                                             div()
                                                 .text_size(px(11.5))
-                                                .font_weight(FontWeight::MEDIUM)
+                                                .font_weight(FontWeight::NORMAL)
                                                 .text_color(theme.text)
                                                 .truncate()
                                                 .child(SharedString::from(app_name)),
@@ -656,14 +656,14 @@ impl Waku {
                                             )))
                                             .h(px(27.0))
                                             .px(px(10.0))
-                                            .rounded(px(7.0))
+                                            .rounded(px(RADIUS_DF))
                                             .border_1()
                                             .border_color(theme.border_strong)
                                             .flex()
                                             .items_center()
                                             .cursor_default()
                                             .text_size(px(10.0))
-                                            .font_weight(FontWeight::MEDIUM)
+                                            .font_weight(FontWeight::NORMAL)
                                             .text_color(if active {
                                                 theme.danger
                                             } else {
@@ -692,7 +692,7 @@ impl Waku {
                                 .relative()
                                 .h(px(170.0))
                                 .w_full()
-                                .rounded(px(11.0))
+                                .rounded(px(RADIUS_DF))
                                 .overflow_hidden()
                                 .bg(rgb(0x101010))
                                 .when_some(screenshot, |element, screenshot| {
@@ -717,7 +717,7 @@ impl Waku {
                                                 div()
                                                     .w(px(34.0))
                                                     .h(px(23.0))
-                                                    .rounded(px(5.0))
+                                                    .rounded(px(RADIUS_SM))
                                                     .border_1()
                                                     .border_color(theme.text_tertiary)
                                                     .child(
@@ -726,7 +726,7 @@ impl Waku {
                                                             .ml(px(25.0))
                                                             .w(px(3.0))
                                                             .h(px(3.0))
-                                                            .rounded_full()
+                                                            .rounded(px(RADIUS_LG))
                                                             .bg(status_color),
                                                     ),
                                             )
@@ -745,7 +745,7 @@ impl Waku {
                                         .left(px(8.0))
                                         .h(px(24.0))
                                         .px(px(8.0))
-                                        .rounded_full()
+                                        .rounded(px(RADIUS_LG))
                                         .flex()
                                         .items_center()
                                         .gap(px(6.0))
@@ -756,13 +756,13 @@ impl Waku {
                                             div()
                                                 .w(px(6.0))
                                                 .h(px(6.0))
-                                                .rounded_full()
+                                                .rounded(px(RADIUS_LG))
                                                 .bg(status_color),
                                         )
                                         .child(
                                             div()
                                                 .text_size(px(9.5))
-                                                .font_weight(FontWeight::MEDIUM)
+                                                .font_weight(FontWeight::NORMAL)
                                                 .text_color(theme.text)
                                                 .child(status),
                                         ),
@@ -794,6 +794,7 @@ impl Waku {
         let provider = session.map(|session| session.provider).unwrap_or_default();
         let selected_model = session.and_then(|session| self.model_for_session(session));
         let selected_model_name = self.model_display_name(provider, selected_model);
+        let model_metadata = session.and_then(|session| self.model_metadata_for_session(session));
         let locked_provider = session
             .filter(|session| !session.messages.is_empty())
             .map(|session| session.provider);
@@ -825,6 +826,7 @@ impl Waku {
         let normalized_query = search_query.trim().to_ascii_lowercase();
         let searching = !normalized_query.is_empty();
         let selected_tab = self.model_picker_tab;
+        let picker_view = self.model_picker_view;
         let selected_model = selected_model.map(str::to_owned);
         let probes = self.probes.clone();
         let disabled_providers = self.state.disabled_providers.clone();
@@ -833,11 +835,121 @@ impl Waku {
         let weak = cx.entity().downgrade();
         let search = self.model_search.clone();
         let search_focus = search.read(cx).focus_handle(cx);
+        let summary_focus = self.model_picker_focus.clone();
+
+        let selected_effort = model_metadata.and_then(|model| {
+            session
+                .and_then(|session| session.reasoning_effort.as_deref())
+                .filter(|selected| {
+                    model
+                        .reasoning_efforts
+                        .iter()
+                        .any(|option| option.id == *selected)
+                })
+                .or(model.default_reasoning_effort.as_deref())
+                .or_else(|| {
+                    model
+                        .reasoning_efforts
+                        .first()
+                        .map(|option| option.id.as_str())
+                })
+                .map(str::to_owned)
+        });
+        let effort_label = model_metadata
+            .and_then(|model| {
+                selected_effort.as_deref().and_then(|selected| {
+                    model
+                        .reasoning_efforts
+                        .iter()
+                        .find(|option| option.id == selected)
+                        .map(|option| option.label.clone())
+                })
+            })
+            .unwrap_or_else(|| tr!("models.unavailable"));
+        let selected_tier = model_metadata
+            .map(|model| {
+                session
+                    .and_then(|session| session.service_tier.as_deref())
+                    .filter(|selected| {
+                        *selected == "default"
+                            || model
+                                .service_tiers
+                                .iter()
+                                .any(|option| option.id == *selected)
+                    })
+                    .or(model.default_service_tier.as_deref())
+                    .unwrap_or("default")
+                    .to_owned()
+            })
+            .unwrap_or_else(|| "default".to_owned());
+        let tier_label = if !model_metadata.is_some_and(|model| !model.service_tiers.is_empty()) {
+            tr!("models.unavailable")
+        } else if selected_tier == "default" {
+            tr!("models.standard")
+        } else {
+            model_metadata
+                .and_then(|model| {
+                    model
+                        .service_tiers
+                        .iter()
+                        .find(|option| option.id == selected_tier)
+                        .map(|option| option.label.clone())
+                })
+                .unwrap_or_else(|| selected_tier.clone())
+        };
+        let selected_window = model_metadata.and_then(|model| {
+            session
+                .and_then(|session| session.context_window.as_deref())
+                .filter(|selected| {
+                    model
+                        .context_windows
+                        .iter()
+                        .any(|option| option.id == *selected)
+                })
+                .or(model.default_context_window.as_deref())
+                .or_else(|| {
+                    model
+                        .context_windows
+                        .first()
+                        .map(|option| option.id.as_str())
+                })
+                .map(str::to_owned)
+        });
+        let window_label = model_metadata
+            .and_then(|model| {
+                selected_window.as_deref().and_then(|selected| {
+                    model
+                        .context_windows
+                        .iter()
+                        .find(|option| option.id == selected)
+                        .map(|option| option.label.clone())
+                })
+            })
+            .unwrap_or_else(|| tr!("models.unavailable"));
+        let reasoning_efforts = model_metadata
+            .map(|model| model.reasoning_efforts.clone())
+            .unwrap_or_default();
+        let default_effort =
+            model_metadata.and_then(|model| model.default_reasoning_effort.clone());
+        let service_tiers = model_metadata
+            .map(|model| model.service_tiers.clone())
+            .unwrap_or_default();
+        let default_tier = model_metadata
+            .and_then(|model| model.default_service_tier.clone())
+            .unwrap_or_else(|| "default".to_owned());
+        let context_windows = model_metadata
+            .map(|model| model.context_windows.clone())
+            .unwrap_or_default();
+        let default_window = model_metadata.and_then(|model| model.default_context_window.clone());
+        let picker_provider = match selected_tab {
+            ModelPickerTab::Provider(kind) => kind,
+            ModelPickerTab::Favorites => provider,
+        };
 
         let handle = {
             let reset_weak = weak.clone();
             let reset_search = search.clone();
-            let picker_focus = search_focus.clone();
+            let picker_focus = summary_focus.clone();
             self.menu_handle_with(MODEL_PICKER_MENU_ID, cx, move |open, window, cx| {
                 let _ = reset_weak.update(cx, |this, cx| {
                     if open {
@@ -861,9 +973,9 @@ impl Waku {
                                 provider
                             };
                         this.model_picker_tab = ModelPickerTab::Provider(provider);
+                        this.model_picker_view = ModelPickerView::Summary;
                         // Opening re-runs the tab's catalog discovery so models
-                        // authored since launch appear without a restart; the
-                        // other rails refresh when selected, not all at once.
+                        // authored since launch appear without a restart.
                         this.refresh_provider_model_discovery(provider);
                         this.model_picker_highlight = None;
                         reset_search.update(cx, |search, cx| search.clear(cx));
@@ -875,22 +987,13 @@ impl Waku {
                     cx.notify();
                 });
                 if open {
-                    // The panel is deferred, so its input joins the dispatch
-                    // tree only after the deferred draw — same two-frame wait
-                    // the menus need before they can take focus. The reveal is
-                    // re-issued here too: a parked scroll request resolves
-                    // against the viewport bounds of the *previous* paint, so
-                    // on the container's first-ever paint it reads a zeroed
-                    // viewport, lands wrong, and is consumed. By this frame
-                    // the panel has painted real bounds to resolve against.
+                    // The panel is deferred, so its summary row joins the
+                    // dispatch tree only after the same two-frame wait menus
+                    // need before taking focus.
                     let picker_focus = picker_focus.clone();
-                    let reveal_weak = reset_weak.clone();
                     window.on_next_frame(move |window, _| {
                         window.on_next_frame(move |window, cx| {
                             window.focus(&picker_focus, cx);
-                            let _ = reveal_weak.update(cx, |this, _| {
-                                this.reveal_selected_picker_model();
-                            });
                         });
                     });
                 }
@@ -902,18 +1005,20 @@ impl Waku {
         // Built out here rather than in the body so the key handler and the
         // rendered rows index one ordering and cannot disagree about what
         // `enter` selects.
-        let available_models = Rc::new(if handle.is_open() {
-            visible_picker_models(
-                &probes,
-                &favorites,
-                &disabled_providers,
-                locked_provider,
-                selected_tab,
-                &normalized_query,
-            )
-        } else {
-            Vec::new()
-        });
+        let available_models = Rc::new(
+            if handle.is_visible() && picker_view == ModelPickerView::Models {
+                visible_picker_models(
+                    &probes,
+                    &favorites,
+                    &disabled_providers,
+                    locked_provider,
+                    selected_tab,
+                    &normalized_query,
+                )
+            } else {
+                Vec::new()
+            },
+        );
         let highlight = self
             .model_picker_highlight
             .filter(|index| *index < available_models.len());
@@ -922,11 +1027,12 @@ impl Waku {
 
         popover(
             MenuChip::new("composer-provider-model")
+                .full_radius()
                 .icon(
                     provider_icon(provider),
                     provider_color(&theme, provider).opacity(0.9),
                 )
-                .label(selected_model_name)
+                .label(selected_model_name.clone())
                 .caret(false)
                 .selected(handle.is_open()),
             &handle,
@@ -934,113 +1040,316 @@ impl Waku {
             move |popover, _window, _cx| {
                 let popover = popover.clone();
                 let available_models = available_models.clone();
-
-                let mut sidebar = div()
-                    .w(px(50.0))
-                    .h_full()
-                    .flex_none()
-                    .flex()
-                    .flex_col()
-                    .items_center()
-                    .gap(px(4.0))
-                    .p(px(5.0))
-                    .rounded_tl(px(12.0))
-                    .rounded_bl(px(12.0))
-                    .bg(theme.canvas)
-                    .border_r_1()
-                    .border_color(theme.border);
-
-                let favorites_selected = selected_tab == ModelPickerTab::Favorites && !searching;
-                let favorite_weak = weak.clone();
-                sidebar = sidebar
-                    .child(
-                        div()
-                            .id("model-tab-favorites")
-                            .w(px(38.0))
-                            .h(px(38.0))
-                            .rounded(px(7.0))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .cursor_default()
-                            .when(favorites_selected, |element| {
-                                element.bg(theme.overlay_strong)
-                            })
-                            .hover(|element| element.bg(theme.overlay))
-                            .child(icon(
-                                "icons/star.svg",
-                                17.0,
-                                if favorites_selected {
-                                    theme.text
-                                } else {
-                                    theme.text_tertiary
+                if picker_view == ModelPickerView::Summary {
+                    let model_weak = weak.clone();
+                    let model_search_focus = search_focus.clone();
+                    let provider_weak = weak.clone();
+                    let effort_weak = weak.clone();
+                    let speed_weak = weak.clone();
+                    let context_weak = weak.clone();
+                    let effort_enabled = !reasoning_efforts.is_empty();
+                    let speed_enabled = !service_tiers.is_empty();
+                    return div()
+                        .w(px(260.0))
+                        .p(px(4.0))
+                        .rounded(px(RADIUS_DF))
+                        .border_1()
+                        .border_color(theme.border_strong)
+                        .bg(theme.raised)
+                        .child(model_picker_summary_row(
+                            "model-picker-summary-model",
+                            tr!("models.model"),
+                            selected_model_name.clone(),
+                            true,
+                            Some(summary_focus.clone()),
+                            theme,
+                            move |window, cx| {
+                                let _ = model_weak.update(cx, |this, cx| {
+                                    this.model_picker_view = ModelPickerView::Models;
+                                    this.model_picker_highlight = None;
+                                    this.reveal_selected_picker_model();
+                                    cx.notify();
+                                });
+                                focus_model_search(model_search_focus.clone(), window);
+                            },
+                        ))
+                        .child(model_picker_summary_row(
+                            "model-picker-summary-effort",
+                            tr!("models.effort"),
+                            effort_label.clone(),
+                            effort_enabled,
+                            None,
+                            theme,
+                            move |_, cx| {
+                                let _ = effort_weak.update(cx, |this, cx| {
+                                    this.model_picker_view = ModelPickerView::Effort;
+                                    cx.notify();
+                                });
+                            },
+                        ))
+                        .child(model_picker_summary_row(
+                            "model-picker-summary-speed",
+                            tr!("models.speed"),
+                            tier_label.clone(),
+                            speed_enabled,
+                            None,
+                            theme,
+                            move |_, cx| {
+                                let _ = speed_weak.update(cx, |this, cx| {
+                                    this.model_picker_view = ModelPickerView::Speed;
+                                    cx.notify();
+                                });
+                            },
+                        ))
+                        .child(model_picker_summary_row(
+                            "model-picker-summary-provider",
+                            tr!("models.provider"),
+                            picker_provider.display_name().to_owned(),
+                            true,
+                            None,
+                            theme,
+                            move |_, cx| {
+                                let _ = provider_weak.update(cx, |this, cx| {
+                                    this.model_picker_view = ModelPickerView::Providers;
+                                    cx.notify();
+                                });
+                            },
+                        ))
+                        .when(!context_windows.is_empty(), |card| {
+                            card.child(model_picker_summary_row(
+                                "model-picker-summary-context",
+                                tr!("models.context_window"),
+                                window_label.clone(),
+                                true,
+                                None,
+                                theme,
+                                move |_, cx| {
+                                    let _ = context_weak.update(cx, |this, cx| {
+                                        this.model_picker_view = ModelPickerView::Context;
+                                        cx.notify();
+                                    });
                                 },
                             ))
-                            .on_click(move |_, _, cx| {
-                                let _ = favorite_weak.update(cx, |this, cx| {
-                                    this.select_model_picker_tab(ModelPickerTab::Favorites, cx);
-                                });
-                            }),
-                    )
-                    .child(div().w(px(34.0)).h(px(1.0)).my(px(3.0)).bg(theme.border));
+                        })
+                        .into_any_element();
+                }
 
-                // One predicate with the `tab` cycle, so clicking and cycling
-                // agree on which tabs are usable.
-                let rail_tabs = visible_picker_tabs(&probes, &disabled_providers, locked_provider);
-                for kind in ProviderKind::ALL {
-                    let usable = rail_tabs.contains(&ModelPickerTab::Provider(kind));
-                    let selected = selected_tab == ModelPickerTab::Provider(kind) && !searching;
-                    let tab_weak = weak.clone();
-                    sidebar = sidebar.child(
-                        div()
-                            .id(SharedString::from(format!("model-tab-{}", kind.id())))
-                            .w(px(38.0))
-                            .h(px(38.0))
-                            .rounded(px(7.0))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .cursor_default()
-                            .when(selected, |element| element.bg(theme.overlay_strong))
-                            .when(!usable, |element| element.opacity(0.35))
-                            .when(usable, |element| {
-                                element.hover(|element| element.bg(theme.overlay)).on_click(
-                                    move |_, _, cx| {
-                                        let _ = tab_weak.update(cx, |this, cx| {
-                                            this.select_model_picker_tab(
-                                                ModelPickerTab::Provider(kind),
-                                                cx,
-                                            );
-                                        });
-                                    },
+                if picker_view == ModelPickerView::Providers {
+                    let tabs = visible_picker_tabs(&probes, &disabled_providers, locked_provider);
+                    let mut rows = div().p(px(4.0)).flex().flex_col();
+                    for kind in tabs.into_iter().filter_map(|tab| match tab {
+                        ModelPickerTab::Provider(kind) => Some(kind),
+                        ModelPickerTab::Favorites => None,
+                    }) {
+                        let click_weak = weak.clone();
+                        let key_weak = weak.clone();
+                        let click_search = search.clone();
+                        let key_search = search.clone();
+                        let click_focus = search_focus.clone();
+                        let key_focus = search_focus.clone();
+                        let selected = selected_tab == ModelPickerTab::Provider(kind);
+                        let starts_new_task = locked_provider.is_some_and(|locked| locked != kind);
+                        rows = rows.child(
+                            div()
+                                .id(SharedString::from(format!("model-provider-{}", kind.id())))
+                                .tab_index(0)
+                                .h(px(32.0))
+                                .px(px(8.0))
+                                .rounded(px(RADIUS_DF))
+                                .flex()
+                                .items_center()
+                                .gap(px(10.0))
+                                .cursor_pointer()
+                                .focus_visible(|style| style.border_1().border_color(theme.ring))
+                                .hover(|style| style.bg(theme.overlay))
+                                .when(selected, |row| row.bg(theme.overlay_strong))
+                                .child(icon(
+                                    provider_icon(kind),
+                                    17.0,
+                                    provider_color(&theme, kind),
+                                ))
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .text_size(px(12.5))
+                                        .text_color(theme.text)
+                                        .child(kind.display_name()),
                                 )
-                            })
-                            .child(icon(
-                                provider_icon(kind),
-                                18.0,
-                                provider_color(&theme, kind).opacity(if selected {
-                                    1.0
-                                } else {
-                                    0.82
+                                .when(selected, |row| {
+                                    row.child(icon("icons/check.svg", 12.0, theme.text_secondary))
+                                })
+                                .when(starts_new_task, |row| {
+                                    row.child(
+                                        div()
+                                            .flex_none()
+                                            .flex()
+                                            .items_center()
+                                            .gap(px(4.0))
+                                            .text_size(px(10.5))
+                                            .text_color(theme.text_tertiary)
+                                            .child(icon(
+                                                "icons/plus.svg",
+                                                10.0,
+                                                theme.text_tertiary,
+                                            ))
+                                            .child(tr!("models.new_task")),
+                                    )
+                                })
+                                .on_click(move |_, window, cx| {
+                                    let _ = click_weak.update(cx, |this, cx| {
+                                        this.open_model_picker_provider(kind, cx);
+                                        click_search.update(cx, |search, cx| search.clear(cx));
+                                        cx.notify();
+                                    });
+                                    focus_model_search(click_focus.clone(), window);
+                                })
+                                .on_key_down(move |event: &KeyDownEvent, window, cx| {
+                                    if !event.keystroke.modifiers.modified()
+                                        && matches!(event.keystroke.key.as_str(), "enter" | "space")
+                                    {
+                                        let _ = key_weak.update(cx, |this, cx| {
+                                            this.open_model_picker_provider(kind, cx);
+                                            key_search.update(cx, |search, cx| search.clear(cx));
+                                            cx.notify();
+                                        });
+                                        focus_model_search(key_focus.clone(), window);
+                                        cx.stop_propagation();
+                                    }
                                 }),
-                            )),
+                        );
+                    }
+                    return model_picker_subview_card(
+                        tr!("models.provider"),
+                        rows.into_any_element(),
+                        weak.clone(),
+                        summary_focus.clone(),
+                        theme,
+                    );
+                }
+
+                if picker_view == ModelPickerView::Effort {
+                    let mut rows = div().p(px(4.0)).flex().flex_col();
+                    for option in reasoning_efforts.clone() {
+                        let option_id = option.id.clone();
+                        let choice_weak = weak.clone();
+                        let choice_focus = summary_focus.clone();
+                        rows = rows.child(model_picker_choice_row(
+                            SharedString::from(format!("model-effort-{}", option.id)),
+                            option.label,
+                            default_effort.as_deref() == Some(option.id.as_str()),
+                            selected_effort.as_deref() == Some(option.id.as_str()),
+                            theme,
+                            move |window, cx| {
+                                let _ = choice_weak.update(cx, |this, cx| {
+                                    this.set_reasoning_effort(option_id.clone(), cx);
+                                    this.model_picker_view = ModelPickerView::Summary;
+                                    cx.notify();
+                                });
+                                focus_model_summary(choice_focus.clone(), window);
+                            },
+                        ));
+                    }
+                    return model_picker_subview_card(
+                        tr!("models.effort"),
+                        rows.into_any_element(),
+                        weak.clone(),
+                        summary_focus.clone(),
+                        theme,
+                    );
+                }
+
+                if picker_view == ModelPickerView::Speed {
+                    let mut rows = div().p(px(4.0)).flex().flex_col();
+                    let standard_weak = weak.clone();
+                    let standard_focus = summary_focus.clone();
+                    rows = rows.child(model_picker_choice_row(
+                        "model-speed-default",
+                        tr!("models.standard"),
+                        default_tier == "default",
+                        selected_tier == "default",
+                        theme,
+                        move |window, cx| {
+                            let _ = standard_weak.update(cx, |this, cx| {
+                                this.set_service_tier("default".to_owned(), cx);
+                                this.model_picker_view = ModelPickerView::Summary;
+                                cx.notify();
+                            });
+                            focus_model_summary(standard_focus.clone(), window);
+                        },
+                    ));
+                    for option in service_tiers.clone() {
+                        let option_id = option.id.clone();
+                        let choice_weak = weak.clone();
+                        let choice_focus = summary_focus.clone();
+                        rows = rows.child(model_picker_choice_row(
+                            SharedString::from(format!("model-speed-{}", option.id)),
+                            option.label,
+                            default_tier == option.id,
+                            selected_tier == option.id,
+                            theme,
+                            move |window, cx| {
+                                let _ = choice_weak.update(cx, |this, cx| {
+                                    this.set_service_tier(option_id.clone(), cx);
+                                    this.model_picker_view = ModelPickerView::Summary;
+                                    cx.notify();
+                                });
+                                focus_model_summary(choice_focus.clone(), window);
+                            },
+                        ));
+                    }
+                    return model_picker_subview_card(
+                        tr!("models.speed"),
+                        rows.into_any_element(),
+                        weak.clone(),
+                        summary_focus.clone(),
+                        theme,
+                    );
+                }
+
+                if picker_view == ModelPickerView::Context {
+                    let mut rows = div().p(px(4.0)).flex().flex_col();
+                    for option in context_windows.clone() {
+                        let option_id = option.id.clone();
+                        let choice_weak = weak.clone();
+                        let choice_focus = summary_focus.clone();
+                        rows = rows.child(model_picker_choice_row(
+                            SharedString::from(format!("model-context-{}", option.id)),
+                            option.label,
+                            default_window.as_deref() == Some(option.id.as_str()),
+                            selected_window.as_deref() == Some(option.id.as_str()),
+                            theme,
+                            move |window, cx| {
+                                let _ = choice_weak.update(cx, |this, cx| {
+                                    this.set_context_window(option_id.clone(), cx);
+                                    this.model_picker_view = ModelPickerView::Summary;
+                                    cx.notify();
+                                });
+                                focus_model_summary(choice_focus.clone(), window);
+                            },
+                        ));
+                    }
+                    return model_picker_subview_card(
+                        tr!("models.context_window"),
+                        rows.into_any_element(),
+                        weak.clone(),
+                        summary_focus.clone(),
+                        theme,
                     );
                 }
 
                 let search_input = div()
-                    .h(px(52.0))
-                    .px(px(12.0))
-                    .pt(px(10.0))
-                    .pb(px(8.0))
+                    .h(px(44.0))
+                    .px(px(8.0))
+                    .py(px(6.0))
                     .flex_none()
                     .flex()
                     .items_center()
                     .child(
                         div()
                             .w_full()
-                            .h(px(34.0))
-                            .px(px(10.0))
-                            .rounded(px(9.0))
+                            .h(px(30.0))
+                            .px(px(8.0))
+                            .rounded(px(RADIUS_DF))
                             .bg(theme.raised)
                             .flex()
                             .items_center()
@@ -1102,13 +1411,13 @@ impl Waku {
                                 kind.id(),
                                 model.id
                             )))
-                            .h(px(58.0))
-                            .px(px(12.0))
-                            .rounded(px(9.0))
+                            .h(px(44.0))
+                            .px(px(10.0))
+                            .rounded(px(RADIUS_DF))
                             .flex()
                             .items_center()
                             .gap(px(10.0))
-                            .cursor_default()
+                            .cursor_pointer()
                             // Reserved on every row so highlighting one cannot
                             // resize it and shift the list by a pixel.
                             .border_1()
@@ -1118,7 +1427,7 @@ impl Waku {
                             // fill, so it stays legible on the current model's
                             // already-filled row.
                             .when(is_highlighted, |element| {
-                                element.bg(theme.overlay).border_color(theme.accent)
+                                element.bg(theme.overlay).border_color(theme.ring)
                             })
                             .hover(|element| element.bg(theme.overlay))
                             .active(|element| element.opacity(0.85))
@@ -1130,13 +1439,13 @@ impl Waku {
                                         div()
                                             .truncate()
                                             .text_size(px(13.0))
-                                            .font_weight(FontWeight::SEMIBOLD)
+                                            .font_weight(FontWeight::NORMAL)
                                             .text_color(theme.text)
                                             .child(SharedString::from(model.name.clone())),
                                     )
                                     .child(
                                         div()
-                                            .mt(px(4.0))
+                                            .mt(px(2.0))
                                             .flex()
                                             .items_center()
                                             .gap(px(6.0))
@@ -1163,10 +1472,11 @@ impl Waku {
                                     )))
                                     .w(px(28.0))
                                     .h(px(28.0))
-                                    .rounded(px(6.0))
+                                    .rounded(px(RADIUS_DF))
                                     .flex()
                                     .items_center()
                                     .justify_center()
+                                    .cursor_pointer()
                                     .hover(|element| element.bg(theme.overlay_strong))
                                     .child(icon(
                                         if is_favorite {
@@ -1206,20 +1516,35 @@ impl Waku {
                 let confirm_models = available_models.clone();
                 let next_weak = weak.clone();
                 let previous_weak = weak.clone();
-                let next_tab_weak = weak.clone();
-                let previous_tab_weak = weak.clone();
+                let next_tab_focus = summary_focus.clone();
+                let previous_tab_focus = summary_focus.clone();
                 let confirm_weak = weak.clone();
                 let confirm_popover = popover.clone();
+                let model_body = div()
+                    .min_w_0()
+                    .flex_1()
+                    .flex()
+                    .flex_col()
+                    .bg(theme.surface)
+                    .child(search_input)
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_h_0()
+                            .relative()
+                            .child(rows)
+                            .child(scrollbar::vertical(&scroll, &scrollbar_state)),
+                    );
                 div()
-                    .w(px(460.0))
-                    .h(px(390.0))
-                    .rounded(px(13.0))
+                    .w(px(380.0))
+                    .h(px(340.0))
+                    .rounded(px(RADIUS_DF))
                     .overflow_hidden()
                     .border_1()
                     .border_color(theme.border_strong)
                     .bg(theme.raised)
-                    .shadow_lg()
                     .flex()
+                    .flex_col()
                     // The filter field keeps focus and the selected row is only
                     // drawn, never focused — the same split Zed's picker uses.
                     // These arrive as actions bound to `WakuMenu > ComposerInput`,
@@ -1235,15 +1560,11 @@ impl Waku {
                             this.move_model_picker_highlight("up", &previous_models, cx);
                         });
                     })
-                    .on_action(move |_: &SelectNextTab, _, cx| {
-                        let _ = next_tab_weak.update(cx, |this, cx| {
-                            this.cycle_model_picker_tab("down", cx);
-                        });
+                    .on_action(move |_: &SelectNextTab, window, cx| {
+                        window.focus(&next_tab_focus, cx);
                     })
-                    .on_action(move |_: &SelectPreviousTab, _, cx| {
-                        let _ = previous_tab_weak.update(cx, |this, cx| {
-                            this.cycle_model_picker_tab("up", cx);
-                        });
+                    .on_action(move |_: &SelectPreviousTab, window, cx| {
+                        window.focus(&previous_tab_focus, cx);
                     })
                     .on_action(move |_: &ConfirmEntry, window, cx| {
                         let _ = confirm_weak.update(cx, |this, cx| {
@@ -1252,26 +1573,13 @@ impl Waku {
                         confirm_popover.close(window, cx);
                         window.refresh();
                     })
-                    .child(sidebar)
-                    .child(
-                        div()
-                            .min_w_0()
-                            .flex_1()
-                            .flex()
-                            .flex_col()
-                            .rounded_tr(px(12.0))
-                            .rounded_br(px(12.0))
-                            .bg(theme.surface)
-                            .child(search_input)
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .min_h_0()
-                                    .relative()
-                                    .child(rows)
-                                    .child(scrollbar::vertical(&scroll, &scrollbar_state)),
-                            ),
-                    )
+                    .child(model_picker_back_header(
+                        tr!("models.model"),
+                        weak.clone(),
+                        summary_focus.clone(),
+                        theme,
+                    ))
+                    .child(model_body)
                     .into_any_element()
             },
         )
@@ -1294,31 +1602,6 @@ impl Waku {
         self.model_picker_highlight = Some(next);
         self.model_picker_scroll.scroll_to_item(next);
         cx.notify();
-    }
-
-    /// Step the sidebar rail to the adjacent usable tab, wrapping at both
-    /// ends. `tab`/`shift-tab` land here from under the focused filter field,
-    /// the same route the arrows take. A live query hides which tab is
-    /// selected and searches across all of them, so cycling waits until the
-    /// field is cleared.
-    fn cycle_model_picker_tab(&mut self, key: &str, cx: &mut Context<Self>) {
-        if !self.model_search.read(cx).content().trim().is_empty() {
-            return;
-        }
-        let locked_provider = self
-            .selected_session()
-            .filter(|session| !session.messages.is_empty())
-            .map(|session| session.provider);
-        let tabs = visible_picker_tabs(
-            &self.probes,
-            &self.state.disabled_providers,
-            locked_provider,
-        );
-        let current = tabs.iter().position(|tab| *tab == self.model_picker_tab);
-        let Some(next) = next_picker_highlight(current, tabs.len(), key) else {
-            return;
-        };
-        self.select_model_picker_tab(tabs[next], cx);
     }
 
     /// Bring the current model's row into view whenever the picker shows the
@@ -1364,204 +1647,6 @@ impl Waku {
         self.choose_model(kind, model_id, cx);
     }
 
-    pub(super) fn render_model_traits_control(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let theme = Theme::current(cx);
-        let session = self.selected_session()?;
-        let model = self.model_metadata_for_session(session)?;
-        if model.reasoning_efforts.is_empty()
-            && model.service_tiers.is_empty()
-            && model.context_windows.is_empty()
-        {
-            return None;
-        }
-
-        let selected_effort = session
-            .reasoning_effort
-            .as_deref()
-            .filter(|selected| {
-                model
-                    .reasoning_efforts
-                    .iter()
-                    .any(|option| option.id == *selected)
-            })
-            .or(model.default_reasoning_effort.as_deref())
-            .or_else(|| {
-                model
-                    .reasoning_efforts
-                    .first()
-                    .map(|option| option.id.as_str())
-            })
-            .map(str::to_owned);
-        let effort_label = selected_effort.as_deref().and_then(|selected| {
-            model
-                .reasoning_efforts
-                .iter()
-                .find(|option| option.id == selected)
-                .map(|option| option.label.clone())
-        });
-
-        let selected_tier = session
-            .service_tier
-            .as_deref()
-            .filter(|selected| {
-                *selected == "default"
-                    || model
-                        .service_tiers
-                        .iter()
-                        .any(|option| option.id == *selected)
-            })
-            .or(model.default_service_tier.as_deref())
-            .unwrap_or("default")
-            .to_owned();
-        let tier_label = if selected_tier == "default" {
-            tr!("models.standard")
-        } else {
-            model
-                .service_tiers
-                .iter()
-                .find(|option| option.id == selected_tier)
-                .map(|option| option.label.clone())
-                .unwrap_or_else(|| selected_tier.clone())
-        };
-        let selected_window = session
-            .context_window
-            .as_deref()
-            .filter(|selected| {
-                model
-                    .context_windows
-                    .iter()
-                    .any(|option| option.id == *selected)
-            })
-            .or(model.default_context_window.as_deref())
-            .or_else(|| {
-                model
-                    .context_windows
-                    .first()
-                    .map(|option| option.id.as_str())
-            })
-            .map(str::to_owned);
-        // A non-default window changes what the session costs and how much it
-        // can hold, so it reads on the chip rather than only inside the menu.
-        let window_label = selected_window
-            .as_deref()
-            .filter(|selected| model.default_context_window.as_deref() != Some(selected))
-            .and_then(|selected| {
-                model
-                    .context_windows
-                    .iter()
-                    .find(|option| option.id == selected)
-                    .map(|option| option.label.clone())
-            });
-
-        let fast = selected_tier == "fast" || tier_label.eq_ignore_ascii_case("fast");
-        let trigger_label = match (effort_label.unwrap_or_else(|| tier_label.clone()), window_label)
-        {
-            (label, Some(window)) => format!("{label} · {window}"),
-            (label, None) => label,
-        };
-        let reasoning_efforts = model.reasoning_efforts.clone();
-        let default_effort = model.default_reasoning_effort.clone();
-        let service_tiers = model.service_tiers.clone();
-        let context_windows = model.context_windows.clone();
-        let default_window = model.default_context_window.clone();
-        let default_tier = model
-            .default_service_tier
-            .clone()
-            .unwrap_or_else(|| "default".to_owned());
-        let weak = cx.entity().downgrade();
-        let handle = self.menu_handle("model-traits", cx);
-        Some(dropdown_menu(
-            MenuChip::new("model-traits")
-                .when(fast, |trigger| {
-                    trigger.icon("icons/zap.svg", theme.text_secondary)
-                })
-                .label(trigger_label)
-                .caret(false)
-                .selected(handle.is_open()),
-            "model-traits-menu",
-            &handle,
-            MenuAlign::AboveLeft,
-            move |_| {
-                let mut items = Vec::new();
-                if !reasoning_efforts.is_empty() {
-                    items.push(MenuItem::Header(tr!("models.reasoning").into()));
-                    for option in reasoning_efforts.clone() {
-                        let weak = weak.clone();
-                        let effort = option.id;
-                        let is_default = default_effort.as_deref() == Some(effort.as_str());
-                        let selected = selected_effort.as_deref() == Some(effort.as_str());
-                        items.push(
-                            traits_choice(theme, option.label, is_default, selected).on_click(
-                                move |_, cx| {
-                                    let _ = weak.update(cx, |this, cx| {
-                                        this.set_reasoning_effort(effort.clone(), cx);
-                                    });
-                                },
-                            ),
-                        );
-                    }
-                }
-                if !service_tiers.is_empty() {
-                    if !reasoning_efforts.is_empty() {
-                        items.push(MenuItem::Separator);
-                    }
-                    items.push(MenuItem::Header(tr!("models.service_tier").into()));
-                    let weak_standard = weak.clone();
-                    items.push(
-                        traits_choice(
-                            theme,
-                            tr!("models.standard"),
-                            default_tier == "default",
-                            selected_tier == "default",
-                        )
-                        .on_click(move |_, cx| {
-                            let _ = weak_standard.update(cx, |this, cx| {
-                                this.set_service_tier("default".to_owned(), cx);
-                            });
-                        }),
-                    );
-                    for option in service_tiers.clone() {
-                        let weak = weak.clone();
-                        let tier = option.id;
-                        let is_default = default_tier == tier;
-                        let selected = selected_tier == tier;
-                        items.push(
-                            traits_choice(theme, option.label, is_default, selected).on_click(
-                                move |_, cx| {
-                                    let _ = weak.update(cx, |this, cx| {
-                                        this.set_service_tier(tier.clone(), cx);
-                                    });
-                                },
-                            ),
-                        );
-                    }
-                }
-                if !context_windows.is_empty() {
-                    if !reasoning_efforts.is_empty() || !service_tiers.is_empty() {
-                        items.push(MenuItem::Separator);
-                    }
-                    items.push(MenuItem::Header(tr!("models.context_window").into()));
-                    for option in context_windows.clone() {
-                        let weak = weak.clone();
-                        let window = option.id;
-                        let is_default = default_window.as_deref() == Some(window.as_str());
-                        let selected = selected_window.as_deref() == Some(window.as_str());
-                        items.push(
-                            traits_choice(theme, option.label, is_default, selected).on_click(
-                                move |_, cx| {
-                                    let _ = weak.update(cx, |this, cx| {
-                                        this.set_context_window(window.clone(), cx);
-                                    });
-                                },
-                            ),
-                        );
-                    }
-                }
-                items
-            },
-        ))
-    }
-
     pub(super) fn render_access_control(&self, cx: &mut Context<Self>) -> AnyElement {
         let theme = Theme::current(cx);
         let selected_mode = self
@@ -1573,8 +1658,9 @@ impl Waku {
         let handle = self.menu_handle("runtime-mode", cx);
         dropdown_menu(
             MenuChip::new("runtime-mode")
+                .full_radius()
                 .icon(selected_mode.icon(), theme.text_tertiary)
-                .label(selected_mode.label())
+                .label(tr!("composer.agent_mode"))
                 .caret(false)
                 .selected(handle.is_open()),
             "runtime-mode-menu",
@@ -1604,9 +1690,9 @@ impl Waku {
                                                 .truncate()
                                                 .text_size(px(12.0))
                                                 .font_weight(if selected {
-                                                    FontWeight::SEMIBOLD
+                                                    FontWeight::NORMAL
                                                 } else {
-                                                    FontWeight::MEDIUM
+                                                    FontWeight::NORMAL
                                                 })
                                                 .text_color(theme.text)
                                                 .child(option.label()),
@@ -1667,6 +1753,7 @@ impl Waku {
             }
         });
         let trigger = MenuChip::new("agent-preset")
+            .full_radius()
             .icon("icons/bot.svg", theme.text_tertiary)
             .label(selected_label)
             .caret(false)
@@ -1717,9 +1804,9 @@ impl Waku {
                                                 .truncate()
                                                 .text_size(px(12.0))
                                                 .font_weight(if selected {
-                                                    FontWeight::SEMIBOLD
+                                                    FontWeight::NORMAL
                                                 } else {
-                                                    FontWeight::MEDIUM
+                                                    FontWeight::NORMAL
                                                 })
                                                 .text_color(theme.text)
                                                 .child(name.clone()),
@@ -1756,72 +1843,6 @@ impl Waku {
         ))
     }
 
-    pub(super) fn render_interaction_mode_control(&self, cx: &mut Context<Self>) -> AnyElement {
-        let theme = Theme::current(cx);
-        let mode = self
-            .selected_session()
-            .map(|session| session.interaction_mode)
-            .unwrap_or_default();
-        let supports_plan = self.selected_session().is_none_or(|session| {
-            session.provider != ProviderKind::DeepSeek
-                || self.agent_preset_for_session(session).as_deref() != Some("minimal")
-        });
-        // A stale state can still be switched back to Build; Minimal simply
-        // cannot be toggled from Build into a plan capability it does not mount.
-        let interactive = mode == InteractionMode::Plan || supports_plan;
-        let next_mode = if mode == InteractionMode::Plan {
-            InteractionMode::Build
-        } else {
-            InteractionMode::Plan
-        };
-        let weak = cx.entity().downgrade();
-        div()
-            .id("interaction-mode")
-            .h(px(24.0))
-            .px(px(7.0))
-            .rounded(px(6.0))
-            .flex()
-            .items_center()
-            .gap(px(6.0))
-            .cursor_default()
-            .text_size(px(11.5))
-            .line_height(px(14.0))
-            .text_color(if mode == InteractionMode::Plan {
-                theme.accent
-            } else {
-                theme.text_secondary
-            })
-            .child(icon(
-                if mode == InteractionMode::Plan {
-                    "icons/list.svg"
-                } else {
-                    "icons/wrench.svg"
-                },
-                10.5,
-                if mode == InteractionMode::Plan {
-                    theme.accent
-                } else {
-                    theme.text_tertiary
-                },
-            ))
-            .child(mode.label())
-            .when(interactive, |element| {
-                element
-                    .hover(|element| element.bg(theme.overlay))
-                    .on_click(move |_, _, cx| {
-                        let _ = weak.update(cx, |this, cx| {
-                            this.set_interaction_mode(next_mode, cx);
-                        });
-                    })
-            })
-            .when(!interactive, |element| {
-                element
-                    .opacity(0.7)
-                    .tooltip(Tooltip::text(tr!("agent_preset.minimal_no_plan")))
-            })
-            .into_any_element()
-    }
-
     /// Stage files dropped onto the composer as attachment chips. The mention
     /// each chip will submit takes the autocomplete's form: relative to the
     /// project root when the file is inside it, absolute otherwise,
@@ -1837,6 +1858,26 @@ impl Waku {
         }
         let focus = self.composer.read(cx).focus();
         window.focus(&focus, cx);
+    }
+
+    /// Open the platform file panel and feed its selection through the same
+    /// durable staging path used by drag-and-drop and clipboard attachments.
+    pub(super) fn open_attachment_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let receiver = cx.prompt_for_paths(PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: true,
+            prompt: Some(tr!("composer.attach_files").into()),
+        });
+        cx.spawn(async move |this, cx| {
+            if let Ok(Ok(Some(paths))) = receiver.await {
+                let _ = this.update(cx, |this, cx| {
+                    this.stage_attachment_paths(&paths, cx);
+                });
+            }
+        })
+        .detach();
+        window.focus(&self.composer_focus(cx), cx);
     }
 
     fn stage_attachment_paths(&mut self, paths: &[PathBuf], cx: &mut Context<Self>) -> bool {
@@ -2044,6 +2085,54 @@ impl Waku {
         if self.execute_local_composer_command(prompt, cx) {
             return None;
         }
+        if let Some(provider) = self.selected_session().map(|session| session.provider) {
+            if self.provider_detection_checked_at.is_none()
+                && !self.provider_setup.contains_key(&provider)
+            {
+                self.show_toast(tr!("common.checking"));
+                cx.notify();
+                return None;
+            }
+            let installed = self
+                .provider_probe(provider)
+                .is_some_and(|probe| probe.installed);
+            let auth_ready = !crate::provider_setup::supports_auth_probe(provider)
+                || matches!(
+                    self.provider_auth.get(&provider),
+                    Some(crate::provider_setup::ProviderAuthState::SignedIn)
+                );
+            let setup_busy = matches!(
+                self.provider_setup.get(&provider),
+                Some(
+                    crate::provider_setup::ProviderSetupState::Installing
+                        | crate::provider_setup::ProviderSetupState::Authenticating
+                )
+            );
+            if !installed || !auth_ready || setup_busy {
+                self.show_toast(tr!(
+                    "providers.setup_before_starting",
+                    provider = provider.short_name()
+                ));
+                cx.notify();
+                return None;
+            }
+        }
+        let goal_mode = self.selected_session().is_some_and(|session| {
+            crate::composer_complete::is_goal_mode_submission(
+                session.provider,
+                prompt,
+                &self.slash_command_index,
+            )
+        });
+        let goal_objective = if goal_mode {
+            let Some(objective) = crate::composer_complete::goal_objective(prompt) else {
+                self.show_toast(tr!("commands.goal_requires_objective"));
+                return None;
+            };
+            Some(objective)
+        } else {
+            None
+        };
         for attachment in &self.composer_attachments {
             if let (Some(reference), Some(image)) = (
                 attachment.blob_reference.as_ref(),
@@ -2063,13 +2152,17 @@ impl Waku {
             .iter()
             .map(|attachment| attachment.mention.clone())
             .collect::<Vec<_>>();
-        let submission = merged_submission(prompt, &mentions)?;
-        let display_content = (!attachments.is_empty()).then(|| prompt.trim().to_owned());
+        let visible_prompt = goal_objective.as_deref().unwrap_or(prompt);
+        let submission = merged_submission(visible_prompt, &mentions)?;
+        let display_content =
+            (goal_mode || !attachments.is_empty()).then(|| visible_prompt.trim().to_owned());
+        let goal_objective = goal_mode.then(|| submission.clone());
         self.discard_current_composer_draft(cx);
         Some(ComposerSubmission {
             prompt: submission,
             display_content,
             attachments,
+            goal_objective,
         })
     }
 
@@ -2078,6 +2171,24 @@ impl Waku {
         prompt: &str,
         cx: &mut Context<Self>,
     ) -> bool {
+        let interaction_mode = self.selected_session().and_then(|session| {
+            if session.provider == ProviderKind::DeepSeek
+                && self.agent_preset_for_session(session).as_deref() == Some("minimal")
+            {
+                return None;
+            }
+            crate::composer_complete::interaction_mode_submission(
+                session.provider,
+                prompt,
+                &self.slash_command_index,
+            )
+        });
+        if let Some(interaction_mode) = interaction_mode {
+            self.composer.update(cx, |input, cx| input.clear(cx));
+            self.set_interaction_mode(interaction_mode, cx);
+            return true;
+        }
+
         let Some(next_tier) = self.selected_session().and_then(|session| {
             if !crate::composer_complete::is_fast_mode_toggle_submission(
                 session.provider,
@@ -2112,30 +2223,30 @@ impl Waku {
         submission: ComposerSubmission,
         cx: &mut Context<Self>,
     ) {
+        let goal_mode = submission.goal_objective.is_some();
         self.composer_attachments = submission
             .attachments
             .into_iter()
             .map(ComposerAttachment::from)
             .collect();
         let content = submission.display_content.unwrap_or(submission.prompt);
+        let content = if goal_mode {
+            format!("/goal {content}")
+        } else {
+            content
+        };
         self.composer
             .update(cx, |input, cx| input.set_content(content, cx));
         self.schedule_composer_draft_save(cx);
         cx.notify();
     }
 
-    /// The staged-attachment chips above the input: a thumbnail tile per
+    /// The staged-attachment strip above the input: a thumbnail tile per
     /// image, a file-type icon and basename for everything else, each with a
     /// floating remove button — T3 Code's attachment row in graphite.
     fn render_composer_attachments(&self, cx: &mut Context<Self>) -> Div {
         let theme = Theme::current(cx);
-        let mut row = div()
-            .px(px(14.0))
-            .pt(px(2.0))
-            .pb(px(8.0))
-            .flex()
-            .flex_wrap()
-            .gap(px(8.0));
+        let mut row = div().w_full().px(px(2.0)).flex().flex_wrap().gap(px(6.0));
         for (index, attachment) in self.composer_attachments.iter().enumerate() {
             let menu = self.menu_handle(format!("composer-attachment-{index}-menu"), cx);
             let icon_path = if attachment.is_dir {
@@ -2143,19 +2254,21 @@ impl Waku {
             } else {
                 super::right_panel::file_icon_for_path(&attachment.mention)
             };
+            let group_name = SharedString::from(format!("composer-attachment-group-{index}"));
             let mut tile = div()
                 .id(SharedString::from(format!("composer-attachment-{index}")))
                 .relative()
-                .w(px(64.0))
-                .h(px(64.0))
-                .rounded(px(8.0))
+                .w(px(52.0))
+                .h(px(52.0))
+                .rounded(px(RADIUS_DF))
                 .overflow_hidden()
                 .border_1()
-                .border_color(theme.border)
+                .border_color(theme.border_strong)
                 .bg(theme.inset)
+                .group(group_name.clone())
                 .track_focus(menu.trigger_focus_handle())
                 .tab_index(0)
-                .focus_visible(|style| style.border_color(theme.accent))
+                .focus_visible(|style| style.border_color(theme.ring))
                 .tooltip(Tooltip::text(format!("@{}", attachment.mention)));
             let attachment_image = attachment.client_preview_image.clone().or_else(|| {
                 attachment
@@ -2183,7 +2296,7 @@ impl Waku {
                                 "composer-attachment-{index}-preview"
                             )))
                             .size_full()
-                            .cursor_default()
+                            .cursor_pointer()
                             .on_click(cx.listener(move |this, _, window, cx| {
                                 this.open_image_preview(
                                     preview_image.clone(),
@@ -2260,13 +2373,15 @@ impl Waku {
                     .w(px(16.0))
                     .h(px(16.0))
                     .tab_index(0)
-                    .rounded(px(5.0))
+                    .rounded(px(RADIUS_SM))
                     .flex()
                     .items_center()
                     .justify_center()
-                    .cursor_default()
+                    .cursor_pointer()
+                    .opacity(0.0)
+                    .group_hover(group_name, |style| style.opacity(1.0))
                     .bg(theme.canvas.opacity(0.8))
-                    .focus_visible(|style| style.border_1().border_color(theme.accent))
+                    .focus_visible(|style| style.opacity(1.0).border_1().border_color(theme.ring))
                     .hover(|element| element.bg(theme.canvas.opacity(0.95)))
                     .active(|element| element.opacity(0.8))
                     .child(icon("icons/x.svg", 9.0, theme.text_secondary))
@@ -2337,13 +2452,13 @@ impl Waku {
                     )))
                     .h(px(24.0))
                     .px(px(7.0))
-                    .rounded(px(6.0))
+                    .rounded(px(RADIUS_DF))
                     .flex()
                     .items_center()
                     .gap(px(5.0))
-                    .cursor_default()
+                    .cursor_pointer()
                     .tab_index(0)
-                    .focus_visible(|style| style.border_1().border_color(theme.accent))
+                    .focus_visible(|style| style.border_1().border_color(theme.ring))
                     .hover(|element| element.bg(theme.overlay_strong))
                     .active(|element| element.opacity(0.8))
                     .text_size(px(11.5))
@@ -2376,12 +2491,12 @@ impl Waku {
                     )))
                     .w(px(24.0))
                     .h(px(24.0))
-                    .rounded(px(6.0))
+                    .rounded(px(RADIUS_DF))
                     .flex()
                     .items_center()
                     .justify_center()
-                    .cursor_default()
-                    .focus_visible(|style| style.border_1().border_color(theme.accent))
+                    .cursor_pointer()
+                    .focus_visible(|style| style.border_1().border_color(theme.ring))
                     .when(menu_open, |element| element.bg(theme.overlay_strong))
                     .hover(|element| element.bg(theme.overlay_strong))
                     .active(|element| element.opacity(0.8))
@@ -2417,9 +2532,9 @@ impl Waku {
                     .flex()
                     .items_center()
                     .gap(px(9.0))
-                    .cursor_default()
+                    .cursor_pointer()
                     .tab_index(0)
-                    .focus_visible(|style| style.border_1().border_color(theme.accent))
+                    .focus_visible(|style| style.border_1().border_color(theme.ring))
                     .hover(|element| element.bg(theme.overlay))
                     .tooltip(Tooltip::text(tr!("composer.edit_in_composer")))
                     .child(icon("icons/queue.svg", 12.0, theme.text_tertiary))
@@ -2445,14 +2560,14 @@ impl Waku {
                                     )))
                                     .w(px(24.0))
                                     .h(px(24.0))
-                                    .rounded(px(6.0))
+                                    .rounded(px(RADIUS_DF))
                                     .flex()
                                     .items_center()
                                     .justify_center()
-                                    .cursor_default()
+                                    .cursor_pointer()
                                     .tab_index(0)
                                     .focus_visible(|style| {
-                                        style.border_1().border_color(theme.accent)
+                                        style.border_1().border_color(theme.ring)
                                     })
                                     .hover(|element| element.bg(theme.overlay_strong))
                                     .active(|element| element.opacity(0.8))
@@ -2498,8 +2613,8 @@ impl Waku {
                     .px(px(14.0))
                     .child(
                         div()
-                            .rounded_tl(px(12.0))
-                            .rounded_tr(px(12.0))
+                            .rounded_tl(px(RADIUS_DF))
+                            .rounded_tr(px(RADIUS_DF))
                             .border_t_1()
                             .border_l_1()
                             .border_r_1()
@@ -2514,9 +2629,220 @@ impl Waku {
         )
     }
 
+    fn render_provider_setup_notice(
+        &self,
+        provider: ProviderKind,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let installed = self
+            .provider_probe(provider)
+            .is_some_and(|probe| probe.installed);
+        let auth_state = self.provider_auth.get(&provider);
+        let setup_state = self.provider_setup.get(&provider);
+        // Startup probes are deliberately initialized as unavailable so no
+        // provider can be used before the daemon has checked the host. That
+        // placeholder is not evidence that a CLI is missing. Keep the
+        // composer still until the initial scan completes instead of flashing
+        // an install banner that disappears a moment later.
+        if !provider_setup_notice_can_render(
+            self.provider_detection_checked_at.is_some(),
+            setup_state.is_some(),
+        ) {
+            return None;
+        }
+        let guided = crate::provider_setup::can_install_automatically(provider);
+        let remote = self.daemon.is_remote();
+        let (title, description, action, pending) = match setup_state {
+            Some(crate::provider_setup::ProviderSetupState::Installing) => (
+                tr!("providers.installing_cli", provider = provider.short_name()),
+                tr!("providers.installing_cli_description"),
+                tr!("providers.installing"),
+                true,
+            ),
+            Some(crate::provider_setup::ProviderSetupState::Authenticating) => (
+                tr!("providers.finish_sign_in", provider = provider.short_name()),
+                tr!("providers.finish_sign_in_description"),
+                tr!("providers.waiting_for_sign_in"),
+                true,
+            ),
+            Some(crate::provider_setup::ProviderSetupState::Failed(error)) => (
+                tr!("providers.setup_needs_attention"),
+                error.clone(),
+                tr!("common.retry"),
+                false,
+            ),
+            None if !installed && remote => (
+                tr!(
+                    "providers.cli_required_title",
+                    provider = provider.short_name()
+                ),
+                tr!(
+                    "providers.remote_setup_required",
+                    provider = provider.short_name()
+                ),
+                tr!("providers.provider_settings"),
+                false,
+            ),
+            None if !installed => (
+                tr!(
+                    "providers.cli_required_title",
+                    provider = provider.short_name()
+                ),
+                tr!(
+                    "providers.cli_required_description",
+                    provider = provider.short_name()
+                ),
+                if guided {
+                    if crate::provider_setup::can_authenticate_automatically(provider) {
+                        tr!("providers.install_and_sign_in")
+                    } else {
+                        tr!("providers.install")
+                    }
+                } else {
+                    tr!("providers.install_guide")
+                },
+                false,
+            ),
+            None if guided
+                && matches!(
+                    auth_state,
+                    Some(
+                        crate::provider_setup::ProviderAuthState::SignedOut
+                            | crate::provider_setup::ProviderAuthState::Failed(_)
+                    )
+                ) =>
+            {
+                let description = match auth_state {
+                    Some(crate::provider_setup::ProviderAuthState::Failed(error)) => error.clone(),
+                    _ => tr!(
+                        "providers.sign_in_required_description",
+                        provider = provider.short_name()
+                    ),
+                };
+                (
+                    tr!(
+                        "providers.sign_in_required",
+                        provider = provider.short_name()
+                    ),
+                    description,
+                    if remote {
+                        tr!("providers.provider_settings")
+                    } else {
+                        tr!("providers.sign_in")
+                    },
+                    false,
+                )
+            }
+            _ => return None,
+        };
+        let theme = Theme::current(cx);
+        let focus =
+            self.transcript_control_focus(&format!("provider-setup-notice-{}", provider.id()), cx);
+        let action_button = div()
+            .id(SharedString::from(format!(
+                "composer-provider-setup-{}",
+                provider.id()
+            )))
+            .track_focus(&focus)
+            .tab_index(0)
+            .tab_stop(true)
+            .h(px(28.0))
+            .px(px(11.0))
+            .rounded(px(RADIUS_LG))
+            .flex_none()
+            .flex()
+            .items_center()
+            .gap(px(6.0))
+            .text_size(px(10.5))
+            .font_weight(FontWeight::MEDIUM)
+            .focus_visible(|style| style.border_1().border_color(theme.ring))
+            .when(pending, |button| {
+                button
+                    .cursor_default()
+                    .bg(theme.overlay)
+                    .text_color(theme.text_tertiary)
+                    .child(motion::spin(icon(
+                        "icons/loader-circle.svg",
+                        11.0,
+                        theme.text_tertiary,
+                    )))
+            })
+            .when(!pending, |button| {
+                button
+                    .cursor_pointer()
+                    .bg(theme.inverse)
+                    .text_color(theme.on_inverse)
+                    .hover(|element| element.bg(theme.primary_hover))
+                    .active(|element| element.opacity(0.8))
+            })
+            .child(action)
+            .on_click(cx.listener(move |this, _, _, cx| {
+                if pending {
+                    return;
+                }
+                if remote || !guided {
+                    this.open_settings_page(SettingsPage::Providers, cx);
+                } else {
+                    this.start_provider_setup(provider, cx);
+                }
+            }))
+            .on_key_down(cx.listener(move |this, event: &KeyDownEvent, _, cx| {
+                if !pending && matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                    if remote || !guided {
+                        this.open_settings_page(SettingsPage::Providers, cx);
+                    } else {
+                        this.start_provider_setup(provider, cx);
+                    }
+                    cx.stop_propagation();
+                }
+            }));
+
+        Some(
+            div()
+                .w_full()
+                .max_w(px(CONTENT_MAX_WIDTH))
+                .mx_auto()
+                .px(px(12.0))
+                .py(px(9.0))
+                .rounded(px(RADIUS_DF))
+                .border_1()
+                .border_color(theme.sidebar_border)
+                .bg(theme.sidebar_drag_background)
+                .flex()
+                .items_center()
+                .gap(px(10.0))
+                .child(icon("icons/terminal.svg", 15.0, theme.text_secondary))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .child(
+                            div()
+                                .text_size(px(11.5))
+                                .font_weight(FontWeight::MEDIUM)
+                                .text_color(theme.text)
+                                .child(title),
+                        )
+                        .child(
+                            div()
+                                .mt(px(2.0))
+                                .truncate()
+                                .text_size(px(10.5))
+                                .text_color(theme.text_tertiary)
+                                .child(description),
+                        ),
+                )
+                .child(action_button)
+                .into_any_element(),
+        )
+    }
+
     pub(super) fn render_composer(&self, window: &Window, cx: &mut Context<Self>) -> Div {
         let theme = Theme::current(cx);
         let session = self.selected_session();
+        let setup_notice = session
+            .map(|session| session.provider)
+            .and_then(|provider| self.render_provider_setup_notice(provider, cx));
         let preparing = session.is_some_and(|session| {
             self.submission_preparations.contains(&session.id)
                 || self.response_fork_preparations.contains_key(&session.id)
@@ -2531,199 +2857,259 @@ impl Waku {
             || !self.composer_attachments.is_empty();
         let autocomplete = self.render_composer_autocomplete(window, cx);
         let autocomplete_open = autocomplete.is_some();
+        let attachment_focus = self.transcript_control_focus("composer-attach", cx);
         // Files dragged in from the OS light the card up as a drop target and
         // stage as attachment chips. The wash arrives pre-blended because a
         // drag-over refinement replaces the card's fill rather than
         // compositing over it.
-        let drop_wash = theme.composer.blend(theme.overlay_strong);
+        let composer_surface = theme.sidebar_drag_background;
+        let drop_wash = composer_surface.blend(theme.overlay_strong);
         let drop_ring = theme.accent.opacity(0.7);
-        div().flex_none().px(px(20.0)).child(
-            div()
-                .w_full()
-                .max_w(px(CONTENT_MAX_WIDTH))
-                .mx_auto()
-                .rounded(px(13.0))
-                .border_1()
-                .border_color(theme.border)
-                .bg(theme.composer)
-                // Horizontal insets live on each row (and inside the field's
-                // scroll viewport, via `padding_x`) rather than on the card,
-                // so the field's overlay scrollbar can hug the card's edge.
-                .py(px(10.0))
-                .drag_over::<ExternalPaths>(move |style, _, _, _| {
-                    style.bg(drop_wash).border_color(drop_ring)
-                })
-                .on_drop(cx.listener(|this, paths: &ExternalPaths, window, cx| {
-                    this.stage_dropped_files(paths, window, cx);
-                }))
-                // Anchor for the bounds probe the autocomplete popup aligns to.
-                .relative()
-                .child(super::autocomplete::composer_card_bounds_probe(
-                    self.composer_autocomplete.card_bounds_cell(),
-                ))
-                // Only while the popup is open: the key context routes the
-                // arrows, `enter`, `tab` and `escape` here as actions, out
-                // from under the focused field. When it closes, the context
-                // disappears with it and `enter` submits again.
-                .when(autocomplete_open, |card| {
-                    card.key_context("ComposerAutocomplete")
-                        .on_action(cx.listener(|this, _: &SelectNextEntry, window, cx| {
-                            this.move_autocomplete_highlight("down", window, cx);
-                        }))
-                        .on_action(cx.listener(|this, _: &SelectPreviousEntry, window, cx| {
-                            this.move_autocomplete_highlight("up", window, cx);
-                        }))
-                        .on_action(cx.listener(|this, _: &ConfirmEntry, window, cx| {
-                            this.accept_autocomplete(None, window, cx);
-                        }))
-                        .on_action(cx.listener(|this, _: &DismissMenu, _, cx| {
-                            this.dismiss_autocomplete(cx);
-                        }))
-                })
-                .children(autocomplete)
-                .when(!self.composer_attachments.is_empty(), |card| {
-                    card.child(self.render_composer_attachments(cx))
-                })
-                .child(div().pt(px(2.0)).child(self.composer.clone()))
-                .child(
+        div()
+            .flex_none()
+            .px(px(20.0))
+            .flex()
+            .flex_col()
+            .gap(px(8.0))
+            .children(setup_notice)
+            // Attachments are staged outside the field shell. Adding an image
+            // must never change the input's own height; the strip simply sits
+            // above it and retains the existing full-screen preview action.
+            .when(!self.composer_attachments.is_empty(), |column| {
+                column.child(
                     div()
-                        .mt(px(8.0))
-                        .px(px(10.0))
-                        .flex()
-                        .items_center()
-                        .gap(px(4.0))
-                        .text_size(px(11.5))
-                        .line_height(px(14.0))
-                        .child(self.render_provider_model_control(cx))
-                        .children(self.render_model_traits_control(cx))
-                        .children(self.render_agent_preset_control(cx))
-                        .child(self.render_access_control(cx))
-                        .child(self.render_interaction_mode_control(cx))
-                        .child(div().flex_1())
-                        .child(match submit_action {
-                            ComposerSubmitAction::Preparing => div()
-                                .id("send-or-stop")
-                                .w(px(26.0))
-                                .h(px(26.0))
-                                .rounded_full()
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .cursor_default()
-                                .bg(theme.overlay_strong)
-                                .child(motion::spin(icon(
-                                    "icons/loader-circle.svg",
-                                    15.0,
-                                    theme.text_secondary,
-                                )))
-                                .tooltip(Tooltip::text(tr!("composer.preparing_task"))),
-                            ComposerSubmitAction::Stop => div()
-                                .id("working-actions")
-                                .flex()
-                                .items_center()
-                                .gap(px(6.0))
-                                .child(
-                                    div()
-                                        .id("send-or-stop")
-                                        .w(px(26.0))
-                                        .h(px(26.0))
-                                        .rounded_full()
-                                        .flex()
-                                        .items_center()
-                                        .justify_center()
-                                        .cursor_default()
-                                        .bg(theme.overlay_strong)
-                                        .hover(|element| element.bg(theme.danger_soft))
-                                        .active(|element| element.opacity(0.8))
-                                        .when(escape_stop_armed, |element| {
-                                            element.child(
-                                                div()
-                                                    .text_size(px(10.0))
-                                                    .font_weight(FontWeight::SEMIBOLD)
-                                                    .text_color(theme.text)
-                                                    .child("Esc"),
-                                            )
-                                        })
-                                        .when(!escape_stop_armed, |element| {
-                                            element.child(icon("icons/stop.svg", 18.0, theme.text))
-                                        })
-                                        .on_click(cx.listener(|this, _, _, cx| {
-                                            this.cancel_turn(cx);
-                                        })),
-                                )
-                                .when(has_draft, |element| {
-                                    element.child(
+                        .w_full()
+                        .max_w(px(CONTENT_MAX_WIDTH))
+                        .mx_auto()
+                        .child(self.render_composer_attachments(cx)),
+                )
+            })
+            .child(
+                div()
+                    .w_full()
+                    .max_w(px(CONTENT_MAX_WIDTH))
+                    .mx_auto()
+                    .rounded(px(RADIUS_LG))
+                    .border_1()
+                    .border_color(theme.sidebar_border)
+                    .bg(composer_surface)
+                    // Horizontal insets live on each row (and inside the field's
+                    // scroll viewport, via `padding_x`) rather than on the card,
+                    // so the field's overlay scrollbar can hug the card's edge.
+                    .py(px(5.0))
+                    .drag_over::<ExternalPaths>(move |style, _, _, _| {
+                        style.bg(drop_wash).border_color(drop_ring)
+                    })
+                    .on_drop(cx.listener(|this, paths: &ExternalPaths, window, cx| {
+                        this.stage_dropped_files(paths, window, cx);
+                    }))
+                    // Anchor for the bounds probe the autocomplete popup aligns to.
+                    .relative()
+                    .child(super::autocomplete::composer_card_bounds_probe(
+                        self.composer_autocomplete.card_bounds_cell(),
+                    ))
+                    // Only while the popup is open: the key context routes the
+                    // arrows, `enter`, `tab` and `escape` here as actions, out
+                    // from under the focused field. When it closes, the context
+                    // disappears with it and `enter` submits again.
+                    .when(autocomplete_open, |card| {
+                        card.key_context("ComposerAutocomplete")
+                            .on_action(cx.listener(|this, _: &SelectNextEntry, window, cx| {
+                                this.move_autocomplete_highlight("down", window, cx);
+                            }))
+                            .on_action(cx.listener(|this, _: &SelectPreviousEntry, window, cx| {
+                                this.move_autocomplete_highlight("up", window, cx);
+                            }))
+                            .on_action(cx.listener(|this, _: &ConfirmEntry, window, cx| {
+                                this.accept_autocomplete(None, window, cx);
+                            }))
+                            .on_action(cx.listener(|this, _: &DismissMenu, _, cx| {
+                                this.dismiss_autocomplete(cx);
+                            }))
+                    })
+                    .children(autocomplete)
+                    .child(
+                        div()
+                            .min_h(px(32.0))
+                            .pr(px(10.0))
+                            .flex()
+                            .items_center()
+                            .gap(px(4.0))
+                            .text_size(px(11.5))
+                            .line_height(px(14.0))
+                            .child(div().flex_1().min_w_0().child(self.composer.clone()))
+                            .child(self.render_provider_model_control(cx))
+                            .children(self.render_agent_preset_control(cx))
+                            .child(self.render_access_control(cx))
+                            .child(
+                                div()
+                                    .id("composer-attach")
+                                    .track_focus(&attachment_focus)
+                                    .tab_index(0)
+                                    .tab_stop(true)
+                                    .size(px(28.0))
+                                    .flex_none()
+                                    .rounded(px(RADIUS_LG))
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .cursor_pointer()
+                                    .focus_visible(|style| {
+                                        style.border_1().border_color(theme.ring)
+                                    })
+                                    .hover(|style| style.bg(theme.overlay))
+                                    .active(|style| style.bg(theme.overlay_strong))
+                                    .tooltip(Tooltip::text(tr!("composer.attach_files")))
+                                    .child(icon("icons/paperclip.svg", 15.0, theme.text_secondary))
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.open_attachment_picker(window, cx);
+                                        cx.stop_propagation();
+                                    }))
+                                    .on_key_down(cx.listener(
+                                        |this, event: &KeyDownEvent, window, cx| {
+                                            if matches!(
+                                                event.keystroke.key.as_str(),
+                                                "enter" | "space"
+                                            ) {
+                                                this.open_attachment_picker(window, cx);
+                                                cx.stop_propagation();
+                                            }
+                                        },
+                                    )),
+                            )
+                            .child(match submit_action {
+                                ComposerSubmitAction::Preparing => div()
+                                    .id("send-or-stop")
+                                    .w(px(30.0))
+                                    .h(px(30.0))
+                                    .rounded(px(RADIUS_LG))
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .cursor_default()
+                                    .bg(theme.overlay_strong)
+                                    .child(motion::spin(icon(
+                                        "icons/loader-circle.svg",
+                                        15.0,
+                                        theme.text_secondary,
+                                    )))
+                                    .tooltip(Tooltip::text(tr!("composer.preparing_task"))),
+                                ComposerSubmitAction::Stop => div()
+                                    .id("working-actions")
+                                    .flex()
+                                    .items_center()
+                                    .gap(px(6.0))
+                                    .child(
                                         div()
-                                            .id("queue-follow-up")
-                                            .w(px(26.0))
-                                            .h(px(26.0))
-                                            .rounded_full()
+                                            .id("send-or-stop")
+                                            .w(px(30.0))
+                                            .h(px(30.0))
+                                            .rounded(px(RADIUS_LG))
                                             .flex()
                                             .items_center()
                                             .justify_center()
-                                            .cursor_default()
-                                            .bg(theme.inverse)
-                                            .hover(|element| element.opacity(0.9))
+                                            .cursor_pointer()
+                                            .bg(theme.overlay_strong)
+                                            .hover(|element| element.bg(theme.danger_soft))
                                             .active(|element| element.opacity(0.8))
-                                            .child(icon(
-                                                "icons/arrow-up.svg",
-                                                16.0,
-                                                theme.on_inverse,
-                                            ))
-                                            .tooltip(Tooltip::text(tr!("composer.queue_followup")))
+                                            .when(escape_stop_armed, |element| {
+                                                element.child(
+                                                    div()
+                                                        .text_size(px(10.0))
+                                                        .font_weight(FontWeight::NORMAL)
+                                                        .text_color(theme.text)
+                                                        .child("Esc"),
+                                                )
+                                            })
+                                            .when(!escape_stop_armed, |element| {
+                                                element.child(icon(
+                                                    "icons/stop.svg",
+                                                    18.0,
+                                                    theme.text,
+                                                ))
+                                            })
                                             .on_click(cx.listener(|this, _, _, cx| {
-                                                let prompt =
-                                                    this.composer.read(cx).content().to_owned();
-                                                if let Some(submission) =
-                                                    this.submission_with_attachments(&prompt, cx)
-                                                {
-                                                    this.composer
-                                                        .update(cx, |input, cx| input.clear(cx));
-                                                    this.submit_composer_submission(submission, cx);
-                                                }
+                                                this.cancel_turn(cx);
                                             })),
                                     )
-                                }),
-                            ComposerSubmitAction::Send => div()
-                                .id("send-or-stop")
-                                .w(px(26.0))
-                                .h(px(26.0))
-                                .rounded_full()
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .bg(if has_draft {
-                                    theme.inverse
-                                } else {
-                                    theme.overlay_strong
-                                })
-                                .when(has_draft, |element| {
-                                    element
-                                        .cursor_default()
-                                        .hover(|element| element.opacity(0.9))
-                                        .active(|element| element.opacity(0.8))
-                                })
-                                .child(icon(
-                                    "icons/arrow-up.svg",
-                                    16.0,
-                                    if has_draft {
-                                        theme.on_inverse
+                                    .when(has_draft, |element| {
+                                        element.child(
+                                            div()
+                                                .id("queue-follow-up")
+                                                .w(px(30.0))
+                                                .h(px(30.0))
+                                                .rounded(px(RADIUS_LG))
+                                                .flex()
+                                                .items_center()
+                                                .justify_center()
+                                                .cursor_pointer()
+                                                .bg(theme.inverse)
+                                                .hover(|element| element.bg(theme.primary_hover))
+                                                .active(|element| element.opacity(0.8))
+                                                .child(icon(
+                                                    "icons/send.svg",
+                                                    16.0,
+                                                    theme.on_inverse,
+                                                ))
+                                                .tooltip(Tooltip::text(tr!(
+                                                    "composer.queue_followup"
+                                                )))
+                                                .on_click(cx.listener(|this, _, _, cx| {
+                                                    let prompt =
+                                                        this.composer.read(cx).content().to_owned();
+                                                    if let Some(submission) = this
+                                                        .submission_with_attachments(&prompt, cx)
+                                                    {
+                                                        this.composer.update(cx, |input, cx| {
+                                                            input.clear(cx)
+                                                        });
+                                                        this.submit_composer_submission(
+                                                            submission, cx,
+                                                        );
+                                                    }
+                                                })),
+                                        )
+                                    }),
+                                ComposerSubmitAction::Send => div()
+                                    .id("send-or-stop")
+                                    .w(px(30.0))
+                                    .h(px(30.0))
+                                    .rounded(px(RADIUS_LG))
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .bg(if has_draft {
+                                        theme.inverse
                                     } else {
-                                        theme.text_ghost
-                                    },
-                                ))
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    let prompt = this.composer.read(cx).content().to_owned();
-                                    if let Some(submission) =
-                                        this.submission_with_attachments(&prompt, cx)
-                                    {
-                                        this.composer.update(cx, |input, cx| input.clear(cx));
-                                        this.submit_composer_submission(submission, cx);
-                                    }
-                                })),
-                        }),
-                ),
-        )
+                                        theme.overlay_strong
+                                    })
+                                    .when(has_draft, |element| {
+                                        element
+                                            .cursor_pointer()
+                                            .hover(|element| element.bg(theme.primary_hover))
+                                            .active(|element| element.opacity(0.8))
+                                    })
+                                    .child(icon(
+                                        "icons/send.svg",
+                                        16.0,
+                                        if has_draft {
+                                            theme.on_inverse
+                                        } else {
+                                            theme.text_ghost
+                                        },
+                                    ))
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        let prompt = this.composer.read(cx).content().to_owned();
+                                        if let Some(submission) =
+                                            this.submission_with_attachments(&prompt, cx)
+                                        {
+                                            this.composer.update(cx, |input, cx| input.clear(cx));
+                                            this.submit_composer_submission(submission, cx);
+                                        }
+                                    })),
+                            }),
+                    ),
+            )
     }
 
     fn render_branch_selector(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
@@ -2815,7 +3201,7 @@ impl Waku {
             .trim()
             .to_ascii_lowercase();
         let visible_branches = Rc::new(
-            if handle.is_open() && self.branch_picker_mode == BranchPickerMode::Browse {
+            if handle.is_visible() && self.branch_picker_mode == BranchPickerMode::Browse {
                 visible_branch_entries(&snapshot.branches, &selected_branch, &normalized_query)
             } else {
                 Vec::new()
@@ -2834,7 +3220,7 @@ impl Waku {
             .branch_picker_highlight
             .filter(|index| *index < actions.len());
         let mode = self.branch_picker_mode;
-        if handle.is_open() && mode == BranchPickerMode::Browse {
+        if handle.is_visible() && mode == BranchPickerMode::Browse {
             self.sync_branch_picker_rows(&visible_branches);
         }
         let branch_list = self.branch_picker_list_state.clone();
@@ -2863,7 +3249,7 @@ impl Waku {
                                 .items_center()
                                 .gap(px(8.0))
                                 .text_size(px(13.0))
-                                .font_weight(FontWeight::MEDIUM)
+                                .font_weight(FontWeight::NORMAL)
                                 .text_color(theme.text)
                                 .child(icon("icons/plus.svg", 14.0, theme.text_secondary))
                                 .child(tr!("branches.create_and_checkout")),
@@ -2873,9 +3259,9 @@ impl Waku {
                                 .mt(px(12.0))
                                 .h(px(36.0))
                                 .px(px(10.0))
-                                .rounded(px(9.0))
+                                .rounded(px(RADIUS_DF))
                                 .border_1()
-                                .border_color(theme.border_strong)
+                                .border_color(theme.border)
                                 .bg(theme.surface)
                                 .flex()
                                 .items_center()
@@ -2946,11 +3332,11 @@ impl Waku {
                                         .w_full()
                                         .h(px(BRANCH_PICKER_ROW_HEIGHT))
                                         .px(px(8.0))
-                                        .rounded(px(6.0))
+                                        .rounded(px(RADIUS_DF))
                                         .flex()
                                         .items_center()
                                         .gap(px(8.0))
-                                        .cursor_default()
+                                        .when(!disabled, |row| row.cursor_pointer())
                                         .when(highlighted, |element| {
                                             element.bg(theme.overlay_strong)
                                         })
@@ -3012,11 +3398,11 @@ impl Waku {
                             .mx(px(4.0))
                             .h(px(BRANCH_PICKER_ROW_HEIGHT))
                             .px(px(8.0))
-                            .rounded(px(6.0))
+                            .rounded(px(RADIUS_DF))
                             .flex()
                             .items_center()
                             .gap(px(8.0))
-                            .cursor_default()
+                            .cursor_pointer()
                             .when(
                                 highlight.and_then(|index| actions.get(index))
                                     == Some(&BranchPickerAction::Create),
@@ -3057,7 +3443,7 @@ impl Waku {
                                         .w_full()
                                         .h(px(34.0))
                                         .px(px(10.0))
-                                        .rounded(px(9.0))
+                                        .rounded(px(RADIUS_DF))
                                         .bg(theme.surface)
                                         .flex()
                                         .items_center()
@@ -3072,7 +3458,7 @@ impl Waku {
                                 .pt(px(3.0))
                                 .pb(px(7.0))
                                 .text_size(px(12.0))
-                                .font_weight(FontWeight::MEDIUM)
+                                .font_weight(FontWeight::NORMAL)
                                 .text_color(theme.text_tertiary)
                                 .child(tr!("branches.title")),
                         )
@@ -3089,12 +3475,11 @@ impl Waku {
                 div()
                     .w(px(360.0))
                     .max_h(px(390.0))
-                    .rounded(px(13.0))
+                    .rounded(px(RADIUS_DF))
                     .overflow_hidden()
                     .border_1()
                     .border_color(theme.border_strong)
                     .bg(theme.raised)
-                    .shadow_lg()
                     .flex()
                     .flex_col()
                     .on_action(move |_: &SelectNextEntry, _, cx| {
@@ -3511,6 +3896,237 @@ pub(super) fn merged_submission(prompt: &str, mentions: &[String]) -> Option<Str
     }
 }
 
+/// A placeholder provider probe is intentionally unavailable until the daemon
+/// has inspected the host. It must not be rendered as a confirmed setup error.
+pub(super) fn provider_setup_notice_can_render(
+    detection_completed: bool,
+    setup_in_progress_or_failed: bool,
+) -> bool {
+    detection_completed || setup_in_progress_or_failed
+}
+
+fn focus_model_search(focus: FocusHandle, window: &mut Window) {
+    window.on_next_frame(move |window, _| {
+        window.on_next_frame(move |window, cx| window.focus(&focus, cx));
+    });
+}
+
+fn focus_model_summary(focus: FocusHandle, window: &mut Window) {
+    window.on_next_frame(move |window, _| {
+        window.on_next_frame(move |window, cx| window.focus(&focus, cx));
+    });
+}
+
+fn model_picker_summary_row(
+    id: impl Into<SharedString>,
+    label: String,
+    value: String,
+    enabled: bool,
+    focus: Option<FocusHandle>,
+    theme: Theme,
+    on_activate: impl Fn(&mut Window, &mut App) + 'static,
+) -> Stateful<Div> {
+    let on_activate = Rc::new(on_activate);
+    let click_activate = on_activate.clone();
+    div()
+        .id(id.into())
+        .when_some(focus, |row, focus| row.track_focus(&focus))
+        .when(enabled, |row| row.tab_index(0))
+        .h(px(32.0))
+        .px(px(8.0))
+        .rounded(px(RADIUS_DF))
+        .flex()
+        .items_center()
+        .gap(px(8.0))
+        .text_size(px(12.0))
+        .focus_visible(|style| style.border_1().border_color(theme.ring))
+        .when(enabled, |row| {
+            row.cursor_pointer().hover(|style| style.bg(theme.overlay))
+        })
+        .when(!enabled, |row| row.opacity(0.55))
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .text_color(theme.text_secondary)
+                .child(label),
+        )
+        .child(
+            div()
+                .max_w(px(136.0))
+                .truncate()
+                .text_color(if enabled {
+                    theme.text
+                } else {
+                    theme.text_ghost
+                })
+                .child(value),
+        )
+        .child(icon("icons/chevron-right.svg", 12.0, theme.text_tertiary))
+        .when(enabled, |row| {
+            row.on_click(move |_, window, cx| click_activate(window, cx))
+                .on_key_down(move |event: &KeyDownEvent, window, cx| {
+                    if !event.keystroke.modifiers.modified()
+                        && matches!(event.keystroke.key.as_str(), "enter" | "space")
+                    {
+                        on_activate(window, cx);
+                        cx.stop_propagation();
+                    }
+                })
+        })
+}
+
+fn model_picker_choice_row(
+    id: impl Into<SharedString>,
+    label: String,
+    is_default: bool,
+    selected: bool,
+    theme: Theme,
+    on_activate: impl Fn(&mut Window, &mut App) + 'static,
+) -> Stateful<Div> {
+    let on_activate = Rc::new(on_activate);
+    let click_activate = on_activate.clone();
+    div()
+        .id(id.into())
+        .tab_index(0)
+        .h(px(32.0))
+        .px(px(8.0))
+        .rounded(px(RADIUS_DF))
+        .flex()
+        .items_center()
+        .gap(px(8.0))
+        .cursor_pointer()
+        .text_size(px(12.0))
+        .text_color(theme.text)
+        .focus_visible(|style| style.border_1().border_color(theme.ring))
+        .hover(|style| style.bg(theme.overlay))
+        .when(selected, |row| row.bg(theme.overlay_strong))
+        .child(div().flex_1().min_w_0().truncate().child(label))
+        .when(is_default, |row| {
+            row.child(
+                div()
+                    .h(px(17.0))
+                    .px(px(5.0))
+                    .rounded(px(RADIUS_SM))
+                    .border_1()
+                    .border_color(theme.border_strong)
+                    .flex()
+                    .items_center()
+                    .text_size(px(9.0))
+                    .text_color(theme.text_tertiary)
+                    .child(tr!("common.default")),
+            )
+        })
+        .when(selected, |row| {
+            row.child(icon("icons/check.svg", 12.0, theme.text_secondary))
+        })
+        .on_click(move |_, window, cx| click_activate(window, cx))
+        .on_key_down(move |event: &KeyDownEvent, window, cx| {
+            if !event.keystroke.modifiers.modified()
+                && matches!(event.keystroke.key.as_str(), "enter" | "space")
+            {
+                on_activate(window, cx);
+                cx.stop_propagation();
+            }
+        })
+}
+
+fn model_picker_back_header(
+    title: String,
+    weak: WeakEntity<Waku>,
+    summary_focus: FocusHandle,
+    theme: Theme,
+) -> Div {
+    let click_weak = weak.clone();
+    let click_focus = summary_focus.clone();
+    let back = div()
+        .id(SharedString::from(format!("model-picker-back-{title}")))
+        .track_focus(&summary_focus)
+        .tab_index(0)
+        .h(px(26.0))
+        .px(px(6.0))
+        .rounded(px(RADIUS_DF))
+        .flex()
+        .items_center()
+        .gap(px(5.0))
+        .cursor_pointer()
+        .focus_visible(|style| style.border_1().border_color(theme.ring))
+        .hover(|style| style.bg(theme.overlay))
+        .child(icon("icons/arrow-left.svg", 12.0, theme.text_secondary))
+        .child(
+            div()
+                .text_size(px(11.5))
+                .text_color(theme.text_secondary)
+                .child(tr!("models.back")),
+        )
+        .on_click(move |_, window, cx| {
+            let _ = click_weak.update(cx, |this, cx| {
+                this.model_picker_view = ModelPickerView::Summary;
+                cx.notify();
+            });
+            focus_model_summary(click_focus.clone(), window);
+        })
+        .on_key_down(move |event: &KeyDownEvent, window, cx| {
+            if !event.keystroke.modifiers.modified()
+                && matches!(event.keystroke.key.as_str(), "enter" | "space")
+            {
+                let _ = weak.update(cx, |this, cx| {
+                    this.model_picker_view = ModelPickerView::Summary;
+                    cx.notify();
+                });
+                focus_model_summary(summary_focus.clone(), window);
+                cx.stop_propagation();
+            }
+        });
+
+    div()
+        .h(px(36.0))
+        .px(px(4.0))
+        .flex_none()
+        .border_b_1()
+        .border_color(theme.border)
+        .flex()
+        .items_center()
+        .gap(px(8.0))
+        .child(back)
+        .child(div().flex_1())
+        .child(
+            div()
+                .pr(px(6.0))
+                .text_size(px(11.0))
+                .text_color(theme.text_tertiary)
+                .child(title),
+        )
+}
+
+fn model_picker_subview_card(
+    title: String,
+    rows: AnyElement,
+    weak: WeakEntity<Waku>,
+    summary_focus: FocusHandle,
+    theme: Theme,
+) -> AnyElement {
+    div()
+        .w(px(260.0))
+        .max_h(px(340.0))
+        .rounded(px(RADIUS_DF))
+        .overflow_hidden()
+        .border_1()
+        .border_color(theme.border_strong)
+        .bg(theme.raised)
+        .flex()
+        .flex_col()
+        .child(model_picker_back_header(title, weak, summary_focus, theme))
+        .child(
+            div()
+                .id("model-picker-subview-rows")
+                .min_h_0()
+                .overflow_y_scroll()
+                .child(rows),
+        )
+        .into_any_element()
+}
+
 /// Where the picker's keyboard cursor lands, wrapping at both ends.
 ///
 /// `None` for `current` means the cursor has not moved yet, so `down` opens on
@@ -3531,13 +4147,12 @@ pub(super) fn next_picker_highlight(
     }
 }
 
-/// The sidebar tabs the picker can land on, in rail order: favorites first,
-/// then every installed provider a new session may use.
+/// The picker tabs available for filtering: favorites first, then every
+/// installed provider a new session may use.
 ///
-/// Shared by the rail's click gating and by `tab`'s cycle handler so the two
-/// agree on which tabs are usable. A locked session keeps its own provider
-/// usable even if it was switched off afterwards — disabling is for new work —
-/// while every other provider drops out for the lock's duration.
+/// A locked session keeps its own provider usable even if it was switched off
+/// afterwards. Other installed providers remain visible: selecting one starts
+/// a fresh task in the same project instead of pretending the CLI is missing.
 pub(super) fn visible_picker_tabs(
     probes: &[ProviderProbe],
     disabled_providers: &[ProviderKind],
@@ -3549,7 +4164,7 @@ pub(super) fn visible_picker_tabs(
             .iter()
             .any(|probe| probe.provider == kind && probe.installed);
         let switched_off = disabled_providers.contains(&kind) && locked_provider != Some(kind);
-        let allowed = (locked_provider.is_none() || locked_provider == Some(kind)) && !switched_off;
+        let allowed = !switched_off;
         (installed && allowed).then_some(ModelPickerTab::Provider(kind))
     }));
     tabs

@@ -1,7 +1,6 @@
 use super::*;
 
 use chrono::{Datelike, Days};
-use std::path::Path;
 
 pub(super) fn pulse_dot(size: f32, color: Hsla) -> AnyElement {
     motion::pulse(Duration::from_millis(1600), move |phase| {
@@ -9,7 +8,7 @@ pub(super) fn pulse_dot(size: f32, color: Hsla) -> AnyElement {
             .w(px(size))
             .h(px(size))
             .flex_none()
-            .rounded_full()
+            .rounded(px(RADIUS_LG))
             .bg(color)
             .opacity(pulsating_between(0.3, 1.0)(phase))
             .into_any_element()
@@ -19,33 +18,51 @@ pub(super) fn pulse_dot(size: f32, color: Hsla) -> AnyElement {
     .into_any_element()
 }
 
-/// Three dots chasing a brightness wave, the transcript's "still working"
-/// signal. Each dot rides the shared pulse clock with a phase offset, so the
-/// bright spot travels left to right. Under reduce-motion the clock holds the
-/// cycle's first frame — the lead dot bright, the tail dim — which reads as a
-/// static ellipsis.
-pub(super) fn working_wave_dots(color: Hsla) -> AnyElement {
-    const DOT_PHASE_STEP: f32 = 0.18;
-    motion::pulse(Duration::from_millis(1400), move |phase| {
+/// A restrained left-to-right text shimmer for the transcript's sole live-turn
+/// status. Its 2.25s cycle mirrors the product reference: an 18% hold at each
+/// end with a narrow 45%-opacity band crossing the label between them. The
+/// shared pulse clock still honors the system reduce-motion preference.
+pub(super) fn shimmering_text(text: SharedString, color: Hsla) -> AnyElement {
+    let characters = text
+        .chars()
+        .map(|character| SharedString::from(character.to_string()))
+        .collect::<Vec<_>>();
+    motion::pulse(Duration::from_millis(2250), move |phase| {
+        let travel = if phase <= 0.18 {
+            0.0
+        } else if phase >= 0.82 {
+            1.0
+        } else {
+            let progress = (phase - 0.18) / 0.64;
+            // Smoothstep closely matches the CSS `ease` curve without adding
+            // a per-frame cubic-bezier solver to this hot render path.
+            progress * progress * (3.0 - 2.0 * progress)
+        };
+        let band_center = -0.22 + travel * 1.44;
         div()
             .flex()
             .items_center()
-            .gap(px(3.5))
-            .children((0..3).map(|index| {
-                let dot_phase = (phase + 1.0 - index as f32 * DOT_PHASE_STEP) % 1.0;
-                let wave = ((dot_phase * std::f32::consts::TAU).sin() + 1.0) / 2.0;
+            .text_size(px(13.0))
+            .line_height(px(18.0))
+            .font_weight(FontWeight::MEDIUM)
+            .children(characters.iter().enumerate().map(|(index, character)| {
+                let glyph_position = if characters.len() <= 1 {
+                    0.5
+                } else {
+                    index as f32 / (characters.len() - 1) as f32
+                };
+                let distance = (glyph_position - band_center).abs();
+                let band = (1.0 - distance / 0.22).clamp(0.0, 1.0);
                 div()
-                    .size(px(4.5))
                     .flex_none()
-                    .rounded_full()
-                    .bg(color)
-                    .opacity(0.25 + 0.75 * wave)
+                    .text_color(color)
+                    .opacity(1.0 - 0.55 * band)
+                    .child(character.clone())
             }))
             .into_any_element()
     })
-    // Mounted for the whole turn: this is what sets the transcript pane's
-    // tick floor, and every tick rebuilds each visible row. The 1400 ms wave
-    // reads identically at half cadence.
+    // The label can remain mounted for a whole turn; half cadence keeps the
+    // shimmer smooth without forcing the transcript to redraw at full rate.
     .every(2)
     .into_any_element()
 }
@@ -227,11 +244,11 @@ fn render_message_footer(
         .id(SharedString::from(format!("copy-message-{message_id}")))
         .w(px(27.0))
         .h(px(27.0))
-        .rounded(px(8.0))
+        .rounded(px(RADIUS_DF))
         .flex()
         .items_center()
         .justify_center()
-        .cursor_default()
+        .cursor_pointer()
         .hover(|element| element.bg(theme.overlay_strong))
         .child(icon(
             if copied {
@@ -279,11 +296,11 @@ fn render_message_footer(
                 .id(SharedString::from(format!("fork-response-{message_id}")))
                 .w(px(27.0))
                 .h(px(27.0))
-                .rounded(px(8.0))
+                .rounded(px(RADIUS_DF))
                 .flex()
                 .items_center()
                 .justify_center()
-                .cursor_default()
+                .cursor_pointer()
                 .when(!action.enabled && !action.preparing, |element| {
                     element.opacity(0.45)
                 })
@@ -321,11 +338,11 @@ fn render_message_footer(
                 )))
                 .w(px(27.0))
                 .h(px(27.0))
-                .rounded(px(8.0))
+                .rounded(px(RADIUS_DF))
                 .flex()
                 .items_center()
                 .justify_center()
-                .cursor_default()
+                .cursor_pointer()
                 .hover(|element| element.bg(theme.overlay_strong))
                 .child(icon("icons/rewind.svg", 14.0, footer_color))
                 .tooltip(Tooltip::text(tr_cow!("session.revert_to_here")))
@@ -401,14 +418,14 @@ fn render_sent_message_attachments(
             )))
             .w(px(96.0))
             .h(px(80.0))
-            .rounded(px(9.0))
+            .rounded(px(RADIUS_DF))
             .overflow_hidden()
             .border_1()
             .border_color(theme.border)
             .bg(theme.inset)
             .track_focus(menu.trigger_focus_handle())
             .tab_index(0)
-            .focus_visible(|style| style.border_color(theme.accent))
+            .focus_visible(|style| style.border_color(theme.ring))
             .tooltip(Tooltip::text(attachment.name.clone()));
         if attachment.is_image {
             let key_menu = menu.clone();
@@ -425,7 +442,7 @@ fn render_sent_message_attachments(
                             "message-{message_id}-attachment-{index}-preview"
                         )))
                         .size_full()
-                        .cursor_default()
+                        .cursor_pointer()
                         .on_click(move |_, window, cx| {
                             let _ = preview_waku.update(cx, |this, cx| {
                                 this.open_image_preview(
@@ -598,8 +615,10 @@ pub(super) fn render_message(params: MessageRender, cx: &mut App) -> AnyElement 
                     div()
                         .w_full()
                         .max_w(px(540.0))
-                        .rounded(px(12.0))
-                        .bg(theme.raised)
+                        .rounded(px(RADIUS_DF))
+                        .border_1()
+                        .border_color(theme.sidebar_border)
+                        .bg(theme.sidebar_item_background)
                         .pt(px(9.0))
                         .pb(px(8.0))
                         .child(edit_input)
@@ -617,7 +636,7 @@ pub(super) fn render_message(params: MessageRender, cx: &mut App) -> AnyElement 
                                         )))
                                         .h(px(26.0))
                                         .px(px(10.0))
-                                        .rounded(px(7.0))
+                                        .rounded(px(RADIUS_DF))
                                         .border_1()
                                         .border_color(theme.border)
                                         .bg(theme.overlay)
@@ -625,7 +644,7 @@ pub(super) fn render_message(params: MessageRender, cx: &mut App) -> AnyElement 
                                         .items_center()
                                         .text_size(px(11.5))
                                         .text_color(theme.text_secondary)
-                                        .cursor_default()
+                                        .cursor_pointer()
                                         .hover(|element| element.bg(theme.overlay_strong))
                                         .child(tr_cow!("common.cancel"))
                                         .on_click(move |_, window, cx| {
@@ -641,7 +660,7 @@ pub(super) fn render_message(params: MessageRender, cx: &mut App) -> AnyElement 
                                         )))
                                         .h(px(26.0))
                                         .px(px(11.0))
-                                        .rounded(px(7.0))
+                                        .rounded(px(RADIUS_DF))
                                         .bg(if can_submit {
                                             theme.inverse
                                         } else {
@@ -650,7 +669,7 @@ pub(super) fn render_message(params: MessageRender, cx: &mut App) -> AnyElement 
                                         .flex()
                                         .items_center()
                                         .text_size(px(11.5))
-                                        .font_weight(FontWeight::MEDIUM)
+                                        .font_weight(FontWeight::NORMAL)
                                         .text_color(if can_submit {
                                             theme.on_inverse
                                         } else {
@@ -658,8 +677,8 @@ pub(super) fn render_message(params: MessageRender, cx: &mut App) -> AnyElement 
                                         })
                                         .when(can_submit, |element| {
                                             element
-                                                .cursor_default()
-                                                .hover(|element| element.opacity(0.9))
+                                                .cursor_pointer()
+                                                .hover(|element| element.bg(theme.primary_hover))
                                         })
                                         .child(tr_cow!("common.send"))
                                         .on_click(move |_, _, cx| {
@@ -679,8 +698,10 @@ pub(super) fn render_message(params: MessageRender, cx: &mut App) -> AnyElement 
                         div()
                             .max_w(px(540.0))
                             .min_w_0()
-                            .rounded(px(12.0))
-                            .bg(theme.raised)
+                            .rounded(px(RADIUS_DF))
+                            .border_1()
+                            .border_color(theme.sidebar_border)
+                            .bg(theme.sidebar_item_background)
                             .px(px(12.0))
                             .py(px(8.0))
                             .text_size(px(14.0))
@@ -738,7 +759,7 @@ pub(super) fn render_message(params: MessageRender, cx: &mut App) -> AnyElement 
             div()
                 .px(px(10.0))
                 .py(px(4.0))
-                .rounded_full()
+                .rounded(px(RADIUS_LG))
                 .bg(theme.overlay)
                 .text_size(px(11.0))
                 .line_height(px(16.0))
@@ -915,6 +936,13 @@ pub(super) fn activity_header_title(
     live_reasoning_id: Option<Uuid>,
 ) -> String {
     if live_turn && let Some(activity) = activities.last() {
+        // Shell-backed providers often report the complete executable wrapper
+        // here (for example a user-scoped pwsh path plus `-Command`). Keep the
+        // always-visible disclosure compact; the command itself remains behind
+        // the explicit row expansion.
+        if activity.kind == ActivityKind::Command {
+            return activity_summary(activities);
+        }
         return activity.reasoning.as_ref().map_or_else(
             || activity_display_title(activity),
             |reasoning| reasoning_activity_title(reasoning, live_reasoning_id == Some(activity.id)),
@@ -1176,6 +1204,7 @@ pub(super) fn activity_row_detail(activity: &ActivityItem, reasoning_live: bool)
         ActivityKind::Command => activity
             .display_description
             .clone()
+            .or_else(|| activity.detail.as_deref().map(activity_path_name))
             .or_else(|| activity.display_target.clone())
             .or_else(custom_title)
             .unwrap_or_default(),
@@ -1230,10 +1259,9 @@ pub(super) fn reasoning_activity_title(reasoning: &ReasoningBlock, live: bool) -
 }
 
 fn activity_path_name(path: &str) -> String {
-    Path::new(path)
-        .file_name()
-        .and_then(|name| name.to_str())
-        .filter(|name| !name.is_empty())
+    path.trim_end_matches(['/', '\\'])
+        .rsplit(['/', '\\'])
+        .find(|name| !name.is_empty())
         .unwrap_or(path)
         .to_owned()
 }
@@ -1241,16 +1269,20 @@ fn activity_path_name(path: &str) -> String {
 /// Whether this activity's expanded view shows a diff instead of the tool
 /// arguments that produced it.
 pub(super) fn activity_shows_diff(activity: &ActivityItem) -> bool {
-    activity.kind == ActivityKind::FileChange
-        && activity
-            .file_changes
-            .iter()
-            .any(|change| change.diff.is_some())
+    matches!(
+        activity.kind,
+        ActivityKind::FileChange | ActivityKind::Command
+    ) && activity
+        .file_changes
+        .iter()
+        .any(|change| change.diff.is_some())
 }
 
 pub(super) fn activity_file_change_stats(activity: &ActivityItem) -> Option<(u64, u64)> {
-    if activity.kind != crate::model::ActivityKind::FileChange
-        || !activity.complete
+    if !matches!(
+        activity.kind,
+        crate::model::ActivityKind::FileChange | crate::model::ActivityKind::Command
+    ) || !activity.complete
         || activity.failed
         || activity.file_changes.is_empty()
     {
@@ -1307,6 +1339,7 @@ pub(super) fn activity_disclosure_sections(
     activity: &ActivityItem,
 ) -> Vec<ActivityDisclosureSection> {
     let mut sections = Vec::new();
+    let shows_diff = activity_shows_diff(activity);
     if activity.kind == ActivityKind::Command {
         if let Some(command) = activity
             .arguments
@@ -1314,6 +1347,7 @@ pub(super) fn activity_disclosure_sections(
             .or(activity.display_target.as_deref())
             .map(str::trim)
             .filter(|value| !value.is_empty())
+            .filter(|_| !shows_diff)
         {
             sections.push(ActivityDisclosureSection {
                 kind: ActivityDisclosureSectionKind::Command,
@@ -1325,6 +1359,7 @@ pub(super) fn activity_disclosure_sections(
             .as_deref()
             .map(str::trim)
             .filter(|value| !value.is_empty())
+            .filter(|_| !shows_diff || activity.failed)
         {
             sections.push(ActivityDisclosureSection {
                 kind: ActivityDisclosureSectionKind::Output,
@@ -1340,7 +1375,6 @@ pub(super) fn activity_disclosure_sections(
     }
     // An edit renders as a diff, which says everything the raw arguments would
     // and reads. What the tool replied is only worth the room when it failed.
-    let shows_diff = activity_shows_diff(activity);
     if let Some(arguments) = activity
         .arguments
         .as_deref()
@@ -1570,6 +1604,30 @@ mod message_time_tests {
     }
 
     #[test]
+    fn git_diff_command_disclosure_uses_the_diff_instead_of_raw_shell_text() {
+        let mut activity = ActivityItem::new(
+            Some("command-diff".into()),
+            crate::model::ActivityKind::Command,
+            "git diff",
+            Some("waku".into()),
+            true,
+        )
+        .with_arguments(Some("git diff -- src/auth.ts".into()))
+        .with_output(Some("raw unified diff".into()));
+        activity.file_changes = vec![crate::model::ActivityFileChange {
+            path: "src/auth.ts".into(),
+            additions: Some(1),
+            deletions: Some(1),
+            status: None,
+            diff: Some("@@ -1 +1 @@\n-old\n+new\n".into()),
+        }];
+
+        assert!(activity_shows_diff(&activity));
+        assert!(activity_disclosure_sections(&activity).is_empty());
+        assert_eq!(activity_file_change_stats(&activity), Some((1, 1)));
+    }
+
+    #[test]
     fn activity_display_title_prefers_the_human_facing_tool_argument() {
         let titled = ActivityItem::new(
             Some("tool-1".into()),
@@ -1658,12 +1716,12 @@ mod message_time_tests {
 
         assert_eq!(
             activity_header_title(&activities, true, None),
-            "Running git log --oneline -15"
+            "Running 1 thought · 1 command"
         );
         activities[1].complete = true;
         assert_eq!(
             activity_header_title(&activities, true, None),
-            "Ran git log --oneline -15"
+            "Ran 1 thought · 1 command"
         );
         assert_eq!(
             activity_header_title(&activities, false, None),
@@ -1673,6 +1731,30 @@ mod message_time_tests {
         assert_eq!(
             activity_row_detail(&activities[1], false),
             "git log --oneline -15"
+        );
+    }
+
+    #[test]
+    fn command_rows_prefer_the_workspace_over_the_shell_wrapper() {
+        let activity = ActivityItem::new(
+            Some("command-1".into()),
+            crate::model::ActivityKind::Command,
+            r#"\"C:\Users\Devraj\.cache\codex-runtimes\runtime\pwsh.exe\" -Command \"git status\""#,
+            Some(r#"C:\Users\Devraj\Downloads\Axiusflow_Rust"#.into()),
+            true,
+        )
+        .with_arguments(Some(
+            serde_json::json!({
+                "command": r#"\"C:\Users\Devraj\.cache\codex-runtimes\runtime\pwsh.exe\" -Command \"git status\""#,
+                "cwd": r#"C:\Users\Devraj\Downloads\Axiusflow_Rust"#
+            })
+            .to_string(),
+        ));
+
+        assert_eq!(activity_row_detail(&activity, false), "Axiusflow_Rust");
+        assert_eq!(
+            activity_header_title(&[activity], true, None),
+            "Ran 1 command"
         );
     }
 

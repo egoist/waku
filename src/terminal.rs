@@ -25,8 +25,8 @@ use gpui::{
     FontStyle, FontWeight, Hsla, InteractiveElement, IntoElement, KeyDownEvent, Keystroke,
     Modifiers, ModifiersChangedEvent, MouseButton, MouseDownEvent, MouseExitEvent, MouseMoveEvent,
     MouseUpEvent, ParentElement, Pixels, Point, Render, ScrollDelta, ScrollWheelEvent,
-    SharedString, StrikethroughStyle, Styled, StyledText, Subscription, Task, TextRun,
-    UnderlineStyle, Window, canvas, div, font, px, rgb,
+    StrikethroughStyle, Styled, StyledText, Subscription, Task, TextRun, UnderlineStyle, Window,
+    canvas, div, font, px, rgb,
 };
 use parking_lot::Mutex;
 
@@ -55,7 +55,6 @@ fn terminal_clipboard_modifier_pressed(modifiers: &Modifiers) -> bool {
 }
 const TERMINAL_PADDING_X: f32 = 10.0;
 const TERMINAL_PADDING_Y: f32 = 8.0;
-const TERMINAL_TOOLBAR_HEIGHT: f32 = 34.0;
 const TERMINAL_MIN_COLUMNS: usize = 20;
 const TERMINAL_MIN_ROWS: usize = 8;
 const TERMINAL_SCROLLBACK_LINES: usize = 10_000;
@@ -85,11 +84,8 @@ fn terminal_font() -> gpui::Font {
 }
 
 enum TerminalUiEvent {
-    Title(String),
-    ResetTitle,
     ClipboardStore(String),
     ClipboardLoad(Arc<dyn Fn(&str) -> String + Send + Sync>),
-    Exited,
 }
 
 #[derive(Clone)]
@@ -117,12 +113,7 @@ impl EventListener for TerminalEventProxy {
             Event::Wakeup | Event::MouseCursorDirty | Event::CursorBlinkingChange => {
                 self.dirty.store(true, Ordering::Release);
             }
-            Event::Title(title) => {
-                let _ = self.ui_events.send(TerminalUiEvent::Title(title));
-            }
-            Event::ResetTitle => {
-                let _ = self.ui_events.send(TerminalUiEvent::ResetTitle);
-            }
+            Event::Title(_) | Event::ResetTitle => {}
             Event::ClipboardStore(_, text) => {
                 let _ = self.ui_events.send(TerminalUiEvent::ClipboardStore(text));
             }
@@ -141,7 +132,6 @@ impl EventListener for TerminalEventProxy {
             }
             Event::Bell => {}
             Event::Exit | Event::ChildExit(_) => {
-                let _ = self.ui_events.send(TerminalUiEvent::Exited);
                 self.dirty.store(true, Ordering::Release);
             }
         }
@@ -625,8 +615,6 @@ pub struct TerminalView {
     error: Option<String>,
     focus_handle: FocusHandle,
     working_directory: PathBuf,
-    title: String,
-    exited: bool,
     scroll_accumulator: f32,
     panel_width: f32,
     /// Advance width of one grid cell, measured from the terminal font on
@@ -688,9 +676,7 @@ impl TerminalView {
             session: None,
             error: None,
             focus_handle: cx.focus_handle(),
-            title: tr!("right_panel.terminal"),
             working_directory,
-            exited: false,
             scroll_accumulator: 0.0,
             panel_width: DEFAULT_RIGHT_PANEL_WIDTH,
             measured_cell_width: None,
@@ -713,13 +699,6 @@ impl TerminalView {
         self.panel_width = width;
     }
 
-    pub fn refresh_localized_text(&mut self, cx: &mut Context<Self>) {
-        if matches!(self.title.as_str(), "Terminal" | "终端") {
-            self.title = tr!("right_panel.terminal");
-            cx.notify();
-        }
-    }
-
     fn poll(&mut self, cx: &mut Context<Self>) -> bool {
         let Some(session) = &self.session else {
             return false;
@@ -728,8 +707,6 @@ impl TerminalView {
         while let Ok(event) = session.ui_events.try_recv() {
             changed = true;
             match event {
-                TerminalUiEvent::Title(title) => self.title = title,
-                TerminalUiEvent::ResetTitle => self.title = tr!("right_panel.terminal"),
                 TerminalUiEvent::ClipboardStore(text) => {
                     cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
                 }
@@ -740,7 +717,6 @@ impl TerminalView {
                         .unwrap_or_default();
                     session.write(formatter(&text).into_bytes());
                 }
-                TerminalUiEvent::Exited => self.exited = true,
             }
         }
         changed
@@ -1065,7 +1041,7 @@ impl Render for TerminalView {
         let selection_color = theme.selection;
         let viewport = window.viewport_size();
         let panel_width = self.panel_width;
-        let body_height = (f32::from(viewport.height) - 48.0 - TERMINAL_TOOLBAR_HEIGHT).max(120.0);
+        let body_height = (f32::from(viewport.height) - 48.0).max(120.0);
         // The rows are laid out by `StyledText` at the font's own advance, so
         // the grid must be sized from that same measured advance or the text
         // wraps short of (or past) the panel edge.
@@ -1102,18 +1078,6 @@ impl Render for TerminalView {
             .session
             .as_ref()
             .map(|session| session.snapshot(theme, selection_color, cursor_style, hovered_link));
-        let title = if self.title.trim().is_empty() {
-            tr!("right_panel.terminal")
-        } else {
-            self.title.clone()
-        };
-        let directory = self
-            .working_directory
-            .file_name()
-            .and_then(|name| name.to_str())
-            .map(str::to_owned)
-            .unwrap_or_else(|| tr!("workspace.workspace"));
-
         let mut screen = div()
             .flex_1()
             .min_h_0()
@@ -1296,45 +1260,6 @@ impl Render for TerminalView {
             .flex()
             .flex_col()
             .bg(theme.terminal)
-            .child(
-                div()
-                    .h(px(TERMINAL_TOOLBAR_HEIGHT))
-                    .flex_none()
-                    .px(px(10.0))
-                    .flex()
-                    .items_center()
-                    .gap(px(7.0))
-                    .border_b_1()
-                    .border_color(theme.border)
-                    .bg(theme.surface)
-                    .child(
-                        div()
-                            .w(px(6.0))
-                            .h(px(6.0))
-                            .rounded_full()
-                            .bg(if self.exited {
-                                theme.danger
-                            } else {
-                                theme.accent
-                            }),
-                    )
-                    .child(
-                        div()
-                            .min_w_0()
-                            .flex_1()
-                            .truncate()
-                            .text_size(px(10.5))
-                            .text_color(theme.text_secondary)
-                            .child(SharedString::from(title.to_owned())),
-                    )
-                    .child(
-                        div()
-                            .flex_none()
-                            .text_size(px(10.0))
-                            .text_color(theme.text_tertiary)
-                            .child(directory),
-                    ),
-            )
             .child(grid)
             .on_key_down(cx.listener(Self::on_key_down))
             .on_scroll_wheel(cx.listener(Self::on_scroll_wheel))

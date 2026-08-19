@@ -2,6 +2,11 @@ use gpui::{App, Global, Hsla, Window, WindowAppearance, hsla, rgb, transparent_b
 
 pub use waku_client::theme::ThemePreference;
 
+pub const FONT_SANS: &str = "Inter";
+pub const RADIUS_SM: f32 = 4.0;
+pub const RADIUS_DF: f32 = 6.0;
+pub const RADIUS_LG: f32 = 999.0;
+
 fn resolves_to_dark(preference: ThemePreference, system_appearance: WindowAppearance) -> bool {
     match preference {
         ThemePreference::System => matches!(
@@ -21,11 +26,10 @@ fn native_override(preference: ThemePreference) -> Option<bool> {
     }
 }
 
-/// Waku's visual language, take two: neutral graphite surfaces in the spirit
-/// of Cursor — color is reserved for meaning. On macOS the sidebar's semantic
-/// tint is installed as a native layer above Sidebar vibrancy; keeping this
-/// GPUI surface clear avoids incorrectly accumulating the alpha of nested Metal
-/// backgrounds. Selected, hovered, and pressed rows remain a 6% neutral layer.
+/// Native adapter for the Nucleus brand tokens. Existing field names describe
+/// product roles while their values stay tied to the portable semantic system.
+/// On macOS the sidebar tint is installed as a native layer above Sidebar
+/// vibrancy, so its GPUI surface remains clear.
 #[derive(Clone, Copy)]
 pub struct Theme {
     pub is_dark: bool,
@@ -51,8 +55,11 @@ pub struct Theme {
     pub text_tertiary: Hsla,
     pub text_ghost: Hsla,
 
-    /// Brand coral. Logo, caret, live-activity pulses — nothing structural.
+    /// Nucleus primary blue, reserved for actions and selected brand states.
     pub accent: Hsla,
+    pub primary_hover: Hsla,
+    pub ring: Hsla,
+    pub scrim: Hsla,
     pub resize_handle: Hsla,
     /// Meter fills in the usage panel. Quota-meter blue by convention;
     /// warning/danger take over as a lane fills.
@@ -89,94 +96,100 @@ impl Theme {
     pub fn dark() -> Self {
         Self {
             is_dark: true,
-            canvas: rgb(0x1A1A1A).into(),
+            canvas: rgb(0x070A0F).into(),
             sidebar: if cfg!(target_os = "macos") {
                 transparent_black()
             } else {
                 rgb(0x181818).into()
             },
             sidebar_drag_background: rgb(0x181818).into(),
-            sidebar_item_background: hsla(0.0, 0.0, 0.941, 0.06),
-            surface: rgb(0x1A1A1A).into(),
-            raised: rgb(0x232323).into(),
-            composer: rgb(0x212121).into(),
-            inset: rgb(0x151515).into(),
-            terminal: rgb(0x151515).into(),
-            overlay: hsla(220.0 / 360.0, 0.10, 0.90, 0.05),
-            overlay_strong: hsla(220.0 / 360.0, 0.10, 0.90, 0.09),
+            sidebar_item_background: rgb(0x181818).into(),
+            surface: rgb(0x171717).into(),
+            raised: rgb(0x070A0F).into(),
+            composer: rgb(0x070A0F).into(),
+            inset: rgb(0x0C1115).into(),
+            terminal: rgb(0x070A0F).into(),
+            overlay: rgb(0x222224).into(),
+            overlay_strong: rgb(0x222224).into(),
 
-            border: hsla(220.0 / 360.0, 0.10, 0.90, 0.07),
-            border_strong: hsla(220.0 / 360.0, 0.10, 0.90, 0.14),
-            sidebar_border: hsla(126.93 / 360.0, 0.000_000_1, 0.16077, 1.0),
+            border: rgb(0x232323).into(),
+            border_strong: rgb(0x16191F).into(),
+            sidebar_border: rgb(0x131519).into(),
 
-            text: rgb(0xE2E2E2).into(),
-            text_secondary: rgb(0xA3A3A3).into(),
-            text_tertiary: rgb(0x7D7D7D).into(),
-            text_ghost: rgb(0x575757).into(),
+            text: rgb(0xFAFAFA).into(),
+            text_secondary: rgb(0x9DA3AA).into(),
+            text_tertiary: rgb(0x9DA3AA).into(),
+            text_ghost: rgb(0x696969).into(),
 
-            accent: rgb(0xE2795B).into(),
-            resize_handle: rgb(0x3B82F6).into(),
-            gauge: rgb(0x3B82F6).into(),
+            accent: rgb(0x3E63DD).into(),
+            primary_hover: rgb(0x4E76F2).into(),
+            ring: rgb(0x737373).into(),
+            scrim: hsla(0.0, 0.0, 0.0, 0.50),
+            resize_handle: rgb(0x3E63DD).into(),
+            gauge: rgb(0x3E63DD).into(),
 
-            selection: hsla(211.0 / 360.0, 1.0, 0.50, 0.55),
-            code_text: rgb(0xE0A882).into(),
-            code_wash: hsla(220.0 / 360.0, 0.10, 0.90, 0.08),
+            selection: hsla(225.7 / 360.0, 0.706, 0.555, 0.35),
+            code_text: rgb(0xFAFAFA).into(),
+            code_wash: rgb(0x0C1115).into(),
 
-            inverse: rgb(0xE7E9EC).into(),
-            on_inverse: rgb(0x17181C).into(),
+            inverse: rgb(0x3E63DD).into(),
+            on_inverse: rgb(0xEFF6FF).into(),
 
-            warning: rgb(0xE0B36A).into(),
-            success: rgb(0x62C987).into(),
-            favorite: rgb(0xEAB308).into(),
-            danger: rgb(0xE2726A).into(),
-            danger_soft: hsla(4.0 / 360.0, 0.55, 0.63, 0.10),
+            warning: rgb(0xF59E0A).into(),
+            success: rgb(0x089981).into(),
+            favorite: rgb(0xF59E0A).into(),
+            danger: rgb(0xF7525F).into(),
+            danger_soft: hsla(355.0 / 360.0, 0.91, 0.65, 0.10),
         }
     }
 
     pub fn light() -> Self {
         Self {
             is_dark: false,
-            canvas: rgb(0xF6F5F6).into(),
+            canvas: rgb(0xFFFFFF).into(),
             sidebar: if cfg!(target_os = "macos") {
                 transparent_black()
             } else {
-                rgb(0xF3F3F3).into()
+                rgb(0xFCFCFC).into()
             },
-            sidebar_drag_background: rgb(0xF3F3F3).into(),
-            sidebar_item_background: hsla(0.0, 0.0, 0.078, 0.06),
-            surface: rgb(0xF6F5F6).into(),
-            raised: rgb(0xECECEC).into(),
+            sidebar_drag_background: rgb(0xFCFCFC).into(),
+            sidebar_item_background: rgb(0xF7F7F7).into(),
+            surface: rgb(0xFFFFFF).into(),
+            raised: rgb(0xFFFFFF).into(),
             composer: rgb(0xFFFFFF).into(),
-            inset: rgb(0xE6E6E6).into(),
+            inset: rgb(0xFCFCFC).into(),
             terminal: rgb(0xFFFFFF).into(),
-            overlay: hsla(220.0 / 360.0, 0.10, 0.12, 0.05),
-            overlay_strong: hsla(220.0 / 360.0, 0.10, 0.12, 0.09),
+            overlay: rgb(0xF7F7F7).into(),
+            overlay_strong: rgb(0xF7F7F7).into(),
 
-            border: hsla(220.0 / 360.0, 0.10, 0.12, 0.08),
-            border_strong: hsla(220.0 / 360.0, 0.10, 0.12, 0.15),
-            sidebar_border: hsla(0.0, 0.0, 0.078, 0.12),
+            border: rgb(0xF5F5F5).into(),
+            border_strong: rgb(0xF3F3F3).into(),
+            sidebar_border: rgb(0xF5F5F5).into(),
 
-            text: rgb(0x242424).into(),
-            text_secondary: rgb(0x666666).into(),
-            text_tertiary: rgb(0x858585).into(),
-            text_ghost: rgb(0xA4A4A4).into(),
+            text: rgb(0x333333).into(),
+            text_secondary: rgb(0x737373).into(),
+            text_tertiary: rgb(0x737373).into(),
+            text_ghost: rgb(0xABABAB).into(),
 
-            accent: rgb(0xC85F44).into(),
-            resize_handle: rgb(0x2563EB).into(),
-            gauge: rgb(0x2563EB).into(),
+            accent: rgb(0x3E63DD).into(),
+            primary_hover: rgb(0x2F50C8).into(),
+            ring: rgb(0xA1A1A1).into(),
+            scrim: hsla(0.0, 0.0, 0.0, 0.50),
+            resize_handle: rgb(0x3E63DD).into(),
+            gauge: rgb(0x3E63DD).into(),
 
-            selection: hsla(211.0 / 360.0, 1.0, 0.50, 0.35),
-            code_text: rgb(0x9A5528).into(),
-            code_wash: hsla(220.0 / 360.0, 0.10, 0.12, 0.07),
+            selection: hsla(225.7 / 360.0, 0.706, 0.555, 0.25),
+            code_text: rgb(0x333333).into(),
+            code_wash: rgb(0xFCFCFC).into(),
 
-            inverse: rgb(0x202227).into(),
-            on_inverse: rgb(0xF8F8F9).into(),
+            inverse: rgb(0x3E63DD).into(),
+            on_inverse: rgb(0xEFF6FF).into(),
 
-            warning: rgb(0xA66B20).into(),
-            success: rgb(0x2F8F52).into(),
-            favorite: rgb(0xCA8A04).into(),
-            danger: rgb(0xC64A42).into(),
-            danger_soft: hsla(4.0 / 360.0, 0.55, 0.52, 0.10),
+            warning: rgb(0xF59E0A).into(),
+            success: rgb(0x089981).into(),
+            favorite: rgb(0xF59E0A).into(),
+            danger: rgb(0xF7525F).into(),
+            danger_soft: hsla(355.0 / 360.0, 0.91, 0.65, 0.10),
         }
     }
 }

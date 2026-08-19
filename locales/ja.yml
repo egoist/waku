@@ -169,8 +169,36 @@ settings.share_anonymous_usage_data: 匿名の使用状況データを共有
 settings.share_anonymous_usage_data_description: 機能の利用状況と信頼性に関するデータを共有して、Waku の改善にご協力ください。プロンプト、回答、プロジェクト名、ファイルパスなどの個人データは一切含まれません
 
 providers.coding_agents: コーディングエージェント
-providers.description: Waku はこのコンピュータにインストールされたエージェントの CLI を使用します。各エージェントの CLI をインストールするかログインしてから、更新してください
+providers.description: Waku は内部でローカルのエージェント CLI を使用します。タスクを始める前に、ここでインストールと認証を行えます
 providers.web_description: Waku はデーモンホストにインストールされたエージェント CLI を使用します。各エージェントの CLI をインストールするかログインしてから、更新してください
+providers.cli_required: Waku に必要な %{command} CLI がインストールされていません
+providers.cli_required_title: "%{provider} CLI が必要です"
+providers.cli_required_description: Waku は内部で %{provider} を使ってこのタスクを実行します。インストール後、プロバイダーの設定を一度完了してください
+providers.install_and_sign_in: インストールしてサインイン
+providers.install: インストール
+providers.install_guide: インストールガイド
+providers.configure: 構成
+providers.installing: インストール中…
+providers.installing_cli: "%{provider} CLI をインストール中"
+providers.installing_cli_description: Waku が現在のユーザー向けに公式 CLI をインストールしています
+providers.sign_in: サインイン
+providers.finish_sign_in: "%{provider} のサインインを完了"
+providers.finish_sign_in_description: CLI が開いたブラウザ画面を完了してください。Waku が自動的に検出します
+providers.waiting_for_sign_in: サインインを待っています…
+providers.sign_in_required: "%{provider} へのサインインが必要です"
+providers.sign_in_required_description: CLI を一度認証すれば、Waku が認証情報を扱わずに利用できます
+providers.checking_sign_in: サインインを確認中
+providers.checking_sign_in_description: このコンピューターの %{provider} CLI 認証状態を確認中
+providers.signed_out: サインアウト済み
+providers.ready: 準備完了
+providers.sign_in_needs_attention: サインインを確認してください
+providers.setup_needs_attention: セットアップを確認してください
+providers.setup_complete: "%{provider} のインストールとサインインが完了しました"
+providers.install_complete: "%{provider} はインストール済みです。プロバイダー認証情報は CLI が管理します"
+providers.setup_failed: "プロバイダーのセットアップに失敗しました：%{error}"
+providers.setup_before_starting: このタスクを開始する前に %{provider} をセットアップしてください
+providers.provider_settings: プロバイダー設定
+providers.remote_setup_required: 接続先のデーモンホストで %{provider} をインストールして認証し、プロバイダー一覧を更新してください
 providers.check_failed: "%{command} を確認できませんでした：%{error}"
 providers.show_settings: "%{provider} の設定を表示"
 providers.hide_settings: "%{provider} の設定を隠す"
@@ -226,6 +254,7 @@ sidebar.minutes_ago: "%{count} 分前"
 sidebar.hours_ago: "%{count} 時間前"
 sidebar.days_ago: "%{count} 日前"
 sidebar.unknown_project: 不明なプロジェクト
+sidebar.new_task_in_project: "%{project} で新規タスク"
 sidebar.close: サイドバーを閉じる
 sidebar.hide: サイドバーを隠す
 sidebar.open: サイドバーを開く
@@ -457,6 +486,13 @@ models.standard: 標準
 models.reasoning: 推論レベル
 models.service_tier: サービスティア
 models.context_window: コンテキストウィンドウ
+models.model: モデル
+models.provider: プロバイダー
+models.new_task: 新しいタスク
+models.effort: 推論レベル
+models.speed: 速度
+models.back: 戻る
+models.unavailable: 利用不可
 
 model_option.none: なし
 model_option.minimal: 最小
@@ -528,6 +564,11 @@ commands.init_description: このプロジェクトの %{instructions_file} を�
 commands.review_description: このブランチの保留中の変更をレビュー
 commands.commit_description: 現在の変更をステージしてコミット
 commands.fast_description: 高速モードを切り替え
+commands.goal_description: 目標が完了するまで Codex の作業を継続
+commands.goal_argument_hint: 目標
+commands.goal_requires_objective: /goal の後に目標を入力してください
+commands.plan_description: プランモードに切り替え
+commands.build_description: ビルドモードに切り替え
 commands.fast_enabled: 高速モードを有効にしました
 commands.fast_disabled: 高速モードを無効にしました
 commands.claude_compact: 会話を要約してコンテキストを空ける
@@ -550,6 +591,8 @@ composer.queue_followup: フォローアップとしてキューに追加（⏎�
 composer.message: メッセージ
 composer.queue_placeholder: フォローアップを追加…
 composer.prompt_placeholder: Waku に作業を依頼…
+composer.attach_files: 画像またはファイルを添付
+composer.agent_mode: エージェント
 composer.attach_daemon: デーモンホストからファイルまたはフォルダを添付
 composer.attach_daemon_title: デーモンホストから添付
 composer.stop: 停止
@@ -584,6 +627,7 @@ errors.remote_project_picker: デーモンホスト上のプロジェクトを�
 
 session.stopped: 停止しました
 session.turn_completed: ターンが完了しました
+session.provider_finished_without_response: "%{provider} は応答を返さずに終了しました"
 session.stopped_before_response: エージェントは回答を返す前に停止しました
 session.codex_exited_before_response: Codex app-server は回答を返す前に終了しました
 session.steer_rejected: エージェントに追加の指示を送れませんでした（%{error}）。メッセージはフォローアップとしてキューに追加されました
@@ -833,6 +877,8 @@ diff.preparing_review: レビューを準備中…
 diff.loading_description: レビュー用に一貫した Git スナップショットを取得しています
 diff.unavailable: 変更を利用できません
 diff.refresh: 変更を更新
+diff.show_file_list: ファイル一覧を表示
+diff.show_expanded_diffs: 展開された差分を表示
 diff.refresh_failed: "変更を更新できませんでした：%{error}"
 diff.truncated: 大きな差分 · 先頭 50,000 行を表示
 diff.unmodified_lines: "未変更の行 %{count} 行"
@@ -1041,3 +1087,19 @@ usage_error.curl_did_not_finish: curl がリクエストを完了しませんで
 usage_error.curl_failed: "curl に失敗しました：%{error}"
 usage_error.unknown_error: 不明なエラー
 usage_error.curl_no_status: curl から HTTP ステータス行が返されませんでした
+settings.profile: プロフィール
+settings.profile_keywords: プロフィール 名前 アバター 写真 画像 アカウント サイドバー
+common.save: 保存
+usage.account_limits: アカウント制限
+usage.remaining_percent: "残り %{percent}%"
+usage.sign_in_for_limits: 制限とリセット時刻を表示するには、このプロバイダーにサインインしてください。
+usage.fetching_limits: 最新の制限を取得中…
+profile.default_name: Wakuユーザー
+profile.title: サイドバープロフィール
+profile.description: サイドバーのプロフィールメニューに表示する名前と写真を設定します。
+profile.name_placeholder: 名前
+profile.choose_photo: 写真を選択
+profile.change_photo: 写真を変更
+profile.unsupported_image: PNG、JPEG、GIF、またはWebP画像を選択してください。
+profile.image_too_large: 画像は20 MB未満にしてください。
+profile.image_error: "プロフィール画像を保存できませんでした: %{error}"

@@ -152,15 +152,6 @@ impl Waku {
         }
     }
 
-    /// Width left for the chat column once the panels take theirs — the
-    /// widths they are painted at this frame, so a transcript measured
-    /// mid-slide matches the column it is laid out in.
-    fn chat_viewport_width(&self, window: &Window) -> f32 {
-        f32::from(window.viewport_size().width)
-            - self.sidebar_rendered_width
-            - self.right_panel_rendered_width
-    }
-
     /// [`WakuPane`] delegate for the sidebar island.
     pub(super) fn sidebar_pane_content(
         &mut self,
@@ -178,7 +169,6 @@ impl Waku {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let chat_viewport_width = self.chat_viewport_width(window);
         // The transcript's own element sizes itself with `flex_1`, which only
         // stretches inside a flex parent. A cached pane lays its content out
         // as a root, so give it that parent here or its height collapses to
@@ -188,7 +178,7 @@ impl Waku {
             .flex()
             .flex_col()
             .min_h_0()
-            .child(self.render_transcript(window, chat_viewport_width, cx))
+            .child(self.render_transcript(window, cx))
             .into_any_element()
     }
 
@@ -237,16 +227,13 @@ impl Render for Waku {
         }
         let image_preview = self.render_image_preview(cx);
         if self.settings_page.is_some() {
-            let command_palette = self.render_command_palette(window, cx);
             let commit_dialog = self.render_commit_dialog(cx);
             let toast = self.render_active_toast(cx);
             let content = div()
                 .relative()
                 .size_full()
-                .on_action(cx.listener(Self::toggle_command_palette_action))
                 .child(self.render_settings(window, cx))
                 .children(toast)
-                .children(command_palette)
                 .children(commit_dialog)
                 .children(image_preview)
                 .into_any_element();
@@ -260,18 +247,17 @@ impl Render for Waku {
         let empty = should_render_empty_state(self.selected_session());
         let permission = self.render_permission(cx);
         let computer_use = self.render_computer_use_overlay(cx);
-        let command_palette = self.render_command_palette(window, cx);
         let commit_dialog = self.render_commit_dialog(cx);
         let toast = self.render_active_toast(cx);
         let content = div()
             .key_context("Waku")
+            .on_action(cx.listener(Self::toggle_fullscreen_action))
             .on_action(cx.listener(Self::close_window_or_right_panel_tab_action))
             .on_action(cx.listener(Self::new_session_action))
             .on_action(cx.listener(Self::new_project_action))
             .on_action(cx.listener(Self::open_settings_action))
             .on_action(cx.listener(Self::toggle_sidebar_action))
             .on_action(cx.listener(Self::toggle_right_panel_action))
-            .on_action(cx.listener(Self::toggle_command_palette_action))
             .on_action(cx.listener(Self::toggle_fps_counter_action))
             .on_action(cx.listener(Self::navigate_back_action))
             .on_action(cx.listener(Self::navigate_forward_action))
@@ -297,7 +283,8 @@ impl Render for Waku {
             .relative()
             .flex()
             .text_color(theme.text)
-            .font_family(".SystemUIFont")
+            .font_family(crate::theme::FONT_SANS)
+            .font_weight(FontWeight::NORMAL)
             // Both panels slide through a container that narrows while their
             // content keeps its full width and is clipped: the sidebar list
             // and the right panel's surfaces never reflow on the way in or
@@ -309,12 +296,14 @@ impl Render for Waku {
                         .flex_none()
                         .w(px(panels.sidebar))
                         .when(panels.sidebar_sliding, |element| element.overflow_hidden())
-                        .child(self.sidebar_pane.clone().cached(
-                            StyleRefinement::default()
-                                .w(px(panels.sidebar_content))
-                                .h_full()
-                                .flex_none(),
-                        )),
+                        .child(
+                            self.sidebar_pane.clone().cached(
+                                StyleRefinement::default()
+                                    .w(px(panels.sidebar_content))
+                                    .h_full()
+                                    .flex_none(),
+                            ),
+                        ),
                 )
             })
             .child(
@@ -334,9 +323,7 @@ impl Render for Waku {
                     } else {
                         self.transcript_pane
                             .clone()
-                            .cached(
-                                StyleRefinement::default().flex_1().min_h(px(0.0)).w_full(),
-                            )
+                            .cached(StyleRefinement::default().flex_1().min_h(px(0.0)).w_full())
                             .into_any_element()
                     })
                     .children(permission)
@@ -371,17 +358,18 @@ impl Render for Waku {
                         // Pinned to the window's right edge, so the panel is
                         // uncovered from that edge inward rather than dragged
                         // across the screen.
-                        .child(self.right_panel_pane.clone().cached(
-                            StyleRefinement::default()
-                                .absolute()
-                                .top_0()
-                                .right_0()
-                                .w(px(panels.right_panel_content))
-                                .h_full(),
-                        )),
+                        .child(
+                            self.right_panel_pane.clone().cached(
+                                StyleRefinement::default()
+                                    .absolute()
+                                    .top_0()
+                                    .right_0()
+                                    .w(px(panels.right_panel_content))
+                                    .h_full(),
+                            ),
+                        ),
                 )
             })
-            .children(command_palette)
             .children(commit_dialog)
             .children(image_preview)
             .into_any_element();
@@ -455,12 +443,12 @@ impl Waku {
             .tab_index(0)
             .size(px(26.0))
             .flex_none()
-            .rounded(px(6.0))
+            .rounded(px(crate::theme::RADIUS_DF))
             .flex()
             .items_center()
             .justify_center()
-            .cursor_default()
-            .focus_visible(|style| style.border_1().border_color(theme.accent))
+            .cursor_pointer()
+            .focus_visible(|style| style.border_1().border_color(theme.ring))
             .hover(|element| element.bg(theme.overlay))
             .active(|element| element.bg(theme.overlay_strong))
             .tooltip(Tooltip::text(tr!("common.dismiss_notification")))
@@ -495,7 +483,7 @@ impl Waku {
                     .min_w_0()
                     .px(px(10.0))
                     .py(px(7.0))
-                    .rounded(px(10.0))
+                    .rounded(px(crate::theme::RADIUS_DF))
                     .border_1()
                     .border_color(theme.border_strong)
                     .bg(theme.raised)
