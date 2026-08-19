@@ -97,6 +97,19 @@ impl Metrics {
         code_line_height: 16.0,
         block_gap: 6.0,
     };
+
+    /// Scale conversation typography while keeping half-pixel layout values.
+    /// Tool chrome uses `COMPACT` directly and is intentionally unaffected.
+    pub fn scaled(self, scale: f32) -> Self {
+        let scale_half_pixel = |value: f32| (value * scale * 2.0).round() / 2.0;
+        Self {
+            text_size: scale_half_pixel(self.text_size),
+            line_height: scale_half_pixel(self.line_height),
+            code_text_size: scale_half_pixel(self.code_text_size),
+            code_line_height: scale_half_pixel(self.code_line_height),
+            block_gap: scale_half_pixel(self.block_gap),
+        }
+    }
 }
 
 pub const SANS_FAMILY: &str = ".SystemUIFont";
@@ -506,6 +519,10 @@ impl<'a> Ctx<'a> {
 
     pub fn selection(&self) -> &TranscriptSelection {
         &self.selection
+    }
+
+    pub fn metrics(&self) -> Metrics {
+        self.metrics
     }
 
     pub fn with_link_handler(mut self, handler: LinkHandler) -> Self {

@@ -42,6 +42,7 @@ pub mod projectless;
 pub mod provider_session;
 pub mod settings;
 pub mod skills;
+pub mod text_size;
 pub mod theme;
 pub mod usage;
 pub mod usage_history;
@@ -57,4 +58,5 @@ pub use protocol::{
     WireDriverEvent, WireDriverStartOptions, WireSessionOptions,
 };
 pub use settings::DaemonSettings;
+pub use text_size::ConversationTextSize;
 pub use workspace::{WorkspaceOperation, WorkspaceResult};

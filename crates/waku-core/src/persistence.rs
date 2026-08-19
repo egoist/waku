@@ -34,6 +34,7 @@ use crate::model::{
     ProviderKind, RuntimeMode, SessionWorkspace,
 };
 use crate::theme::ThemePreference;
+use waku_protocol::ConversationTextSize;
 pub use waku_protocol::persistence::{
     ComposerDraft, ComposerDraftAttachment, ComposerDraftChange, ComposerDraftKey,
     ComposerDraftTarget, ComposerDrafts, SessionMessageMatch,
@@ -191,6 +192,7 @@ pub struct AppSettings {
     pub favorite_models: Vec<FavoriteModel>,
     pub theme: ThemePreference,
     pub language: AppLanguage,
+    pub conversation_text_size: ConversationTextSize,
 }
 
 impl Default for AppSettings {
@@ -200,6 +202,7 @@ impl Default for AppSettings {
             favorite_models: Vec::new(),
             theme: ThemePreference::System,
             language: AppLanguage::default(),
+            conversation_text_size: ConversationTextSize::default(),
         }
     }
 }
@@ -268,6 +271,8 @@ pub struct PersistedState {
     pub theme: ThemePreference,
     #[serde(default)]
     pub language: AppLanguage,
+    #[serde(default)]
+    pub conversation_text_size: ConversationTextSize,
     #[serde(default = "default_sidebar_visibility")]
     pub sidebar_visible: bool,
     #[serde(default = "default_right_panel_visibility")]
@@ -338,6 +343,7 @@ impl PersistedState {
             favorite_models: Vec::new(),
             theme: ThemePreference::System,
             language: AppLanguage::default(),
+            conversation_text_size: ConversationTextSize::default(),
             sidebar_visible: true,
             right_panel_visible: false,
             sidebar_width: DEFAULT_SIDEBAR_WIDTH,
@@ -434,6 +440,7 @@ impl PersistedState {
             favorite_models: self.favorite_models.clone(),
             theme: self.theme,
             language: self.language,
+            conversation_text_size: self.conversation_text_size,
         }
     }
 
@@ -471,6 +478,7 @@ impl PersistedState {
         self.favorite_models = settings.favorite_models;
         self.theme = settings.theme;
         self.language = settings.language;
+        self.conversation_text_size = settings.conversation_text_size;
     }
 
     pub fn apply_daemon_settings(&mut self, settings: crate::DaemonSettings) {
@@ -1917,6 +1925,10 @@ mod tests {
         assert_eq!(settings.theme, ThemePreference::Dark);
         assert_eq!(settings.language, AppLanguage::System);
         assert!(settings.analytics_enabled);
+        assert_eq!(
+            settings.conversation_text_size,
+            ConversationTextSize::Default
+        );
     }
 
     #[test]
@@ -2678,6 +2690,7 @@ mod tests {
         let mut state = PersistedState::fresh(PathBuf::from("/tmp/project"));
         state.theme = ThemePreference::Light;
         state.language = AppLanguage::SimplifiedChinese;
+        state.conversation_text_size = ConversationTextSize::Large;
         state.sidebar_width = 301.0;
         store.save(&mut state).unwrap();
 
@@ -2690,6 +2703,7 @@ mod tests {
         let value: serde_json::Value = serde_json::from_str(&text).unwrap();
         assert_eq!(value["theme"], "light");
         assert_eq!(value["language"], "simplified-chinese");
+        assert_eq!(value["conversation_text_size"], "large");
         for daemon_key in [
             "computer_use_enabled",
             "computer_use_allowed_apps",
@@ -2733,6 +2747,7 @@ mod tests {
             "favorite_models",
             "theme",
             "language",
+            "conversation_text_size",
             "computer_use_enabled",
             "computer_use_allowed_apps",
             "disabled_providers",

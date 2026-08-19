@@ -1268,7 +1268,8 @@ impl Waku {
                         MarkdownMetrics::USER_MESSAGE
                     } else {
                         MarkdownMetrics::BODY
-                    };
+                    }
+                    .scaled(self.state.conversation_text_size.scale());
                     let animate_streaming = message.streaming && !cx.reduce_motion();
                     let ctx = self.markdown_ctx(
                         format!("message-{}", message.id),

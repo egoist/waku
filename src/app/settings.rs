@@ -1262,6 +1262,7 @@ impl Waku {
         let theme = Theme::current(cx);
         let selected_theme = self.state.theme;
         let selected_language = self.state.language;
+        let selected_text_size = self.state.conversation_text_size;
         let weak = cx.entity().downgrade();
         let theme_handle = self.menu_handle("theme-selector", cx);
         let theme_selector = dropdown_menu(
@@ -1313,6 +1314,34 @@ impl Waku {
                             });
                         })
                         .selected(language == selected_language)
+                    })
+                    .collect()
+            },
+        );
+
+        let weak = cx.entity().downgrade();
+        let text_size_handle = self.menu_handle("conversation-text-size-selector", cx);
+        let text_size_selector = dropdown_menu(
+            MenuChip::new("conversation-text-size-selector")
+                .label(selected_text_size.label())
+                .outlined()
+                .selected(text_size_handle.is_open())
+                .w(px(116.0))
+                .justify_between(),
+            "conversation-text-size-selector-menu",
+            &text_size_handle,
+            MenuAlign::BelowRight,
+            move |_| {
+                ConversationTextSize::ALL
+                    .into_iter()
+                    .map(|text_size| {
+                        let weak = weak.clone();
+                        MenuItem::new(text_size.label(), move |_, cx| {
+                            let _ = weak.update(cx, |this, cx| {
+                                this.set_conversation_text_size(text_size, cx);
+                            });
+                        })
+                        .selected(text_size == selected_text_size)
                     })
                     .collect()
             },
@@ -1388,6 +1417,38 @@ impl Waku {
                             ),
                     )
                     .child(language_selector),
+            )
+            .child(div().mx(px(20.0)).h(px(1.0)).bg(theme.border))
+            .child(
+                div()
+                    .w_full()
+                    .min_h(px(60.0))
+                    .px(px(20.0))
+                    .py(px(12.0))
+                    .flex()
+                    .items_center()
+                    .gap(px(24.0))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .child(
+                                div()
+                                    .text_size(px(13.5))
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .text_color(theme.text)
+                                    .child(tr!("settings.conversation_text_size")),
+                            )
+                            .child(
+                                div()
+                                    .mt(px(5.0))
+                                    .text_size(px(12.5))
+                                    .line_height(px(18.0))
+                                    .text_color(theme.text_secondary)
+                                    .child(tr!("settings.conversation_text_size_description")),
+                            ),
+                    )
+                    .child(text_size_selector),
             )
             .into_any_element()
     }
@@ -2209,6 +2270,20 @@ impl Waku {
         }
         self.state.theme = preference;
         crate::theme::apply_theme_preference(preference, window, cx);
+        self.save();
+        cx.notify();
+    }
+
+    fn set_conversation_text_size(
+        &mut self,
+        text_size: ConversationTextSize,
+        cx: &mut Context<Self>,
+    ) {
+        if self.state.conversation_text_size == text_size {
+            return;
+        }
+        self.state.conversation_text_size = text_size;
+        self.reset_transcript_rows(self.transcript_row_count());
         self.save();
         cx.notify();
     }

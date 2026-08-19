@@ -121,7 +121,7 @@ settings.computer_use:
 settings.general_keywords:
   en: general local projects conversations privacy analytics telemetry anonymous sharing updates automatic sparkle version
 settings.appearance_keywords:
-  en: appearance theme system light dark language english chinese simplified
+  en: appearance theme system light dark language english chinese simplified text font size small large
 settings.providers_keywords:
   en: providers agents models cli version install detect claude codex cursor opencode amp grok pi
 settings.skills:
@@ -272,6 +272,16 @@ settings.theme:
   en: Theme
 settings.theme_description:
   en: Choose between system, light, or dark themes
+settings.conversation_text_size:
+  en: Conversation text size
+settings.conversation_text_size_description:
+  en: Adjust message text without changing the rest of the interface
+settings.text_size_small:
+  en: Small
+settings.text_size_default:
+  en: Default
+settings.text_size_large:
+  en: Large
 settings.theme_system:
   en: System
 settings.theme_light:

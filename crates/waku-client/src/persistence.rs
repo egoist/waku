@@ -15,6 +15,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::{Command, DaemonExposureSettings, DaemonSettings, DaemonSupervisor, ResponsePayload};
+pub use waku_protocol::ConversationTextSize;
 use waku_protocol::computer_use::ComputerAppGrant;
 use waku_protocol::i18n::AppLanguage;
 use waku_protocol::identity::DATA_DIRECTORY_NAME;
@@ -215,6 +216,7 @@ pub struct AppSettings {
     pub favorite_models: Vec<FavoriteModel>,
     pub theme: ThemePreference,
     pub language: AppLanguage,
+    pub conversation_text_size: ConversationTextSize,
     pub daemon_exposure: DaemonExposureSettings,
 }
 
@@ -225,6 +227,7 @@ impl Default for AppSettings {
             favorite_models: Vec::new(),
             theme: ThemePreference::System,
             language: AppLanguage::default(),
+            conversation_text_size: ConversationTextSize::default(),
             daemon_exposure: DaemonExposureSettings::default(),
         }
     }
@@ -292,6 +295,8 @@ pub struct PersistedState {
     #[serde(default)]
     pub language: AppLanguage,
     #[serde(default)]
+    pub conversation_text_size: ConversationTextSize,
+    #[serde(default)]
     pub daemon_exposure: DaemonExposureSettings,
     #[serde(default = "default_sidebar_visibility")]
     pub sidebar_visible: bool,
@@ -351,6 +356,7 @@ impl PersistedState {
             favorite_models: Vec::new(),
             theme: ThemePreference::System,
             language: AppLanguage::default(),
+            conversation_text_size: ConversationTextSize::default(),
             daemon_exposure: DaemonExposureSettings::default(),
             sidebar_visible: true,
             right_panel_visible: false,
@@ -467,6 +473,7 @@ impl PersistedState {
             favorite_models: self.favorite_models.clone(),
             theme: self.theme,
             language: self.language,
+            conversation_text_size: self.conversation_text_size,
             daemon_exposure: self.daemon_exposure.clone(),
         }
     }
@@ -496,6 +503,7 @@ impl PersistedState {
         self.favorite_models = settings.favorite_models;
         self.theme = settings.theme;
         self.language = settings.language;
+        self.conversation_text_size = settings.conversation_text_size;
         self.daemon_exposure = settings.daemon_exposure;
     }
 
@@ -991,6 +999,17 @@ mod tests {
                 [configuration_directory().join("settings.json")]
             );
         }
+    }
+
+    #[test]
+    fn conversation_text_size_defaults_in_partial_settings() {
+        let settings: AppSettings = serde_json::from_str(r#"{"theme":"dark"}"#).unwrap();
+
+        assert_eq!(settings.theme, ThemePreference::Dark);
+        assert_eq!(
+            settings.conversation_text_size,
+            ConversationTextSize::Default
+        );
     }
 
     #[test]
