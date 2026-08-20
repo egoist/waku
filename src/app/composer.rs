@@ -833,14 +833,21 @@ impl Waku {
         let weak = cx.entity().downgrade();
         let search = self.model_search.clone();
         let search_focus = search.read(cx).focus_handle(cx);
+        let empty_focus = self.model_picker_empty_focus.clone();
+        let no_providers = self.model_picker_has_no_providers();
 
         let handle = {
             let reset_weak = weak.clone();
             let reset_search = search.clone();
             let picker_focus = search_focus.clone();
+            let empty_picker_focus = empty_focus.clone();
             self.menu_handle_with(MODEL_PICKER_MENU_ID, cx, move |open, window, cx| {
+                // The empty state draws no filter field, so the handle the
+                // deferred focus below targets depends on which body opened.
+                let mut empty = false;
                 let _ = reset_weak.update(cx, |this, cx| {
                     if open {
+                        empty = this.model_picker_has_no_providers();
                         let provider = this
                             .selected_session()
                             .map(|session| session.provider)
@@ -883,7 +890,11 @@ impl Waku {
                     // on the container's first-ever paint it reads a zeroed
                     // viewport, lands wrong, and is consumed. By this frame
                     // the panel has painted real bounds to resolve against.
-                    let picker_focus = picker_focus.clone();
+                    let picker_focus = if empty {
+                        empty_picker_focus.clone()
+                    } else {
+                        picker_focus.clone()
+                    };
                     let reveal_weak = reset_weak.clone();
                     window.on_next_frame(move |window, _| {
                         window.on_next_frame(move |window, cx| {
@@ -920,20 +931,34 @@ impl Waku {
         let scroll = self.model_picker_scroll.clone();
         let scrollbar_state = self.model_picker_scrollbar.clone();
 
-        popover(
+        // With nothing to pick from, naming a model the app cannot run would
+        // be a lie. The chip says so instead, and stays a trigger because the
+        // panel behind it is where the fix lives. Icon plus wording carry the
+        // state on their own, so the warning tint is never the only signal.
+        let trigger = if no_providers {
+            MenuChip::new("composer-provider-model")
+                .icon("icons/alert.svg", theme.warning)
+                .label(tr!("models.no_providers"))
+        } else {
             MenuChip::new("composer-provider-model")
                 .icon(
                     provider_icon(provider),
                     provider_color(&theme, provider).opacity(0.9),
                 )
                 .label(selected_model_name)
-                .caret(false)
-                .selected(handle.is_open()),
+        };
+
+        popover(
+            trigger.caret(false).selected(handle.is_open()),
             &handle,
             MenuAlign::AboveLeft,
             move |popover, _window, _cx| {
                 let popover = popover.clone();
                 let available_models = available_models.clone();
+
+                if no_providers {
+                    return model_picker_empty_state(&theme, &empty_focus, popover, weak.clone());
+                }
 
                 let mut sidebar = div()
                     .w(px(50.0))
@@ -988,6 +1013,21 @@ impl Waku {
                 // agree on which tabs are usable.
                 let rail_tabs = visible_picker_tabs(&probes, &disabled_providers, locked_provider);
                 for kind in ProviderKind::ALL {
+                    // A provider with no CLI on the machine, or one switched
+                    // off in the Providers settings, leaves the rail entirely
+                    // rather than sitting there dimmed: a tab that can never
+                    // open only advertises a choice settings already ruled
+                    // out. Being locked out by the current session is a
+                    // different claim — that tab stays, dimmed, because it is
+                    // true only until the next session.
+                    if !picker_rail_shows_provider(
+                        &probes,
+                        &disabled_providers,
+                        locked_provider,
+                        kind,
+                    ) {
+                        continue;
+                    }
                     let usable = rail_tabs.contains(&ModelPickerTab::Provider(kind));
                     let selected = selected_tab == ModelPickerTab::Provider(kind) && !searching;
                     let tab_weak = weak.clone();
@@ -1454,8 +1494,10 @@ impl Waku {
             });
 
         let fast = selected_tier == "fast" || tier_label.eq_ignore_ascii_case("fast");
-        let trigger_label = match (effort_label.unwrap_or_else(|| tier_label.clone()), window_label)
-        {
+        let trigger_label = match (
+            effort_label.unwrap_or_else(|| tier_label.clone()),
+            window_label,
+        ) {
             (label, Some(window)) => format!("{label} · {window}"),
             (label, None) => label,
         };
@@ -2044,6 +2086,13 @@ impl Waku {
         if self.execute_local_composer_command(prompt, cx) {
             return None;
         }
+        // Nothing installed or switched on can run this. Refuse before the
+        // draft is consumed, so the text and its attachments survive until a
+        // provider is available — every send route lands here, so `enter`,
+        // the button, and steering are all covered by this one check.
+        if self.model_picker_has_no_providers() {
+            return None;
+        }
         for attachment in &self.composer_attachments {
             if let (Some(reference), Some(image)) = (
                 attachment.blob_reference.as_ref(),
@@ -2529,6 +2578,11 @@ impl Waku {
         });
         let has_draft = !self.composer.read(cx).content().trim().is_empty()
             || !self.composer_attachments.is_empty();
+        // With no provider to run it, a draft has nowhere to go. The button
+        // reads as unavailable and the submission path refuses too, so
+        // `enter` cannot slip past a disabled control.
+        let no_providers = self.model_picker_has_no_providers();
+        let can_send = has_draft && !no_providers;
         let autocomplete = self.render_composer_autocomplete(window, cx);
         let autocomplete_open = autocomplete.is_some();
         // Files dragged in from the OS light the card up as a drop target and
@@ -2651,7 +2705,7 @@ impl Waku {
                                             this.cancel_turn(cx);
                                         })),
                                 )
-                                .when(has_draft, |element| {
+                                .when(can_send, |element| {
                                     element.child(
                                         div()
                                             .id("queue-follow-up")
@@ -2692,12 +2746,12 @@ impl Waku {
                                 .flex()
                                 .items_center()
                                 .justify_center()
-                                .bg(if has_draft {
+                                .bg(if can_send {
                                     theme.inverse
                                 } else {
                                     theme.overlay_strong
                                 })
-                                .when(has_draft, |element| {
+                                .when(can_send, |element| {
                                     element
                                         .cursor_default()
                                         .hover(|element| element.opacity(0.9))
@@ -2706,12 +2760,17 @@ impl Waku {
                                 .child(icon(
                                     "icons/arrow-up.svg",
                                     16.0,
-                                    if has_draft {
+                                    if can_send {
                                         theme.on_inverse
                                     } else {
                                         theme.text_ghost
                                     },
                                 ))
+                                // Says why the button is dead, for the case
+                                // the draft is ready and the machine is not.
+                                .when(no_providers, |element| {
+                                    element.tooltip(Tooltip::text(tr!("composer.no_providers")))
+                                })
                                 .on_click(cx.listener(|this, _, _, cx| {
                                     let prompt = this.composer.read(cx).content().to_owned();
                                     if let Some(submission) =
@@ -3545,14 +3604,139 @@ pub(super) fn visible_picker_tabs(
 ) -> Vec<ModelPickerTab> {
     let mut tabs = vec![ModelPickerTab::Favorites];
     tabs.extend(ProviderKind::ALL.into_iter().filter_map(|kind| {
-        let installed = probes
-            .iter()
-            .any(|probe| probe.provider == kind && probe.installed);
-        let switched_off = disabled_providers.contains(&kind) && locked_provider != Some(kind);
-        let allowed = (locked_provider.is_none() || locked_provider == Some(kind)) && !switched_off;
-        (installed && allowed).then_some(ModelPickerTab::Provider(kind))
+        let drawn = picker_rail_shows_provider(probes, disabled_providers, locked_provider, kind);
+        let allowed = locked_provider.is_none() || locked_provider == Some(kind);
+        (drawn && allowed).then_some(ModelPickerTab::Provider(kind))
     }));
     tabs
+}
+
+/// The picker's whole body when nothing can back a session: no agent CLI
+/// found on this machine, and none left switched on.
+///
+/// A rail holding a lone star above an empty filter field would invite the
+/// user to search a list that cannot have rows, so the panel names what is
+/// missing and offers the page that fixes it. Its one button also carries the
+/// panel's focus, which is what `escape` dispatches up from.
+fn model_picker_empty_state(
+    theme: &Theme,
+    focus: &FocusHandle,
+    popover: ContextMenuHandle,
+    waku: WeakEntity<Waku>,
+) -> AnyElement {
+    let click_popover = popover.clone();
+    let click_waku = waku.clone();
+    div()
+        .w(px(320.0))
+        .rounded(px(13.0))
+        .overflow_hidden()
+        .border_1()
+        .border_color(theme.border_strong)
+        .bg(theme.raised)
+        .shadow_lg()
+        .flex()
+        .flex_col()
+        .items_center()
+        .gap(px(9.0))
+        .px(px(24.0))
+        .py(px(22.0))
+        .child(
+            div()
+                .w(px(40.0))
+                .h(px(40.0))
+                .rounded(px(10.0))
+                .bg(theme.overlay)
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(icon("icons/bot.svg", 19.0, theme.text_tertiary)),
+        )
+        .child(
+            div()
+                .text_size(px(12.5))
+                .font_weight(FontWeight::MEDIUM)
+                .text_color(theme.text)
+                .child(tr!("models.no_providers_title")),
+        )
+        .child(
+            div()
+                .text_size(px(11.5))
+                .line_height(px(17.0))
+                .text_center()
+                .text_color(theme.text_secondary)
+                .child(tr!("models.no_providers_description")),
+        )
+        .child(
+            div()
+                .id("model-picker-open-providers")
+                .track_focus(focus)
+                .tab_index(0)
+                .tab_stop(true)
+                .focus_visible(|style| style.border_color(theme.accent))
+                .mt(px(3.0))
+                .h(px(28.0))
+                .px(px(11.0))
+                .rounded(px(7.0))
+                .border_1()
+                .border_color(theme.border_strong)
+                .flex()
+                .items_center()
+                .gap(px(6.0))
+                .cursor_default()
+                .text_size(px(11.0))
+                .text_color(theme.text_secondary)
+                .hover(|element| element.bg(theme.overlay))
+                .child(icon("icons/settings.svg", 11.0, theme.text_tertiary))
+                .child(tr!("models.open_provider_settings"))
+                .on_click(move |_, window, cx| {
+                    open_provider_settings_from_picker(&click_waku, &click_popover, window, cx);
+                })
+                .on_key_down(move |event: &KeyDownEvent, window, cx| {
+                    if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                        open_provider_settings_from_picker(&waku, &popover, window, cx);
+                        cx.stop_propagation();
+                    }
+                }),
+        )
+        .into_any_element()
+}
+
+/// Dismiss the picker and land on the Providers page, for both the empty
+/// state's click and its keyboard activation. Closing first matters: the
+/// picker returns focus to the composer as it closes, which would otherwise
+/// pull focus straight back out of the settings view.
+fn open_provider_settings_from_picker(
+    waku: &WeakEntity<Waku>,
+    popover: &ContextMenuHandle,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    popover.close(window, cx);
+    let _ = waku.update(cx, |this, cx| {
+        this.open_settings_action(&OpenSettings, window, cx);
+        this.open_settings_page(SettingsPage::Providers, cx);
+    });
+}
+
+/// Whether the rail draws a tab for the provider at all, usable or not.
+///
+/// Installed on this machine and not switched off in the Providers settings.
+/// Both of those are settings-level facts the user has already decided, so the
+/// tab is absent rather than dimmed — the rail offers what could be picked,
+/// not a catalog of everything Waku can speak to. A session locked to a
+/// provider switched off afterwards keeps its own tab, since the picker is
+/// that session's only route to another model.
+pub(super) fn picker_rail_shows_provider(
+    probes: &[ProviderProbe],
+    disabled_providers: &[ProviderKind],
+    locked_provider: Option<ProviderKind>,
+    kind: ProviderKind,
+) -> bool {
+    let installed = probes
+        .iter()
+        .any(|probe| probe.provider == kind && probe.installed);
+    let switched_off = disabled_providers.contains(&kind) && locked_provider != Some(kind);
+    installed && !switched_off
 }
 
 pub(super) fn model_picker_subtitle(provider: ProviderKind, sub_provider: Option<&str>) -> String {
@@ -3562,6 +3746,25 @@ pub(super) fn model_picker_subtitle(provider: ProviderKind, sub_provider: Option
         Some(name) => format!("{name} · {provider_name}"),
         None => provider_name.to_owned(),
     }
+}
+
+/// Whether the picker has nothing left to offer, so the composer's trigger
+/// and the panel behind it both swap to their empty state.
+///
+/// `detection_settled` gates the whole answer. Every probe is seeded as "not
+/// installed" and detection answers off the UI thread, so a pass that has
+/// never completed means "not known yet", never "nothing here" — otherwise
+/// the trigger would flash an empty state during every launch.
+pub(super) fn picker_has_no_providers(
+    probes: &[ProviderProbe],
+    disabled_providers: &[ProviderKind],
+    locked_provider: Option<ProviderKind>,
+    detection_settled: bool,
+) -> bool {
+    detection_settled
+        && !ProviderKind::ALL.into_iter().any(|kind| {
+            picker_rail_shows_provider(probes, disabled_providers, locked_provider, kind)
+        })
 }
 
 /// The models the picker lists, in display order.

@@ -16,6 +16,23 @@ the original feature bullet instead of adding separate entries for them.
 
 ## [unreleased]
 
+- Add Kimi Code support
+
+## [0.1.8]
+
+- Fix `PATH` resolution on Windows
+
+## [0.1.4]
+
+- Fix text selection in diff view
+
+## [0.1.3]
+
+- Pin Codex and Claude commit message generation to cheap models: gpt-5.6-luna and claude-4.5-haiku
+- Animate sidebars
+- Render provider file edits as inline diffs in the transcript
+- Fix claude task title generation
+
 ## [0.1.2]
 
 - Fix regression: user bubble should fit its content width

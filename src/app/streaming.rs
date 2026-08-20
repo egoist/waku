@@ -120,6 +120,8 @@ impl Waku {
                 });
                 if let Some(activity) = matching {
                     let has_arguments = item.arguments.is_some();
+                    let replaces_changes = !item.file_changes.is_empty();
+                    let activity_id = activity.id;
                     activity.kind = item.kind;
                     activity.title = item.title;
                     activity.complete = item.complete;
@@ -154,6 +156,11 @@ impl Waku {
                     }
                     session.updated_at = unix_time();
                     runtime.stream_phase = Some(StreamPhase::Activity);
+                    if replaces_changes {
+                        // The rows this activity's diff was built from are gone;
+                        // an expanded card rebuilds from the new ones.
+                        self.activity_diffs.borrow_mut().remove(&activity_id);
+                    }
                     return;
                 }
             }

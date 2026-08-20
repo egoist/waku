@@ -12,7 +12,10 @@
 //! app entity stores.
 
 use std::io::{BufRead as _, BufReader, Write as _};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
+
+#[cfg(target_os = "macos")]
+use std::process::Command;
 use std::time::Duration;
 
 use anyhow::{Context as _, anyhow};
@@ -26,6 +29,13 @@ const KEYCHAIN_SERVICE: &str = "Claude Code-credentials";
 const OAUTH_BETA_HEADER: &str = "oauth-2025-04-20";
 /// User-Agent when the CLI's probed version is not known yet.
 const FALLBACK_CLI_VERSION: &str = "2.1.0";
+
+/// The absolute path keeps a shadowed `curl` on `PATH` out of the credential
+/// exchange. Windows 10 build 17063 and later ship the same tool in System32.
+#[cfg(not(windows))]
+const CURL_PATH: &str = "/usr/bin/curl";
+#[cfg(windows)]
+const CURL_PATH: &str = r"C:\Windows\System32\curl.exe";
 
 const CODEX_USAGE_URL: &str = "https://chatgpt.com/backend-api/wham/usage";
 const OPENCODE_GO_USAGE_URL: &str = "https://opencode.ai/zen/go/v1/usage";
@@ -585,7 +595,7 @@ fn parse_credentials(payload: &str) -> anyhow::Result<OauthCredentials> {
 /// on stdin, never on argv, so bearer tokens cannot show up in the process
 /// table. Shared with the usage-history rate-table fetch.
 pub fn http_get(url: &str, headers: &[String]) -> anyhow::Result<(u16, String)> {
-    let mut child = Command::new("/usr/bin/curl")
+    let mut child = crate::command_env::plain_command(CURL_PATH)
         .args(["-sS", "--max-time", "15", "-D", "-", "-K", "-", url])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())

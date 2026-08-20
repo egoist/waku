@@ -12,14 +12,14 @@ use super::{
     assistant_response_footer_time, changed_files_inline_message_index, compact_driver_error,
     disclosure_leading_space, fenced_code, fitted_file_tree_width, fitted_panel_widths,
     folded_transcript_row_kinds, format_worked_duration, format_working_elapsed,
-    maintain_transcript_anchor, message_starts_followup_turn, navigation_preview_snippet,
-    navigation_rail_fade_visibility, navigation_rail_height, navigation_rail_scale,
-    paused_toast_duration, pop_stream_batch, push_transcript_activity, session_is_reapable,
-    should_refresh_branch_after_activity, should_show_navigation_rail,
+    maintain_transcript_anchor, message_opens_turn, message_starts_followup_turn,
+    navigation_preview_snippet, navigation_rail_fade_visibility, navigation_rail_height,
+    navigation_rail_scale, paused_toast_duration, pop_stream_batch, push_transcript_activity,
+    session_is_reapable, should_refresh_branch_after_activity, should_show_navigation_rail,
     should_show_scroll_to_bottom, task_id_from_notification_tag, task_notification_tag,
-    transcript_anchor_end_space, transcript_navigation_turns, transcript_row_kinds,
-    transcript_row_splice, transcript_rows_fingerprint, widened_panel_width_for_file_editor,
-    widened_panel_width_for_review,
+    transcript_anchor_end_space, transcript_navigation_turns, transcript_rests_at_tail,
+    transcript_row_kinds, transcript_row_splice, transcript_rows_fingerprint,
+    widened_panel_width_for_file_editor, widened_panel_width_for_review,
 };
 use crate::git_branch::BranchEntry;
 use crate::model::{
@@ -534,57 +534,84 @@ fn anchor_end_space_keeps_a_short_new_turn_at_the_viewport_top() {
 fn scroll_to_bottom_only_appears_while_the_tail_is_below_the_viewport() {
     let viewport_bottom = px(700.0);
 
-    assert!(!should_show_scroll_to_bottom(
-        false,
-        false,
-        true,
-        viewport_bottom,
-        None,
-        Pixels::ZERO,
-    ));
-    assert!(!should_show_scroll_to_bottom(
-        true,
-        true,
-        true,
-        viewport_bottom,
-        Some(px(900.0)),
-        Pixels::ZERO,
-    ));
+    assert_eq!(
+        should_show_scroll_to_bottom(false, false, true, viewport_bottom, None, Pixels::ZERO),
+        Some(false)
+    );
+    assert_eq!(
+        should_show_scroll_to_bottom(
+            true,
+            true,
+            true,
+            viewport_bottom,
+            Some(px(900.0)),
+            Pixels::ZERO,
+        ),
+        Some(false)
+    );
     // Disclosure pinning keeps `is_scrolled` true and a splice can leave the
     // tail temporarily unmeasured, but a collapsed transcript that fits the
     // viewport has nowhere to scroll back to.
-    assert!(!should_show_scroll_to_bottom(
-        true,
-        false,
-        false,
-        viewport_bottom,
-        None,
-        Pixels::ZERO,
-    ));
-    assert!(should_show_scroll_to_bottom(
-        true,
-        false,
-        true,
-        viewport_bottom,
-        None,
-        Pixels::ZERO,
-    ));
-    assert!(should_show_scroll_to_bottom(
-        true,
-        false,
-        true,
-        viewport_bottom,
-        Some(px(701.0)),
-        Pixels::ZERO,
-    ));
-    assert!(!should_show_scroll_to_bottom(
-        true,
-        false,
-        true,
-        viewport_bottom,
-        Some(px(500.0)),
-        px(200.0),
-    ));
+    assert_eq!(
+        should_show_scroll_to_bottom(true, false, false, viewport_bottom, None, Pixels::ZERO),
+        Some(false)
+    );
+    assert_eq!(
+        should_show_scroll_to_bottom(
+            true,
+            false,
+            true,
+            viewport_bottom,
+            Some(px(701.0)),
+            Pixels::ZERO,
+        ),
+        Some(true)
+    );
+    assert_eq!(
+        should_show_scroll_to_bottom(
+            true,
+            false,
+            true,
+            viewport_bottom,
+            Some(px(500.0)),
+            px(200.0),
+        ),
+        Some(false)
+    );
+    // A stream commit remeasures the tail rows, so the frame after each one has
+    // no bounds to read. Answering "show" there strobes the button against the
+    // measured frames between commits; the caller holds its last answer instead.
+    assert_eq!(
+        should_show_scroll_to_bottom(true, false, true, viewport_bottom, None, Pixels::ZERO),
+        None
+    );
+}
+
+#[test]
+fn scrolling_back_onto_the_tail_is_told_apart_from_an_unmeasured_tail() {
+    let viewport_bottom = px(700.0);
+
+    // Landed on the tail: the reply's last row ends at the viewport bottom,
+    // with or without the anchor's reserved end space below it.
+    assert_eq!(
+        transcript_rests_at_tail(viewport_bottom, Some(px(700.0)), Pixels::ZERO),
+        Some(true)
+    );
+    assert_eq!(
+        transcript_rests_at_tail(viewport_bottom, Some(px(500.0)), px(200.0)),
+        Some(true)
+    );
+    // Stopped short of it, so the stream must not reclaim the view.
+    assert_eq!(
+        transcript_rests_at_tail(viewport_bottom, Some(px(701.0)), Pixels::ZERO),
+        Some(false)
+    );
+    // Unmeasured this frame: unknown, not "stopped short" — concluding the
+    // latter would drop the re-engage whenever a scroll settles on a commit.
+    assert_eq!(
+        transcript_rests_at_tail(viewport_bottom, None, Pixels::ZERO),
+        None
+    );
 }
 
 #[test]
@@ -673,6 +700,27 @@ fn only_later_user_messages_start_followup_turns() {
     assert!(!message_starts_followup_turn(&messages, 1));
     assert!(message_starts_followup_turn(&messages, 2));
     assert!(!message_starts_followup_turn(&messages, 3));
+}
+
+#[test]
+fn only_the_turn_opening_prompt_is_a_rewind_boundary() {
+    let mut session = AgentSession::new(Uuid::new_v4(), ProviderKind::Codex);
+    session.begin_turn("first prompt");
+    session.push_message(MessageRole::Assistant, "working on it");
+    // A steer the provider folded into the live turn.
+    session.push_user_message_with_presentation("actually, also this", None, Vec::new());
+    session.push_message(MessageRole::Assistant, "answer");
+    session.finish_active_turn(TurnStatus::Interrupted);
+    session.begin_turn("second prompt");
+
+    assert!(message_opens_turn(&session.messages, 0));
+    assert!(!message_opens_turn(&session.messages, 1));
+    assert!(
+        !message_opens_turn(&session.messages, 2),
+        "a steer shares the turn's checkpoint, so it cannot be rewound to on its own"
+    );
+    assert!(!message_opens_turn(&session.messages, 3));
+    assert!(message_opens_turn(&session.messages, 4));
 }
 
 #[test]
@@ -1890,4 +1938,103 @@ fn tab_cycle_walks_favorites_then_usable_providers_in_rail_order() {
             ModelPickerTab::Provider(ProviderKind::Claude),
         ]
     );
+}
+
+#[test]
+fn the_picker_is_empty_only_once_detection_has_answered() {
+    use super::composer::picker_has_no_providers;
+    use crate::model::{ProviderModel, ProviderProbe};
+
+    let probe = |provider: ProviderKind, installed: bool| ProviderProbe {
+        provider,
+        installed,
+        path: installed.then(|| std::path::PathBuf::from(format!("/bin/{}", provider.id()))),
+        models: vec![ProviderModel::new("model", "model")],
+        agent_presets: Vec::new(),
+    };
+    // What every probe looks like before detection answers: seeded with a
+    // fallback catalog and not yet installed.
+    let undetected = [
+        probe(ProviderKind::Claude, false),
+        probe(ProviderKind::Codex, false),
+    ];
+    let detected = [
+        probe(ProviderKind::Claude, true),
+        probe(ProviderKind::Codex, false),
+    ];
+
+    // An unsettled first pass reads as "not known yet", so the composer keeps
+    // showing the remembered model instead of flashing an empty state.
+    assert!(!picker_has_no_providers(&undetected, &[], None, false));
+    // Once it settles, the same probes really do mean nothing is installed.
+    assert!(picker_has_no_providers(&undetected, &[], None, true));
+    // One detected CLI is enough to keep the picker populated...
+    assert!(!picker_has_no_providers(&detected, &[], None, true));
+    // ...until it is switched off, which empties the picker just as surely as
+    // never having been installed.
+    assert!(picker_has_no_providers(
+        &detected,
+        &[ProviderKind::Claude],
+        None,
+        true
+    ));
+    // A session already locked to that provider keeps it, switched off or not.
+    assert!(!picker_has_no_providers(
+        &detected,
+        &[ProviderKind::Claude],
+        Some(ProviderKind::Claude),
+        true
+    ));
+}
+
+#[test]
+fn the_rail_draws_only_installed_providers_the_settings_left_on() {
+    use super::composer::picker_rail_shows_provider;
+    use crate::model::{ProviderModel, ProviderProbe};
+
+    let probe = |provider: ProviderKind, installed: bool| ProviderProbe {
+        provider,
+        installed,
+        path: installed.then(|| std::path::PathBuf::from(format!("/bin/{}", provider.id()))),
+        models: vec![ProviderModel::new("model", "model")],
+        agent_presets: Vec::new(),
+    };
+    let probes = [
+        probe(ProviderKind::Claude, true),
+        probe(ProviderKind::Codex, true),
+        probe(ProviderKind::Cursor, false),
+    ];
+
+    // An undetected CLI and a switched-off provider both leave the rail
+    // outright, rather than sitting in it dimmed.
+    assert!(!picker_rail_shows_provider(
+        &probes,
+        &[],
+        None,
+        ProviderKind::Cursor
+    ));
+    assert!(!picker_rail_shows_provider(
+        &probes,
+        &[ProviderKind::Claude],
+        None,
+        ProviderKind::Claude
+    ));
+
+    // A provider only the *current* session locks out stays drawn: that is a
+    // fact about this session, not about what the user configured.
+    assert!(picker_rail_shows_provider(
+        &probes,
+        &[],
+        Some(ProviderKind::Codex),
+        ProviderKind::Claude
+    ));
+
+    // ...and the locked session keeps its own tab even once it is switched
+    // off, since the picker is its only route to another model.
+    assert!(picker_rail_shows_provider(
+        &probes,
+        &[ProviderKind::Claude],
+        Some(ProviderKind::Claude),
+        ProviderKind::Claude
+    ));
 }

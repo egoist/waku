@@ -386,9 +386,7 @@ impl PersistedState {
                 .reasoning_effort
                 .clone_from(&self.last_reasoning_effort);
             session.service_tier.clone_from(&self.last_service_tier);
-            session
-                .context_window
-                .clone_from(&self.last_context_window);
+            session.context_window.clone_from(&self.last_context_window);
         }
         session
     }

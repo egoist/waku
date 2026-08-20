@@ -144,6 +144,16 @@ impl DaemonProcess {
         let token = settings.token.clone();
         let app_executable = std::env::current_exe().context("could not locate Waku executable")?;
         let mut command = ProcessCommand::new(executable);
+        // The desktop is a GUI-subsystem binary on Windows, so a console
+        // child would get a console window of its own. `stderr` still reaches
+        // the app's inherited handle.
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt as _;
+
+            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+            command.creation_flags(CREATE_NO_WINDOW);
+        }
         command
             .arg("--bind")
             .arg(settings.bind_address())

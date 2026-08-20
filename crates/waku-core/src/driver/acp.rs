@@ -76,6 +76,10 @@ fn launch_for(provider: ProviderKind) -> anyhow::Result<AcpLaunch> {
             args: vec!["agent".into(), "stdio".into()],
             env: vec![("GROK_OAUTH2_REFERRER".into(), "waku".into())],
         }),
+        ProviderKind::Kimi => Ok(AcpLaunch {
+            args: vec!["acp".into()],
+            env: Vec::new(),
+        }),
         ProviderKind::OpenCode => Ok(AcpLaunch {
             args: vec!["acp".into()],
             env: Vec::new(),
@@ -479,6 +483,7 @@ async fn run_sdk_connection(
             let mut current_model = model;
             apply_model(
                 &connection,
+                provider,
                 &session_id,
                 current_model.as_deref(),
                 reasoning_effort.as_deref(),
@@ -507,6 +512,7 @@ async fn run_sdk_connection(
                             &native_session_id,
                             grok_title_home.clone(),
                             title_refresh.clone(),
+                            stream_state.clone(),
                         ) {
                             let _ = events.send(DriverEvent::Error(error.to_string()));
                             let _ = events.send(DriverEvent::TurnFinished {
@@ -536,6 +542,7 @@ async fn run_sdk_connection(
                             &native_session_id,
                             grok_title_home.clone(),
                             title_refresh.clone(),
+                            stream_state.clone(),
                         ) {
                             Ok(()) => {
                                 let _ = events.send(DriverEvent::SteerAccepted { message: text });
@@ -587,6 +594,7 @@ async fn run_sdk_connection(
                             current_model = options.model;
                             apply_model(
                                 &connection,
+                                provider,
                                 &session_id,
                                 current_model.as_deref(),
                                 options.reasoning_effort.as_deref(),
@@ -664,8 +672,19 @@ fn desired_mode(
     (modes.current_mode_id != plan).then_some(plan)
 }
 
+/// Which session config option carries reasoning effort. ACP leaves the id to
+/// the agent: Kimi Code exposes it as its `thinking` level, while the other
+/// agents Waku drives keep it on `mode`.
+fn reasoning_effort_config_id(provider: ProviderKind) -> &'static str {
+    match provider {
+        ProviderKind::Kimi => "thinking",
+        _ => "mode",
+    }
+}
+
 async fn apply_model(
     connection: &ConnectionTo<Agent>,
+    provider: ProviderKind,
     session_id: &SessionId,
     model: Option<&str>,
     reasoning_effort: Option<&str>,
@@ -700,7 +719,7 @@ async fn apply_model(
         let _ = connection
             .send_request(SetSessionConfigOptionRequest::new(
                 session_id.clone(),
-                "mode",
+                reasoning_effort_config_id(provider),
                 effort,
             ))
             .block_task()
@@ -719,7 +738,13 @@ fn send_prompt(
     native_session_id: &str,
     grok_title_home: Option<std::path::PathBuf>,
     title_refresh: super::title_refresh::NativeTitleRefresh,
+    stream_state: Arc<Mutex<AcpStreamState>>,
 ) -> agent_client_protocol::Result<()> {
+    stream_state.lock().produced_content = false;
+    // Read before the turn runs, so the failure lookup cannot mistake an
+    // earlier turn's record for this one's.
+    let wire_offset = (provider == ProviderKind::Kimi)
+        .then(|| crate::kimi_session::wire_offset(native_session_id));
     let extension_id =
         (provider == ProviderKind::Grok).then(|| format!("waku-{}", uuid::Uuid::new_v4()));
     let mut request = PromptRequest::new(
@@ -745,7 +770,12 @@ fn send_prompt(
     let native_session_id = native_session_id.to_owned();
     let registered = sent.on_receiving_result(async move |result| {
         if settle_prompt_request(&callback_requests, &callback_request_id) {
-            let success = finish_prompt(result, &callback_events);
+            // Only an empty turn pays for this lookup, so a healthy turn never
+            // waits on Kimi's records.
+            let native_failure = wire_offset
+                .filter(|_| !stream_state.lock().produced_content)
+                .and_then(|offset| crate::kimi_session::turn_failure(&native_session_id, offset));
+            let success = finish_prompt(result, native_failure, &callback_events);
             if provider == ProviderKind::Grok && success {
                 start_grok_title_refresh(
                     grok_title_home.as_deref(),
@@ -790,7 +820,7 @@ fn finish_xai_prompt_complete(
         Some("refusal") => StopReason::Refusal,
         _ => StopReason::EndTurn,
     };
-    finish_prompt(Ok(PromptResponse::new(stop_reason)), events).then(|| session_id.to_owned())
+    finish_prompt(Ok(PromptResponse::new(stop_reason)), None, events).then(|| session_id.to_owned())
 }
 
 fn start_grok_title_refresh(
@@ -823,6 +853,7 @@ fn start_grok_title_refresh(
 
 fn finish_prompt(
     result: agent_client_protocol::Result<PromptResponse>,
+    native_failure: Option<String>,
     events: &impl DriverEventSink,
 ) -> bool {
     let response = match result {
@@ -836,6 +867,18 @@ fn finish_prompt(
             return false;
         }
     };
+    // An agent can end a turn cleanly and still have failed upstream. Where
+    // that failure is recoverable from the provider's own records, it outranks
+    // the protocol's verdict: reporting success here would show the user an
+    // empty answer and no reason for it.
+    if let Some(failure) = native_failure {
+        let _ = events.send(DriverEvent::Error(failure));
+        let _ = events.send(DriverEvent::TurnFinished {
+            success: false,
+            summary: None,
+        });
+        return false;
+    }
     let (success, summary) = match response.stop_reason {
         StopReason::EndTurn | StopReason::Cancelled => (true, None),
         StopReason::MaxTokens => (false, Some(tr!("session.agent_ran_out_of_context"))),
@@ -1197,7 +1240,20 @@ fn handle_session_update(
     state: &mut AcpStreamState,
 ) -> agent_client_protocol::Result<()> {
     let update = serde_json::to_value(notification.update)?;
-    match update.get("sessionUpdate").and_then(Value::as_str) {
+    let kind = update.get("sessionUpdate").and_then(Value::as_str);
+    if matches!(
+        kind,
+        Some(
+            "agent_message_chunk"
+                | "agent_thought_chunk"
+                | "tool_call"
+                | "tool_call_update"
+                | "plan"
+        )
+    ) {
+        state.produced_content = true;
+    }
+    match kind {
         Some("agent_message_chunk") => {
             if let Some(text) = update
                 .pointer("/content/text")
@@ -1285,6 +1341,10 @@ fn handle_session_update(
 #[derive(Default)]
 struct AcpStreamState {
     tools: HashMap<String, (ActivityKind, String)>,
+    /// Whether the running turn has produced anything visible. A turn that
+    /// ends having produced nothing is the shape a swallowed provider error
+    /// takes, which is what makes a native failure worth looking up.
+    produced_content: bool,
 }
 
 /// Pull the agent's explanation out of a permission request's tool call.
@@ -1635,11 +1695,37 @@ mod tests {
         assert!(event_rx.try_recv().is_err());
     }
 
+    /// Kimi ends a failed turn with `end_turn` and no content at all, so the
+    /// provider's own record is the only thing that can name the cause.
+    #[test]
+    fn a_recovered_provider_failure_overrides_a_clean_stop_reason() {
+        let (events, event_rx) = crossbeam_channel::unbounded();
+
+        assert!(!finish_prompt(
+            Ok(PromptResponse::new(StopReason::EndTurn)),
+            Some("402 membership inactive".to_owned()),
+            &events
+        ));
+
+        assert!(matches!(
+            event_rx.try_recv().unwrap(),
+            DriverEvent::Error(message) if message == "402 membership inactive"
+        ));
+        assert!(matches!(
+            event_rx.try_recv().unwrap(),
+            DriverEvent::TurnFinished {
+                success: false,
+                summary: None
+            }
+        ));
+    }
+
     #[test]
     fn typed_prompt_response_settles_the_turn() {
         let (events, event_rx) = crossbeam_channel::unbounded();
         assert!(finish_prompt(
             Ok(PromptResponse::new(StopReason::EndTurn)),
+            None,
             &events
         ));
         assert!(matches!(
@@ -1758,5 +1844,76 @@ mod tests {
             }
         }
         assert_eq!(finished, Some(true));
+    }
+
+    /// The invariant Kimi's silent failures break: a turn may finish
+    /// successfully or report why it did not, but it must never claim success
+    /// having produced nothing at all. Holds whether or not the account is
+    /// currently able to serve the request.
+    #[test]
+    #[ignore = "requires an installed, authenticated kimi"]
+    fn kimi_never_reports_an_empty_turn_as_a_success() {
+        let binary = crate::command_env::find_executable("kimi").expect("kimi is not installed");
+        let (events, event_rx) = crate::driver::test_event_channel();
+        let driver = AcpDriver::start(
+            ProviderKind::Kimi,
+            DriverStartOptions {
+                binary,
+                cwd: std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")),
+                mode: RuntimeMode::FullAccess,
+                interaction_mode: InteractionMode::Build,
+                model: None,
+                reasoning_effort: None,
+                service_tier: None,
+                context_window: None,
+                agent_preset: None,
+                computer_use_enabled: false,
+                provider_cursor: None,
+            },
+            events,
+        )
+        .expect("the ACP session should open");
+
+        loop {
+            let event = event_rx
+                .recv_timeout(Duration::from_secs(60))
+                .expect("the agent should report its session");
+            match event {
+                DriverEvent::Connected {
+                    provider_cursor: Some(ProviderResumeCursor::Kimi { .. }),
+                } => break,
+                DriverEvent::Error(error) => panic!("the agent reported: {error}"),
+                _ => {}
+            }
+        }
+        driver.prompt("Say hi in three words.".into());
+
+        let mut produced_content = false;
+        let mut reported_error = None;
+        let mut finished = None;
+        while let Ok(event) = event_rx.recv_timeout(Duration::from_secs(120)) {
+            match event {
+                DriverEvent::TextDelta(_) | DriverEvent::ReasoningDelta(_) => {
+                    produced_content = true;
+                }
+                DriverEvent::Error(error) => reported_error = Some(error),
+                DriverEvent::TurnFinished { success, .. } => {
+                    finished = Some(success);
+                    break;
+                }
+                _ => {}
+            }
+        }
+
+        match finished.expect("the turn should settle") {
+            true => assert!(
+                produced_content,
+                "the turn was reported successful without producing anything"
+            ),
+            false => assert!(
+                reported_error.is_some_and(|error| !error.trim().is_empty()),
+                "the turn failed without naming a reason"
+            ),
+        }
     }
 }

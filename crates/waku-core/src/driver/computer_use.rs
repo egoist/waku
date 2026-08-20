@@ -2,7 +2,6 @@
 
 use std::collections::HashMap;
 use std::fs;
-use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -14,6 +13,7 @@ use uuid::Uuid;
 
 use crate::computer_use;
 use crate::driver::DriverEventSender;
+use crate::fs_ext;
 use crate::model::DriverEvent;
 
 #[cfg(target_os = "macos")]
@@ -139,7 +139,7 @@ pub(super) fn create_process_directory() -> anyhow::Result<PathBuf> {
             directory.display()
         )
     })?;
-    fs::set_permissions(&directory, fs::Permissions::from_mode(0o700)).with_context(|| {
+    fs_ext::restrict_to_owner(&directory).with_context(|| {
         format!(
             "could not secure Computer Use process directory {}",
             directory.display()
@@ -153,6 +153,9 @@ pub(super) fn stop_registered_processes(directory: &Path, helper_executable: &Pa
         fs::canonicalize(helper_executable).unwrap_or_else(|_| helper_executable.to_path_buf());
     for (pid, registration) in registered_processes(directory) {
         if process_executable(pid).as_deref() == Some(expected_executable.as_path()) {
+            // Unreachable off unix, where `process_executable` never resolves
+            // and the loop only clears stale registration files.
+            #[cfg(unix)]
             unsafe {
                 libc::kill(pid, libc::SIGTERM);
             }

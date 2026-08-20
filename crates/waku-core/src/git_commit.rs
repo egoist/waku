@@ -26,6 +26,18 @@ const MAX_STDOUT_BYTES: usize = 1024 * 1024;
 const MAX_STDERR_BYTES: usize = 256 * 1024;
 const MAX_ERROR_CHARS: usize = 4_000;
 
+// A commit subject is a fixed classification over a diff that is already in the
+// prompt, so it does not need — or benefit from — the model the task runs on.
+// Where a provider exposes a cheap tier by name, generation is pinned to it and
+// to the lowest effort that tier's API accepts, whatever the session selected.
+const CLAUDE_COMMIT_MODEL: &str = "claude-haiku-4-5";
+const CLAUDE_COMMIT_EFFORT: &str = "low";
+const CODEX_COMMIT_MODEL: &str = "gpt-5.6-luna";
+// `codex exec` has no effort flag, so the config override is the only route.
+// `none` is the floor: `minimal` is rejected by the API for this model with
+// `unsupported_value`, listing `none` as the lowest it accepts.
+const CODEX_COMMIT_EFFORT: &str = r#"model_reasoning_effort="none""#;
+
 struct CapturedOutput {
     status: ExitStatus,
     stdout: Vec<u8>,
@@ -236,14 +248,10 @@ fn agent_arguments(
             push(&mut args, "--disable-slash-commands");
             push(&mut args, "--no-session-persistence");
             push(&mut args, "--no-chrome");
-            if let Some(model) = model {
-                push(&mut args, "--model");
-                push(&mut args, model);
-            }
-            if let Some(effort) = reasoning_effort {
-                push(&mut args, "--effort");
-                push(&mut args, effort);
-            }
+            push(&mut args, "--model");
+            push(&mut args, CLAUDE_COMMIT_MODEL);
+            push(&mut args, "--effort");
+            push(&mut args, CLAUDE_COMMIT_EFFORT);
         }
         ProviderKind::Codex => {
             push(&mut args, "exec");
@@ -253,10 +261,10 @@ fn agent_arguments(
             push(&mut args, "--color");
             push(&mut args, "never");
             push(&mut args, "--skip-git-repo-check");
-            if let Some(model) = model {
-                push(&mut args, "--model");
-                push(&mut args, model);
-            }
+            push(&mut args, "--model");
+            push(&mut args, CODEX_COMMIT_MODEL);
+            push(&mut args, "-c");
+            push(&mut args, CODEX_COMMIT_EFFORT);
         }
         ProviderKind::Cursor => {
             push(&mut args, "--print");
@@ -314,6 +322,39 @@ fn agent_arguments(
                 push(&mut args, effort);
             }
             return args;
+        }
+        // Kimi carries the prompt as `--prompt`'s value rather than a trailing
+        // positional, so it returns early. It has no tool or session switches
+        // to turn off; the commit prompt is what forbids tool use.
+        ProviderKind::Kimi => {
+            push(&mut args, "--prompt");
+            push(&mut args, prompt);
+            push(&mut args, "--output-format");
+            push(&mut args, "text");
+            if let Some(model) = model {
+                push(&mut args, "--model");
+                push(&mut args, model);
+            }
+            return args;
+        }
+        // Oh My Pi rejects unknown flags outright, so it gets its own list
+        // rather than Pi's: context files are `--no-rules`, and it has no
+        // prompt-template or project-trust switch to turn off.
+        ProviderKind::OhMyPi => {
+            push(&mut args, "--print");
+            push(&mut args, "--no-session");
+            push(&mut args, "--no-tools");
+            push(&mut args, "--no-rules");
+            push(&mut args, "--no-extensions");
+            push(&mut args, "--no-skills");
+            if let Some(model) = model {
+                push(&mut args, "--model");
+                push(&mut args, model);
+            }
+            if let Some(effort) = reasoning_effort {
+                push(&mut args, "--thinking");
+                push(&mut args, effort);
+            }
         }
         ProviderKind::Pi => {
             push(&mut args, "--print");
@@ -590,7 +631,7 @@ mod tests {
     use super::*;
 
     fn run_git(cwd: &Path, args: &[&str]) {
-        let output = Command::new("git")
+        let output = crate::command_env::plain_command("git")
             .args(args)
             .current_dir(cwd)
             .output()
@@ -670,17 +711,17 @@ mod tests {
         );
     }
 
+    fn has(args: &[OsString], value: &str) -> bool {
+        args.iter().any(|arg| arg == value)
+    }
+
+    fn has_pair(args: &[OsString], first: &str, second: &str) -> bool {
+        args.windows(2)
+            .any(|pair| pair[0] == first && pair[1] == second)
+    }
+
     #[test]
     fn every_provider_uses_a_noninteractive_generation_mode() {
-        fn has(args: &[OsString], value: &str) -> bool {
-            args.iter().any(|arg| arg == value)
-        }
-
-        fn has_pair(args: &[OsString], first: &str, second: &str) -> bool {
-            args.windows(2)
-                .any(|pair| pair[0] == first && pair[1] == second)
-        }
-
         let prompt = "Generate subject";
         for provider in ProviderKind::ALL {
             let args = agent_arguments(
@@ -702,6 +743,7 @@ mod tests {
                     assert_eq!(args.first().and_then(|arg| arg.to_str()), Some("exec"));
                     assert!(has_pair(&args, "--sandbox", "read-only"));
                     assert!(has(&args, "--ephemeral"));
+                    assert!(has(&args, "--skip-git-repo-check"));
                 }
                 ProviderKind::OpenCode => {
                     assert_eq!(args.first().and_then(|arg| arg.to_str()), Some("run"));
@@ -736,7 +778,49 @@ mod tests {
                     assert!(has(&args, "--no-tools"));
                     assert!(has_pair(&args, "--thinking", "low"));
                 }
+                ProviderKind::OhMyPi => {
+                    assert!(has(&args, "--print"));
+                    assert!(has(&args, "--no-session"));
+                    assert!(has(&args, "--no-tools"));
+                    assert!(has(&args, "--no-rules"));
+                    assert!(has_pair(&args, "--thinking", "low"));
+                }
+                ProviderKind::Kimi => {
+                    assert!(has_pair(&args, "--prompt", prompt));
+                    assert!(has_pair(&args, "--output-format", "text"));
+                    assert!(has_pair(&args, "--model", "model"));
+                }
             }
         }
+    }
+
+    /// The session's own model must not reach commit-message generation for the
+    /// two providers that name a cheap tier: a subject line is the same job on
+    /// Haiku as on Opus, and the diff is already in the prompt.
+    #[test]
+    fn claude_and_codex_generate_on_a_pinned_cheap_tier() {
+        let claude = agent_arguments(
+            ProviderKind::Claude,
+            Some("claude-opus-5"),
+            Some("xhigh"),
+            "Generate subject",
+            None,
+        );
+        assert!(has_pair(&claude, "--model", CLAUDE_COMMIT_MODEL));
+        assert!(has_pair(&claude, "--effort", CLAUDE_COMMIT_EFFORT));
+        assert!(!has(&claude, "claude-opus-5"));
+        assert!(!has(&claude, "xhigh"));
+
+        let codex = agent_arguments(
+            ProviderKind::Codex,
+            Some("gpt-5.6-sol"),
+            Some("high"),
+            "Generate subject",
+            None,
+        );
+        assert!(has_pair(&codex, "--model", CODEX_COMMIT_MODEL));
+        assert!(has_pair(&codex, "-c", CODEX_COMMIT_EFFORT));
+        assert!(!has(&codex, "gpt-5.6-sol"));
+        assert!(!has(&codex, "high"));
     }
 }

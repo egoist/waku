@@ -8,13 +8,11 @@ const root = resolve(import.meta.dir, "..");
 const isMacOS = process.platform === "darwin";
 const appName = "Waku Debug";
 const targetDir = resolve(root, process.env.CARGO_TARGET_DIR || "target");
+const executableSuffix = process.platform === "win32" ? ".exe" : "";
 const appPath = isMacOS
   ? join(targetDir, "debug/Waku Debug.app")
-  : join(targetDir, "debug/waku");
-const daemonPath = join(
-  targetDir,
-  `debug/waku-debug-daemon${process.platform === "win32" ? ".exe" : ""}`,
-);
+  : join(targetDir, `debug/waku${executableSuffix}`);
+const daemonPath = join(targetDir, `debug/waku-debug-daemon${executableSuffix}`);
 const watchedDirectories = ["src", "crates", "assets", "resources", "locales"];
 const watchedFiles = ["Cargo.toml", "Cargo.lock", "build.rs"];
 const rebuildDebounceMs = 1_000;

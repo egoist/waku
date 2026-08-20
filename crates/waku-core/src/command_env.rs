@@ -2,12 +2,13 @@
 
 use std::collections::HashSet;
 use std::ffi::{OsStr, OsString};
-use std::fs::{self, OpenOptions};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{OnceLock, RwLock};
+
+use std::fs::{self, OpenOptions};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 #[cfg(unix)]
@@ -22,7 +23,9 @@ use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::process::CommandExt;
 
 const LOGIN_SHELL_ENV_TIMEOUT: Duration = Duration::from_secs(5);
+#[cfg(unix)]
 const INTERACTIVE_SHELL_ENV_TIMEOUT: Duration = Duration::from_secs(3);
+#[cfg(unix)]
 const SHELL_ENV_COMMAND: &str = "/usr/bin/env -0 > \"$WAKU_SHELL_ENV_CAPTURE_FILE\"";
 
 type ShellEnvironment = Vec<(OsString, OsString)>;
@@ -37,9 +40,69 @@ static SHELL_ENV_CAPTURE_ID: AtomicU64 = AtomicU64::new(0);
 /// launcher needs `node`). Callers can add provider-specific overrides after
 /// this.
 pub fn command(program: impl AsRef<OsStr>) -> Command {
-    let mut command = Command::new(program);
+    let program = program.as_ref();
+    let search_path = child_search_path(Path::new(program));
+    let mut command = plain_command(program);
     command.envs(shell_environment());
+    if let Some(search_path) = search_path {
+        command.env("PATH", search_path);
+    }
     command
+}
+
+/// The `PATH` a provider CLI runs with: every directory Waku itself searched,
+/// plus the one the binary was found in.
+///
+/// Detection resolves CLIs from more directories than the desktop process
+/// inherits — a Bun or npm global prefix that the GUI `PATH` predates, for
+/// example — so a CLI found in one of them has to *run* with them too.
+/// Launcher-based installs depend on it and fail silently without it: Bun's
+/// Windows `pi.EXE` is a shim that launches `bun.exe` from its own directory,
+/// and both an npm `.cmd` shim and a `/usr/bin/env node` shebang need `node`
+/// on the child's `PATH`. Detection still succeeds in that state — it only
+/// looks for the file — so the provider shows up as installed while every
+/// probe it runs comes back empty.
+///
+/// Windows needs this most: the login-shell probe there is best-effort — no
+/// PowerShell may be present, and a profile can refuse to load — so a
+/// GUI-launched Waku can still be running with only the `PATH` it inherited.
+fn child_search_path(program: &Path) -> Option<OsString> {
+    let mut directories = executable_search_paths();
+    // Last, not first: an install outside the known prefixes still finds its
+    // runtime, while the user's own `PATH` order decides everything else.
+    directories.extend(
+        program
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .map(Path::to_path_buf),
+    );
+    let mut seen = HashSet::new();
+    directories.retain(|directory| seen.insert(directory.clone()));
+    std::env::join_paths(directories).ok()
+}
+
+/// A command that never flashes a console window.
+///
+/// Waku's Windows build is a GUI-subsystem binary with no console of its own,
+/// so `CreateProcess` allocates one for every console child — `git`, a
+/// provider CLI, the daemon — and flashes it on screen. `CREATE_NO_WINDOW`
+/// keeps the child's console hidden while its pipes still work.
+pub fn plain_command(program: impl AsRef<OsStr>) -> Command {
+    let mut command = Command::new(program);
+    detach_console(&mut command);
+    command
+}
+
+fn detach_console(command: &mut Command) {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt as _;
+
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
+    #[cfg(not(windows))]
+    let _ = command;
 }
 
 /// Spawn `command` with `SIGCHLD` unblocked in the child. On macOS, libdispatch
@@ -48,6 +111,7 @@ pub fn command(program: impl AsRef<OsStr>) -> Command {
 /// provider-side async process reapers. The caller's mask is restored as soon
 /// as the child has been created.
 pub fn spawn(command: &mut Command) -> io::Result<Child> {
+    detach_console(command);
     with_sigchld_unblocked(|| command.spawn())
 }
 
@@ -135,13 +199,57 @@ impl Drop for SignalMaskRestore {
 
 pub fn find_executable(name: &str) -> Option<PathBuf> {
     let candidate = Path::new(name);
-    if candidate.components().count() > 1 && candidate.is_file() {
-        return Some(candidate.to_path_buf());
+    if candidate.components().count() > 1 {
+        return resolve_executable_file(candidate);
     }
     executable_search_paths()
         .into_iter()
-        .map(|directory| directory.join(name))
-        .find(|candidate| candidate.is_file())
+        .find_map(|directory| resolve_executable_file(&directory.join(name)))
+}
+
+/// Accept `candidate` as it stands, then — on Windows — the same path with
+/// each `PATHEXT` suffix.
+///
+/// Nothing is executable by name alone there: an npm-installed provider CLI
+/// lands as `claude.cmd` beside `claude.ps1`, and Bun and Cargo install
+/// `.exe`. Trying `PATHEXT` in its configured order picks the same file the
+/// shell would, and `std::process::Command` runs a `.cmd`/`.bat` through
+/// `cmd.exe` for us.
+fn resolve_executable_file(candidate: &Path) -> Option<PathBuf> {
+    if candidate.is_file() {
+        return Some(candidate.to_path_buf());
+    }
+    #[cfg(windows)]
+    {
+        let stem = candidate.file_name()?.to_owned();
+        for extension in executable_extensions() {
+            let mut name = stem.clone();
+            name.push(&extension);
+            let candidate = candidate.with_file_name(name);
+            if candidate.is_file() {
+                return Some(candidate);
+            }
+        }
+    }
+    None
+}
+
+#[cfg(windows)]
+fn executable_extensions() -> Vec<OsString> {
+    const DEFAULT_PATHEXT: &str = ".COM;.EXE;.BAT;.CMD";
+
+    let configured = std::env::var("PATHEXT").unwrap_or_default();
+    let configured = if configured.trim().is_empty() {
+        DEFAULT_PATHEXT
+    } else {
+        configured.as_str()
+    };
+    configured
+        .split(';')
+        .map(str::trim)
+        .filter(|extension| extension.starts_with('.'))
+        .map(OsString::from)
+        .collect()
 }
 
 /// Resolve a user-supplied binary override: `~` expands to the home
@@ -166,6 +274,7 @@ pub fn executable_search_path() -> Option<std::ffi::OsString> {
 /// Resolve the user's interactive login-shell environment and cache it for
 /// provider discovery and every later child process. This starts a shell and
 /// must therefore only be called from a background thread.
+#[cfg(unix)]
 pub fn refresh_from_default_shell() -> bool {
     let Some(environment) = resolve_default_shell_environment(LOGIN_SHELL_ENV_TIMEOUT) else {
         return false;
@@ -174,6 +283,160 @@ pub fn refresh_from_default_shell() -> bool {
         .write()
         .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(environment);
     true
+}
+
+/// Windows has no login shell, but it still needs this probe. A GUI-launched
+/// Waku inherits explorer's `PATH`, which predates later installs, and the
+/// package managers users actually add to it — fnm, Volta, nvm — extend
+/// `PATH` only in the PowerShell profile, which never reaches the machine or
+/// user environment block. Probe PowerShell with the profile loaded, capture
+/// the fresh user and machine registry `PATH` values in the same run, and
+/// cache the merge for provider discovery and every later child. This starts
+/// PowerShell — which runs the user's profile — and must therefore only be
+/// called from a background thread.
+#[cfg(windows)]
+pub fn refresh_from_default_shell() -> bool {
+    let Some(environment) = resolve_windows_profile_environment(LOGIN_SHELL_ENV_TIMEOUT) else {
+        return false;
+    };
+    *login_shell_environment()
+        .write()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(environment);
+    true
+}
+
+/// Targets with neither probe keep the inherited environment.
+#[cfg(not(any(unix, windows)))]
+pub fn refresh_from_default_shell() -> bool {
+    true
+}
+
+/// A hanging or exiting profile loses the whole probe run, so the
+/// no-profile retry gets its own short leash.
+#[cfg(windows)]
+const WINDOWS_NO_PROFILE_ENV_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// The PowerShell script the probe runs. Each captured variable is written to
+/// the capture file as NUL-separated `name=value` entries — the same format
+/// as `env -0` on Unix — so profile noise on stdout cannot corrupt the
+/// result. `[Environment]::GetEnvironmentVariable` reads the child's
+/// *process* environment, which includes whatever the profile did to
+/// `$env:PATH`; the two-argument form reads the fresh registry blocks, which
+/// the inherited `PATH` may be older than.
+#[cfg(windows)]
+const WINDOWS_ENV_CAPTURE_COMMAND: &str = "\
+$ErrorActionPreference = 'Continue'
+$entries = New-Object System.Collections.Generic.List[string]
+foreach ($name in @('PATH', 'FNM_DIR', 'FNM_MULTISHELL_PATH')) {
+  $value = [Environment]::GetEnvironmentVariable($name)
+  if ($value) { $entries.Add($name + '=' + $value) }
+}
+foreach ($target in @('User', 'Machine')) {
+  $value = [Environment]::GetEnvironmentVariable('PATH', $target)
+  if ($value) { $entries.Add('WAKU_' + $target.ToUpper() + '_PATH=' + [Environment]::ExpandEnvironmentVariables($value)) }
+}
+[IO.File]::WriteAllText($env:WAKU_SHELL_ENV_CAPTURE_FILE, [string]::Join([string][char]0, $entries))
+";
+
+/// PowerShell 7 first, then the in-box Windows PowerShell. `cmd.exe` is not a
+/// candidate: it has no profile to load and no registry API.
+#[cfg(windows)]
+fn windows_powershell_candidates() -> Vec<PathBuf> {
+    ["pwsh.exe", "powershell.exe"]
+        .into_iter()
+        .filter_map(find_executable)
+        .collect()
+}
+
+#[cfg(windows)]
+fn resolve_windows_profile_environment(timeout: Duration) -> Option<ShellEnvironment> {
+    let started_at = Instant::now();
+    // Load each shell's profile first — fnm/Volta/nvm extend PATH there and
+    // nowhere else. The registry PATH is captured by the same run, so a
+    // profile that merely lacks PATH still succeeds via the registry values.
+    for shell in windows_powershell_candidates() {
+        let remaining = timeout.checked_sub(started_at.elapsed())?;
+        if remaining.is_zero() {
+            return None;
+        }
+        if let Some(environment) = capture_windows_environment(&shell, true, remaining) {
+            if let Some(environment) = merge_windows_environment(environment) {
+                return Some(environment);
+            }
+        }
+    }
+    // A hanging or exiting profile loses the whole run. Retry without it on a
+    // short leash; the registry PATH alone is still worth the spawn.
+    for shell in windows_powershell_candidates() {
+        if let Some(environment) =
+            capture_windows_environment(&shell, false, WINDOWS_NO_PROFILE_ENV_TIMEOUT)
+        {
+            if let Some(environment) = merge_windows_environment(environment) {
+                return Some(environment);
+            }
+        }
+    }
+    None
+}
+
+#[cfg(windows)]
+fn capture_windows_environment(
+    shell: &Path,
+    load_profile: bool,
+    timeout: Duration,
+) -> Option<ShellEnvironment> {
+    let capture = ShellEnvironmentCapture::create()?;
+    let mut command = Command::new(shell);
+    command.arg("-NoLogo").arg("-NonInteractive");
+    if !load_profile {
+        command.arg("-NoProfile");
+    }
+    command
+        .arg("-Command")
+        .arg(WINDOWS_ENV_CAPTURE_COMMAND)
+        .env("WAKU_SHELL_ENV_CAPTURE_FILE", capture.path())
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    let mut child = spawn(&mut command).ok()?;
+    if !wait_for_child(&mut child, timeout) {
+        return None;
+    }
+    parse_shell_environment(&fs::read(capture.path()).ok()?)
+}
+
+/// Combine the profile variables with the fresh registry `PATH` values into
+/// the cached environment. The profile `PATH` comes first — it is the user's
+/// own order — then the user registry `PATH`, then the machine one; the
+/// inherited `PATH` is appended afterwards by [`search_paths_from`], and a
+/// child `PATH` built by [`child_search_path`] keeps that order. fnm's
+/// variables ride along so its shims can resolve their Node installation.
+/// `PATH` matching is case-insensitive on Windows, so deduplicate that way.
+#[cfg(windows)]
+fn merge_windows_environment(mut environment: ShellEnvironment) -> Option<ShellEnvironment> {
+    let mut directories = Vec::new();
+    for name in ["PATH", "WAKU_USER_PATH", "WAKU_MACHINE_PATH"] {
+        if let Some(value) = take_environment_variable(&mut environment, name) {
+            directories.extend(std::env::split_paths(&value));
+        }
+    }
+    let mut seen = HashSet::new();
+    directories
+        .retain(|directory| seen.insert(directory.as_os_str().to_string_lossy().to_lowercase()));
+    if directories.is_empty() {
+        return None;
+    }
+    let path = std::env::join_paths(directories).ok()?;
+    environment.insert(0, (OsString::from("PATH"), path));
+    Some(environment)
+}
+
+#[cfg(windows)]
+fn take_environment_variable(environment: &mut ShellEnvironment, name: &str) -> Option<OsString> {
+    let position = environment
+        .iter()
+        .position(|(candidate, _)| candidate.to_string_lossy().eq_ignore_ascii_case(name))?;
+    Some(environment.remove(position).1)
 }
 
 fn executable_search_paths() -> Vec<PathBuf> {
@@ -216,28 +479,77 @@ fn search_paths_from(
         directories.extend(std::env::split_paths(path));
     }
     if let Some(home) = home {
-        directories.extend([
-            home.join(".local/bin"),
-            home.join(".bun/bin"),
-            home.join(".cargo/bin"),
-            home.join(".local/share/mise/shims"),
-            home.join(".volta/bin"),
-        ]);
+        directories.extend(user_tool_directories(home));
     }
-    directories.extend([
-        PathBuf::from("/opt/homebrew/bin"),
-        PathBuf::from("/usr/local/bin"),
-        PathBuf::from("/usr/bin"),
-        PathBuf::from("/bin"),
-        PathBuf::from("/usr/sbin"),
-        PathBuf::from("/sbin"),
-    ]);
+    directories.extend(system_tool_directories());
 
     let mut seen = HashSet::new();
     directories.retain(|directory| seen.insert(directory.clone()));
     directories
 }
 
+/// Where per-user package managers put the provider CLIs, in case the
+/// inherited `PATH` predates the install.
+#[cfg(not(windows))]
+fn user_tool_directories(home: &Path) -> Vec<PathBuf> {
+    vec![
+        home.join(".local/bin"),
+        home.join(".bun/bin"),
+        home.join(".cargo/bin"),
+        home.join(".local/share/mise/shims"),
+        home.join(".volta/bin"),
+    ]
+}
+
+#[cfg(windows)]
+fn user_tool_directories(home: &Path) -> Vec<PathBuf> {
+    let mut directories = vec![
+        // npm's global prefix, where a `claude.cmd` shim lands.
+        home.join("AppData/Roaming/npm"),
+        home.join(".bun/bin"),
+        home.join(".cargo/bin"),
+        home.join("scoop/shims"),
+        home.join("AppData/Local/Microsoft/WindowsApps"),
+        home.join(".local/bin"),
+    ];
+    // Volta, pnpm, and the user-scoped Node installer default to LocalAppData
+    // (the same list T3 Code probes); it can be redirected away from home.
+    if let Some(local_app_data) = std::env::var_os("LOCALAPPDATA") {
+        let local_app_data = PathBuf::from(local_app_data);
+        directories.push(local_app_data.join("Volta/bin"));
+        directories.push(local_app_data.join("pnpm"));
+        directories.push(local_app_data.join("Programs/nodejs"));
+    }
+    directories
+}
+
+#[cfg(not(windows))]
+fn system_tool_directories() -> Vec<PathBuf> {
+    vec![
+        PathBuf::from("/opt/homebrew/bin"),
+        PathBuf::from("/usr/local/bin"),
+        PathBuf::from("/usr/bin"),
+        PathBuf::from("/bin"),
+        PathBuf::from("/usr/sbin"),
+        PathBuf::from("/sbin"),
+    ]
+}
+
+#[cfg(windows)]
+fn system_tool_directories() -> Vec<PathBuf> {
+    let mut directories = Vec::new();
+    if let Some(program_files) = std::env::var_os("ProgramFiles") {
+        directories.push(PathBuf::from(program_files).join("nodejs"));
+    }
+    if let Some(system_root) = std::env::var_os("SystemRoot") {
+        let system32 = PathBuf::from(system_root).join("System32");
+        directories.push(system32.join("WindowsPowerShell/v1.0"));
+        directories.push(system32);
+    }
+    directories
+}
+
+#[cfg(unix)]
 fn resolve_default_shell_environment(timeout: Duration) -> Option<ShellEnvironment> {
     let started_at = Instant::now();
     for shell in default_shell_candidates() {
@@ -265,30 +577,99 @@ fn resolve_default_shell_environment(timeout: Duration) -> Option<ShellEnvironme
 
 fn default_shell_candidates() -> Vec<PathBuf> {
     let mut candidates = Vec::new();
-    if let Some(shell) = std::env::var_os("SHELL").filter(|shell| !shell.is_empty()) {
-        candidates.push(PathBuf::from(shell));
-    }
+    // `SHELL` is a POSIX convention. On Windows it is set only by ported
+    // toolchains such as Git Bash, and usually to an MSYS path that Win32
+    // cannot open, so the native shells are resolved instead.
     #[cfg(unix)]
-    if let Some(shell) = account_default_shell() {
-        candidates.push(shell);
+    {
+        if let Some(shell) = std::env::var_os("SHELL").filter(|shell| !shell.is_empty()) {
+            candidates.push(PathBuf::from(shell));
+        }
+        if let Some(shell) = account_default_shell() {
+            candidates.push(shell);
+        }
     }
     #[cfg(target_os = "macos")]
     candidates.push(PathBuf::from("/bin/zsh"));
     #[cfg(target_os = "linux")]
     candidates.extend([PathBuf::from("/bin/bash"), PathBuf::from("/bin/sh")]);
+    #[cfg(windows)]
+    candidates.extend(windows_shell_candidates());
 
     let mut seen = HashSet::new();
     candidates.retain(|shell| seen.insert(shell.clone()));
     candidates
 }
 
+/// PowerShell 7 first, then the in-box Windows PowerShell, then whatever
+/// `COMSPEC` names — the same order a Windows Terminal profile list uses.
+#[cfg(windows)]
+fn windows_shell_candidates() -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
+    for shell in ["pwsh.exe", "powershell.exe"] {
+        candidates.extend(find_executable(shell));
+    }
+    if let Some(comspec) = std::env::var_os("COMSPEC").filter(|comspec| !comspec.is_empty()) {
+        candidates.push(PathBuf::from(comspec));
+    }
+    candidates
+}
+
 /// Pick the user's configured login shell for an interactive terminal, with a
 /// platform shell as a final fallback when desktop launchers omit `SHELL`.
 pub fn default_terminal_shell() -> PathBuf {
-    default_shell_candidates()
+    let mut candidates = Vec::new();
+    // The shell the user chose outranks whatever `SHELL` was inherited from;
+    // see the note in waku-client's `unix_terminal_shell_candidates`. The
+    // environment probe below keeps its own order, since it wants the shell
+    // whose rc files produced this process's `PATH`.
+    #[cfg(unix)]
+    candidates.extend(account_default_shell());
+    candidates.extend(default_shell_candidates());
+
+    candidates
         .into_iter()
         .find(|shell| shell.is_file())
-        .unwrap_or_else(|| PathBuf::from("/bin/sh"))
+        .unwrap_or_else(default_terminal_shell_fallback)
+}
+
+#[cfg(not(windows))]
+fn default_terminal_shell_fallback() -> PathBuf {
+    PathBuf::from("/bin/sh")
+}
+
+#[cfg(windows)]
+fn default_terminal_shell_fallback() -> PathBuf {
+    PathBuf::from("cmd.exe")
+}
+
+/// The arguments that open `shell` the way the user's own terminal would.
+///
+/// A POSIX shell needs `-l` so the login files that set `PATH` are read.
+/// Windows applies the environment before the process starts, so there is no
+/// login mode to ask for — PowerShell's `-Login` exists on Unix hosts only,
+/// and passing it here is an error. Suppressing its banner is the one thing
+/// worth saying.
+pub fn default_terminal_shell_args(shell: &Path) -> Vec<String> {
+    #[cfg(not(windows))]
+    {
+        let _ = shell;
+        vec!["-l".to_owned()]
+    }
+    #[cfg(windows)]
+    {
+        let is_powershell = shell
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .is_some_and(|stem| {
+                stem.eq_ignore_ascii_case("pwsh") || stem.eq_ignore_ascii_case("powershell")
+            });
+        if is_powershell {
+            vec!["-NoLogo".to_owned()]
+        } else {
+            Vec::new()
+        }
+    }
 }
 
 #[cfg(unix)]
@@ -328,6 +709,7 @@ fn account_default_shell() -> Option<PathBuf> {
     }
 }
 
+#[cfg(unix)]
 fn capture_shell_environment(
     shell: &Path,
     shell_args: &[&str],
@@ -388,14 +770,22 @@ fn is_shell_capture_variable(name: &OsStr) -> bool {
     .any(|candidate| name == OsStr::new(candidate))
 }
 
-#[cfg(unix)]
 fn os_string_from_bytes(bytes: &[u8]) -> Option<OsString> {
-    Some(OsString::from_vec(bytes.to_vec()))
-}
-
-#[cfg(not(unix))]
-fn os_string_from_bytes(bytes: &[u8]) -> Option<OsString> {
-    String::from_utf8(bytes.to_vec()).ok().map(OsString::from)
+    #[cfg(unix)]
+    {
+        Some(OsString::from_vec(bytes.to_vec()))
+    }
+    #[cfg(windows)]
+    {
+        // The Windows probe writes UTF-8; PowerShell encodes .NET strings
+        // exactly, so lossy decoding loses nothing.
+        Some(String::from_utf8_lossy(bytes).into_owned().into())
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = bytes;
+        None
+    }
 }
 
 fn wait_for_child(child: &mut Child, timeout: Duration) -> bool {
@@ -462,6 +852,45 @@ mod tests {
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
 
+    fn command_search_path(command: &Command) -> Vec<PathBuf> {
+        let path = command
+            .get_envs()
+            .find(|(key, _)| *key == OsStr::new("PATH"))
+            .and_then(|(_, value)| value)
+            .expect("a provider command sets PATH for its child");
+        std::env::split_paths(path).collect()
+    }
+
+    /// A CLI resolved from a directory the desktop `PATH` never had must run
+    /// with that directory too, or its own launcher — a Bun shim, an npm
+    /// `.cmd`, an `env node` shebang — cannot find its runtime.
+    #[test]
+    fn a_provider_cli_runs_with_the_directories_detection_searched() {
+        #[cfg(windows)]
+        let program = PathBuf::from("C:\\waku-fixture\\bin\\pi.exe");
+        #[cfg(not(windows))]
+        let program = PathBuf::from("/opt/waku-fixture/bin/pi");
+
+        let directories = command_search_path(&command(&program));
+
+        assert!(directories.contains(&program.parent().expect("fixture parent").to_path_buf()));
+        for searched in executable_search_paths() {
+            assert!(
+                directories.contains(&searched),
+                "{} is searched during detection but missing from the child PATH",
+                searched.display()
+            );
+        }
+    }
+
+    #[test]
+    fn a_bare_program_name_contributes_no_search_directory() {
+        let directories = command_search_path(&command("git"));
+
+        assert_eq!(directories, executable_search_paths());
+    }
+
+    #[cfg(unix)]
     #[test]
     fn output_captures_stdout_and_stderr() {
         let mut command = Command::new("/bin/sh");
@@ -532,6 +961,7 @@ mod tests {
         assert!(!sigchld_is_blocked().expect("read normalized signal mask"));
     }
 
+    #[cfg(unix)]
     #[test]
     fn launch_services_path_is_extended_for_script_based_clis() {
         let home = Path::new("/Users/example");
@@ -551,6 +981,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn login_shell_path_precedes_the_inherited_desktop_path() {
         let paths = search_paths_from(
@@ -569,6 +1000,152 @@ mod tests {
                 PathBuf::from("/usr/bin"),
                 PathBuf::from("/bin"),
             ]
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn desktop_path_is_extended_with_the_windows_package_manager_prefixes() {
+        let home = Path::new("C:\\Users\\example");
+        let paths = search_paths_from(
+            None,
+            Some(OsStr::new("C:\\Windows\\System32;C:\\Windows")),
+            Some(home),
+        );
+
+        assert_eq!(paths[0], PathBuf::from("C:\\Windows\\System32"));
+        assert_eq!(paths[1], PathBuf::from("C:\\Windows"));
+        assert!(paths.contains(&home.join("AppData/Roaming/npm")));
+        assert!(paths.contains(&home.join(".bun/bin")));
+        assert!(paths.contains(&home.join("scoop/shims")));
+        assert!(paths.contains(&home.join(".local/bin")));
+        if let Some(local_app_data) = std::env::var_os("LOCALAPPDATA") {
+            let local_app_data = PathBuf::from(local_app_data);
+            assert!(paths.contains(&local_app_data.join("Volta/bin")));
+            assert!(paths.contains(&local_app_data.join("pnpm")));
+            assert!(paths.contains(&local_app_data.join("Programs/nodejs")));
+        }
+        assert_eq!(
+            paths
+                .iter()
+                .filter(|path| *path == Path::new("C:\\Windows"))
+                .count(),
+            1
+        );
+    }
+
+    /// The probe script must execute as written against the in-box Windows
+    /// PowerShell: `-NoProfile` leaves the child `PATH` untouched, so the
+    /// captured value is exactly the one this process inherited.
+    #[cfg(windows)]
+    #[test]
+    fn windows_environment_probe_captures_the_inherited_path_without_a_profile() {
+        let capture = ShellEnvironmentCapture::create().expect("create capture file");
+        let mut command = Command::new("powershell.exe");
+        command
+            .args(["-NoLogo", "-NoProfile", "-NonInteractive", "-Command"])
+            .arg(WINDOWS_ENV_CAPTURE_COMMAND)
+            .env("WAKU_SHELL_ENV_CAPTURE_FILE", capture.path())
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        let mut child = spawn(&mut command).expect("spawn PowerShell probe");
+        assert!(
+            wait_for_child(&mut child, Duration::from_secs(10)),
+            "PowerShell probe did not finish in time"
+        );
+        let environment =
+            parse_shell_environment(&fs::read(capture.path()).expect("capture file written"))
+                .expect("parse captured environment");
+        let path = environment
+            .iter()
+            .find(|(name, _)| name == OsStr::new("PATH"))
+            .map(|(_, value)| value.clone())
+            .expect("captured PATH");
+        assert_eq!(path, std::env::var_os("PATH").expect("inherited PATH"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_profile_environment_merges_registry_paths_behind_the_profile_path() {
+        let environment = merge_windows_environment(vec![
+            (OsString::from("FNM_DIR"), OsString::from("C:\\fnm")),
+            (
+                OsString::from("PATH"),
+                OsString::from("C:\\profile-first;C:\\shared"),
+            ),
+            (
+                OsString::from("WAKU_USER_PATH"),
+                OsString::from("C:\\user;C:\\shared"),
+            ),
+            (
+                OsString::from("WAKU_MACHINE_PATH"),
+                OsString::from("C:\\machine;C:\\USER;C:\\SHARED"),
+            ),
+        ])
+        .expect("merge captured environment");
+
+        let path = environment
+            .iter()
+            .find(|(name, _)| name == OsStr::new("PATH"))
+            .map(|(_, value)| value.clone())
+            .expect("merged PATH");
+        assert_eq!(
+            std::env::split_paths(&path).collect::<Vec<_>>(),
+            vec![
+                PathBuf::from("C:\\profile-first"),
+                PathBuf::from("C:\\shared"),
+                PathBuf::from("C:\\user"),
+                PathBuf::from("C:\\machine"),
+            ]
+        );
+        assert!(environment.contains(&(OsString::from("FNM_DIR"), OsString::from("C:\\fnm"))));
+        assert!(
+            !environment
+                .iter()
+                .any(|(name, _)| name == OsStr::new("WAKU_USER_PATH"))
+        );
+        assert!(
+            !environment
+                .iter()
+                .any(|(name, _)| name == OsStr::new("WAKU_MACHINE_PATH"))
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_bare_name_resolves_through_pathext() {
+        let directory = std::env::temp_dir().join(format!("waku-pathext-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&directory);
+        std::fs::create_dir_all(&directory).expect("create fixture directory");
+        // The npm shim layout: no extensionless file to find by name alone.
+        std::fs::write(directory.join("faux-provider.cmd"), "@echo off\n")
+            .expect("write shim fixture");
+
+        assert_eq!(
+            resolve_executable_file(&directory.join("faux-provider"))
+                .expect("resolve through PATHEXT")
+                .to_string_lossy()
+                .to_lowercase(),
+            directory
+                .join("faux-provider.cmd")
+                .to_string_lossy()
+                .to_lowercase(),
+        );
+        assert_eq!(resolve_executable_file(&directory.join("absent")), None);
+
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_terminal_shells_never_ask_for_a_login_session() {
+        assert_eq!(
+            default_terminal_shell_args(Path::new("C:\\Program Files\\PowerShell\\7\\pwsh.exe")),
+            vec!["-NoLogo".to_owned()]
+        );
+        assert!(
+            default_terminal_shell_args(Path::new("C:\\Windows\\System32\\cmd.exe")).is_empty()
         );
     }
 

@@ -23,7 +23,7 @@ price:
 | --- | --- | --- |
 | `cx.notify(view)` | Re-renders that view and its ancestors; **cached sibling panes replay** | The stream pump (per commit), the pulse clock, user-event handlers |
 | `window.refresh()` | Re-renders everything and **bypasses every cached pane** | Genuine whole-window invalidation only: hover transitions, drags, theme |
-| `request_animation_frame` | Display-rate (120 Hz) re-render of the current view for as long as it re-arms | Nothing during streaming. One mounted repeating `with_animation` pinned the window at 120 Hz for a whole turn (~36% CPU by itself) |
+| `request_animation_frame` | Display-rate (120 Hz) re-render of the current view for as long as it re-arms | Nothing during streaming. One mounted repeating `with_animation` pinned the window at 120 Hz for a whole turn (~36% CPU by itself). The one sanctioned transient: the 200 ms panel show/hide slide ([src/app/render.rs](../src/app/render.rs)), which re-arms only while an edge is moving and gates the pane fan-out (below) |
 
 The root `Waku` view re-renders on every frame regardless of what is dirty, so
 it must stay thin: the sidebar, transcript, and right panel are `WakuPane`
@@ -31,7 +31,17 @@ islands ([src/app.rs](../src/app.rs)) embedded with the fork's
 `Entity::cached`. Each pane observes the root — any root notify still
 re-renders every island, so caching can never show stale state — while a
 notify targeted at one pane (the pulse clock leases `window.current_view()`)
-rebuilds only that island and replays the rest. Two traps to know: gpui's
+rebuilds only that island and replays the rest.
+
+The one exception to that fan-out is the 200 ms panel slide: its display-rate
+root notifies would price every tick at a three-island rebuild, so while
+`panels_sliding()` the observer skips the fan-out and the cached-view keys
+decide instead — the sliding panel (its clip moves) and the transcript (its
+bounds move) miss their caches and rebuild with fresh state anyway, while the
+island nothing is moving replays. Updates born inside an island still land
+mid-slide because a child notify dirties its ancestor pane without the
+observer, and the slide's retirement schedules one ungated notify so any
+root-state drift in a reused pane converges the frame after the slide ends. Two traps to know: gpui's
 `mark_view_dirty` walks **ancestors only**, which is why panes must observe
 the root rather than expect root notifies to reach them; and a cached pane
 lays its content out **as a root**, so a `flex_1`-sized subtree collapses to

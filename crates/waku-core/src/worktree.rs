@@ -6,7 +6,7 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::Output;
 
 use anyhow::{Context as _, anyhow, bail};
 use uuid::Uuid;
@@ -83,7 +83,7 @@ fn create_in(
             continue;
         }
 
-        let output = Command::new("git")
+        let output = crate::command_env::plain_command("git")
             .args(["worktree", "add", "-b"])
             .arg(&branch)
             .arg(&path)
@@ -116,7 +116,7 @@ fn create_in(
     if path.exists() || local_branch_exists(&repository, &branch)? {
         bail!("could not allocate a unique Git worktree name");
     }
-    let output = Command::new("git")
+    let output = crate::command_env::plain_command("git")
         .args(["worktree", "add", "-b"])
         .arg(&branch)
         .arg(&path)
@@ -164,7 +164,7 @@ fn default_base_ref(repository: &Path) -> anyhow::Result<String> {
 }
 
 fn local_branch_exists(repository: &Path, branch: &str) -> anyhow::Result<bool> {
-    let output = Command::new("git")
+    let output = crate::command_env::plain_command("git")
         .args(["show-ref", "--verify", "--quiet"])
         .arg(format!("refs/heads/{branch}"))
         .current_dir(repository)
@@ -178,7 +178,7 @@ fn local_branch_exists(repository: &Path, branch: &str) -> anyhow::Result<bool> 
 }
 
 fn git_stdout(cwd: &Path, args: &[&str]) -> anyhow::Result<String> {
-    let output = Command::new("git")
+    let output = crate::command_env::plain_command("git")
         .args(args)
         .current_dir(cwd)
         .output()
@@ -190,7 +190,7 @@ fn git_stdout(cwd: &Path, args: &[&str]) -> anyhow::Result<String> {
 }
 
 fn git_optional_stdout(cwd: &Path, args: &[&str]) -> anyhow::Result<Option<String>> {
-    let output = Command::new("git")
+    let output = crate::command_env::plain_command("git")
         .args(args)
         .current_dir(cwd)
         .output()
@@ -244,7 +244,7 @@ mod tests {
     use super::*;
 
     fn run_git(cwd: &Path, args: &[&str]) {
-        let output = Command::new("git")
+        let output = crate::command_env::plain_command("git")
             .args(args)
             .current_dir(cwd)
             .output()

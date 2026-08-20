@@ -28,7 +28,6 @@ window.minimize: 最小化
 window.maximize: 最大化
 window.restore: 还原
 updater.update: 更新
-updater.checking: 正在检查更新…
 updater.updating: 正在更新…
 updater.up_to_date: Waku 已是最新版本
 updater.failed: "更新失败：%{error}"
@@ -69,7 +68,7 @@ settings.computer_use_keywords: 电脑操作 屏幕录制 辅助功能 应用 �
 settings.back: 返回
 settings.search: 搜索设置
 daemon.expose_title: 暴露由 Waku 管理的守护进程
-daemon.expose_description: 允许这台 Mac 之外的 Waku 客户端连接。更改此项只会重启守护进程。
+daemon.expose_description: 允许本机之外的 Waku 客户端连接。更改此项只会重启守护进程。
 daemon.status_local: 仅本机
 daemon.status_exposed: 已暴露
 daemon.status_restarting: 正在重启
@@ -84,13 +83,13 @@ daemon.allowed_origins_placeholder: https://waku.example.com, http://localhost:3
 daemon.apply: 应用
 daemon.restarting: 正在重启…
 daemon.credentials_title: 连接信息
-daemon.credentials_description: 在 Waku Web 中输入这些信息。此地址使用这台 Mac 的局域网主机名。
+daemon.credentials_description: 在 Waku Web 中输入这些信息。此地址使用本机的局域网主机名。
 daemon.websocket_url: WebSocket 地址
 daemon.token: 令牌
 daemon.reveal_token: 显示令牌
 daemon.hide_token: 隐藏令牌
 daemon.regenerate_token: 重新生成
-daemon.security_warning: 此令牌可完全访问这台 Mac 上的任务、文件、Git、附件和编程智能体。在私有网络之外请通过受信任的 TLS 代理使用 WSS。
+daemon.security_warning: 此令牌可完全访问本机上的任务、文件、Git、附件和编程智能体。在私有网络之外请通过受信任的 TLS 代理使用 WSS。
 daemon.external_title: 外部守护进程
 daemon.external_description: 此桌面应用连接到由 Waku 之外管理的守护进程。请在对应主机上配置监听地址、浏览器来源和令牌。
 daemon.web_external_description: Waku Web 连接到由浏览器之外管理的守护进程。请在对应主机上配置监听地址、浏览器来源和令牌。
@@ -155,14 +154,14 @@ common.revoke: 撤销授权
 common.retry: 重试
 common.creating: 正在创建…
 settings.local_by_default: 默认存储在本地
-settings.local_by_default_description: 项目、对话和设置均存储在这台 Mac 上
+settings.local_by_default_description: 项目、对话和设置均存储在这台电脑上
 settings.local_by_default_web_description: 项目、对话和附件保留在所连接的守护进程主机上。Waku Web 的偏好设置保留在此浏览器中。
 settings.automatic_updates: 自动更新
 settings.automatic_updates_description: 在后台检查新版本，并在发现更新时提示安装
 settings.share_anonymous_usage_data: 分享匿名使用数据
 settings.share_anonymous_usage_data_description: 分享功能使用情况和可靠性数据，帮助改进 Waku。不会包含提示词、回复、项目名称、文件路径等个人信息
 providers.coding_agents: 编程智能体
-providers.description: Waku 调用安装在这台 Mac 上的智能体命令行工具。请先安装相应工具或完成登录，然后刷新
+providers.description: Waku 调用安装在这台电脑上的智能体命令行工具。请先安装相应工具或完成登录，然后刷新
 providers.web_description: Waku 调用安装在守护进程主机上的智能体命令行工具。请先安装相应工具或完成登录，然后刷新
 providers.check_failed: "无法检查 %{command}：%{error}"
 providers.show_settings: 显示 %{provider} 设置
@@ -233,7 +232,7 @@ project.project_lower: 项目
 project.without_a_project: 不使用项目
 project.your_project: 你的项目
 onboarding.open_project_to_begin: 打开一个项目即可开始
-onboarding.description: Waku 会在你选择的文件夹中运行编程智能体。代码、任务和历史记录都保留在这台 Mac 上
+onboarding.description: Waku 会在你选择的文件夹中运行编程智能体。代码、任务和历史记录都保留在这台电脑上
 onboarding.web_description: 请选择守护进程主机上的路径，或在不使用项目的情况下开始。
 onboarding.open_project_folder: 打开项目文件夹…
 onboarding.what_should_we_build: 想构建什么？
@@ -283,6 +282,7 @@ activity.ask_questions: 提问
 activity.arguments: 参数
 activity.output: 输出
 activity.image_output: 图片输出
+activity.open_file: 打开文件
 activity.search_for: 搜索：%{query}
 activity.searched_web: 已搜索网页
 activity.open_url: 打开 %{url}
@@ -420,10 +420,15 @@ permission.agent_asks_for_permission: 智能体正在请求权限
 permission.agent_wants_to: 智能体想要执行 %{action}
 common.close: 关闭
 common.default: 默认
+composer.no_providers: 请安装或启用一个服务商后再发送
 models.none_found: 未找到模型
 models.favorite_hint: 为模型加星标即可固定在这里
 models.loading: 正在加载模型…
 models.none_reported: 此服务商未提供任何模型
+models.no_providers: 无可用服务商
+models.no_providers_title: 没有可用的服务商
+models.no_providers_description: 请安装一个智能体 CLI，或在服务商设置中重新启用。
+models.open_provider_settings: 打开服务商设置
 models.choose: 选择模型
 models.favorites: 收藏
 models.add_favorite: 添加到收藏
@@ -575,7 +580,8 @@ errors.provider_not_installed: "尚未安装 %{provider}"
 errors.provider_not_found: "尚未安装 %{provider}，或无法找到该程序"
 errors.claude_fork_checkpoint_missing: Claude 未返回派生任务所需的检查点
 errors.claude_turn_checkpoint_unavailable: "Claude 中该轮任务的原生检查点不可用：%{error}"
-errors.pi_session_file_unavailable: Pi 的原生会话文件不可用
+errors.provider_session_file_unavailable: "%{provider} 的原生会话文件不可用"
+errors.provider_turn_branching_unsupported: "%{provider} 无法在指定轮次回退或分支对话"
 errors.fork_task: "无法派生任务：%{error}"
 errors.create_rewind_snapshot: "无法创建回退前的安全快照：%{error}"
 errors.restore_checkpoint: "无法恢复检查点：%{error}"
@@ -631,7 +637,7 @@ errors.provider_stopped_receiving: "%{provider} 已停止接收消息"
 errors.provider_initialize_session: "%{provider} 未能初始化此任务"
 errors.provider_rejected_prompt: "%{provider} 在开始处理前拒绝了消息"
 errors.provider_complete_turn: "%{provider} 未能完成本轮任务"
-errors.pi_reported_error: Pi 报告了错误
+errors.provider_reported_error: "%{provider} 报告了错误"
 session.response_unavailable: 该回复已不可用
 session.response_cannot_fork: 目前无法从该回复派生任务
 session.response_fork_in_progress: 请等待任务派生完成后再移除原任务
@@ -801,6 +807,10 @@ diff.resize_tree: 调整差异文件树宽度
 diff.changed_files: 已更改的文件
 diff.file_count_one: 1 个文件
 diff.file_count: "%{count} 个文件"
+diff.status_added: 新增
+diff.status_deleted: 删除
+diff.rows_hidden_one: 还有 1 行 · 打开审阅查看完整更改
+diff.rows_hidden: "还有 %{count} 行 · 打开审阅查看完整更改"
 terminal.transport_failed: 终端传输失败
 terminal.no_workspace_description: 请先选择一个任务，再打开终端。
 terminal.process_exited: 进程已退出
@@ -812,7 +822,7 @@ browser.open_external: 在默认浏览器中打开
 browser.browse_web: 浏览网页
 browser.start_hint: 在上方输入网址或搜索内容 — 按 %{shortcut} 聚焦地址栏
 browser.unavailable: 浏览器不可用
-browser.requires_macos: 浏览器面板仅支持 macOS
+browser.unavailable_on_platform: 浏览器面板尚不支持当前平台
 find.bad_pattern: 表达式无效
 find.no_results: 无结果
 find.result_count: "%{current} / %{total}"

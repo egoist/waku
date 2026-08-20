@@ -56,11 +56,9 @@ mod platform {
             }
 
             let shell = crate::command_env::default_terminal_shell();
+            let shell_args = crate::command_env::default_terminal_shell_args(&shell);
             let mut options = tty::Options {
-                shell: Some(Shell::new(
-                    shell.to_string_lossy().into_owned(),
-                    vec!["-l".into()],
-                )),
+                shell: Some(Shell::new(shell.to_string_lossy().into_owned(), shell_args)),
                 working_directory: Some(cwd.to_owned()),
                 drain_on_exit: false,
                 ..Default::default()

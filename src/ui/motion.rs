@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 
 use gpui::{
     AnyElement, App, EntityId, Global, IntoElement, RenderOnce, Svg, Transformation, Window,
-    percentage,
+    ease_out_quint, percentage,
 };
 
 /// Repeat-tick interval (~30 fps): visually equivalent for these chunky
@@ -195,5 +195,83 @@ impl RenderOnce for Pulse {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let phase = pulse_phase(self.period, self.stride, window.current_view(), cx);
         (self.render)(phase)
+    }
+}
+
+/// How long a side panel takes to slide open or shut. Zeron's panel
+/// transition (`crates/ui/src/motion.rs` `RESIZE`) is 200ms — long enough to
+/// read as travel rather than a jump cut, short enough that the layout is
+/// settled before the pointer arrives anywhere else.
+pub const PANEL_SLIDE: Duration = Duration::from_millis(200);
+
+/// A one-shot width slide, evaluated from `render` instead of wrapped around
+/// an element.
+///
+/// `with_animation` cannot drive this. The width feeds the flex layout of the
+/// panel's *siblings* — the transcript column takes whatever the panels leave
+/// — and gpui keys an animation element by its element-id path, so a wrapper
+/// that remounts would replay the slide from zero. Evaluating by hand keeps
+/// the element tree's shape constant: a finished or dropped tween is exactly
+/// the steady state.
+#[derive(Clone, Copy, Debug)]
+pub struct WidthTween {
+    from: f32,
+    started: Instant,
+}
+
+impl WidthTween {
+    /// Start a slide from the width the panel currently occupies, so a toggle
+    /// mid-slide reverses from where the edge actually is instead of jumping
+    /// back to the far end.
+    pub fn new(from: f32) -> Self {
+        Self {
+            from,
+            started: Instant::now(),
+        }
+    }
+
+    /// Eased width on the way to `target`, or `None` once the slide is over —
+    /// the caller then drops the tween and reads `target` directly, which is
+    /// also what retires a closed panel from the element tree.
+    pub fn width_toward(&self, target: f32) -> Option<f32> {
+        width_at(self.from, target, self.started.elapsed())
+    }
+}
+
+fn width_at(from: f32, target: f32, elapsed: Duration) -> Option<f32> {
+    let progress = elapsed.as_secs_f32() / PANEL_SLIDE.as_secs_f32();
+    (progress < 1.0).then(|| from + (target - from) * ease_out_quint()(progress.max(0.0)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_slide_eases_out_and_then_retires() {
+        let start = width_at(0.0, 260.0, Duration::ZERO).expect("a fresh slide is in flight");
+        assert!(start.abs() < 0.01, "the slide opens from its start width");
+
+        let half = width_at(0.0, 260.0, PANEL_SLIDE / 2).expect("halfway is in flight");
+        assert!(
+            half > 130.0,
+            "ease-out covers most of the distance early, got {half}"
+        );
+
+        assert_eq!(
+            width_at(0.0, 260.0, PANEL_SLIDE),
+            None,
+            "an elapsed slide reports no width so the caller settles on the target"
+        );
+    }
+
+    #[test]
+    fn a_slide_reversed_mid_flight_leaves_from_where_it_is() {
+        let interrupted = width_at(0.0, 260.0, PANEL_SLIDE / 4).expect("in flight");
+        let reversed = width_at(interrupted, 0.0, Duration::ZERO).expect("in flight");
+        assert!(
+            (reversed - interrupted).abs() < 0.01,
+            "the reversed slide starts at the interrupted width"
+        );
     }
 }

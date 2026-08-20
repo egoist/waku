@@ -63,7 +63,7 @@ use crate::theme::{Theme, ThemePreference};
 use crate::ui::text_field::TextField;
 use crate::ui::{
     MenuChip, ProjectNameSelector, activity_icon, activity_noun, contain_scroll, file_icon, icon,
-    icon_button, motion, provider_color, provider_icon, status_color,
+    icon_button, motion, provider_color, provider_icon, status_color, toggle_switch,
 };
 use crate::{
     CancelTurn, CloseFind, CloseWindow, CopySelection, FindNext, FindPrevious, FocusComposer,
@@ -669,12 +669,31 @@ impl WakuPane {
         content: fn(&mut Waku, &mut Window, &mut Context<Waku>) -> AnyElement,
         cx: &mut App,
     ) -> Entity<Self> {
-        cx.new(|_| Self { waku: None, content })
+        cx.new(|_| Self {
+            waku: None,
+            content,
+        })
     }
 
     fn bind(&mut self, waku: &Entity<Waku>, cx: &mut Context<Self>) {
         self.waku = Some(waku.downgrade());
-        cx.observe(waku, |_, _, cx| cx.notify()).detach();
+        cx.observe(waku, |_, waku, cx| {
+            // A panel slide notifies the root at display rate for its 200ms,
+            // and this fan-out would price every one of those ticks at a
+            // three-island rebuild. Skipping it hands the decision to the
+            // cached-view keys: the sliding panel (its clip moves) and the
+            // transcript (its bounds move) miss their caches and re-render
+            // with fresh state anyway, while the island nothing is moving
+            // re-plays its cached subtree. Root-state changes it displays
+            // can wait out the slide: updates born inside an island
+            // (terminal output, pulse leases) dirty their ancestor pane
+            // without this observer, and the slide's retirement notify
+            // below re-runs the fan-out, so nothing outlasts the 200ms.
+            if !waku.read(cx).panels_sliding() {
+                cx.notify();
+            }
+        })
+        .detach();
     }
 }
 
@@ -792,6 +811,10 @@ fn traits_choice(theme: Theme, label: String, is_default: bool, selected: bool) 
 #[derive(Clone, Copy, Debug)]
 struct UserMessageAction {
     session_id: Uuid,
+    /// The prompt that opened the turn. A turn can hold several user messages
+    /// once a steer lands in it, and only the opening one is a rewind
+    /// boundary, so this is what the editor and the rewind both address.
+    message_id: Uuid,
     turn_count: usize,
 }
 
@@ -806,6 +829,9 @@ struct AssistantMessageAction {
 #[derive(Clone)]
 struct MessageEdit {
     session_id: Uuid,
+    /// Identifies the edited bubble outright. Matching by turn alone would
+    /// open this one input on every user message the turn holds.
+    message_id: Uuid,
     turn_count: usize,
     input: Entity<ComposerInput>,
     attachments: Vec<MessageAttachment>,
@@ -1148,6 +1174,11 @@ pub struct Waku {
     model_picker_highlight: Option<usize>,
     model_picker_scroll: ScrollHandle,
     model_picker_scrollbar: Rc<ScrollbarState>,
+    /// Focus for the picker's no-providers state. The panel takes focus on
+    /// open so `escape` has a focused descendant to dispatch up from, and
+    /// normally that is the filter field — which the empty state does not
+    /// draw, so its one button holds focus instead.
+    model_picker_empty_focus: FocusHandle,
     branch_search: Entity<ComposerInput>,
     branch_create_input: Entity<ComposerInput>,
     branch_picker_mode: BranchPickerMode,
@@ -1259,6 +1290,16 @@ pub struct Waku {
     sidebar_width: f32,
     right_panel_visible: bool,
     right_panel_width: f32,
+    /// The show/hide slide each panel is in the middle of, if any. Driven by
+    /// hand from `render` (see [`motion::WidthTween`]) because the width these
+    /// produce is what the transcript column between them is laid out against.
+    sidebar_slide: Option<motion::WidthTween>,
+    right_panel_slide: Option<motion::WidthTween>,
+    /// Width each panel actually occupied in the last frame — where a toggle
+    /// starts its slide from, and what the transcript measures itself against
+    /// while one is running.
+    sidebar_rendered_width: f32,
+    right_panel_rendered_width: f32,
     fps_counter_visible: bool,
     panel_resize_drag: Option<PanelResizeDrag>,
     right_panel_session_states: HashMap<Uuid, RightPanelSessionState>,
@@ -1428,7 +1469,21 @@ pub struct Waku {
     transcript_anchor: Cell<Option<TranscriptAnchor>>,
     transcript_anchor_end_space: Rc<Cell<Pixels>>,
     transcript_anchor_following: Rc<Cell<bool>>,
+    /// A wheel scroll has landed and where it came to rest is not classified
+    /// yet. The first frame that can measure the tail consumes this and
+    /// re-engages following when the reader scrolled back onto it; a frame that
+    /// cannot measure the tail leaves it set, so a stream remeasure cannot
+    /// swallow the re-engage.
+    transcript_tail_recheck: Rc<Cell<bool>>,
     transcript_is_scrolled: Rc<Cell<bool>>,
+    /// Last decided visibility of the scroll-to-tail affordance. The tail's
+    /// position is unknowable on the frames a stream commit remeasures it, and
+    /// those arrive at commit cadence — deciding "show" from that silence
+    /// strobes the button against the frames in between.
+    transcript_scroll_to_bottom_visible: Cell<bool>,
+    /// Whether the transcript's scrollbar thumb was held at the last frame, so
+    /// render can notice a drag starting and ending.
+    transcript_scrollbar_dragging: Cell<bool>,
     transcript_layout_width: Cell<Pixels>,
     /// Parsed markdown per assistant message, keeping each response's
     /// incremental parse and flattened blocks alive across frames.
@@ -1441,6 +1496,13 @@ pub struct Waku {
     /// Independent capped viewports for expanded thoughts and command output.
     /// Keeping these stable preserves scroll position through virtualization.
     activity_scroll_viewports: RefCell<HashMap<Uuid, ActivityScrollViewport>>,
+    /// Positioned, syntax-tokenized diff rows for expanded file-change
+    /// activities. Built once when the activity is expanded and dropped when it
+    /// collapses or its changes are replaced, so a frame only indexes rows.
+    activity_diffs: RefCell<HashMap<Uuid, Rc<activity_diff::Diff>>>,
+    /// Viewports for those diffs. Separate from `activity_scroll_viewports`
+    /// because a failed edit shows both its diff and the error it returned.
+    activity_diff_viewports: RefCell<HashMap<Uuid, ActivityScrollViewport>>,
     /// One allocation for every transcript markdown context to share. The
     /// callback knows about the active workspace; the renderer deliberately
     /// does not.
@@ -1472,6 +1534,7 @@ pub struct Waku {
     fps_value: u32,
 }
 
+mod activity_diff;
 mod autocomplete;
 mod background_work;
 mod branches;
@@ -2098,27 +2161,44 @@ impl Waku {
         let branch_picker_list_state = ListState::new(0, ListAlignment::Top, px(152.0));
         let transcript_is_scrolled = Rc::new(Cell::new(false));
         let transcript_anchor_following = Rc::new(Cell::new(false));
+        let transcript_tail_recheck = Rc::new(Cell::new(false));
+        // A wheel scroll drops tail following and asks the next measured frame
+        // whether it landed back on the tail. GPUI re-engages its own tail pin
+        // when a bottom-aligned list reaches the end — it represents that end as
+        // no logical offset — but a turn renders through the top-aligned
+        // anchored list, whose end is an ordinary offset, so only this can.
         transcript_rows.set_scroll_handler({
             let transcript_is_scrolled = transcript_is_scrolled.clone();
             let transcript_anchor_following = transcript_anchor_following.clone();
+            let transcript_tail_recheck = transcript_tail_recheck.clone();
             move |event, window, _| {
                 transcript_is_scrolled.set(event.is_scrolled);
                 transcript_anchor_following.set(false);
+                transcript_tail_recheck.set(true);
                 window.refresh();
             }
         });
         anchored_transcript_rows.set_scroll_handler({
             let transcript_is_scrolled = transcript_is_scrolled.clone();
             let transcript_anchor_following = transcript_anchor_following.clone();
+            let transcript_tail_recheck = transcript_tail_recheck.clone();
             move |event, window, _| {
                 transcript_is_scrolled.set(event.is_scrolled);
                 transcript_anchor_following.set(false);
+                transcript_tail_recheck.set(true);
                 window.refresh();
             }
         });
         // Enable GPUI's experimental overlay plane so deferred draws (menus,
-        // tooltips, popovers) composite above native child views — without it
-        // the browser surface's WKWebView would cover them.
+        // tooltips, popovers) composite above native content — without it the
+        // browser surface would cover them.
+        //
+        // Both backends of the pinned fork implement it, and both browser
+        // hosts render somewhere it can reach: a sibling NSView below GPUI's
+        // overlay layer on macOS, a DirectComposition visual between GPUI's
+        // base and overlay planes on Windows. When it is unavailable the
+        // surface falls back to freezing the page to a bitmap while an
+        // overlay is open.
         let scene_overlay_enabled = window.enable_scene_overlay().is_ok();
         let (updater_status, updater_events) = cx
             .try_global::<crate::updater::UpdaterState>()
@@ -2130,6 +2210,7 @@ impl Waku {
             let onboarding_add_project_focus = cx.focus_handle();
             let onboarding_projectless_focus = cx.focus_handle();
             let updater_button_focus = cx.focus_handle();
+            let model_picker_empty_focus = cx.focus_handle();
 
             cx.on_focus(&updater_button_focus, window, |this: &mut Self, _, cx| {
                 this.set_updater_button_focused(true, cx);
@@ -2618,6 +2699,7 @@ impl Waku {
                 model_picker_highlight: None,
                 model_picker_scroll: ScrollHandle::new(),
                 model_picker_scrollbar: ScrollbarState::new(),
+                model_picker_empty_focus,
                 branch_picker_mode: BranchPickerMode::Browse,
                 branch_picker_highlight: None,
                 branch_picker_list_state,
@@ -2668,6 +2750,14 @@ impl Waku {
                 sidebar_width,
                 right_panel_visible,
                 right_panel_width,
+                sidebar_slide: None,
+                right_panel_slide: None,
+                sidebar_rendered_width: if sidebar_visible { sidebar_width } else { 0.0 },
+                right_panel_rendered_width: if right_panel_visible {
+                    right_panel_width
+                } else {
+                    0.0
+                },
                 fps_counter_visible: false,
                 panel_resize_drag: None,
                 right_panel_session_states: HashMap::new(),
@@ -2766,12 +2856,17 @@ impl Waku {
                 transcript_anchor: Cell::new(None),
                 transcript_anchor_end_space: Rc::new(Cell::new(Pixels::ZERO)),
                 transcript_anchor_following,
+                transcript_tail_recheck,
                 transcript_is_scrolled,
+                transcript_scroll_to_bottom_visible: Cell::new(false),
+                transcript_scrollbar_dragging: Cell::new(false),
                 transcript_layout_width: Cell::new(Pixels::ZERO),
                 message_markdown: RefCell::new(HashMap::new()),
                 activity_markdown: RefCell::new(HashMap::new()),
                 reasoning_window_starts: RefCell::new(HashMap::new()),
                 activity_scroll_viewports: RefCell::new(HashMap::new()),
+                activity_diffs: RefCell::new(HashMap::new()),
+                activity_diff_viewports: RefCell::new(HashMap::new()),
                 markdown_link_handler,
                 transcript_selection: TranscriptSelection::default(),
                 toast_selection: TranscriptSelection::default(),
