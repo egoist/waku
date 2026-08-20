@@ -1116,7 +1116,9 @@ mod tests {
         let directory = std::env::temp_dir().join(format!("waku-pathext-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&directory);
         std::fs::create_dir_all(&directory).expect("create fixture directory");
-        // The npm shim layout: no extensionless file to find by name alone.
+        // Only a suffixed file exists here, so the bare name resolves through PATHEXT.
+        // A global npm install also drops an extensionless shim beside it; that layout is
+        // covered by a_bare_name_prefers_pathext_over_an_extensionless_shim.
         std::fs::write(directory.join("faux-provider.cmd"), "@echo off\n")
             .expect("write shim fixture");
 
