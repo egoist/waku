@@ -16,6 +16,7 @@ the original feature bullet instead of adding separate entries for them.
 
 ## [unreleased]
 
+- Add reasoning effort selection for Grok
 - Add Kimi Code support
 
 ## [0.1.8]
