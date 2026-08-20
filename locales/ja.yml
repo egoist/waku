@@ -29,7 +29,6 @@ window.maximize: 最大化
 window.restore: 元に戻す
 
 updater.update: アップデート
-updater.checking: アップデートを確認中…
 updater.updating: アップデート中…
 updater.up_to_date: Waku は最新です
 updater.failed: "アップデートに失敗しました：%{error}"
@@ -73,8 +72,8 @@ settings.computer_use_keywords: コンピュータ 操作 画面収録 アクセ
 settings.back: 戻る
 settings.search: 設定を検索
 daemon.expose_title: 管理対象デーモンを公開
-daemon.expose_description: この Mac 以外の Waku クライアントから接続できるようにします。変更時はデーモンだけが再起動します。
-daemon.status_local: この Mac のみ
+daemon.expose_description: このマシン以外の Waku クライアントから接続できるようにします。変更時はデーモンだけが再起動します。
+daemon.status_local: このマシンのみ
 daemon.status_exposed: 公開中
 daemon.status_restarting: 再起動中
 daemon.connection_title: リスナーアクセス
@@ -88,13 +87,13 @@ daemon.allowed_origins_placeholder: https://waku.example.com, http://localhost:3
 daemon.apply: 適用
 daemon.restarting: 再起動中…
 daemon.credentials_title: 接続情報
-daemon.credentials_description: Waku Web に入力してください。URL にはこの Mac のローカルネットワーク用ホスト名が使われます。
+daemon.credentials_description: Waku Web に入力してください。URL にはこのマシンのローカルネットワーク用ホスト名が使われます。
 daemon.websocket_url: WebSocket URL
 daemon.token: トークン
 daemon.reveal_token: トークンを表示
 daemon.hide_token: トークンを隠す
 daemon.regenerate_token: 再生成
-daemon.security_warning: このトークンは、この Mac 上のタスク、ファイル、Git、添付ファイル、コーディングエージェントへの完全なアクセス権を持ちます。プライベートネットワーク外では信頼できる TLS プロキシ経由で WSS を使用してください。
+daemon.security_warning: このトークンは、このマシン上のタスク、ファイル、Git、添付ファイル、コーディングエージェントへの完全なアクセス権を持ちます。プライベートネットワーク外では信頼できる TLS プロキシ経由で WSS を使用してください。
 daemon.external_title: 外部デーモン
 daemon.external_description: このデスクトップは Waku の外部で管理されているデーモンに接続しています。リスナー、ブラウザオリジン、トークンは接続先ホストで設定してください。
 daemon.web_external_description: Waku Web はブラウザの外部で管理されているデーモンに接続します。リスナー、ブラウザオリジン、トークンは接続先ホストで設定してください。
@@ -162,7 +161,7 @@ common.retry: 再試行
 common.creating: 作成中…
 
 settings.local_by_default: デフォルトでローカルに保存
-settings.local_by_default_description: プロジェクト、会話、設定はこの Mac に保存されます
+settings.local_by_default_description: プロジェクト、会話、設定はこのコンピュータに保存されます
 settings.local_by_default_web_description: プロジェクト、会話、添付ファイルは接続先デーモンのホストに保存されます。Waku Web の設定はこのブラウザに保存されます。
 settings.automatic_updates: 自動アップデート
 settings.automatic_updates_description: バックグラウンドで新しいバージョンを確認し、インストールを案内します
@@ -170,7 +169,7 @@ settings.share_anonymous_usage_data: 匿名の使用状況データを共有
 settings.share_anonymous_usage_data_description: 機能の利用状況と信頼性に関するデータを共有して、Waku の改善にご協力ください。プロンプト、回答、プロジェクト名、ファイルパスなどの個人データは一切含まれません
 
 providers.coding_agents: コーディングエージェント
-providers.description: Waku はこの Mac にインストールされたエージェントの CLI を使用します。各エージェントの CLI をインストールするかログインしてから、更新してください
+providers.description: Waku はこのコンピュータにインストールされたエージェントの CLI を使用します。各エージェントの CLI をインストールするかログインしてから、更新してください
 providers.web_description: Waku はデーモンホストにインストールされたエージェント CLI を使用します。各エージェントの CLI をインストールするかログインしてから、更新してください
 providers.check_failed: "%{command} を確認できませんでした：%{error}"
 providers.show_settings: "%{provider} の設定を表示"
@@ -247,7 +246,7 @@ project.without_a_project: プロジェクトなし
 project.your_project: あなたのプロジェクト
 
 onboarding.open_project_to_begin: プロジェクトを開いて始めましょう
-onboarding.description: Waku は選択したフォルダでコーディングエージェントを実行します。コード、タスク、履歴はこの Mac に保存されます
+onboarding.description: Waku は選択したフォルダでコーディングエージェントを実行します。コード、タスク、履歴はこのコンピュータに保存されます
 onboarding.web_description: デーモンホスト上のパスを選ぶか、プロジェクトなしで開始してください。
 onboarding.open_project_folder: プロジェクトフォルダを開く…
 onboarding.what_should_we_build: 何を作りましょうか？
@@ -301,6 +300,7 @@ activity.ask_questions: 質問する
 activity.arguments: 引数
 activity.output: 出力
 activity.image_output: 画像出力
+activity.open_file: ファイルを開く
 activity.search_for: "%{query} を検索"
 activity.searched_web: ウェブを検索しました
 activity.open_url: "%{url} を開く"
@@ -445,10 +445,15 @@ permission.agent_wants_to: エージェントが次の操作を実行しよう�
 common.close: 閉じる
 common.default: デフォルト
 
+composer.no_providers: 送信するにはプロバイダーをインストールするか有効にしてください
 models.none_found: モデルが見つかりません
 models.favorite_hint: モデルにスターを付けると、ここに固定できます
 models.loading: モデルを読み込み中…
 models.none_reported: このプロバイダーにモデルがありません
+models.no_providers: プロバイダーなし
+models.no_providers_title: 利用できるプロバイダーがありません
+models.no_providers_description: エージェント CLI をインストールするか、プロバイダー設定で再度有効にしてください。
+models.open_provider_settings: プロバイダー設定を開く
 models.choose: モデルを選択
 models.favorites: お気に入り
 models.add_favorite: お気に入りに追加
@@ -611,7 +616,8 @@ errors.provider_not_installed: "%{provider} はインストールされていま
 errors.provider_not_found: "%{provider} はインストールされていないか、見つかりませんでした"
 errors.claude_fork_checkpoint_missing: Claude からフォーク用チェックポイントが返されませんでした
 errors.claude_turn_checkpoint_unavailable: "そのターンの Claude ネイティブチェックポイントは利用できません：%{error}"
-errors.pi_session_file_unavailable: Pi のネイティブセッションファイルは利用できません
+errors.provider_session_file_unavailable: "%{provider} のネイティブセッションファイルは利用できません"
+errors.provider_turn_branching_unsupported: "%{provider} は特定のターンでの巻き戻しや分岐ができません"
 errors.fork_task: "タスクをフォークできませんでした：%{error}"
 errors.create_rewind_snapshot: "巻き戻し用の安全スナップショットを作成できませんでした：%{error}"
 errors.restore_checkpoint: "チェックポイントを復元できませんでした：%{error}"
@@ -667,7 +673,7 @@ errors.provider_stopped_receiving: "%{provider} はメッセージの受信を�
 errors.provider_initialize_session: "%{provider} はこのセッションを初期化できませんでした"
 errors.provider_rejected_prompt: "%{provider} は実行前にプロンプトを拒否しました"
 errors.provider_complete_turn: "%{provider} はこのターンを完了できませんでした"
-errors.pi_reported_error: Pi からエラーが報告されました
+errors.provider_reported_error: "%{provider} からエラーが報告されました"
 
 session.response_unavailable: その回答は利用できなくなりました
 session.response_cannot_fork: その回答からは現在タスクをフォークできません
@@ -844,6 +850,10 @@ diff.resize_tree: 差分ファイルツリーの幅を変更
 diff.changed_files: 変更されたファイル
 diff.file_count_one: ファイル 1 件
 diff.file_count: "ファイル %{count} 件"
+diff.status_added: 追加
+diff.status_deleted: 削除
+diff.rows_hidden_one: 残り 1 行 · レビューを開くと変更全体を読めます
+diff.rows_hidden: "残り %{count} 行 · レビューを開くと変更全体を読めます"
 terminal.transport_failed: ターミナル転送に失敗しました
 terminal.no_workspace_description: ターミナルを開く前にタスクを選択してください。
 terminal.process_exited: プロセスが終了しました
@@ -856,7 +866,7 @@ browser.open_external: デフォルトのブラウザで開く
 browser.browse_web: ウェブを閲覧
 browser.start_hint: 上に URL または検索語句を入力してください — %{shortcut} でアドレスバーにフォーカス
 browser.unavailable: ブラウザを利用できません
-browser.requires_macos: ブラウザパネルは macOS でのみ利用できます
+browser.unavailable_on_platform: ブラウザパネルはこのプラットフォームではまだ利用できません
 
 find.bad_pattern: 無効なパターン
 find.no_results: 結果なし

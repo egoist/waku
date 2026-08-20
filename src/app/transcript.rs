@@ -156,6 +156,9 @@ impl Waku {
 
         self.transcript_anchor_following.set(false);
         self.transcript_is_scrolled.set(true);
+        // The position above is deliberate, so a wheel scroll still waiting to
+        // be classified must not re-engage following on top of it.
+        self.transcript_tail_recheck.set(false);
     }
 
     /// Bulk-reset the transcript. Used for session/document replacement.
@@ -721,11 +724,18 @@ pub(super) fn transcript_anchor_end_space(
 }
 
 /// Whether the transcript needs an explicit affordance for returning to its
-/// tail. A measured scroll range is required because disclosure pinning can
-/// leave `is_scrolled` set after a collapse removes all overflow. The final
-/// row's bounds then distinguish the tail position for both list alignments:
+/// tail, or `None` when the tail's position is unknowable this frame. A
+/// measured scroll range is required because disclosure pinning can leave
+/// `is_scrolled` set after a collapse removes all overflow. The final row's
+/// bounds then distinguish the tail position for both list alignments:
 /// `ListScrollEvent::is_scrolled` alone stays true at the bottom of the
 /// top-aligned list used while a turn is anchored.
+///
+/// The caller holds the previous answer through `None` rather than resolving
+/// it. Every stream commit remeasures the tail rows, so the frame after each
+/// one has no bounds to read, and answering "show" into that silence blinks the
+/// button against the measured frames in between — at commit cadence, for as
+/// long as the reader sits at the tail without following it.
 pub(super) fn should_show_scroll_to_bottom(
     is_scrolled: bool,
     anchor_following: bool,
@@ -733,12 +743,31 @@ pub(super) fn should_show_scroll_to_bottom(
     viewport_bottom: Pixels,
     tail_bottom: Option<Pixels>,
     end_space: Pixels,
-) -> bool {
+) -> Option<bool> {
     if !is_scrolled || anchor_following || !transcript_scrollable {
-        return false;
+        return Some(false);
     }
 
-    tail_bottom.is_none_or(|tail_bottom| tail_bottom + end_space > viewport_bottom + px(0.5))
+    Some(!transcript_rests_at_tail(
+        viewport_bottom,
+        tail_bottom,
+        end_space,
+    )?)
+}
+
+/// Whether the transcript currently sits at the end of its content, or `None`
+/// while the last row is unmeasured and its position is unknowable.
+///
+/// `None` is not `false`. The stream remeasures the tail on every commit, so a
+/// wheel scroll can easily settle on a frame that cannot answer; a caller
+/// waiting to re-engage tail following has to ask again rather than conclude
+/// the reader stopped short of the tail.
+pub(super) fn transcript_rests_at_tail(
+    viewport_bottom: Pixels,
+    tail_bottom: Option<Pixels>,
+    end_space: Pixels,
+) -> Option<bool> {
+    Some(tail_bottom? + end_space <= viewport_bottom + px(0.5))
 }
 
 pub(super) fn maintain_transcript_anchor(
@@ -1133,6 +1162,28 @@ pub(super) fn format_working_elapsed(seconds: u64) -> String {
             }
         }
     }
+}
+
+/// Whether this user message is the prompt that opened its turn.
+///
+/// A steer accepted mid-turn joins the running turn as another user message,
+/// so a turn can hold several. Only the opening prompt is a rewind boundary —
+/// checkpoints and provider rollback are per turn, not per message. Messages
+/// of a turn are contiguous, so this walks back only while the turn id holds
+/// rather than scanning the session, which a per-frame row builder must avoid.
+pub(super) fn message_opens_turn(messages: &[Message], message_index: usize) -> bool {
+    let Some(turn_id) = messages
+        .get(message_index)
+        .filter(|message| message.role == MessageRole::User)
+        .and_then(|message| message.turn_id)
+    else {
+        return false;
+    };
+    !messages[..message_index]
+        .iter()
+        .rev()
+        .take_while(|earlier| earlier.turn_id == Some(turn_id))
+        .any(|earlier| earlier.role == MessageRole::User)
 }
 
 pub(super) fn message_starts_followup_turn(messages: &[Message], message_index: usize) -> bool {

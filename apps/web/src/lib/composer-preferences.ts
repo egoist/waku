@@ -36,6 +36,8 @@ const PROVIDERS = new Set<ProviderKind>([
   'deepSeek',
   'openCode',
   'grok',
+  'kimi',
+  'ohMyPi',
   'pi',
 ])
 

@@ -1,4 +1,10 @@
-//! Pi RPC transport.
+//! Pi RPC transport, shared by Pi and Oh My Pi.
+//!
+//! Oh My Pi is a fork of Pi that kept the newline-delimited RPC transport but
+//! renamed part of the surface: forking is `branch`, a run settles on
+//! `agent_end` instead of `agent_settled`, and oversized frames are chunked
+//! once protocol v2 is negotiated. [`PiFlavor`] carries those differences so
+//! both providers share one transport instead of two near-copies.
 
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
@@ -21,6 +27,122 @@ use crate::model::{ActivityKind, DriverEvent, InteractionMode, ProviderResumeCur
 
 const RPC_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// Oh My Pi has to start a whole second agent to clone a session, so it needs
+/// more headroom than a request against the already-running process.
+const CLONE_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Oh My Pi refuses to reassemble beyond this, so neither should Waku.
+const MAX_REASSEMBLED_FRAME_BYTES: usize = 64 * 1024 * 1024;
+
+/// Which dialect of the Pi RPC protocol a session speaks.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PiFlavor {
+    Pi,
+    OhMyPi,
+}
+
+impl PiFlavor {
+    fn display_name(self) -> &'static str {
+        match self {
+            Self::Pi => "Pi",
+            Self::OhMyPi => "Oh My Pi",
+        }
+    }
+
+    /// Pi has no permission system and only needs project-local files trusted;
+    /// Oh My Pi does have one, and Waku only ever runs these in Full access.
+    fn full_access_arg(self) -> &'static str {
+        match self {
+            Self::Pi => "--approve",
+            Self::OhMyPi => "--yolo",
+        }
+    }
+
+    /// The event that means the run is over and no more work is scheduled.
+    fn settled_event(self) -> &'static str {
+        match self {
+            Self::Pi => "agent_settled",
+            Self::OhMyPi => "agent_end",
+        }
+    }
+
+    fn session_info_event(self) -> &'static str {
+        match self {
+            Self::Pi => "session_info_changed",
+            Self::OhMyPi => "session_info_update",
+        }
+    }
+
+    fn session_info_title_field(self) -> &'static str {
+        match self {
+            Self::Pi => "name",
+            Self::OhMyPi => "title",
+        }
+    }
+
+    fn branch_messages_command(self) -> &'static str {
+        match self {
+            Self::Pi => "get_fork_messages",
+            Self::OhMyPi => "get_branch_messages",
+        }
+    }
+
+    fn branch_command(self) -> &'static str {
+        match self {
+            Self::Pi => "fork",
+            Self::OhMyPi => "branch",
+        }
+    }
+
+    /// Oh My Pi dropped Pi's opt-out env var; it gates its update check on a
+    /// setting instead, and does it off the startup path either way.
+    fn skips_version_check_by_env(self) -> bool {
+        matches!(self, Self::Pi)
+    }
+
+    /// Only Oh My Pi chunks oversized frames, and only after it is asked to.
+    fn negotiates_protocol_v2(self) -> bool {
+        matches!(self, Self::OhMyPi)
+    }
+
+    /// Waku's computer-use bridge is a Pi extension written against Pi's
+    /// extension API. Oh My Pi ships its own `/computer` instead.
+    fn supports_waku_computer_use(self) -> bool {
+        matches!(self, Self::Pi)
+    }
+
+    fn cursor(self, session_id: String, session_file: Option<PathBuf>) -> ProviderResumeCursor {
+        match self {
+            Self::Pi => ProviderResumeCursor::Pi {
+                session_id,
+                session_file,
+            },
+            Self::OhMyPi => ProviderResumeCursor::OhMyPi {
+                session_id,
+                session_file,
+            },
+        }
+    }
+
+    fn session_file_from_cursor(self, cursor: &ProviderResumeCursor) -> Option<&PathBuf> {
+        match (self, cursor) {
+            (Self::Pi, ProviderResumeCursor::Pi { session_file, .. })
+            | (Self::OhMyPi, ProviderResumeCursor::OhMyPi { session_file, .. }) => {
+                session_file.as_ref()
+            }
+            _ => None,
+        }
+    }
+
+    fn owns_cursor(self, cursor: &ProviderResumeCursor) -> bool {
+        matches!(
+            (self, cursor),
+            (Self::Pi, ProviderResumeCursor::Pi { .. })
+                | (Self::OhMyPi, ProviderResumeCursor::OhMyPi { .. })
+        )
+    }
+}
+
 enum CommandMessage {
     Prompt(String),
     Steer(String),
@@ -41,6 +163,7 @@ enum CommandMessage {
 type PendingResponses = Arc<Mutex<HashMap<String, Sender<Result<Value, String>>>>>;
 
 pub struct PiDriver {
+    flavor: PiFlavor,
     commands: Sender<CommandMessage>,
     computer_use: Option<computer_use_runtime::ComputerUseRuntime>,
 }
@@ -65,7 +188,11 @@ fn configure_pi_computer_use_command(
 }
 
 impl PiDriver {
-    pub fn start(options: DriverStartOptions, events: DriverEventSender) -> anyhow::Result<Self> {
+    pub fn start(
+        flavor: PiFlavor,
+        options: DriverStartOptions,
+        events: DriverEventSender,
+    ) -> anyhow::Result<Self> {
         let DriverStartOptions {
             binary,
             cwd,
@@ -80,21 +207,25 @@ impl PiDriver {
             provider_cursor,
         } = options;
         if mode != RuntimeMode::FullAccess || interaction_mode != InteractionMode::Build {
-            return Err(anyhow!("Pi currently supports Build with Full access only"));
+            return Err(anyhow!(
+                "{} currently supports Build with Full access only",
+                flavor.display_name()
+            ));
         }
         let resume_session_file = match provider_cursor {
-            Some(ProviderResumeCursor::Pi {
-                session_file: Some(session_file),
-                ..
-            }) => Some(session_file),
-            Some(ProviderResumeCursor::Pi { .. }) => {
-                return Err(anyhow!(
-                    "cannot resume Pi because its native session file is missing"
-                ));
+            Some(cursor) if flavor.owns_cursor(&cursor) => {
+                let Some(session_file) = flavor.session_file_from_cursor(&cursor).cloned() else {
+                    return Err(anyhow!(
+                        "cannot resume {} because its native session file is missing",
+                        flavor.display_name()
+                    ));
+                };
+                Some(session_file)
             }
             Some(cursor) => {
                 return Err(anyhow!(
-                    "cannot resume Pi from a {} cursor",
+                    "cannot resume {} from a {} cursor",
+                    flavor.display_name(),
                     cursor.provider().display_name()
                 ));
             }
@@ -104,17 +235,18 @@ impl PiDriver {
             parse_model_slug(model)?;
         }
 
-        let computer_use = computer_use_enabled
+        let computer_use = (computer_use_enabled && flavor.supports_waku_computer_use())
             .then(|| computer_use_runtime::ComputerUseRuntime::start(events.clone()))
             .transpose()?;
         let pi_extension = computer_use
             .as_ref()
             .map(|_| crate::computer_use::pi_extension_path())
             .transpose()?;
-        let mut command = crate::command_env::command(binary);
-        command
-            .args(["--mode", "rpc", "--approve"])
-            .env("PI_SKIP_VERSION_CHECK", "1");
+        let mut command = crate::command_env::command(&binary);
+        command.args(["--mode", "rpc", flavor.full_access_arg()]);
+        if flavor.skips_version_check_by_env() {
+            command.env("PI_SKIP_VERSION_CHECK", "1");
+        }
         configure_pi_computer_use_command(
             &mut command,
             computer_use
@@ -123,24 +255,24 @@ impl PiDriver {
                 .map(|(runtime, extension)| (&runtime.config, extension)),
         );
         let command = command
-            .current_dir(cwd)
+            .current_dir(&cwd)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
-        let mut child =
-            crate::command_env::spawn(command).context("failed to start `pi --mode rpc`")?;
+        let mut child = crate::command_env::spawn(command)
+            .with_context(|| format!("failed to start `{} --mode rpc`", binary.display()))?;
         let stdin = child
             .stdin
             .take()
-            .ok_or_else(|| anyhow!("Pi stdin unavailable"))?;
+            .ok_or_else(|| anyhow!("{} stdin unavailable", flavor.display_name()))?;
         let stdout = child
             .stdout
             .take()
-            .ok_or_else(|| anyhow!("Pi stdout unavailable"))?;
+            .ok_or_else(|| anyhow!("{} stdout unavailable", flavor.display_name()))?;
         let stderr = child
             .stderr
             .take()
-            .ok_or_else(|| anyhow!("Pi stderr unavailable"))?;
+            .ok_or_else(|| anyhow!("{} stderr unavailable", flavor.display_name()))?;
 
         let (commands, command_rx) = unbounded();
         let pending = Arc::new(Mutex::new(HashMap::new()));
@@ -152,21 +284,40 @@ impl PiDriver {
                 .name("waku-pi-reader".into())
                 .spawn(move || {
                     let mut stream_state = PiStreamState::default();
+                    let mut chunks = ChunkAssembly::default();
                     for line in BufReader::new(stdout).lines() {
                         match line {
                             Ok(line) if !line.trim().is_empty() => {
                                 match serde_json::from_str::<Value>(&line) {
-                                    Ok(value) => handle_pi_message(
-                                        value,
-                                        &reader_pending,
-                                        &reader_commands,
-                                        &reader_events,
-                                        &mut stream_state,
-                                    ),
+                                    Ok(value) => {
+                                        // A chunked frame arrives as an
+                                        // uninterrupted run of `rpc_chunk`
+                                        // envelopes that reassemble into one
+                                        // logical message.
+                                        match chunks.accept(value) {
+                                            Ok(Some(value)) => handle_pi_message(
+                                                flavor,
+                                                value,
+                                                &reader_pending,
+                                                &reader_commands,
+                                                &reader_events,
+                                                &mut stream_state,
+                                            ),
+                                            Ok(None) => {}
+                                            Err(error) => {
+                                                let _ =
+                                                    reader_events.send(DriverEvent::Error(tr!(
+                                                        "errors.provider_transport_read",
+                                                        provider = flavor.display_name(),
+                                                        error = error
+                                                    )));
+                                            }
+                                        }
+                                    }
                                     Err(error) => {
                                         let _ = reader_events.send(DriverEvent::Error(tr!(
                                             "errors.provider_invalid_json",
-                                            provider = "Pi",
+                                            provider = flavor.display_name(),
                                             error = error
                                         )));
                                     }
@@ -176,7 +327,7 @@ impl PiDriver {
                             Err(error) => {
                                 let _ = reader_events.send(DriverEvent::Error(tr!(
                                     "errors.provider_transport_read",
-                                    provider = "Pi",
+                                    provider = flavor.display_name(),
                                     error = error
                                 )));
                                 break;
@@ -186,7 +337,10 @@ impl PiDriver {
                     // Unblock anything waiting on an RPC reply immediately; the
                     // process thread owns the `ProcessExited` announcement so a
                     // non-zero exit can be reported before the runtime is torn down.
-                    fail_pending(&reader_pending, "Pi RPC process exited");
+                    fail_pending(
+                        &reader_pending,
+                        &format!("{} RPC process exited", flavor.display_name()),
+                    );
                 })?;
 
         let writer_pending = pending;
@@ -197,6 +351,16 @@ impl PiDriver {
                 let mut stdin = stdin;
                 let mut next_request_id = 0_u64;
                 let initialize = (|| -> Result<Value, String> {
+                    // Negotiate before anything else so a large first response
+                    // arrives chunked rather than shrunk to an error frame.
+                    if flavor.negotiates_protocol_v2() {
+                        send_request(
+                            &mut stdin,
+                            &writer_pending,
+                            &mut next_request_id,
+                            json!({"type": "negotiate_protocol", "protocolVersion": 2}),
+                        )?;
+                    }
                     let _ = send_request(
                         &mut stdin,
                         &writer_pending,
@@ -216,7 +380,10 @@ impl PiDriver {
                         if response.pointer("/data/cancelled").and_then(Value::as_bool)
                             == Some(true)
                         {
-                            return Err("Pi session switch was cancelled".into());
+                            return Err(format!(
+                                "{} session switch was cancelled",
+                                flavor.display_name()
+                            ));
                         }
                     }
                     if let Some(model) = model.as_deref() {
@@ -254,27 +421,30 @@ impl PiDriver {
                     Err(error) => {
                         let _ = writer_events.send(DriverEvent::Error(tr!(
                             "errors.initialize_provider",
-                            provider = "Pi",
+                            provider = flavor.display_name(),
                             error = error
                         )));
                         let _ = writer_events.send(DriverEvent::TurnFinished {
                             success: false,
                             summary: Some(tr!(
                                 "errors.provider_initialize_session",
-                                provider = "Pi"
+                                provider = flavor.display_name()
                             )),
                         });
                         return;
                     }
                 };
-                let Some(mut cursor) = cursor_from_state(&state) else {
+                let Some(mut cursor) = cursor_from_state(flavor, &state) else {
                     let _ = writer_events.send(DriverEvent::Error(tr!(
                         "errors.provider_no_session_id",
-                        provider = "Pi"
+                        provider = flavor.display_name()
                     )));
                     let _ = writer_events.send(DriverEvent::TurnFinished {
                         success: false,
-                        summary: Some(tr!("errors.provider_initialize_session", provider = "Pi")),
+                        summary: Some(tr!(
+                            "errors.provider_initialize_session",
+                            provider = flavor.display_name()
+                        )),
                     });
                     return;
                 };
@@ -305,8 +475,8 @@ impl PiDriver {
                         writer_events.send(DriverEvent::AutoTitleUpdated(Some(title.to_owned())));
                 }
 
-                // Pi exposes setters for both, so changing either is an RPC on
-                // the live session rather than a restart.
+                // Both flavors expose setters for these, so changing either is
+                // an RPC on the live session rather than a restart.
                 let mut current_model = model;
                 let mut current_effort = reasoning_effort;
                 while let Ok(message) = command_rx.recv() {
@@ -321,14 +491,14 @@ impl PiDriver {
                             if let Err(error) = result {
                                 let _ = writer_events.send(DriverEvent::Error(tr!(
                                     "errors.provider_rejected_prompt_detail",
-                                    provider = "Pi",
+                                    provider = flavor.display_name(),
                                     error = error
                                 )));
                                 let _ = writer_events.send(DriverEvent::TurnFinished {
                                     success: false,
                                     summary: Some(tr!(
                                         "errors.provider_rejected_prompt",
-                                        provider = "Pi"
+                                        provider = flavor.display_name()
                                     )),
                                 });
                             }
@@ -362,7 +532,7 @@ impl PiDriver {
                             ) {
                                 let _ = writer_events.send(DriverEvent::Error(tr!(
                                     "errors.stop_provider",
-                                    provider = "Pi",
+                                    provider = flavor.display_name(),
                                     error = error
                                 )));
                             }
@@ -399,7 +569,7 @@ impl PiDriver {
                                                 let _ =
                                                     writer_events.send(DriverEvent::Error(tr!(
                                                         "errors.switch_provider_model",
-                                                        provider = "Pi",
+                                                        provider = flavor.display_name(),
                                                         error = error
                                                     )));
                                             }
@@ -424,7 +594,7 @@ impl PiDriver {
                                 {
                                     let _ = writer_events.send(DriverEvent::Error(tr!(
                                         "errors.change_provider_thinking",
-                                        provider = "Pi",
+                                        provider = flavor.display_name(),
                                         error = error
                                     )));
                                 }
@@ -447,9 +617,12 @@ impl PiDriver {
                         }
                         CommandMessage::Rollback { turns, response } => {
                             let result = fork_pi_session(
+                                flavor,
                                 &mut stdin,
                                 &writer_pending,
                                 &mut next_request_id,
+                                &binary,
+                                &cwd,
                                 &cursor,
                                 turns,
                                 false,
@@ -464,9 +637,12 @@ impl PiDriver {
                             response,
                         } => {
                             let result = fork_pi_session(
+                                flavor,
                                 &mut stdin,
                                 &writer_pending,
                                 &mut next_request_id,
+                                &binary,
+                                &cwd,
                                 &cursor,
                                 turns_to_remove,
                                 true,
@@ -487,14 +663,14 @@ impl PiDriver {
                 .spawn(move || {
                     for line in BufReader::new(stderr).lines().map_while(Result::ok) {
                         if line.to_ascii_lowercase().contains("error") {
-                            let error = format!("Pi: {}", line.trim());
+                            let error = format!("{}: {}", flavor.display_name(), line.trim());
                             *stderr_last_error.lock() = Some(error.clone());
                             let _ = stderr_events.send(DriverEvent::Error(error));
                         }
                     }
                 })?;
 
-        // Nothing signals or kills the Pi process: it exits when the writer
+        // Nothing signals or kills the agent process: it exits when the writer
         // thread drops its stdin. Something still has to reap it, or every
         // session that ever ran leaves a zombie behind for the life of the app.
         thread::Builder::new()
@@ -507,14 +683,14 @@ impl PiDriver {
                     Ok(status) if !status.success() && last_visible_stderr.lock().is_none() => {
                         let _ = events.send(DriverEvent::Error(tr!(
                             "errors.provider_rpc_exited",
-                            provider = "Pi",
+                            provider = flavor.display_name(),
                             status = status
                         )));
                     }
                     Err(error) => {
                         let _ = events.send(DriverEvent::Error(tr!(
                             "errors.read_provider_exit_status",
-                            provider = "Pi RPC",
+                            provider = format!("{} RPC", flavor.display_name()),
                             error = error
                         )));
                     }
@@ -524,6 +700,7 @@ impl PiDriver {
             })?;
 
         Ok(Self {
+            flavor,
             commands,
             computer_use,
         })
@@ -556,10 +733,10 @@ impl DriverControl for PiDriver {
     fn respond(&self, _request_id: String, _option_id: String) {}
 
     fn apply_options(&self, options: SessionOptions) -> bool {
-        // Pi has setters for the model and thinking level, so those apply to the
-        // live session. It has none for permissions — and only runs Build with
-        // Full access anyway — so a mode change asks for a fresh start, which is
-        // where that constraint is reported.
+        // Both flavors have setters for the model and thinking level, so those
+        // apply to the live session. Neither exposes one for permissions — and
+        // Waku only runs them in Build with Full access anyway — so a mode
+        // change asks for a fresh start, which is where that is reported.
         if options.mode != RuntimeMode::FullAccess
             || options.interaction_mode != InteractionMode::Build
         {
@@ -578,10 +755,20 @@ impl DriverControl for PiDriver {
                 turns,
                 response: response_tx,
             })
-            .context("Pi driver stopped before rollback")?;
+            .with_context(|| {
+                format!(
+                    "{} driver stopped before rollback",
+                    self.flavor.display_name()
+                )
+            })?;
         response_rx
-            .recv_timeout(Duration::from_secs(45))
-            .context("timed out waiting for Pi conversation rollback")?
+            .recv_timeout(Duration::from_secs(60))
+            .with_context(|| {
+                format!(
+                    "timed out waiting for {} conversation rollback",
+                    self.flavor.display_name()
+                )
+            })?
             .map(Some)
             .map_err(anyhow::Error::msg)
     }
@@ -593,10 +780,20 @@ impl DriverControl for PiDriver {
                 turns_to_remove,
                 response: response_tx,
             })
-            .context("Pi driver stopped before forking")?;
+            .with_context(|| {
+                format!(
+                    "{} driver stopped before forking",
+                    self.flavor.display_name()
+                )
+            })?;
         response_rx
-            .recv_timeout(Duration::from_secs(45))
-            .context("timed out waiting for Pi conversation fork")?
+            .recv_timeout(Duration::from_secs(60))
+            .with_context(|| {
+                format!(
+                    "timed out waiting for {} conversation fork",
+                    self.flavor.display_name()
+                )
+            })?
             .map_err(anyhow::Error::msg)
     }
 }
@@ -650,18 +847,18 @@ fn fail_pending(pending: &PendingResponses, message: &str) {
 fn parse_model_slug(model: &str) -> anyhow::Result<(&str, &str)> {
     let Some((provider, model_id)) = model.trim().split_once('/') else {
         return Err(anyhow!(
-            "Pi models must use provider/model format; received `{model}`"
+            "models must use provider/model format; received `{model}`"
         ));
     };
     if provider.is_empty() || model_id.is_empty() {
         return Err(anyhow!(
-            "Pi models must use provider/model format; received `{model}`"
+            "models must use provider/model format; received `{model}`"
         ));
     }
     Ok((provider, model_id))
 }
 
-fn cursor_from_state(response: &Value) -> Option<ProviderResumeCursor> {
+fn cursor_from_state(flavor: PiFlavor, response: &Value) -> Option<ProviderResumeCursor> {
     let session_id = response
         .pointer("/data/sessionId")
         .and_then(Value::as_str)?;
@@ -669,10 +866,100 @@ fn cursor_from_state(response: &Value) -> Option<ProviderResumeCursor> {
         .pointer("/data/sessionFile")
         .and_then(Value::as_str)
         .map(PathBuf::from);
-    Some(ProviderResumeCursor::Pi {
-        session_id: session_id.to_owned(),
-        session_file,
-    })
+    Some(flavor.cursor(session_id.to_owned(), session_file))
+}
+
+/// Reassembles the `rpc_chunk` runs Oh My Pi emits for frames over its 1 MiB
+/// stdout ceiling. Without this a large tool result degrades to an error frame
+/// and the activity row renders empty.
+#[derive(Default)]
+struct ChunkAssembly {
+    active: Option<PendingChunks>,
+}
+
+struct PendingChunks {
+    chunk_id: String,
+    count: u64,
+    next_index: u64,
+    byte_length: usize,
+    data: Vec<u8>,
+}
+
+impl ChunkAssembly {
+    /// Returns the logical message to dispatch, or `None` while a chunked
+    /// frame is still arriving.
+    fn accept(&mut self, value: Value) -> Result<Option<Value>, String> {
+        if value.get("type").and_then(Value::as_str) != Some("rpc_chunk") {
+            // The run must be uninterrupted, so anything else invalidates a
+            // partial frame rather than silently splicing around it.
+            if self.active.take().is_some() {
+                return Err("chunked frame was interrupted".to_owned());
+            }
+            return Ok(Some(value));
+        }
+        let (chunk_id, index, count, byte_length, data) = (|| {
+            Some((
+                value.get("chunkId").and_then(Value::as_str)?,
+                value.get("index").and_then(Value::as_u64)?,
+                value.get("count").and_then(Value::as_u64)?,
+                value.get("byteLength").and_then(Value::as_u64)?,
+                value.get("data").and_then(Value::as_str)?,
+            ))
+        })()
+        .ok_or_else(|| "chunk frame was malformed".to_owned())?;
+        let byte_length = usize::try_from(byte_length)
+            .map_err(|_| "chunked frame exceeds the reassembly limit".to_owned())?;
+        if count == 0 || index >= count {
+            self.active = None;
+            return Err("chunk frame was malformed".to_owned());
+        }
+        if byte_length > MAX_REASSEMBLED_FRAME_BYTES {
+            self.active = None;
+            return Err("chunked frame exceeds the reassembly limit".to_owned());
+        }
+        let decoded = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, data)
+            .map_err(|error| format!("chunk payload was not valid base64: {error}"))?;
+
+        let pending = match self.active.take() {
+            Some(pending)
+                if pending.chunk_id == chunk_id
+                    && pending.count == count
+                    && pending.byte_length == byte_length
+                    && pending.next_index == index =>
+            {
+                pending
+            }
+            Some(_) => {
+                return Err("chunked frame was interrupted".to_owned());
+            }
+            None if index == 0 => PendingChunks {
+                chunk_id: chunk_id.to_owned(),
+                count,
+                next_index: 0,
+                byte_length,
+                data: Vec::with_capacity(byte_length),
+            },
+            None => return Err("chunked frame started mid-sequence".to_owned()),
+        };
+        let mut pending = pending;
+        pending.data.extend_from_slice(&decoded);
+        pending.next_index += 1;
+        if pending.data.len() > pending.byte_length {
+            return Err("chunked frame overran its declared length".to_owned());
+        }
+        if pending.next_index < pending.count {
+            self.active = Some(pending);
+            return Ok(None);
+        }
+        if pending.data.len() != pending.byte_length {
+            return Err("chunked frame did not match its declared length".to_owned());
+        }
+        let text = String::from_utf8(pending.data)
+            .map_err(|_| "chunked frame was not valid UTF-8".to_owned())?;
+        serde_json::from_str(&text)
+            .map(Some)
+            .map_err(|error| format!("chunked frame was not valid JSON: {error}"))
+    }
 }
 
 /// Pi already computes context occupancy for its own footer. Prefer that
@@ -713,28 +1000,44 @@ fn pi_message_context_tokens(message: &Value) -> Option<u64> {
         })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn fork_pi_session(
+    flavor: PiFlavor,
     stdin: &mut impl Write,
     pending: &PendingResponses,
     next_request_id: &mut u64,
+    binary: &Path,
+    cwd: &Path,
     original_cursor: &ProviderResumeCursor,
     turns_to_remove: usize,
     restore_original: bool,
 ) -> Result<ProviderResumeCursor, String> {
+    let name = flavor.display_name();
     let messages = send_request(
         stdin,
         pending,
         next_request_id,
-        json!({"type": "get_fork_messages"}),
+        json!({"type": flavor.branch_messages_command()}),
     )?;
     let messages = messages
         .pointer("/data/messages")
         .and_then(Value::as_array)
-        .ok_or_else(|| "Pi returned an invalid fork-message list".to_owned())?;
-    let request = pi_fork_request(messages, turns_to_remove)?;
+        .ok_or_else(|| format!("{name} returned an invalid fork-message list"))?;
+
+    // Keeping every turn is a whole-session copy, which Pi does in place and
+    // Oh My Pi only does at launch. The out-of-process copy leaves this
+    // session untouched, so it never needs restoring afterwards.
+    if turns_to_remove == 0 && flavor == PiFlavor::OhMyPi {
+        let session_file = flavor
+            .session_file_from_cursor(original_cursor)
+            .ok_or_else(|| format!("{name}'s original session file is unavailable"))?;
+        return clone_ohmypi_session(binary, cwd, session_file);
+    }
+
+    let request = pi_fork_request(flavor, messages, turns_to_remove)?;
     let fork = send_request(stdin, pending, next_request_id, request)?;
     if fork.pointer("/data/cancelled").and_then(Value::as_bool) == Some(true) {
-        return Err("Pi session fork was cancelled".into());
+        return Err(format!("{name} session fork was cancelled"));
     }
     let fork_state = send_request(
         stdin,
@@ -742,17 +1045,13 @@ fn fork_pi_session(
         next_request_id,
         json!({"type": "get_state"}),
     )?;
-    let fork_cursor = cursor_from_state(&fork_state)
-        .ok_or_else(|| "Pi did not report the forked session cursor".to_owned())?;
+    let fork_cursor = cursor_from_state(flavor, &fork_state)
+        .ok_or_else(|| format!("{name} did not report the forked session cursor"))?;
 
     if restore_original {
-        let ProviderResumeCursor::Pi {
-            session_file: Some(session_file),
-            ..
-        } = original_cursor
-        else {
-            return Err("Pi's original session file is unavailable".into());
-        };
+        let session_file = flavor
+            .session_file_from_cursor(original_cursor)
+            .ok_or_else(|| format!("{name}'s original session file is unavailable"))?;
         let switched = send_request(
             stdin,
             pending,
@@ -763,7 +1062,9 @@ fn fork_pi_session(
             }),
         )?;
         if switched.pointer("/data/cancelled").and_then(Value::as_bool) == Some(true) {
-            return Err("Pi could not return to the source session after forking".into());
+            return Err(format!(
+                "{name} could not return to the source session after forking"
+            ));
         }
         let restored_state = send_request(
             stdin,
@@ -771,34 +1072,113 @@ fn fork_pi_session(
             next_request_id,
             json!({"type": "get_state"}),
         )?;
-        let restored_cursor = cursor_from_state(&restored_state)
-            .ok_or_else(|| "Pi did not report the restored source session".to_owned())?;
+        let restored_cursor = cursor_from_state(flavor, &restored_state)
+            .ok_or_else(|| format!("{name} did not report the restored source session"))?;
         if restored_cursor.native_id() != original_cursor.native_id() {
-            return Err("Pi returned to the wrong source session after forking".into());
+            return Err(format!(
+                "{name} returned to the wrong source session after forking"
+            ));
         }
     }
 
     Ok(fork_cursor)
 }
 
-fn pi_fork_request(messages: &[Value], turns_to_remove: usize) -> Result<Value, String> {
+fn pi_fork_request(
+    flavor: PiFlavor,
+    messages: &[Value],
+    turns_to_remove: usize,
+) -> Result<Value, String> {
+    let name = flavor.display_name();
     if turns_to_remove > messages.len() {
         return Err(format!(
-            "Pi has only {} native turns, but Waku needs to remove {turns_to_remove}",
+            "{name} has only {} native turns, but Waku needs to remove {turns_to_remove}",
             messages.len()
         ));
     }
     let retained_turns = messages.len() - turns_to_remove;
     if turns_to_remove == 0 {
+        // Only reachable for Pi; Oh My Pi copies out of process instead.
         Ok(json!({"type": "clone"}))
     } else {
         let entry_id = messages
             .get(retained_turns)
             .and_then(|message| message.get("entryId"))
             .and_then(Value::as_str)
-            .ok_or_else(|| "Pi returned a fork message without an entry ID".to_owned())?;
-        Ok(json!({"type": "fork", "entryId": entry_id}))
+            .ok_or_else(|| format!("{name} returned a fork message without an entry ID"))?;
+        Ok(json!({"type": flavor.branch_command(), "entryId": entry_id}))
     }
+}
+
+/// Copies a whole Oh My Pi session by launching a throwaway agent with
+/// `--fork`, which is the only place it exposes a full-session copy, then
+/// reading back the session the copy landed in.
+fn clone_ohmypi_session(
+    binary: &Path,
+    cwd: &Path,
+    session_file: &Path,
+) -> Result<ProviderResumeCursor, String> {
+    let mut command = crate::command_env::command(binary);
+    let command = command
+        .args(["--mode", "rpc"])
+        .arg(PiFlavor::OhMyPi.full_access_arg())
+        .arg("--fork")
+        .arg(session_file)
+        .current_dir(cwd)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    let mut child = crate::command_env::spawn(command)
+        .map_err(|error| format!("could not start Oh My Pi to copy the session: {error}"))?;
+    let result = (|| {
+        let mut stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| "Oh My Pi stdin unavailable".to_owned())?;
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| "Oh My Pi stdout unavailable".to_owned())?;
+        let (tx, rx) = bounded(1);
+        thread::Builder::new()
+            .name("waku-ohmypi-clone".into())
+            .spawn(move || {
+                let mut chunks = ChunkAssembly::default();
+                for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+                    let Ok(value) = serde_json::from_str::<Value>(&line) else {
+                        continue;
+                    };
+                    let Ok(Some(value)) = chunks.accept(value) else {
+                        continue;
+                    };
+                    if value.get("id").and_then(Value::as_str) == Some("waku-clone") {
+                        let _ = tx.send(value);
+                        break;
+                    }
+                }
+            })
+            .map_err(|error| format!("could not read the Oh My Pi session copy: {error}"))?;
+        write_json_line(
+            &mut stdin,
+            &json!({"id": "waku-clone", "type": "get_state"}),
+        )
+        .map_err(|error| format!("could not ask Oh My Pi for the copied session: {error}"))?;
+        let state = rx
+            .recv_timeout(CLONE_TIMEOUT)
+            .map_err(|_| "timed out waiting for Oh My Pi to copy the session".to_owned())?;
+        if state.get("success").and_then(Value::as_bool) != Some(true) {
+            return Err(state
+                .get("error")
+                .and_then(Value::as_str)
+                .unwrap_or("Oh My Pi could not copy the session")
+                .to_owned());
+        }
+        cursor_from_state(PiFlavor::OhMyPi, &state)
+            .ok_or_else(|| "Oh My Pi did not report the copied session cursor".to_owned())
+    })();
+    let _ = child.kill();
+    let _ = child.wait();
+    result
 }
 
 #[derive(Default)]
@@ -811,6 +1191,7 @@ struct PiStreamState {
 }
 
 fn handle_pi_message(
+    flavor: PiFlavor,
     value: Value,
     pending: &PendingResponses,
     commands: &Sender<CommandMessage>,
@@ -834,23 +1215,48 @@ fn handle_pi_message(
             let error = value
                 .get("error")
                 .and_then(Value::as_str)
-                .unwrap_or("Pi RPC command failed")
-                .to_owned();
+                .map(str::to_owned)
+                .unwrap_or_else(|| format!("{} RPC command failed", flavor.display_name()));
             let _ = response.send(Err(error));
         }
         return;
     }
 
-    match event_type {
-        "session_info_changed" => {
-            let title = value
-                .get("name")
-                .and_then(Value::as_str)
-                .map(str::trim)
-                .filter(|title| !title.is_empty())
-                .map(str::to_owned);
-            let _ = events.send(DriverEvent::AutoTitleUpdated(title));
+    if event_type == flavor.session_info_event() {
+        let title = value
+            .get(flavor.session_info_title_field())
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|title| !title.is_empty())
+            .map(str::to_owned);
+        let _ = events.send(DriverEvent::AutoTitleUpdated(title));
+        return;
+    }
+
+    // Oh My Pi reuses `agent_end` for intermediate settles, flagging the real
+    // one with `isTerminal`. Anything else here would end the turn early while
+    // maintenance or async delivery still has work queued.
+    if event_type == flavor.settled_event() {
+        if value.get("isTerminal").and_then(Value::as_bool) == Some(false) {
+            return;
         }
+        if state.run_started {
+            let success = !state.failed;
+            let _ = events.send(DriverEvent::TurnFinished {
+                success,
+                summary: (!success).then(|| {
+                    tr!(
+                        "errors.provider_complete_turn",
+                        provider = flavor.display_name()
+                    )
+                }),
+            });
+        }
+        *state = PiStreamState::default();
+        return;
+    }
+
+    match event_type {
         "agent_start" | "turn_start" => {
             if !state.run_started {
                 state.run_started = true;
@@ -889,7 +1295,7 @@ fn handle_pi_message(
                 }
                 Some("error") => {
                     state.failed = true;
-                    let _ = events.send(DriverEvent::Error(pi_error_message(update)));
+                    let _ = events.send(DriverEvent::Error(pi_error_message(flavor, update)));
                 }
                 _ => {}
             }
@@ -965,20 +1371,12 @@ fn handle_pi_message(
                 let message = value
                     .get("finalError")
                     .and_then(Value::as_str)
-                    .unwrap_or("Pi exhausted its automatic retries");
-                let _ = events.send(DriverEvent::Error(message.to_owned()));
+                    .map(str::to_owned)
+                    .unwrap_or_else(|| {
+                        format!("{} exhausted its automatic retries", flavor.display_name())
+                    });
+                let _ = events.send(DriverEvent::Error(message));
             }
-        }
-        "agent_settled" => {
-            if state.run_started {
-                let success = !state.failed;
-                let _ = events.send(DriverEvent::TurnFinished {
-                    success,
-                    summary: (!success)
-                        .then(|| tr!("errors.provider_complete_turn", provider = "Pi")),
-                });
-            }
-            *state = PiStreamState::default();
         }
         "extension_ui_request" => {
             let method = value.get("method").and_then(Value::as_str);
@@ -990,7 +1388,7 @@ fn handle_pi_message(
             }
         }
         "extension_error" => {
-            let _ = events.send(DriverEvent::Error(pi_error_message(&value)));
+            let _ = events.send(DriverEvent::Error(pi_error_message(flavor, &value)));
         }
         _ => {}
     }
@@ -1034,14 +1432,19 @@ fn emit_completed_message_fallback(
     }
 }
 
-fn pi_error_message(value: &Value) -> String {
+fn pi_error_message(flavor: PiFlavor, value: &Value) -> String {
     value
         .get("error")
         .and_then(Value::as_str)
         .or_else(|| value.get("errorMessage").and_then(Value::as_str))
         .or_else(|| value.get("reason").and_then(Value::as_str))
         .map(str::to_owned)
-        .unwrap_or_else(|| tr!("errors.pi_reported_error"))
+        .unwrap_or_else(|| {
+            tr!(
+                "errors.provider_reported_error",
+                provider = flavor.display_name()
+            )
+        })
 }
 
 fn classify_tool(name: &str) -> ActivityKind {
@@ -1089,6 +1492,7 @@ mod tests {
         let binary = crate::command_env::find_executable("pi").expect("pi is not installed");
         let (events, event_rx) = crate::driver::test_event_channel();
         let driver = PiDriver::start(
+            PiFlavor::Pi,
             DriverStartOptions {
                 binary,
                 cwd: std::env::temp_dir(),
@@ -1151,6 +1555,7 @@ mod tests {
     fn model_and_thinking_changes_reach_the_running_session_but_mode_changes_do_not() {
         let (commands, command_rx) = unbounded();
         let driver = PiDriver {
+            flavor: PiFlavor::Pi,
             commands,
             computer_use: None,
         };
@@ -1235,18 +1640,18 @@ mod tests {
             json!({"entryId": "turn-3"}),
         ];
         assert_eq!(
-            pi_fork_request(&messages, 0).unwrap(),
+            pi_fork_request(PiFlavor::Pi, &messages, 0).unwrap(),
             json!({"type": "clone"})
         );
         assert_eq!(
-            pi_fork_request(&messages, 2).unwrap(),
+            pi_fork_request(PiFlavor::Pi, &messages, 2).unwrap(),
             json!({"type": "fork", "entryId": "turn-2"})
         );
         assert_eq!(
-            pi_fork_request(&messages, 3).unwrap(),
+            pi_fork_request(PiFlavor::Pi, &messages, 3).unwrap(),
             json!({"type": "fork", "entryId": "turn-1"})
         );
-        assert!(pi_fork_request(&messages, 4).is_err());
+        assert!(pi_fork_request(PiFlavor::Pi, &messages, 4).is_err());
     }
 
     #[test]
@@ -1280,7 +1685,14 @@ mod tests {
             json!({"type": "agent_end", "willRetry": false}),
             json!({"type": "agent_settled"}),
         ] {
-            handle_pi_message(value, &pending, &commands, &events, &mut state);
+            handle_pi_message(
+                PiFlavor::Pi,
+                value,
+                &pending,
+                &commands,
+                &events,
+                &mut state,
+            );
         }
 
         assert!(matches!(event_rx.recv().unwrap(), DriverEvent::TurnStarted));
@@ -1322,12 +1734,222 @@ mod tests {
         assert!(matches!(event_rx.try_recv(), Err(TryRecvError::Empty)));
     }
 
+    /// Drives the installed Oh My Pi RPC through one real provider turn.
+    /// Ignored by default because it needs the CLI, credentials, and network.
+    #[test]
+    #[ignore = "requires an installed, authenticated omp"]
+    fn ohmypi_context_usage_against_the_real_rpc() {
+        let binary = crate::command_env::find_executable("omp").expect("omp is not installed");
+        let (events, event_rx) = crate::driver::test_event_channel();
+        let driver = PiDriver::start(
+            PiFlavor::OhMyPi,
+            DriverStartOptions {
+                binary,
+                cwd: std::env::temp_dir(),
+                mode: RuntimeMode::FullAccess,
+                interaction_mode: InteractionMode::Build,
+                model: None,
+                reasoning_effort: None,
+                service_tier: None,
+                context_window: None,
+                agent_preset: None,
+                computer_use_enabled: false,
+                provider_cursor: None,
+            },
+            events,
+        )
+        .expect("the Oh My Pi RPC session should start");
+
+        let mut cursor = None;
+        while let Ok(event) = event_rx.recv_timeout(Duration::from_secs(60)) {
+            match event {
+                DriverEvent::Connected { provider_cursor } => {
+                    cursor = provider_cursor;
+                    break;
+                }
+                DriverEvent::Error(error) => panic!("Oh My Pi failed to initialize: {error}"),
+                _ => {}
+            }
+        }
+        assert!(
+            matches!(
+                cursor,
+                Some(ProviderResumeCursor::OhMyPi {
+                    session_file: Some(_),
+                    ..
+                })
+            ),
+            "Oh My Pi should report its own cursor with a session file, got {cursor:?}"
+        );
+
+        driver.prompt("Reply with exactly: OK. Do not use any tools.".into());
+        let mut finished = false;
+        let mut context_tokens = None;
+        let mut context_window = None;
+        while let Ok(event) = event_rx.recv_timeout(Duration::from_secs(180)) {
+            match event {
+                DriverEvent::UsageUpdated {
+                    context_tokens: tokens,
+                    context_window: window,
+                } => {
+                    context_tokens = tokens.or(context_tokens);
+                    context_window = window.or(context_window);
+                }
+                DriverEvent::TurnFinished { success, .. } => {
+                    assert!(success, "Oh My Pi should finish the probe turn");
+                    finished = true;
+                    break;
+                }
+                DriverEvent::Error(error) => panic!("Oh My Pi reported: {error}"),
+                _ => {}
+            }
+        }
+
+        assert!(finished, "Oh My Pi never settled the probe turn");
+        assert!(context_tokens.is_some_and(|tokens| tokens > 0));
+        assert!(context_window.is_some_and(|window| window > 0));
+    }
+
+    #[test]
+    fn ohmypi_branches_where_pi_forks_and_never_asks_it_to_clone() {
+        let messages = [
+            json!({"entryId": "turn-1"}),
+            json!({"entryId": "turn-2"}),
+            json!({"entryId": "turn-3"}),
+        ];
+        assert_eq!(
+            pi_fork_request(PiFlavor::OhMyPi, &messages, 2).unwrap(),
+            json!({"type": "branch", "entryId": "turn-2"})
+        );
+        assert!(pi_fork_request(PiFlavor::OhMyPi, &messages, 4).is_err());
+    }
+
+    /// Oh My Pi reuses `agent_end` for intermediate settles, so only the
+    /// terminal one may end the turn.
+    #[test]
+    fn ohmypi_settles_on_the_terminal_agent_end_only() {
+        let (pending, commands, _command_rx, mut state) = harness();
+        let (events, event_rx) = unbounded();
+        for value in [
+            json!({"type": "agent_start"}),
+            json!({
+                "type": "message_update",
+                "assistantMessageEvent": {"type": "text_delta", "delta": "done"}
+            }),
+            json!({"type": "agent_end", "isTerminal": false}),
+            json!({"type": "agent_end", "messages": []}),
+        ] {
+            handle_pi_message(
+                PiFlavor::OhMyPi,
+                value,
+                &pending,
+                &commands,
+                &events,
+                &mut state,
+            );
+        }
+
+        assert!(matches!(event_rx.recv().unwrap(), DriverEvent::TurnStarted));
+        assert!(matches!(
+            event_rx.recv().unwrap(),
+            DriverEvent::TextDelta(value) if value == "done"
+        ));
+        assert!(matches!(
+            event_rx.recv().unwrap(),
+            DriverEvent::TurnFinished { success: true, .. }
+        ));
+        assert!(matches!(event_rx.try_recv(), Err(TryRecvError::Empty)));
+    }
+
+    /// Pi's own settle event carries no meaning for Oh My Pi, and vice versa.
+    #[test]
+    fn each_flavor_ignores_the_other_settle_and_title_events() {
+        let (pending, commands, _command_rx, mut state) = harness();
+        let (events, event_rx) = unbounded();
+        for (flavor, value) in [
+            (PiFlavor::OhMyPi, json!({"type": "agent_start"})),
+            (PiFlavor::OhMyPi, json!({"type": "agent_settled"})),
+            (
+                PiFlavor::OhMyPi,
+                json!({"type": "session_info_changed", "name": "Pi's spelling"}),
+            ),
+            (PiFlavor::Pi, json!({"type": "agent_end"})),
+            (
+                PiFlavor::Pi,
+                json!({"type": "session_info_update", "title": "Oh My Pi's spelling"}),
+            ),
+        ] {
+            handle_pi_message(flavor, value, &pending, &commands, &events, &mut state);
+        }
+
+        assert!(matches!(event_rx.recv().unwrap(), DriverEvent::TurnStarted));
+        assert!(matches!(event_rx.try_recv(), Err(TryRecvError::Empty)));
+    }
+
+    #[test]
+    fn ohmypi_session_titles_arrive_on_its_own_event() {
+        let (pending, commands, _command_rx, mut state) = harness();
+        let (events, event_rx) = unbounded();
+        handle_pi_message(
+            PiFlavor::OhMyPi,
+            json!({"type": "session_info_update", "title": "Named by Oh My Pi"}),
+            &pending,
+            &commands,
+            &events,
+            &mut state,
+        );
+        assert!(matches!(
+            event_rx.try_recv().unwrap(),
+            DriverEvent::AutoTitleUpdated(Some(title)) if title == "Named by Oh My Pi"
+        ));
+    }
+
+    #[test]
+    fn chunked_frames_reassemble_and_reject_broken_runs() {
+        use base64::Engine as _;
+        let encode = |bytes: &[u8]| base64::engine::general_purpose::STANDARD.encode(bytes);
+
+        let payload = json!({"type": "response", "id": "waku-1", "success": true});
+        let bytes = serde_json::to_vec(&payload).unwrap();
+        let (first, second) = bytes.split_at(bytes.len() / 2);
+        let chunk = |index: u64, data: &[u8]| {
+            json!({
+                "type": "rpc_chunk",
+                "chunkId": "rpc-1",
+                "index": index,
+                "count": 2,
+                "byteLength": bytes.len(),
+                "data": encode(data),
+            })
+        };
+
+        let mut assembly = ChunkAssembly::default();
+        assert_eq!(assembly.accept(chunk(0, first)).unwrap(), None);
+        assert_eq!(assembly.accept(chunk(1, second)).unwrap(), Some(payload));
+
+        // An ordinary frame passes straight through.
+        let mut assembly = ChunkAssembly::default();
+        let plain = json!({"type": "agent_start"});
+        assert_eq!(assembly.accept(plain.clone()).unwrap(), Some(plain.clone()));
+
+        // Anything interleaved into a run invalidates it rather than splicing.
+        let mut assembly = ChunkAssembly::default();
+        assert_eq!(assembly.accept(chunk(0, first)).unwrap(), None);
+        assert!(assembly.accept(plain).is_err());
+        assert!(assembly.active.is_none());
+
+        // A run that starts mid-sequence is not a frame Waku can trust.
+        let mut assembly = ChunkAssembly::default();
+        assert!(assembly.accept(chunk(1, second)).is_err());
+    }
+
     #[test]
     fn session_name_changes_are_forwarded_as_automatic_titles() {
         let (pending, commands, _command_rx, mut state) = harness();
         let (events, event_rx) = unbounded();
 
         handle_pi_message(
+            PiFlavor::Pi,
             json!({"type": "session_info_changed", "name": "Named by Pi"}),
             &pending,
             &commands,
@@ -1340,6 +1962,7 @@ mod tests {
         ));
 
         handle_pi_message(
+            PiFlavor::Pi,
             json!({"type": "session_info_changed", "name": null}),
             &pending,
             &commands,
@@ -1357,6 +1980,7 @@ mod tests {
         let (pending, commands, _command_rx, mut state) = harness();
         let (events, event_rx) = unbounded();
         handle_pi_message(
+            PiFlavor::Pi,
             json!({
                 "type": "message_end",
                 "message": {
@@ -1378,6 +2002,7 @@ mod tests {
         let (pending, commands, _command_rx, mut state) = harness();
         let (events, event_rx) = unbounded();
         handle_pi_message(
+            PiFlavor::Pi,
             json!({
                 "type": "message_end",
                 "message": {
@@ -1409,6 +2034,7 @@ mod tests {
         let (pending, commands, _command_rx, mut state) = harness();
         let (events, event_rx) = unbounded();
         handle_pi_message(
+            PiFlavor::Pi,
             json!({
                 "type": "message_end",
                 "message": {
@@ -1474,7 +2100,14 @@ mod tests {
             }),
             json!({"type": "agent_settled"}),
         ] {
-            handle_pi_message(value, &pending, &commands, &events, &mut state);
+            handle_pi_message(
+                PiFlavor::Pi,
+                value,
+                &pending,
+                &commands,
+                &events,
+                &mut state,
+            );
         }
 
         assert!(matches!(event_rx.recv().unwrap(), DriverEvent::TurnStarted));
@@ -1507,7 +2140,14 @@ mod tests {
             json!({"type": "auto_retry_end", "success": true}),
             json!({"type": "agent_settled"}),
         ] {
-            handle_pi_message(value, &pending, &commands, &events, &mut state);
+            handle_pi_message(
+                PiFlavor::Pi,
+                value,
+                &pending,
+                &commands,
+                &events,
+                &mut state,
+            );
         }
 
         assert!(matches!(event_rx.recv().unwrap(), DriverEvent::TurnStarted));

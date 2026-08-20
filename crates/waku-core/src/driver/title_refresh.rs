@@ -63,3 +63,93 @@ impl NativeTitleRefresh {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::DriverEvent;
+    use std::sync::atomic::AtomicUsize;
+
+    /// Blank and failed lookups are misses, not answers, so the schedule keeps
+    /// going and the driver is left free to try again on its next turn.
+    #[test]
+    fn a_schedule_walks_past_misses_and_stops_on_the_first_real_title() {
+        let (events, event_rx) = crate::driver::test_event_channel();
+        let refresh = NativeTitleRefresh::default();
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let lookups = attempts.clone();
+
+        refresh.start(
+            "waku-title-test",
+            vec![Duration::ZERO; 4],
+            events,
+            move || match lookups.fetch_add(1, Ordering::AcqRel) {
+                0 => Err(anyhow::anyhow!("the native store is not written yet")),
+                1 => Ok(None),
+                2 => Ok(Some("   ".into())),
+                _ => Ok(Some("  Fix the title poll  ".into())),
+            },
+        );
+
+        let event = event_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("a resolved title must reach the driver's events");
+        assert!(matches!(
+            event,
+            DriverEvent::AutoTitleUpdated(Some(title)) if title == "Fix the title poll"
+        ));
+        assert_eq!(attempts.load(Ordering::Acquire), 4);
+
+        // Resolved is final: a later turn must not re-announce the same title.
+        refresh.start(
+            "waku-title-test",
+            vec![Duration::ZERO],
+            {
+                let (events, _) = crate::driver::test_event_channel();
+                events
+            },
+            || Ok(Some("Should never run".into())),
+        );
+        assert_eq!(attempts.load(Ordering::Acquire), 4);
+    }
+
+    /// A session whose provider never wrote a title — Claude skips prompts
+    /// under ten characters entirely — must leave the refresh re-armable
+    /// rather than latching, so a later prompt still gets a look.
+    #[test]
+    fn a_schedule_that_runs_dry_can_be_started_again() {
+        let (events, event_rx) = crate::driver::test_event_channel();
+        let refresh = NativeTitleRefresh::default();
+        let attempts = Arc::new(AtomicUsize::new(0));
+
+        for _ in 0..2 {
+            let lookups = attempts.clone();
+            refresh.start(
+                "waku-title-test",
+                vec![Duration::ZERO, Duration::ZERO],
+                events.clone(),
+                move || {
+                    lookups.fetch_add(1, Ordering::AcqRel);
+                    Ok(None)
+                },
+            );
+            // The dry run returns the state to IDLE only after its last
+            // lookup, so wait on the state itself — an attempt count can be
+            // final while the thread is still RUNNING, and the next start
+            // would silently no-op.
+            for _ in 0..400 {
+                if refresh.state.load(Ordering::Acquire) == IDLE {
+                    break;
+                }
+                thread::sleep(Duration::from_millis(5));
+            }
+            assert_eq!(refresh.state.load(Ordering::Acquire), IDLE);
+        }
+
+        assert_eq!(attempts.load(Ordering::Acquire), 4);
+        assert!(
+            event_rx.try_recv().is_err(),
+            "a dry schedule must not announce a title"
+        );
+    }
+}

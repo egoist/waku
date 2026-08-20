@@ -60,7 +60,10 @@ pub fn fallback_models(provider: ProviderKind) -> Vec<ProviderModel> {
             claude_reasoning_model("claude-opus-4-5", "Claude Opus 4.5"),
             claude_long_context(claude_ultracode_model("claude-sonnet-5", "Claude Sonnet 5"))
                 .default(),
-            claude_long_context(claude_reasoning_model("claude-sonnet-4-6", "Claude Sonnet 4.6")),
+            claude_long_context(claude_reasoning_model(
+                "claude-sonnet-4-6",
+                "Claude Sonnet 4.6",
+            )),
             ProviderModel::new("claude-haiku-4-5", "Claude Haiku 4.5"),
         ],
         // Cursor's full catalog is account-specific and exposed by the
@@ -76,9 +79,10 @@ pub fn fallback_models(provider: ProviderKind) -> Vec<ProviderModel> {
         ProviderKind::Grok => {
             vec![ProviderModel::new("grok-build", "Grok Build").default()]
         }
-        // Pi's catalog depends on the user's configured LLM providers. A
-        // fabricated fallback would make unavailable models look selectable.
-        ProviderKind::Pi => Vec::new(),
+        // Pi, Oh My Pi, and Kimi Code all take their catalog from the user's
+        // configured LLM providers. A fabricated fallback would make
+        // unavailable models look selectable.
+        ProviderKind::Kimi | ProviderKind::OhMyPi | ProviderKind::Pi => Vec::new(),
     }
 }
 
@@ -119,7 +123,9 @@ pub fn discover_catalog(
         ProviderKind::DeepSeek => discover_deepseek_catalog(binary),
         ProviderKind::OpenCode => (discover_opencode_models(binary), None),
         ProviderKind::Grok => (discover_grok_models(binary), None),
-        ProviderKind::Pi => (discover_pi_models(binary), None),
+        ProviderKind::Kimi => (discover_kimi_models(binary), None),
+        ProviderKind::Pi => (discover_pi_models(binary, PiDialect::Pi), None),
+        ProviderKind::OhMyPi => (discover_pi_models(binary, PiDialect::OhMyPi), None),
     };
     let models = if discovered.is_empty() {
         // A failed or empty probe keeps the last successful discovery over
@@ -451,18 +457,145 @@ fn parse_grok_models(output: &str) -> Vec<ProviderModel> {
         .collect()
 }
 
-fn discover_pi_models(binary: &Path) -> Vec<ProviderModel> {
+/// Kimi Code resolves models through its own provider config, which covers the
+/// managed Kimi plan as well as any registry the user imported. `--json` is the
+/// catalog itself; it omits the configured default, so the human-readable
+/// listing supplies that single field.
+fn discover_kimi_models(binary: &Path) -> Vec<ProviderModel> {
     let mut command = crate::command_env::command(binary);
+    let command = command.args(["provider", "list", "--json"]);
+    let Ok(output) = crate::command_env::output(command) else {
+        return Vec::new();
+    };
+    let Ok(catalog) = serde_json::from_slice::<Value>(&output.stdout) else {
+        return Vec::new();
+    };
+    parse_kimi_models(&catalog, discover_kimi_default_model(binary).as_deref())
+}
+
+fn discover_kimi_default_model(binary: &Path) -> Option<String> {
+    let mut command = crate::command_env::command(binary);
+    let command = command.args(["provider", "list"]);
+    let output = crate::command_env::output(command).ok()?;
+    parse_kimi_default_model(&String::from_utf8_lossy(&output.stdout))
+}
+
+fn parse_kimi_default_model(output: &str) -> Option<String> {
+    strip_ansi(output).lines().find_map(|line| {
+        line.trim()
+            .strip_prefix("Default model:")
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned)
+    })
+}
+
+fn parse_kimi_models(catalog: &Value, default_model: Option<&str>) -> Vec<ProviderModel> {
+    catalog
+        .get("models")
+        .and_then(Value::as_object)
+        .into_iter()
+        .flatten()
+        .filter(|(id, _)| !id.trim().is_empty())
+        .map(|(id, value)| {
+            // Only the managed Kimi models carry a display name. An imported
+            // registry names its models by bare id, and the alias prefix is
+            // what tells two providers' catalogs apart in the picker.
+            let (alias_provider, alias_model) = id
+                .split_once('/')
+                .map_or((None, id.as_str()), |(prefix, rest)| (Some(prefix), rest));
+            let name = value
+                .get("displayName")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|name| !name.is_empty())
+                .map(str::to_owned)
+                .unwrap_or_else(|| {
+                    display_name_from_slug(
+                        value
+                            .get("model")
+                            .and_then(Value::as_str)
+                            .map(str::trim)
+                            .filter(|model| !model.is_empty())
+                            .unwrap_or(alias_model),
+                    )
+                });
+            let mut model = ProviderModel::new(id, name);
+            if let Some(prefix) = alias_provider.filter(|prefix| !prefix.trim().is_empty()) {
+                model = model.sub_provider(display_name_from_slug(prefix));
+            }
+            model.is_default = default_model == Some(id.as_str());
+            // Only the K3 family exposes thinking levels; the rest report a
+            // single always-on state that is not a user choice.
+            model.reasoning_efforts = value
+                .get("supportEfforts")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .map(str::trim)
+                .filter(|effort| !effort.is_empty())
+                .map(|effort| ProviderModelOption::new(effort, reasoning_effort_label(effort)))
+                .collect();
+            if !model.reasoning_efforts.is_empty() {
+                model.default_reasoning_effort = value
+                    .get("defaultEffort")
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|effort| {
+                        model
+                            .reasoning_efforts
+                            .iter()
+                            .any(|option| option.id == *effort)
+                    })
+                    .map(str::to_owned);
+            }
+            model
+        })
+        .collect()
+}
+
+/// Pi and Oh My Pi share the RPC catalog commands but not the flags that keep
+/// a probe cheap, nor the shape of a model's thinking metadata.
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum PiDialect {
+    Pi,
+    OhMyPi,
+}
+
+impl PiDialect {
+    fn probe_args(self) -> &'static [&'static str] {
+        match self {
+            Self::Pi => &[
+                "--mode",
+                "rpc",
+                "--no-session",
+                "--no-skills",
+                "--no-prompt-templates",
+                "--no-context-files",
+            ],
+            // Oh My Pi rejects unknown flags outright, and spells context
+            // files `--no-rules`.
+            Self::OhMyPi => &[
+                "--mode",
+                "rpc",
+                "--no-session",
+                "--no-skills",
+                "--no-rules",
+                "--no-extensions",
+            ],
+        }
+    }
+}
+
+fn discover_pi_models(binary: &Path, dialect: PiDialect) -> Vec<ProviderModel> {
+    let mut command = crate::command_env::command(binary);
+    if dialect == PiDialect::Pi {
+        // Oh My Pi has no such opt-out; it gates its update check on a setting.
+        command.env("PI_SKIP_VERSION_CHECK", "1");
+    }
     let command = command
-        .args([
-            "--mode",
-            "rpc",
-            "--no-session",
-            "--no-skills",
-            "--no-prompt-templates",
-            "--no-context-files",
-        ])
-        .env("PI_SKIP_VERSION_CHECK", "1")
+        .args(dialect.probe_args())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
@@ -499,7 +632,7 @@ fn discover_pi_models(binary: &Path) -> Vec<ProviderModel> {
         } else {
             Value::Null
         };
-        parse_pi_model_response(&state, &models)
+        parse_pi_model_response(dialect, &state, &models)
     } else {
         Vec::new()
     };
@@ -508,7 +641,11 @@ fn discover_pi_models(binary: &Path) -> Vec<ProviderModel> {
     result
 }
 
-fn parse_pi_model_response(state: &Value, response: &Value) -> Vec<ProviderModel> {
+fn parse_pi_model_response(
+    dialect: PiDialect,
+    state: &Value,
+    response: &Value,
+) -> Vec<ProviderModel> {
     let default_provider = state
         .pointer("/data/model/provider")
         .and_then(Value::as_str);
@@ -539,7 +676,7 @@ fn parse_pi_model_response(state: &Value, response: &Value) -> Vec<ProviderModel
             let mut model = ProviderModel::new(slug.clone(), name)
                 .sub_provider(display_name_from_slug(provider));
             model.is_default = default_slug.as_deref() == Some(slug.as_str());
-            model.reasoning_efforts = pi_reasoning_options(value);
+            model.reasoning_efforts = pi_reasoning_options(dialect, value);
             if !model.reasoning_efforts.is_empty() {
                 let preferred = model
                     .is_default
@@ -571,12 +708,33 @@ fn parse_pi_model_response(state: &Value, response: &Value) -> Vec<ProviderModel
         .collect()
 }
 
-fn pi_reasoning_options(model: &Value) -> Vec<ProviderModelOption> {
+const PI_THINKING_LEVELS: [&str; 7] = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
+
+fn pi_reasoning_options(dialect: PiDialect, model: &Value) -> Vec<ProviderModelOption> {
     if model.get("reasoning").and_then(Value::as_bool) != Some(true) {
         return Vec::new();
     }
+    if dialect == PiDialect::OhMyPi {
+        // Oh My Pi advertises the levels a model actually honors. `off` is
+        // never in that list because it bypasses provider mapping entirely,
+        // but it is always accepted.
+        let Some(efforts) = model.pointer("/thinking/efforts").and_then(Value::as_array) else {
+            return Vec::new();
+        };
+        return PI_THINKING_LEVELS
+            .into_iter()
+            .filter(|level| {
+                *level == "off"
+                    || efforts
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .any(|effort| effort == *level)
+            })
+            .map(|level| ProviderModelOption::new(level, reasoning_effort_label(level)))
+            .collect();
+    }
     let level_map = model.get("thinkingLevelMap").and_then(Value::as_object);
-    ["off", "minimal", "low", "medium", "high", "xhigh", "max"]
+    PI_THINKING_LEVELS
         .into_iter()
         .filter(|level| {
             let mapped = level_map.and_then(|map| map.get(*level));
@@ -1159,6 +1317,68 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires an installed Kimi Code CLI"]
+    fn installed_kimi_reports_models_and_a_default() {
+        let binary =
+            crate::command_env::find_executable("kimi").expect("Kimi Code CLI is not installed");
+        let models = discover_kimi_models(&binary);
+        assert!(
+            !models.is_empty(),
+            "the installed Kimi Code CLI reported no models"
+        );
+        assert!(
+            models.iter().any(|model| model.is_default),
+            "no Kimi model was marked as the configured default"
+        );
+    }
+
+    #[test]
+    fn parses_kimi_catalog_across_providers() {
+        let catalog = json!({
+            "providers": {"managed:kimi-code": {}, "moonshot-cn": {}},
+            "models": {
+                "kimi-code/k3": {
+                    "provider": "managed:kimi-code",
+                    "model": "k3",
+                    "displayName": "K3",
+                    "supportEfforts": ["low", "high", "max"],
+                    "defaultEffort": "high"
+                },
+                "moonshot-cn/kimi-k2.6": {"provider": "moonshot-cn", "model": "kimi-k2.6"}
+            }
+        });
+
+        let models = parse_kimi_models(&catalog, Some("moonshot-cn/kimi-k2.6"));
+
+        assert_eq!(models.len(), 2);
+        let k3 = &models[0];
+        assert_eq!(k3.id, "kimi-code/k3");
+        assert_eq!(k3.name, "K3");
+        assert_eq!(k3.sub_provider.as_deref(), Some("Kimi Code"));
+        assert!(!k3.is_default);
+        assert_eq!(k3.reasoning_efforts.len(), 3);
+        assert_eq!(k3.default_reasoning_effort.as_deref(), Some("high"));
+        // No display name: the bare model id is the readable fallback, not the
+        // provider-qualified alias.
+        let k2 = &models[1];
+        assert_eq!(k2.name, "Kimi K2.6");
+        assert!(k2.is_default);
+        assert!(k2.reasoning_efforts.is_empty());
+    }
+
+    #[test]
+    fn reads_kimi_default_model_from_the_provider_listing() {
+        assert_eq!(
+            parse_kimi_default_model(
+                "managed:kimi-code  type=kimi  models=4\n\nDefault model: kimi-code/k3\n"
+            )
+            .as_deref(),
+            Some("kimi-code/k3")
+        );
+        assert!(parse_kimi_default_model("no default here").is_none());
+    }
+
+    #[test]
     fn parses_codex_model_list_metadata() {
         let response = json!({
             "id": 1,
@@ -1225,7 +1445,7 @@ mod tests {
             ]}
         });
 
-        let models = parse_pi_model_response(&state, &response);
+        let models = parse_pi_model_response(PiDialect::Pi, &state, &response);
 
         assert_eq!(models.len(), 2);
         assert_eq!(models[0].id, "github-copilot/gpt-5.6-terra");
@@ -1267,12 +1487,84 @@ done
 "#,
         );
 
-        let models = discover_pi_models(&binary);
+        let models = discover_pi_models(&binary, PiDialect::Pi);
 
         assert_eq!(models.len(), 1);
         assert_eq!(models[0].id, "extension-provider/extension-model");
         assert_eq!(models[0].name, "Extension Model");
         assert!(models[0].is_default);
         let _ = std::fs::remove_file(binary);
+    }
+
+    /// Oh My Pi replaced Pi's `thinkingLevelMap` with the list of efforts a
+    /// model honors. `off` is never in that list but is always accepted.
+    #[test]
+    fn ohmypi_reasoning_options_come_from_the_advertised_efforts() {
+        let state = json!({"data": {"model": {"provider": "deepseek", "id": "deepseek-v4-pro"}}});
+        let response = json!({"data": {"models": [
+            {
+                "provider": "deepseek",
+                "id": "deepseek-v4-pro",
+                "name": "DeepSeek V4 Pro",
+                "reasoning": true,
+                "thinking": {"mode": "effort", "efforts": ["low", "high", "max"]}
+            },
+            {
+                "provider": "deepseek",
+                "id": "deepseek-v4-chat",
+                "name": "DeepSeek V4 Chat",
+                "reasoning": false
+            }
+        ]}});
+
+        let models = parse_pi_model_response(PiDialect::OhMyPi, &state, &response);
+
+        assert_eq!(models.len(), 2);
+        assert_eq!(
+            models[0]
+                .reasoning_efforts
+                .iter()
+                .map(|option| option.id.as_str())
+                .collect::<Vec<_>>(),
+            ["off", "low", "high", "max"]
+        );
+        assert!(models[1].reasoning_efforts.is_empty());
+    }
+
+    /// Ignored by default because it needs the CLI and its configured
+    /// providers; run it after changing Oh My Pi's probe flags.
+    #[test]
+    #[ignore = "requires an installed, authenticated omp"]
+    fn ohmypi_catalog_against_the_real_cli() {
+        let binary = crate::command_env::find_executable("omp").expect("omp is not installed");
+        let models = discover_pi_models(&binary, PiDialect::OhMyPi);
+        assert!(!models.is_empty(), "Oh My Pi reported no models");
+        for model in &models {
+            assert!(
+                model.id.contains('/'),
+                "{} is not a provider/model slug",
+                model.id
+            );
+            assert!(!model.name.trim().is_empty());
+        }
+        assert_eq!(
+            models.iter().filter(|model| model.is_default).count(),
+            1,
+            "exactly one model should be marked default"
+        );
+        println!("discovered {} Oh My Pi models", models.len());
+        for model in models.iter().take(5) {
+            println!(
+                "  {} — {} [{}]",
+                model.id,
+                model.name,
+                model
+                    .reasoning_efforts
+                    .iter()
+                    .map(|option| option.id.as_str())
+                    .collect::<Vec<_>>()
+                    .join(",")
+            );
+        }
     }
 }

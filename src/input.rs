@@ -116,7 +116,8 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("ctrl-shift-e", SelectToEnd, Some("ComposerInput")),
     ]);
 
-    #[cfg(target_os = "linux")]
+    // The word-motion chords Windows and the Linux desktops share.
+    #[cfg(not(target_os = "macos"))]
     cx.bind_keys([
         KeyBinding::new(
             "ctrl-backspace",

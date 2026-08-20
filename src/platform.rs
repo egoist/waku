@@ -105,7 +105,31 @@ fn linux_reduce_motion_enabled() -> bool {
         .is_some_and(|animations_enabled| !animations_enabled)
 }
 
-#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+/// Ease of Access → "Show animations in Windows" clears
+/// `SPI_GETCLIENTAREAANIMATION`. GPUI has no Windows implementation of its
+/// own, and the call only reads a cached user setting, so startup can ask
+/// directly.
+#[cfg(target_os = "windows")]
+pub fn init_reduce_motion(cx: &mut gpui::App) {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        SPI_GETCLIENTAREAANIMATION, SystemParametersInfoW,
+    };
+
+    let mut animations_enabled: i32 = 1;
+    let read = unsafe {
+        SystemParametersInfoW(
+            SPI_GETCLIENTAREAANIMATION,
+            0,
+            std::ptr::from_mut(&mut animations_enabled).cast(),
+            0,
+        )
+    };
+    if read != 0 {
+        cx.set_reduce_motion(animations_enabled == 0);
+    }
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
 pub fn init_reduce_motion(_: &mut gpui::App) {}
 
 #[cfg(target_os = "linux")]
@@ -305,7 +329,13 @@ pub fn titlebar_double_click(window: &Window) {
     #[cfg(target_os = "macos")]
     window.titlebar_double_click();
 
-    #[cfg(not(target_os = "macos"))]
+    // Windows performs the user's configured caption double-click action in
+    // `DefWindowProc`, which sees the click because the drag region reports
+    // itself as caption to the hit test.
+    #[cfg(target_os = "windows")]
+    let _ = window;
+
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     if window.window_controls().maximize && window.is_resizable() {
         window.zoom_window();
     }

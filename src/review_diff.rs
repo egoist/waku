@@ -266,6 +266,47 @@ pub fn parse_collected(
     snapshot
 }
 
+/// A snapshot over the file changes a provider reported for one tool call.
+///
+/// The normalization that produced those bodies already ran when the tool
+/// event arrived, so this only reassembles them into the patch text [`parse`]
+/// already understands. `Source` is meaningless here — nothing reads it on a
+/// tool-call diff — and context is never complete, because the provider sent
+/// hunks rather than whole files.
+pub fn from_file_changes(changes: &[crate::model::ActivityFileChange]) -> Snapshot {
+    let mut numstat = String::new();
+    let mut patch = String::new();
+    for change in changes {
+        let Some(body) = change.diff.as_deref() else {
+            continue;
+        };
+        numstat.push_str(&format!(
+            "{}\t{}\t{}\n",
+            change.additions.unwrap_or(0),
+            change.deletions.unwrap_or(0),
+            change.path
+        ));
+        patch.push_str(&format!(
+            "diff --git a/{path} b/{path}\n",
+            path = change.path
+        ));
+        match change.status {
+            Some(crate::model::ActivityFileChangeStatus::Added) => {
+                patch.push_str("new file mode 100644\n");
+            }
+            Some(crate::model::ActivityFileChangeStatus::Deleted) => {
+                patch.push_str("deleted file mode 100644\n");
+            }
+            _ => {}
+        }
+        patch.push_str(body);
+        if !body.ends_with('\n') {
+            patch.push('\n');
+        }
+    }
+    parse(Source::default(), &numstat, &patch, false)
+}
+
 pub fn wire_source(source: Source) -> waku_client::workspace::ReviewDiffSource {
     match source {
         Source::LastTurn {
@@ -301,6 +342,8 @@ fn parse(source: Source, numstat: &str, patch: &str, complete_context: bool) -> 
     let mut old_carry = Carry::None;
     let mut new_carry = Carry::None;
     let mut next_gap_id = 0u64;
+    // Whether the current hunk told us where in the file it sits.
+    let mut positioned = true;
 
     for raw in patch.lines() {
         if let Some(path) = parse_diff_header_path(raw) {
@@ -323,6 +366,7 @@ fn parse(source: Source, numstat: &str, patch: &str, complete_context: bool) -> 
             previous_new_next = 1;
             old_carry = Carry::None;
             new_carry = Carry::None;
+            positioned = true;
             lines.push(Line {
                 file_index,
                 old_line: None,
@@ -366,7 +410,31 @@ fn parse(source: Source, numstat: &str, patch: &str, complete_context: bool) -> 
             continue;
         }
 
+        // A hunk header with no ranges. Git never writes one, but a diff
+        // synthesized from a provider's before/after text has no position to
+        // report, so its rows are numbered `None` rather than from 1.
+        if raw.starts_with("@@") && parse_hunk_starts(raw).is_none() {
+            positioned = false;
+            if !lines
+                .last()
+                .is_none_or(|line| line.kind == LineKind::FileHeader)
+            {
+                lines.push(Line {
+                    file_index,
+                    old_line: None,
+                    new_line: None,
+                    kind: LineKind::HunkHeader,
+                    content: String::new(),
+                    tokens: Vec::new(),
+                });
+            }
+            old_carry = Carry::None;
+            new_carry = Carry::None;
+            continue;
+        }
+
         if let Some((next_old, next_new)) = parse_hunk_starts(raw) {
+            positioned = true;
             let old_gap = next_old.saturating_sub(previous_old_next);
             let new_gap = next_new.saturating_sub(previous_new_next);
             let gap = old_gap.max(new_gap);
@@ -416,7 +484,10 @@ fn parse(source: Source, numstat: &str, patch: &str, complete_context: bool) -> 
             b' ' => {
                 let (tokens, next_new_carry) = tokenize(language, &content, new_carry);
                 let (_, next_old_carry) = tokenize(language, &content, old_carry);
-                let shown = (Some(old_line), Some(new_line));
+                let shown = (
+                    positioned.then_some(old_line),
+                    positioned.then_some(new_line),
+                );
                 old_line = old_line.saturating_add(1);
                 new_line = new_line.saturating_add(1);
                 old_carry = next_old_carry;
@@ -425,17 +496,17 @@ fn parse(source: Source, numstat: &str, patch: &str, complete_context: bool) -> 
             }
             b'-' => {
                 let (tokens, carry) = tokenize(language, &content, old_carry);
-                let shown = old_line;
+                let shown = positioned.then_some(old_line);
                 old_line = old_line.saturating_add(1);
                 old_carry = carry;
-                (LineKind::Deletion, Some(shown), None, tokens)
+                (LineKind::Deletion, shown, None, tokens)
             }
             b'+' => {
                 let (tokens, carry) = tokenize(language, &content, new_carry);
-                let shown = new_line;
+                let shown = positioned.then_some(new_line);
                 new_line = new_line.saturating_add(1);
                 new_carry = carry;
-                (LineKind::Addition, None, Some(shown), tokens)
+                (LineKind::Addition, None, shown, tokens)
             }
             b'\\' => (LineKind::Meta, None, None, Vec::new()),
             _ => continue,
@@ -677,7 +748,7 @@ fn unescape_git_path(path: &str) -> String {
     output
 }
 
-fn parse_hunk_starts(line: &str) -> Option<(u32, u32)> {
+pub fn parse_hunk_starts(line: &str) -> Option<(u32, u32)> {
     let ranges = line.strip_prefix("@@ ")?.split_once(" @@")?.0;
     let mut parts = ranges.split_whitespace();
     let old = parts.next()?.strip_prefix('-')?;
@@ -689,7 +760,7 @@ fn parse_range_start(range: &str) -> Option<u32> {
     range.split(',').next()?.parse().ok()
 }
 
-fn language_for_path(path: &str) -> Option<Lang> {
+pub fn language_for_path(path: &str) -> Option<Lang> {
     let path = Path::new(path);
     let name = path.file_name()?.to_str()?;
     let normalized = name.to_ascii_lowercase();
@@ -703,7 +774,7 @@ fn language_for_path(path: &str) -> Option<Lang> {
     lang_for_tag(tag)
 }
 
-fn tokenize(language: Option<Lang>, content: &str, carry: Carry) -> (Vec<Token>, Carry) {
+pub fn tokenize(language: Option<Lang>, content: &str, carry: Carry) -> (Vec<Token>, Carry) {
     language.map_or_else(
         || (Vec::new(), Carry::None),
         |language| tokenize_line(language, content, carry),

@@ -57,8 +57,6 @@ window.restore:
 
 updater.update:
   en: Update
-updater.checking:
-  en: Checking for updates…
 updater.updating:
   en: Updating…
 updater.up_to_date:
@@ -143,7 +141,7 @@ settings.search:
 daemon.expose_title:
   en: Expose managed daemon
 daemon.expose_description:
-  en: Listen beyond this Mac so another Waku client can connect. Changing this restarts only the daemon.
+  en: Listen beyond this machine so another Waku client can connect. Changing this restarts only the daemon.
 daemon.status_local:
   en: Local only
 daemon.status_exposed:
@@ -173,7 +171,7 @@ daemon.restarting:
 daemon.credentials_title:
   en: Connection details
 daemon.credentials_description:
-  en: Enter these in Waku Web. The URL uses this Mac’s local network hostname.
+  en: Enter these in Waku Web. The URL uses this machine’s local network hostname.
 daemon.websocket_url:
   en: WebSocket URL
 daemon.token:
@@ -185,7 +183,7 @@ daemon.hide_token:
 daemon.regenerate_token:
   en: Regenerate
 daemon.security_warning:
-  en: The token grants full access to tasks, files, Git, attachments, and coding agents on this Mac. Use WSS through a trusted TLS proxy outside a private network.
+  en: The token grants full access to tasks, files, Git, attachments, and coding agents on this machine. Use WSS through a trusted TLS proxy outside a private network.
 daemon.external_title:
   en: External daemon
 daemon.external_description:
@@ -318,7 +316,7 @@ common.creating:
 settings.local_by_default:
   en: Local by default
 settings.local_by_default_description:
-  en: Projects, conversations, and settings are stored on this Mac
+  en: Projects, conversations, and settings are stored on this computer
 settings.local_by_default_web_description:
   en: Projects, conversations, and attachments stay on the connected daemon host. Waku Web preferences stay in this browser.
 settings.automatic_updates:
@@ -333,7 +331,7 @@ settings.share_anonymous_usage_data_description:
 providers.coding_agents:
   en: Coding agents
 providers.description:
-  en: Waku drives agent CLIs installed on this Mac. Install or sign in with each agent's own CLI, then refresh
+  en: Waku drives agent CLIs installed on this computer. Install or sign in with each agent's own CLI, then refresh
 providers.web_description:
   en: Waku drives agent CLIs installed on the daemon host. Install or sign in with each agent's own CLI, then refresh
 providers.check_failed:
@@ -481,7 +479,7 @@ project.your_project:
 onboarding.open_project_to_begin:
   en: Open a project to begin
 onboarding.description:
-  en: Waku runs coding agents in folders you choose. Your code, sessions, and history stay on this Mac
+  en: Waku runs coding agents in folders you choose. Your code, sessions, and history stay on this computer
 onboarding.web_description:
   en: Choose a path on the daemon host, or start without a project.
 onboarding.open_project_folder:
@@ -584,6 +582,8 @@ activity.output:
   en: Output
 activity.image_output:
   en: Image output
+activity.open_file:
+  en: Open file
 activity.search_for:
   en: Search for %{query}
 activity.searched_web:
@@ -863,6 +863,9 @@ common.close:
 common.default:
   en: Default
 
+composer.no_providers:
+  en: Install or switch on a provider to send
+
 models.none_found:
   en: No models found
 models.favorite_hint:
@@ -871,6 +874,14 @@ models.loading:
   en: Loading models…
 models.none_reported:
   en: No models reported by this provider
+models.no_providers:
+  en: No providers
+models.no_providers_title:
+  en: No providers available
+models.no_providers_description:
+  en: Install an agent CLI, or switch one back on in Provider settings.
+models.open_provider_settings:
+  en: Open Provider Settings
 models.choose:
   en: Choose model
 models.favorites:
@@ -1184,8 +1195,10 @@ errors.claude_fork_checkpoint_missing:
   en: Claude omitted the fork checkpoint
 errors.claude_turn_checkpoint_unavailable:
   en: "Claude's native checkpoint for that turn is unavailable: %{error}"
-errors.pi_session_file_unavailable:
-  en: Pi's native session file is unavailable
+errors.provider_session_file_unavailable:
+  en: "%{provider}'s native session file is unavailable"
+errors.provider_turn_branching_unsupported:
+  en: "%{provider} cannot rewind or branch a conversation at a turn"
 errors.fork_task:
   en: "Could not fork the task: %{error}"
 errors.create_rewind_snapshot:
@@ -1296,8 +1309,8 @@ errors.provider_rejected_prompt:
   en: "%{provider} rejected the prompt before it ran"
 errors.provider_complete_turn:
   en: "%{provider} could not complete this turn"
-errors.pi_reported_error:
-  en: Pi reported an error
+errors.provider_reported_error:
+  en: "%{provider} reported an error"
 
 session.response_unavailable:
   en: That response is no longer available
@@ -1644,6 +1657,14 @@ diff.file_count_one:
   en: 1 file
 diff.file_count:
   en: "%{count} files"
+diff.status_added:
+  en: Added
+diff.status_deleted:
+  en: Deleted
+diff.rows_hidden_one:
+  en: 1 more line · open Review to read the whole change
+diff.rows_hidden:
+  en: "%{count} more lines · open Review to read the whole change"
 
 terminal.transport_failed:
   en: Terminal transport failed
@@ -1668,8 +1689,8 @@ browser.start_hint:
   en: Enter a URL or search above — %{shortcut} focuses the address bar
 browser.unavailable:
   en: Browser unavailable
-browser.requires_macos:
-  en: The browser surface requires macOS
+browser.unavailable_on_platform:
+  en: The browser surface is not available on this platform yet
 
 find.bad_pattern:
   en: Bad pattern

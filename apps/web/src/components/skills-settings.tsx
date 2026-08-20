@@ -365,7 +365,7 @@ function availableSkillSources(skills: SkillEntry[], t: Translator) {
     for (const install of skill.installs) seen.add(skillSourceKey(install.source))
     for (const key of seen) counts.set(key, (counts.get(key) ?? 0) + 1)
   }
-  const ids: Array<Exclude<SkillSourceFilter, 'all'>> = ['shared', 'claude', 'codex', 'cursor', 'openCode', 'pi', 'amp', 'deepSeek', 'grok']
+  const ids: Array<Exclude<SkillSourceFilter, 'all'>> = ['shared', 'claude', 'codex', 'cursor', 'openCode', 'pi', 'ohMyPi', 'amp', 'deepSeek', 'grok']
   return [
     { id: 'all' as const, label: t('skills.filter_all'), count: skills.length },
     ...ids.filter((id) => counts.has(id)).map((id) => ({ id, label: skillSourceFilterLabel(id, t), count: counts.get(id)! })),

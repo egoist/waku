@@ -54,10 +54,13 @@ pub fn local_hostname() -> Option<String> {
             }
         }
     }
-    std::env::var("HOSTNAME")
-        .ok()
+    // `COMPUTERNAME` is the Windows equivalent and is always set; `HOSTNAME`
+    // covers the shells that export it.
+    ["COMPUTERNAME", "HOSTNAME"]
+        .into_iter()
+        .filter_map(|name| std::env::var(name).ok())
         .map(|hostname| hostname.trim().to_owned())
-        .filter(|hostname| !hostname.is_empty())
+        .find(|hostname| !hostname.is_empty())
 }
 
 fn daemon_executable_path() -> anyhow::Result<PathBuf> {

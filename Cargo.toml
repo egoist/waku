@@ -1,6 +1,6 @@
 [package]
 name = "waku"
-version = "0.1.2"
+version = "0.1.9"
 edition = "2024"
 description = "A fast, native control plane for local coding agents"
 license = "GPL-3.0-only"
@@ -32,7 +32,7 @@ dirs = "6.0"
 # rendering), which lets GPUI composite menus and tooltips above native child
 # views — the browser surface's WKWebView. Drop back to upstream once the PR
 # merges.
-gpui = { git = "https://github.com/egoist/zed", branch = "waku-webview", features = ["test-support"] }
+gpui = { git = "https://github.com/egoist/zed", branch = "waku-webview" }
 gpui_platform = { git = "https://github.com/egoist/zed", branch = "waku-webview", features = [
     "font-kit",
     "wayland",
@@ -57,6 +57,16 @@ futures-lite = "2"
 futures = "0.3"
 nucleo-matcher = "0.3.1"
 tokio = { version = "1", features = ["rt"] }
+
+# `test-support` has to stay test-only. It compiles a loop into gpui's
+# `flush_effects` that draws every dirty window right there, so with the
+# feature on a shipping build every notify pays a full frame the moment it
+# happens instead of coalescing into the display link's next one — a panel
+# resize drew once per mouse-move event rather than once per displayed frame.
+[dev-dependencies]
+gpui = { git = "https://github.com/egoist/zed", branch = "waku-webview", features = [
+    "test-support",
+] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
@@ -132,6 +142,40 @@ raw-window-handle = "0.6"
 [target.'cfg(target_os = "linux")'.dependencies]
 # Matches the version GPUI exposes through `WindowOptions::icon`.
 image = { version = "0.25", default-features = false, features = ["png"] }
+
+[target.'cfg(target_os = "windows")'.build-dependencies]
+embed-resource = "3.0"
+
+[target.'cfg(target_os = "windows")'.dependencies]
+raw-window-handle = "0.6"
+# The browser surface. WebView2 is evergreen on Windows 10 and in-box on 11.
+# Waku drives it through `webview2-com` rather than wry because it needs the
+# *composition* controller, which renders into a DirectComposition visual
+# instead of a child HWND — see `browser::host` for why, and note that only
+# the environment can create one, so it cannot be reached from wry's
+# `WebViewExtWindows` after the fact.
+webview2-com = "0.38"
+# Same version GPUI is built against, so the portal's `IDCompositionVisual`
+# hands straight to `SetRootVisualTarget` with no ABI bridging. `windows-sys`
+# stays for the plain Win32 calls that do not need COM.
+windows = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_DirectComposition",
+    "Win32_System_Com",
+    "Win32_UI_WindowsAndMessaging",
+] }
+windows-core = "0.61"
+# GPUI does not read the Windows animation preference, so Waku asks
+# `SystemParametersInfoW` itself. Same major version as the one already in the
+# graph through GPUI.
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_WindowsAndMessaging",
+] }
+# Verifies the EdDSA signatures `generate_appcast` writes, so the Windows
+# updater trusts the same key Sparkle does on macOS.
+ed25519-dalek = "2"
 
 [profile.release]
 lto = "thin"

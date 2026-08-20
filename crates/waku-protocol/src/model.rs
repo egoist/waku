@@ -18,11 +18,13 @@ pub enum ProviderKind {
     DeepSeek,
     OpenCode,
     Grok,
+    Kimi,
+    OhMyPi,
     Pi,
 }
 
 impl ProviderKind {
-    pub const ALL: [Self; 8] = [
+    pub const ALL: [Self; 10] = [
         Self::Amp,
         Self::Claude,
         Self::Codex,
@@ -30,6 +32,8 @@ impl ProviderKind {
         Self::DeepSeek,
         Self::OpenCode,
         Self::Grok,
+        Self::Kimi,
+        Self::OhMyPi,
         Self::Pi,
     ];
 
@@ -42,6 +46,8 @@ impl ProviderKind {
             Self::DeepSeek => "deepseek",
             Self::OpenCode => "opencode",
             Self::Grok => "grok",
+            Self::Kimi => "kimi",
+            Self::OhMyPi => "ohmypi",
             Self::Pi => "pi",
         }
     }
@@ -55,6 +61,8 @@ impl ProviderKind {
             Self::DeepSeek => "DeepSeek Harness",
             Self::OpenCode => "OpenCode",
             Self::Grok => "Grok Build",
+            Self::Kimi => "Kimi Code",
+            Self::OhMyPi => "Oh My Pi",
             Self::Pi => "Pi",
         }
     }
@@ -68,6 +76,8 @@ impl ProviderKind {
             Self::DeepSeek => "DeepSeek",
             Self::OpenCode => "OpenCode",
             Self::Grok => "Grok",
+            Self::Kimi => "Kimi",
+            Self::OhMyPi => "Oh My Pi",
             Self::Pi => "Pi",
         }
     }
@@ -83,10 +93,16 @@ impl ProviderKind {
             Self::DeepSeek => "dsh",
             Self::OpenCode => "opencode",
             Self::Grok => "grok",
+            Self::Kimi => "kimi",
+            Self::OhMyPi => "omp",
             Self::Pi => "pi",
         }
     }
 
+    /// Kimi Code is deliberately absent from this list and from
+    /// [`Self::supports_conversation_fork`]: its ACP `session/fork` copies a
+    /// whole session and takes no turn count, so there is no way to reproduce
+    /// Waku's "drop the last N turns" semantics without corrupting history.
     pub fn supports_conversation_rollback(self) -> bool {
         matches!(
             self,
@@ -97,6 +113,7 @@ impl ProviderKind {
                 | Self::DeepSeek
                 | Self::OpenCode
                 | Self::Grok
+                | Self::OhMyPi
                 | Self::Pi
         )
     }
@@ -111,6 +128,7 @@ impl ProviderKind {
                 | Self::DeepSeek
                 | Self::OpenCode
                 | Self::Grok
+                | Self::OhMyPi
                 | Self::Pi
         )
     }
@@ -118,7 +136,14 @@ impl ProviderKind {
     pub fn supports_model_discovery(self) -> bool {
         matches!(
             self,
-            Self::Codex | Self::Cursor | Self::DeepSeek | Self::OpenCode | Self::Grok | Self::Pi
+            Self::Codex
+                | Self::Cursor
+                | Self::DeepSeek
+                | Self::OpenCode
+                | Self::Grok
+                | Self::Kimi
+                | Self::OhMyPi
+                | Self::Pi
         )
     }
 }
@@ -157,6 +182,14 @@ pub enum ProviderResumeCursor {
     Grok {
         session_id: String,
     },
+    Kimi {
+        session_id: String,
+    },
+    OhMyPi {
+        session_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        session_file: Option<PathBuf>,
+    },
     Pi {
         session_id: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -183,6 +216,11 @@ impl ProviderResumeCursor {
             ProviderKind::DeepSeek => Self::DeepSeek { session_id: id },
             ProviderKind::OpenCode => Self::OpenCode { session_id: id },
             ProviderKind::Grok => Self::Grok { session_id: id },
+            ProviderKind::Kimi => Self::Kimi { session_id: id },
+            ProviderKind::OhMyPi => Self::OhMyPi {
+                session_id: id,
+                session_file: None,
+            },
             ProviderKind::Pi => Self::Pi {
                 session_id: id,
                 session_file: None,
@@ -199,6 +237,8 @@ impl ProviderResumeCursor {
             Self::DeepSeek { .. } => ProviderKind::DeepSeek,
             Self::OpenCode { .. } => ProviderKind::OpenCode,
             Self::Grok { .. } => ProviderKind::Grok,
+            Self::Kimi { .. } => ProviderKind::Kimi,
+            Self::OhMyPi { .. } => ProviderKind::OhMyPi,
             Self::Pi { .. } => ProviderKind::Pi,
         }
     }
@@ -211,6 +251,8 @@ impl ProviderResumeCursor {
             | Self::DeepSeek { session_id }
             | Self::OpenCode { session_id }
             | Self::Grok { session_id }
+            | Self::Kimi { session_id }
+            | Self::OhMyPi { session_id, .. }
             | Self::Pi { session_id, .. } => session_id,
             Self::Codex { thread_id } => thread_id,
         }
@@ -1830,6 +1872,15 @@ pub struct UserInputAnswer {
     pub answers: Vec<String>,
 }
 
+/// What a provider says happened to a file, when it says anything at all.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub enum ActivityFileChangeStatus {
+    Added,
+    Modified,
+    Deleted,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize, TS)]
 pub struct ActivityFileChange {
     pub path: String,
@@ -1837,6 +1888,18 @@ pub struct ActivityFileChange {
     pub additions: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deletions: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<ActivityFileChangeStatus>,
+    /// Unified-diff body for this file, normalized once from whatever the
+    /// provider sent: a real patch when it supplied one, otherwise synthesized
+    /// from its before/after text. Rendering parses this instead of reaching
+    /// back into raw tool arguments on every frame.
+    ///
+    /// Hunk headers are optional here: a bare `@@` line opens a hunk whose
+    /// position in the file the provider never told us, which is the common
+    /// case for string-replacement edit tools.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diff: Option<String>,
 }
 
 impl ActivityFileChange {
@@ -1984,11 +2047,31 @@ impl ActivityItem {
             if let Some(command) = self.arguments.as_deref() {
                 self.display_target = Some(compact_activity_target(command));
             }
+            self.reclassify_patch_command();
         }
         if self.display_target.is_none() {
             self.display_target = fallback_activity_display_target(self.kind, &self.title);
         }
         self.refresh_command_output();
+    }
+
+    /// Refile a shell command that only exists to apply a patch as the file
+    /// change it really is. Runs once the command text has been unwrapped from
+    /// whatever the provider wrapped it in, so the patch can be read out of it.
+    fn reclassify_patch_command(&mut self) {
+        let Some(changes) = self
+            .arguments
+            .as_deref()
+            .and_then(apply_patch_command_body)
+            .map(parse_patch_file_changes)
+            .filter(|changes| !changes.is_empty())
+        else {
+            return;
+        };
+        self.kind = ActivityKind::FileChange;
+        self.file_changes = changes;
+        self.display_target = None;
+        self.display_description = None;
     }
 
     fn refresh_activity_metadata_from_value(&mut self, source: &serde_json::Value) {
@@ -2009,8 +2092,11 @@ impl ActivityItem {
         }
     }
 
+    /// Unwrap a tool-result envelope so the run or edit shows what the tool
+    /// said rather than the provider's transport JSON around it. Text that is
+    /// not a recognized envelope is returned untouched.
     fn refresh_command_output(&mut self) {
-        if self.kind == ActivityKind::Command {
+        if matches!(self.kind, ActivityKind::Command | ActivityKind::FileChange) {
             self.output = self
                 .output
                 .take()
@@ -2452,65 +2538,6 @@ fn structured_file_change(
         return None;
     }
 
-    let diff = ["diff", "unifiedDiff", "unified_diff"]
-        .into_iter()
-        .find_map(|key| object.get(key).and_then(serde_json::Value::as_str));
-    let (mut additions, mut deletions) = diff
-        .map(diff_line_counts)
-        .map(|(additions, deletions)| (Some(additions), Some(deletions)))
-        .unwrap_or((None, None));
-
-    let old = [
-        "oldString",
-        "old_string",
-        "oldText",
-        "old_text",
-        "oldContent",
-        "old_content",
-    ]
-    .into_iter()
-    .find_map(|key| object.get(key).and_then(serde_json::Value::as_str));
-    let new = [
-        "newString",
-        "new_string",
-        "newText",
-        "new_text",
-        "newContent",
-        "new_content",
-    ]
-    .into_iter()
-    .find_map(|key| object.get(key).and_then(serde_json::Value::as_str));
-    if let (Some(old), Some(new)) = (old, new) {
-        let (added, deleted) = replacement_line_counts(old, new);
-        additions = Some(added);
-        deletions = Some(deleted);
-    } else if let Some(edits) = object.get("edits").and_then(serde_json::Value::as_array) {
-        let mut added = 0;
-        let mut deleted = 0;
-        let mut counted = false;
-        for edit in edits {
-            let Some(edit) = edit.as_object() else {
-                continue;
-            };
-            let old = ["oldString", "old_string", "oldText", "old_text"]
-                .into_iter()
-                .find_map(|key| edit.get(key).and_then(serde_json::Value::as_str));
-            let new = ["newString", "new_string", "newText", "new_text"]
-                .into_iter()
-                .find_map(|key| edit.get(key).and_then(serde_json::Value::as_str));
-            if let (Some(old), Some(new)) = (old, new) {
-                let (edit_added, edit_deleted) = replacement_line_counts(old, new);
-                added += edit_added;
-                deleted += edit_deleted;
-                counted = true;
-            }
-        }
-        if counted {
-            additions = Some(added);
-            deletions = Some(deleted);
-        }
-    }
-
     let change_type = object
         .get("kind")
         .and_then(|kind| {
@@ -2518,28 +2545,198 @@ fn structured_file_change(
                 .or_else(|| kind.get("type").and_then(serde_json::Value::as_str))
         })
         .or_else(|| object.get("type").and_then(serde_json::Value::as_str));
-    if additions.is_none()
-        && deletions.is_none()
-        && let Some(content) = object.get("content").and_then(serde_json::Value::as_str)
-    {
-        match change_type {
-            Some("add" | "create") => {
-                additions = Some(logical_line_count(content));
-                deletions = Some(0);
-            }
-            Some("delete") => {
-                additions = Some(0);
-                deletions = Some(logical_line_count(content));
-            }
-            _ => {}
-        }
-    }
+    let status = match change_type {
+        Some("add" | "create" | "added" | "write") => Some(ActivityFileChangeStatus::Added),
+        Some("delete" | "deleted" | "remove") => Some(ActivityFileChangeStatus::Deleted),
+        Some("update" | "edit" | "modify" | "modified") => Some(ActivityFileChangeStatus::Modified),
+        _ => None,
+    };
 
+    let patch = ["diff", "unifiedDiff", "unified_diff"]
+        .into_iter()
+        .find_map(|key| object.get(key).and_then(serde_json::Value::as_str));
+    let old = [
+        "oldString",
+        "old_string",
+        "oldStr",
+        "old_str",
+        "oldText",
+        "old_text",
+        "oldContent",
+        "old_content",
+        "oldSource",
+        "old_source",
+    ]
+    .into_iter()
+    .find_map(|key| object.get(key).and_then(serde_json::Value::as_str));
+    let new = [
+        "newString",
+        "new_string",
+        "newStr",
+        "new_str",
+        "newText",
+        "new_text",
+        "newContent",
+        "new_content",
+        "newSource",
+        "new_source",
+    ]
+    .into_iter()
+    .find_map(|key| object.get(key).and_then(serde_json::Value::as_str));
+    // A provider that reports an add or a delete puts the whole file where an
+    // update would carry a patch, so read that key as content rather than as
+    // hunks. Codex's `fileChange` item is the case in the field.
+    let whole_file = matches!(
+        status,
+        Some(ActivityFileChangeStatus::Added | ActivityFileChangeStatus::Deleted)
+    )
+    .then(|| {
+        object
+            .get("content")
+            .and_then(serde_json::Value::as_str)
+            .or(patch)
+    })
+    .flatten();
+
+    let body = if let Some(hunks) = object
+        .get("structuredPatch")
+        .or_else(|| object.get("structured_patch"))
+        .and_then(serde_json::Value::as_array)
+        .filter(|hunks| !hunks.is_empty())
+    {
+        // The one shape that reports where in the file the change landed.
+        // Prefer it over the before/after text beside it, which does not.
+        structured_patch_diff(hunks)
+    } else if let Some(content) = whole_file {
+        whole_file_diff(content, status == Some(ActivityFileChangeStatus::Added))
+    } else if let Some(patch) = patch {
+        normalize_unified_diff(patch)
+    } else if let (Some(old), Some(new)) = (old, new) {
+        replacement_diff(old, new)
+    } else if let Some(edits) = object.get("edits").and_then(serde_json::Value::as_array) {
+        edits_diff(edits)
+    } else if let Some(content) = object.get("content").and_then(serde_json::Value::as_str) {
+        // A write tool that only names a file and its new contents. Nothing
+        // says whether the file already existed, so present it as added.
+        whole_file_diff(content, true)
+    } else {
+        DiffBody::EMPTY
+    };
+
+    let (additions, deletions) = match &body.text {
+        Some(_) => (Some(body.additions), Some(body.deletions)),
+        None => (None, None),
+    };
     Some(ActivityFileChange {
         path: path.to_owned(),
         additions,
         deletions,
+        status,
+        diff: body.text,
     })
+}
+
+/// Hunks a provider already positioned in the file, as Claude's edit tools
+/// report them alongside their result. Each carries its own start lines, so
+/// the rendered diff numbers both sides the way Git would.
+fn structured_patch_diff(hunks: &[serde_json::Value]) -> DiffBody {
+    let mut text = String::new();
+    let mut additions = 0;
+    let mut deletions = 0;
+    let mut rendered = 0;
+    for hunk in hunks {
+        let Some(lines) = hunk.get("lines").and_then(serde_json::Value::as_array) else {
+            continue;
+        };
+        let start = |keys: [&str; 2]| {
+            keys.into_iter()
+                .find_map(|key| hunk.get(key).and_then(serde_json::Value::as_u64))
+                .unwrap_or(1)
+        };
+        let count = |keys: [&str; 2], fallback: usize| {
+            keys.into_iter()
+                .find_map(|key| hunk.get(key).and_then(serde_json::Value::as_u64))
+                .unwrap_or(fallback as u64)
+        };
+        if rendered < MAX_ACTIVITY_DIFF_LINES {
+            text.push_str(&format!(
+                "@@ -{},{} +{},{} @@\n",
+                start(["oldStart", "old_start"]),
+                count(["oldLines", "old_lines"], lines.len()),
+                start(["newStart", "new_start"]),
+                count(["newLines", "new_lines"], lines.len()),
+            ));
+        }
+        for line in lines.iter().filter_map(serde_json::Value::as_str) {
+            match line.as_bytes().first() {
+                Some(b'+') => additions += 1,
+                Some(b'-') => deletions += 1,
+                _ => {}
+            }
+            if rendered >= MAX_ACTIVITY_DIFF_LINES {
+                continue;
+            }
+            rendered += 1;
+            text.push_str(line);
+            text.push('\n');
+        }
+    }
+    DiffBody {
+        text: (!text.is_empty()).then_some(text),
+        additions,
+        deletions,
+    }
+}
+
+/// One diff over a tool's list of independent replacements, in the order the
+/// provider listed them. Each becomes its own hunk.
+fn edits_diff(edits: &[serde_json::Value]) -> DiffBody {
+    let mut text = String::new();
+    let mut additions = 0;
+    let mut deletions = 0;
+    let mut rendered = 0;
+    for edit in edits {
+        let Some(edit) = edit.as_object() else {
+            continue;
+        };
+        let old = [
+            "oldString",
+            "old_string",
+            "oldStr",
+            "old_str",
+            "oldText",
+            "old_text",
+        ]
+        .into_iter()
+        .find_map(|key| edit.get(key).and_then(serde_json::Value::as_str));
+        let new = [
+            "newString",
+            "new_string",
+            "newStr",
+            "new_str",
+            "newText",
+            "new_text",
+        ]
+        .into_iter()
+        .find_map(|key| edit.get(key).and_then(serde_json::Value::as_str));
+        let Some((old, new)) = old.zip(new) else {
+            continue;
+        };
+        let body = replacement_diff(old, new);
+        additions += body.additions;
+        deletions += body.deletions;
+        if let Some(body) = body.text
+            && rendered < MAX_ACTIVITY_DIFF_LINES
+        {
+            rendered += body.lines().count();
+            text.push_str(&body);
+        }
+    }
+    DiffBody {
+        text: (!text.is_empty()).then_some(text),
+        additions,
+        deletions,
+    }
 }
 
 fn parse_patch_file_changes(patch: &str) -> Vec<ActivityFileChange> {
@@ -2549,6 +2746,22 @@ fn parse_patch_file_changes(patch: &str) -> Vec<ActivityFileChange> {
         additions: u64,
         deletions: u64,
         count_lines: bool,
+        status: Option<ActivityFileChangeStatus>,
+        body: String,
+        rendered: usize,
+    }
+
+    impl PendingChange {
+        /// Keep the hunk in the body being assembled for this file. Counting
+        /// continues past the render cap so the badge stays truthful.
+        fn keep(&mut self, line: &str) {
+            if self.rendered >= MAX_ACTIVITY_DIFF_LINES {
+                return;
+            }
+            self.rendered += 1;
+            self.body.push_str(line);
+            self.body.push('\n');
+        }
     }
 
     fn finish(pending: &mut Option<PendingChange>, changes: &mut Vec<ActivityFileChange>) {
@@ -2564,6 +2777,8 @@ fn parse_patch_file_changes(patch: &str) -> Vec<ActivityFileChange> {
                 path: pending.path,
                 additions: Some(pending.additions),
                 deletions: Some(pending.deletions),
+                status: pending.status,
+                diff: (!pending.body.is_empty()).then_some(pending.body),
             },
         );
     }
@@ -2571,14 +2786,19 @@ fn parse_patch_file_changes(patch: &str) -> Vec<ActivityFileChange> {
     let mut changes = Vec::new();
     let mut pending: Option<PendingChange> = None;
     for line in patch.lines() {
-        let file_marker = ["*** Update File: ", "*** Add File: ", "*** Delete File: "]
-            .into_iter()
-            .find_map(|prefix| line.strip_prefix(prefix));
-        if let Some(path) = file_marker {
+        let file_marker = [
+            ("*** Update File: ", ActivityFileChangeStatus::Modified),
+            ("*** Add File: ", ActivityFileChangeStatus::Added),
+            ("*** Delete File: ", ActivityFileChangeStatus::Deleted),
+        ]
+        .into_iter()
+        .find_map(|(prefix, status)| line.strip_prefix(prefix).map(|path| (path, status)));
+        if let Some((path, status)) = file_marker {
             finish(&mut pending, &mut changes);
             pending = Some(PendingChange {
                 path: path.trim().to_owned(),
                 count_lines: true,
+                status: Some(status),
                 ..PendingChange::default()
             });
             continue;
@@ -2605,8 +2825,18 @@ fn parse_patch_file_changes(patch: &str) -> Vec<ActivityFileChange> {
         if line.starts_with("@@") {
             if let Some(pending) = pending.as_mut() {
                 pending.count_lines = true;
+                pending.keep(line);
             }
             continue;
+        }
+        if let Some(pending) = pending.as_mut()
+            && !pending.count_lines
+        {
+            if line.starts_with("new file mode ") {
+                pending.status = Some(ActivityFileChangeStatus::Added);
+            } else if line.starts_with("deleted file mode ") {
+                pending.status = Some(ActivityFileChangeStatus::Deleted);
+            }
         }
         if pending.as_ref().is_none_or(|pending| !pending.count_lines)
             && let Some(path) = line.strip_prefix("+++ ")
@@ -2634,10 +2864,36 @@ fn parse_patch_file_changes(patch: &str) -> Vec<ActivityFileChange> {
             pending.additions += 1;
         } else if line.starts_with('-') {
             pending.deletions += 1;
+        } else if !line.starts_with(' ') && !line.is_empty() && !line.starts_with('\\') {
+            // Codex's dialect ends a file section with the next `*** ` marker
+            // and nothing else; anything unmarked here is not diff content.
+            continue;
         }
+        pending.keep(line);
     }
     finish(&mut pending, &mut changes);
     changes
+}
+
+/// The `*** Begin Patch` body of an `apply_patch` run through a shell tool.
+///
+/// Codex's models edit files by invoking `apply_patch` from the shell rather
+/// than through a dedicated tool, and Codex's own TUI recognizes that and
+/// presents it as a file change. Doing the same here keeps a real edit from
+/// being filed under "ran a command" — and covers any other provider whose
+/// model reaches for the same trick.
+fn apply_patch_command_body(command: &str) -> Option<&str> {
+    const BEGIN: &str = "*** Begin Patch";
+    const END: &str = "*** End Patch";
+
+    if !command.contains("apply_patch") {
+        return None;
+    }
+    let start = command.find(BEGIN)?;
+    let end = command[start..]
+        .find(END)
+        .map_or(command.len(), |offset| start + offset + END.len());
+    Some(&command[start..end])
 }
 
 fn clean_diff_path(path: &str) -> String {
@@ -2649,26 +2905,143 @@ fn clean_diff_path(path: &str) -> String {
         .to_owned()
 }
 
-fn diff_line_counts(diff: &str) -> (u64, u64) {
+/// Unchanged lines kept around each changed region when a diff is synthesized
+/// from a provider's before/after text.
+const ACTIVITY_DIFF_CONTEXT_LINES: usize = 3;
+/// Ceiling on one stored diff body. Tool arguments are already capped upstream,
+/// so this only bounds what synthesis adds — a whole-file write is the case
+/// that would otherwise copy an entire source file into the transcript twice.
+const MAX_ACTIVITY_DIFF_LINES: usize = 1_000;
+
+/// A synthesized or normalized diff plus the counts taken from the same pass,
+/// so the `+N -N` badge can never disagree with the body under it.
+struct DiffBody {
+    text: Option<String>,
+    additions: u64,
+    deletions: u64,
+}
+
+impl DiffBody {
+    const EMPTY: Self = Self {
+        text: None,
+        additions: 0,
+        deletions: 0,
+    };
+}
+
+/// Diff between the before and after text of a string-replacement edit.
+///
+/// The fragments carry no position, so hunks open with a bare `@@` rather than
+/// invented line numbers. Counts come from the same walk as the body.
+fn replacement_diff(old: &str, new: &str) -> DiffBody {
+    // Compare over already-split lines: `from_lines` keeps each line's
+    // terminator, so a final line without one would never match the same text
+    // elsewhere in the file.
+    let old = old.lines().collect::<Vec<_>>();
+    let new = new.lines().collect::<Vec<_>>();
+    let diff = similar::TextDiff::from_slices(&old, &new);
+    let mut text = String::new();
     let mut additions = 0;
     let mut deletions = 0;
-    let has_hunks = diff.lines().any(|line| line.starts_with("@@"));
-    let mut count_lines = !has_hunks;
+    let mut rendered = 0;
+    for group in diff.grouped_ops(ACTIVITY_DIFF_CONTEXT_LINES) {
+        if rendered < MAX_ACTIVITY_DIFF_LINES {
+            text.push_str("@@\n");
+        }
+        for op in &group {
+            for change in diff.iter_changes(op) {
+                let marker = match change.tag() {
+                    similar::ChangeTag::Equal => ' ',
+                    similar::ChangeTag::Delete => {
+                        deletions += 1;
+                        '-'
+                    }
+                    similar::ChangeTag::Insert => {
+                        additions += 1;
+                        '+'
+                    }
+                };
+                // Keep counting past the cap: the badge stays truthful even
+                // when the body stops.
+                if rendered >= MAX_ACTIVITY_DIFF_LINES {
+                    continue;
+                }
+                rendered += 1;
+                text.push(marker);
+                text.push_str(change.value());
+                text.push('\n');
+            }
+        }
+    }
+    DiffBody {
+        text: (!text.is_empty()).then_some(text),
+        additions,
+        deletions,
+    }
+}
+
+/// Diff for a file the provider reported as whole new or whole removed content.
+/// One side of the file is empty, so the hunk header carries real positions.
+fn whole_file_diff(content: &str, added: bool) -> DiffBody {
+    let total = logical_line_count(content);
+    if total == 0 {
+        return DiffBody::EMPTY;
+    }
+    let marker = if added { '+' } else { '-' };
+    let mut text = if added {
+        format!("@@ -0,0 +1,{total} @@\n")
+    } else {
+        format!("@@ -1,{total} +0,0 @@\n")
+    };
+    for line in content.lines().take(MAX_ACTIVITY_DIFF_LINES) {
+        text.push(marker);
+        text.push_str(line);
+        text.push('\n');
+    }
+    DiffBody {
+        text: Some(text),
+        additions: if added { total } else { 0 },
+        deletions: if added { 0 } else { total },
+    }
+}
+
+/// Strip a provider patch down to hunks. Git file headers only appear before
+/// the first hunk, so dropping them by prefix stops there — past it, a line
+/// such as `--- x` is a deletion of `-- x`, not a header.
+fn normalize_unified_diff(diff: &str) -> DiffBody {
+    let mut text = String::with_capacity(diff.len());
+    let mut additions = 0;
+    let mut deletions = 0;
+    let mut rendered = 0;
+    // A patch with no hunk header at all is a bare body; open a positionless
+    // hunk for it rather than discarding every line looking for a header.
+    let mut in_hunk = !diff.lines().any(|line| line.starts_with("@@"));
+    if in_hunk {
+        text.push_str("@@\n");
+    }
     for line in diff.lines() {
-        if line.starts_with("@@") {
-            count_lines = true;
-            continue;
-        }
-        if !count_lines || line.starts_with("+++ ") || line.starts_with("--- ") {
-            continue;
-        }
-        if line.starts_with('+') {
+        if !in_hunk {
+            if !line.starts_with("@@") {
+                continue;
+            }
+            in_hunk = true;
+        } else if line.starts_with('+') {
             additions += 1;
         } else if line.starts_with('-') {
             deletions += 1;
         }
+        if rendered >= MAX_ACTIVITY_DIFF_LINES {
+            continue;
+        }
+        rendered += 1;
+        text.push_str(line);
+        text.push('\n');
     }
-    (additions, deletions)
+    DiffBody {
+        text: (!text.is_empty()).then_some(text),
+        additions,
+        deletions,
+    }
 }
 
 fn logical_line_count(text: &str) -> u64 {
@@ -2677,22 +3050,6 @@ fn logical_line_count(text: &str) -> u64 {
     } else {
         text.lines().count() as u64
     }
-}
-
-fn replacement_line_counts(old: &str, new: &str) -> (u64, u64) {
-    let old = old.lines().collect::<Vec<_>>();
-    let new = new.lines().collect::<Vec<_>>();
-    let mut prefix = 0;
-    while prefix < old.len() && prefix < new.len() && old[prefix] == new[prefix] {
-        prefix += 1;
-    }
-    let mut old_end = old.len();
-    let mut new_end = new.len();
-    while old_end > prefix && new_end > prefix && old[old_end - 1] == new[new_end - 1] {
-        old_end -= 1;
-        new_end -= 1;
-    }
-    ((new_end - prefix) as u64, (old_end - prefix) as u64)
 }
 
 fn extend_file_changes(
@@ -2705,23 +3062,29 @@ fn extend_file_changes(
 }
 
 fn merge_file_change(changes: &mut Vec<ActivityFileChange>, change: ActivityFileChange) {
-    if let Some(existing) = changes.iter_mut().find(|item| item.path == change.path) {
-        match (existing.additions, change.additions) {
-            (Some(existing_count), Some(change_count)) => {
-                existing.additions = Some(existing_count + change_count);
-            }
-            (None, Some(change_count)) => existing.additions = Some(change_count),
-            _ => {}
-        }
-        match (existing.deletions, change.deletions) {
-            (Some(existing_count), Some(change_count)) => {
-                existing.deletions = Some(existing_count + change_count);
-            }
-            (None, Some(change_count)) => existing.deletions = Some(change_count),
-            _ => {}
-        }
-    } else {
+    let Some(existing) = changes.iter_mut().find(|item| item.path == change.path) else {
         changes.push(change);
+        return;
+    };
+    match (existing.additions, change.additions) {
+        (Some(existing_count), Some(change_count)) => {
+            existing.additions = Some(existing_count + change_count);
+        }
+        (None, Some(change_count)) => existing.additions = Some(change_count),
+        _ => {}
+    }
+    match (existing.deletions, change.deletions) {
+        (Some(existing_count), Some(change_count)) => {
+            existing.deletions = Some(existing_count + change_count);
+        }
+        (None, Some(change_count)) => existing.deletions = Some(change_count),
+        _ => {}
+    }
+    existing.status = existing.status.or(change.status);
+    match (existing.diff.as_mut(), change.diff) {
+        (Some(existing_diff), Some(diff)) => existing_diff.push_str(&diff),
+        (None, diff @ Some(_)) => existing.diff = diff,
+        _ => {}
     }
 }
 
@@ -3081,6 +3444,8 @@ mod tests {
                 1,
             ),
             (
+                // A line kept across the replacement is context, not one
+                // deletion plus one addition.
                 ProviderKind::Claude,
                 serde_json::json!({
                     "file_path": "src/claude.rs",
@@ -3088,15 +3453,15 @@ mod tests {
                     "new_string": "new\nline\nadded"
                 }),
                 "src/claude.rs",
-                3,
                 2,
+                1,
             ),
             (
                 ProviderKind::Amp,
                 serde_json::json!({
-                    "file_path": "src/amp.rs",
-                    "old_string": "old",
-                    "new_string": "new"
+                    "path": "src/amp.rs",
+                    "old_str": "old",
+                    "new_str": "new"
                 }),
                 "src/amp.rs",
                 1,
@@ -3174,7 +3539,163 @@ mod tests {
             assert_eq!(change.path, path, "{provider:?}");
             assert_eq!(change.additions, Some(additions), "{provider:?}");
             assert_eq!(change.deletions, Some(deletions), "{provider:?}");
+            // Every shape must reach rendering as a diff, and the counts the
+            // row badge shows must be the ones its body accounts for.
+            let diff = change.diff.as_deref().unwrap_or_else(|| {
+                panic!("{provider:?} edit should carry a diff body");
+            });
+            let (rendered_additions, rendered_deletions) = diff
+                .lines()
+                .skip_while(|line| !line.starts_with("@@"))
+                .fold((0, 0), |(added, deleted), line| match line.as_bytes() {
+                    [b'+', ..] => (added + 1, deleted),
+                    [b'-', ..] => (added, deleted + 1),
+                    _ => (added, deleted),
+                });
+            assert_eq!(rendered_additions, additions, "{provider:?}");
+            assert_eq!(rendered_deletions, deletions, "{provider:?}");
         }
+    }
+
+    #[test]
+    fn positioned_hunks_beat_the_before_and_after_text_beside_them() {
+        // Claude's edit tools answer with the patch they applied. Its hunks
+        // know where they landed; `old_string`/`new_string` never do.
+        let activity = ActivityItem::new(
+            Some("toolu_1".into()),
+            ActivityKind::FileChange,
+            "Edit",
+            None,
+            true,
+        )
+        .with_activity_source(Some(&serde_json::json!({
+            "filePath": "/tmp/f.txt",
+            "oldString": "bravo",
+            "newString": "BRAVO",
+            "structuredPatch": [{
+                "oldStart": 1,
+                "oldLines": 4,
+                "newStart": 1,
+                "newLines": 4,
+                "lines": [" alpha", "-bravo", "+BRAVO", " charlie"]
+            }]
+        })));
+
+        let change = &activity.file_changes[0];
+        assert_eq!(change.path, "/tmp/f.txt");
+        assert_eq!(change.additions, Some(1));
+        assert_eq!(change.deletions, Some(1));
+        assert_eq!(
+            change.diff.as_deref(),
+            Some("@@ -1,4 +1,4 @@\n alpha\n-bravo\n+BRAVO\n charlie\n")
+        );
+    }
+
+    #[test]
+    fn whole_file_writes_diff_against_an_empty_file() {
+        let activity = ActivityItem::new(
+            Some("write-1".into()),
+            ActivityKind::FileChange,
+            "Write",
+            None,
+            true,
+        )
+        .with_arguments(Some(
+            serde_json::json!({
+                "file_path": "src/new.rs",
+                "content": "fn main() {}\n"
+            })
+            .to_string(),
+        ));
+
+        let change = &activity.file_changes[0];
+        assert_eq!(change.additions, Some(1));
+        assert_eq!(change.deletions, Some(0));
+        // Positions are real here: a created file starts at line 1.
+        assert_eq!(
+            change.diff.as_deref(),
+            Some("@@ -0,0 +1,1 @@\n+fn main() {}\n")
+        );
+    }
+
+    #[test]
+    fn codex_add_and_delete_changes_carry_their_whole_file_as_the_diff() {
+        for (kind, additions, deletions, marker) in [
+            ("add", Some(2), Some(0), '+'),
+            ("delete", Some(0), Some(2), '-'),
+        ] {
+            let activity = ActivityItem::new(
+                Some(format!("codex-{kind}")),
+                ActivityKind::FileChange,
+                "File Change",
+                None,
+                true,
+            )
+            .with_arguments(Some(
+                serde_json::json!([{
+                    "path": "src/codex.rs",
+                    "kind": {"type": kind},
+                    "diff": "first\nsecond"
+                }])
+                .to_string(),
+            ));
+
+            let change = &activity.file_changes[0];
+            assert_eq!(change.additions, additions, "{kind}");
+            assert_eq!(change.deletions, deletions, "{kind}");
+            let diff = change.diff.as_deref().expect("whole-file diff");
+            assert!(
+                diff.lines()
+                    .skip(1)
+                    .all(|line| line.starts_with(marker) && line.len() > 1),
+                "{kind}: {diff}"
+            );
+        }
+    }
+
+    #[test]
+    fn apply_patch_run_through_a_shell_becomes_a_file_change() {
+        let mut activity = ActivityItem::new(
+            Some("exec-1".into()),
+            ActivityKind::Command,
+            "Shell",
+            None,
+            true,
+        );
+        activity.arguments = Some(
+            serde_json::json!({
+                "command": "apply_patch <<'PATCH'\n*** Begin Patch\n*** Update File: src/one.rs\n@@\n-old\n+new\n*** End Patch\nPATCH",
+            })
+            .to_string(),
+        );
+        activity.refresh_activity_metadata();
+
+        assert_eq!(activity.kind, ActivityKind::FileChange);
+        assert_eq!(activity.file_changes.len(), 1);
+        assert_eq!(activity.file_changes[0].path, "src/one.rs");
+        assert_eq!(activity.file_changes[0].additions, Some(1));
+        assert_eq!(activity.file_changes[0].deletions, Some(1));
+        assert_eq!(
+            activity.file_changes[0].diff.as_deref(),
+            Some("@@\n-old\n+new\n")
+        );
+    }
+
+    #[test]
+    fn a_command_that_only_mentions_a_patch_stays_a_command() {
+        let mut activity = ActivityItem::new(
+            Some("exec-2".into()),
+            ActivityKind::Command,
+            "Shell",
+            None,
+            true,
+        );
+        activity.arguments =
+            Some(serde_json::json!({"command": "git apply_patch --help"}).to_string());
+        activity.refresh_activity_metadata();
+
+        assert_eq!(activity.kind, ActivityKind::Command);
+        assert!(activity.file_changes.is_empty());
     }
 
     #[test]

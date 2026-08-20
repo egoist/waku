@@ -2,7 +2,6 @@
 
 use std::fs;
 use std::io::Write as _;
-use std::os::unix::fs::DirBuilderExt as _;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -269,10 +268,7 @@ fn install_helper_app(source: &Path) -> anyhow::Result<PathBuf> {
     let application_support =
         dirs::data_dir().ok_or_else(|| anyhow!("Application Support directory is unavailable"))?;
     let install_root = application_support.join("Waku").join("Computer Use");
-    fs::DirBuilder::new()
-        .recursive(true)
-        .mode(0o700)
-        .create(&install_root)
+    crate::fs_ext::create_private_dir_all(&install_root)
         .with_context(|| format!("could not create {}", install_root.display()))?;
     let bundle_name = source
         .file_name()
@@ -327,7 +323,7 @@ fn copy_directory(source: &Path, destination: &Path) -> anyhow::Result<()> {
         if file_type.is_dir() {
             copy_directory(&source_path, &destination_path)?;
         } else if file_type.is_symlink() {
-            std::os::unix::fs::symlink(fs::read_link(&source_path)?, &destination_path)?;
+            crate::fs_ext::symlink(&fs::read_link(&source_path)?, &destination_path)?;
         } else {
             fs::copy(&source_path, &destination_path)?;
             fs::set_permissions(
