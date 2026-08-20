@@ -12,6 +12,9 @@ mod pi;
 mod support;
 mod title_refresh;
 
+pub(crate) use activity::{input_title, tool_activity};
+pub(crate) use codex::{CodexStreamState, codex_web_search_title};
+
 use std::path::PathBuf;
 use std::sync::Arc;
 

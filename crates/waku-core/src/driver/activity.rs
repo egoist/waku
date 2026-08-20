@@ -8,7 +8,7 @@ use crate::model::{ActivityItem, ActivityKind};
 
 const MAX_ACTIVITY_CHARS: usize = 16_000;
 
-pub(super) fn tool_activity(
+pub(crate) fn tool_activity(
     source_id: Option<String>,
     kind: ActivityKind,
     title: String,
@@ -51,7 +51,7 @@ pub(super) fn tool_activity(
         .with_failed(failed)
 }
 
-pub(super) fn input_title(value: Option<&Value>) -> Option<String> {
+pub(crate) fn input_title(value: Option<&Value>) -> Option<String> {
     let value = value?;
     value
         .get("title")

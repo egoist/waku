@@ -1191,24 +1191,29 @@ const CODEX_CITATION_START: char = '\u{e200}';
 const CODEX_CITATION_END: char = '\u{e201}';
 const CODEX_CITATION_SEPARATOR: char = '\u{e202}';
 
+/// Also serves `codex_session`'s offline import, where a whole recorded
+/// message is one delta and a prompt opens the turn.
 #[derive(Default)]
-struct CodexStreamState {
+pub(crate) struct CodexStreamState {
     citations: HashMap<String, String>,
     citation_numbers: HashMap<String, usize>,
     citation_buffer: String,
-    next_citation_number: usize,
 }
 
 impl CodexStreamState {
-    fn begin_turn(&mut self) {
+    pub(crate) fn begin_turn(&mut self) {
         self.citations.clear();
         self.citation_numbers.clear();
         self.citation_buffer.clear();
-        self.next_citation_number = 1;
     }
 
-    fn capture_citations(&mut self, item: &Value) {
-        if item.get("type").and_then(Value::as_str) != Some("webSearch") {
+    pub(crate) fn capture_citations(&mut self, item: &Value) {
+        // A live app-server item spells the type in camelCase, a rollout
+        // record keeps the API's snake_case. Both carry the same results.
+        if !matches!(
+            item.get("type").and_then(Value::as_str),
+            Some("webSearch" | "web_search_call")
+        ) {
             return;
         }
         let Some(results) = item.get("results").and_then(Value::as_array) else {
@@ -1230,7 +1235,23 @@ impl CodexStreamState {
         }
     }
 
-    fn rewrite_citation_delta(&mut self, delta: &str) -> String {
+    /// Rewrites one whole recorded message, for the offline importer. No
+    /// later delta will terminate a partial marker, so whatever it parked in
+    /// the buffer is marker payload and is dropped, never shown.
+    pub(crate) fn rewrite_message(&mut self, text: String) -> String {
+        if !text.contains(CODEX_CITATION_START) {
+            return text;
+        }
+        let output = self.rewrite_citation_delta(&text);
+        self.citation_buffer.clear();
+        output
+    }
+
+    pub(crate) fn rewrite_citation_delta(&mut self, delta: &str) -> String {
+        // Most deltas carry no marker, so skip the buffer round-trip for them.
+        if self.citation_buffer.is_empty() && !delta.contains(CODEX_CITATION_START) {
+            return delta.to_owned();
+        }
         self.citation_buffer.push_str(delta);
         let mut input = std::mem::take(&mut self.citation_buffer);
         let mut output = String::with_capacity(input.len());
@@ -1276,14 +1297,11 @@ impl CodexStreamState {
             let Some(url) = self.citations.get(reference).cloned() else {
                 continue;
             };
+            let next = self.citation_numbers.len() + 1;
             let number = *self
                 .citation_numbers
                 .entry(reference.into())
-                .or_insert_with(|| {
-                    let number = self.next_citation_number;
-                    self.next_citation_number += 1;
-                    number
-                });
+                .or_insert(next);
             links.push(format!("[{number}]({})", markdown_link_destination(&url)));
         }
         links.join(" ")
@@ -1953,7 +1971,7 @@ fn codex_item_title(item: &Value) -> String {
         .unwrap_or_else(|| tr!("activity.activity"))
 }
 
-fn codex_web_search_title(item: &Value) -> String {
+pub(crate) fn codex_web_search_title(item: &Value) -> String {
     let Some(action) = item.get("action") else {
         return tr!("activity.searched_web");
     };
@@ -1977,10 +1995,12 @@ fn codex_web_search_title(item: &Value) -> String {
             }
             tr!("activity.searched_web")
         }
-        Some("openPage") => non_empty_string(action.get("url"))
+        // A live app-server item spells the action in camelCase, a rollout
+        // record keeps the API's snake_case. Both name the same action.
+        Some("openPage" | "open_page") => non_empty_string(action.get("url"))
             .map(|url| tr!("activity.open_url", url = url))
             .unwrap_or_else(|| tr!("activity.opened_web_page")),
-        Some("findInPage") => match (
+        Some("findInPage" | "find_in_page") => match (
             non_empty_string(action.get("pattern")),
             non_empty_string(action.get("url")),
         ) {

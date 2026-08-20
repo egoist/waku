@@ -22,6 +22,7 @@ pub mod attachments;
 pub mod blob_store;
 pub mod checkpoint;
 pub mod claude_session;
+pub mod codex_session;
 pub mod command_env;
 pub mod composer_complete;
 pub mod computer_use;
