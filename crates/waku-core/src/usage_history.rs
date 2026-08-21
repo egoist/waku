@@ -11,7 +11,9 @@
 //! append-only, so parsed records are memoised per file by `(size, mtime)` in
 //! a [`ScanCache`] the caller owns; warm rescans only reparse changed files.
 
+use std::collections::hash_map::DefaultHasher;
 use std::collections::{HashMap, HashSet};
+use std::hash::{Hash, Hasher};
 use std::io::BufRead as _;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -216,6 +218,7 @@ fn parse_codex_line(line: &str, state: &mut CodexScanState) -> Option<UsageRecor
     // Codex re-emits an unchanged token_count on some stream boundaries.
     // Summing those would double count, so identical consecutive payloads are
     // skipped.
+    let payload_signature = serde_json::to_string(payload).ok()?;
     let signature = serde_json::to_string(last).ok()?;
     if state.last_usage_signature.as_deref() == Some(signature.as_str()) {
         return None;
@@ -239,6 +242,13 @@ fn parse_codex_line(line: &str, state: &mut CodexScanState) -> Option<UsageRecor
         return None;
     }
 
+    let dedupe_key = {
+        let mut hasher = DefaultHasher::new();
+        timestamp_ms.hash(&mut hasher);
+        payload_signature.hash(&mut hasher);
+        format!("codex:{:x}", hasher.finish())
+    };
+
     Some(UsageRecord {
         provider: UsageProvider::Codex,
         timestamp_ms,
@@ -248,8 +258,12 @@ fn parse_codex_line(line: &str, state: &mut CodexScanState) -> Option<UsageRecor
         totals,
         // Codex does not report cost in the rollout.
         reported_cost_usd: None,
-        // Rollout files are unique per session; no global dedup needed.
-        dedupe_key: None,
+        // A forked or subagent rollout opens with a verbatim copy of the parent
+        // history, so the same token_count event exists in several files. Key on
+        // the event rather than the file holding it, and the aggregator counts it
+        // once. The session id is deliberately left out: the copy is read under
+        // the forked file's own session.
+        dedupe_key: Some(dedupe_key),
     })
 }
 
@@ -1132,6 +1146,68 @@ mod tests {
 
         // The identical re-emitted event is a duplicate, not more usage.
         assert!(parse_codex_line(&count, &mut state).is_none());
+    }
+
+    #[test]
+    fn codex_forked_rollouts_reuse_the_parent_dedupe_key() {
+        // A fork or subagent rollout starts with a verbatim copy of the parent
+        // history, under its own session id. That copied usage must not be counted
+        // a second time.
+        let context = r#"{"timestamp":"2026-08-06T16:31:20.000Z","type":"turn_context",
+            "payload":{"model":"gpt-5.3-codex","cwd":"/Users/me/dev/waku"}}"#
+            .replace('\n', " ");
+        let count = r#"{"timestamp":"2026-08-06T16:31:25.000Z","type":"event_msg",
+            "payload":{"type":"token_count","info":{"last_token_usage":{
+            "input_tokens":21047,"cached_input_tokens":1000,"cache_write_input_tokens":47,
+            "output_tokens":280,"reasoning_output_tokens":165}}}}"#
+            .replace('\n', " ");
+        let parent_meta = r#"{"timestamp":"2026-08-06T16:31:19.166Z","type":"session_meta",
+            "payload":{"id":"codex-parent","cwd":"/Users/me/dev/waku"}}"#
+            .replace('\n', " ");
+        let fork_meta = r#"{"timestamp":"2026-08-06T16:40:00.000Z","type":"session_meta",
+            "payload":{"id":"codex-fork","cwd":"/Users/me/dev/waku"}}"#
+            .replace('\n', " ");
+
+        let mut parent = CodexScanState::new();
+        parse_codex_line(&parent_meta, &mut parent);
+        parse_codex_line(&context, &mut parent);
+        let from_parent = parse_codex_line(&count, &mut parent).expect("parent usage");
+
+        let mut fork = CodexScanState::new();
+        parse_codex_line(&fork_meta, &mut fork);
+        parse_codex_line(&context, &mut fork);
+        let from_fork = parse_codex_line(&count, &mut fork).expect("copied usage");
+
+        assert_eq!(from_parent.session_id, "codex-parent");
+        assert_eq!(from_fork.session_id, "codex-fork");
+        assert!(from_parent.dedupe_key.is_some());
+        assert_eq!(from_parent.dedupe_key, from_fork.dedupe_key);
+
+        // The aggregator drops the copy, so the tokens are counted once.
+        let rates = rate_table(&[("gpt-5.3-codex", FLAT_RATE)]);
+        let day = Utc
+            .timestamp_millis_opt(from_parent.timestamp_ms)
+            .single()
+            .expect("fixture timestamp")
+            .with_timezone(&Local)
+            .date_naive();
+        let roots = vec![PathBuf::from("/Users/me/dev/waku")];
+        let mut aggregator = Aggregator::new(day, day, &roots);
+        aggregator.add(&from_parent, &rates);
+        aggregator.add(&from_fork, &rates);
+        let history = derive_history(
+            aggregator,
+            UsageWindow::TrailingDays(1),
+            day,
+            day,
+            PricingStatus::Fresh,
+            1,
+            0,
+            Vec::new(),
+            Duration::ZERO,
+        );
+        assert_eq!(history.records, 1);
+        assert_eq!(history.total_tokens, from_parent.totals.total());
     }
 
     #[test]
