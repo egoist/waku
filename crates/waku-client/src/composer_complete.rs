@@ -188,7 +188,10 @@ pub fn resolved_skill_submission(
     prompt: &str,
     commands: &[SlashCommand],
 ) -> Option<String> {
-    if !matches!(provider, ProviderKind::Codex | ProviderKind::Pi) {
+    if !matches!(
+        provider,
+        ProviderKind::Codex | ProviderKind::Pi | ProviderKind::OhMyPi
+    ) {
         return None;
     }
     let invocation = prompt.strip_prefix('/')?;
@@ -203,7 +206,7 @@ pub fn resolved_skill_submission(
     }
     Some(match provider {
         ProviderKind::Codex => format!("${invocation}"),
-        ProviderKind::Pi => format!("/skill:{invocation}"),
+        ProviderKind::Pi | ProviderKind::OhMyPi => format!("/skill:{invocation}"),
         _ => unreachable!("non-native skill providers returned above"),
     })
 }
@@ -415,18 +418,20 @@ mod tests {
 
     #[test]
     fn pi_skill_submission_uses_the_skill_command() {
-        for name in ["to-spec", "to-tickets"] {
-            let skill = command(name, CommandScope::Skill);
-            let expected = format!("/skill:{name} carefully");
-            assert_eq!(
-                resolved_skill_submission(
-                    ProviderKind::Pi,
-                    &format!("/{name} carefully"),
-                    &[skill]
-                )
-                .as_deref(),
-                Some(expected.as_str())
-            );
+        for provider in [ProviderKind::Pi, ProviderKind::OhMyPi] {
+            for name in ["to-spec", "to-tickets"] {
+                let skill = command(name, CommandScope::Skill);
+                let expected = format!("/skill:{name} carefully");
+                assert_eq!(
+                    resolved_skill_submission(
+                        provider,
+                        &format!("/{name} carefully"),
+                        &[skill]
+                    )
+                    .as_deref(),
+                    Some(expected.as_str())
+                );
+            }
         }
     }
 

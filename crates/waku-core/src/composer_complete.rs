@@ -197,7 +197,8 @@ fn builtin_claude_commands() -> Vec<SlashCommand> {
 /// provider and always sent raw using its native invocation. Codex plugin
 /// skills retain the qualified `plugin:skill` catalog key so the client can
 /// translate its composer slash to `$plugin:skill` at the transport boundary.
-/// Pi skills retain their short name and resolve to `/skill:name` there.
+/// Pi and Oh My Pi skills retain their short name and resolve to
+/// `/skill:name` there.
 ///
 /// On top of the native sources, every provider reads Waku's own layer —
 /// `.waku/commands` in the project and `~/.config/waku/commands` — and gets
@@ -332,7 +333,7 @@ pub fn discover_slash_commands(provider: ProviderKind, project_root: &Path) -> V
                 true,
                 &mut commands,
             );
-            scan_skill_files(&project_root.join(".omp/skills"), &mut commands);
+            scan_skill_files(provider, &project_root.join(".omp/skills"), &mut commands);
             if let Some(home) = home.as_deref() {
                 scan_command_files(
                     &home.join(".omp/agent/commands"),
@@ -340,7 +341,7 @@ pub fn discover_slash_commands(provider: ProviderKind, project_root: &Path) -> V
                     true,
                     &mut commands,
                 );
-                scan_skill_files(&home.join(".omp/agent/skills"), &mut commands);
+                scan_skill_files(provider, &home.join(".omp/agent/skills"), &mut commands);
             }
         }
         ProviderKind::Amp => {
@@ -705,7 +706,10 @@ pub fn resolved_skill_submission(
     prompt: &str,
     commands: &[SlashCommand],
 ) -> Option<String> {
-    if !matches!(provider, ProviderKind::Codex | ProviderKind::Pi) {
+    if !matches!(
+        provider,
+        ProviderKind::Codex | ProviderKind::Pi | ProviderKind::OhMyPi
+    ) {
         return None;
     }
     let invocation = prompt.strip_prefix('/')?;
@@ -721,7 +725,7 @@ pub fn resolved_skill_submission(
     }
     Some(match provider {
         ProviderKind::Codex => format!("${invocation}"),
-        ProviderKind::Pi => format!("/skill:{invocation}"),
+        ProviderKind::Pi | ProviderKind::OhMyPi => format!("/skill:{invocation}"),
         _ => unreachable!("non-native skill providers returned above"),
     })
 }
@@ -1392,6 +1396,15 @@ mod tests {
             resolved_submission(ProviderKind::Pi, "/deploy-runbook staging", &commands).as_deref(),
             Some("/skill:deploy-runbook staging")
         );
+        assert_eq!(
+            resolved_submission(
+                ProviderKind::OhMyPi,
+                "/deploy-runbook staging",
+                &commands
+            )
+            .as_deref(),
+            Some("/skill:deploy-runbook staging")
+        );
 
         // Each ecosystem's own project-level skill tree is read too.
         for (provider, dir) in [
@@ -1460,6 +1473,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    // Windows gates symlink creation behind Developer Mode.
+    #[cfg(unix)]
     #[test]
     fn codex_plugin_skill_uses_qualified_catalog_key() {
         let root =
