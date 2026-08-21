@@ -2053,6 +2053,7 @@ impl Waku {
                 ComposerEvent::SubmitSteer(prompt) => {
                     this.submit_message_edit_prompt(prompt.clone(), cx)
                 }
+                ComposerEvent::SteerQueued => {}
                 ComposerEvent::Edited => cx.notify(),
                 ComposerEvent::Focus => {}
                 ComposerEvent::BackspaceOnEmpty => {}
@@ -2771,12 +2772,7 @@ impl Waku {
         // A turn that has not reached the provider yet cannot be steered; the
         // driver reports the outcome asynchronously via SteerAccepted or
         // SteerRejected once it is handed off.
-        let steerable = session.status != SessionStatus::Connecting
-            && self
-                .runtimes
-                .get(&session.id)
-                .is_some_and(|runtime| runtime.driver.supports_steer());
-        if !steerable {
+        if !self.session_can_steer(&session) {
             self.enqueue_follow_up_submission(session.id, submission, cx);
             return;
         }
@@ -2788,6 +2784,15 @@ impl Waku {
             self.enqueue_follow_up_submission(session.id, submission, cx);
         }
         cx.notify();
+    }
+
+    pub(super) fn session_can_steer(&self, session: &AgentSession) -> bool {
+        session.is_busy()
+            && session.status != SessionStatus::Connecting
+            && self
+                .runtimes
+                .get(&session.id)
+                .is_some_and(|runtime| runtime.driver.supports_steer())
     }
 
     /// Resolve presentation-preserving composer syntax immediately before a
@@ -2888,6 +2893,21 @@ impl Waku {
         };
         self.save();
         self.steer_composer_submission(ComposerSubmission::from_queued_message(message), cx);
+    }
+
+    /// Activate the same action as the oldest queued row's Steer control.
+    /// When that control is unavailable, leave the queue untouched rather
+    /// than removing and re-queueing its first message at the back.
+    pub(super) fn steer_oldest_queued_message(&mut self, cx: &mut Context<Self>) {
+        let Some((session_id, message_id)) = self.selected_session().and_then(|session| {
+            if !self.session_can_steer(session) {
+                return None;
+            }
+            Some((session.id, session.queued_messages.first()?.id))
+        }) else {
+            return;
+        };
+        self.steer_queued_message(session_id, message_id, cx);
     }
 
     /// Start the next queued follow-up as a fresh turn. Only called once a

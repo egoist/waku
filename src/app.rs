@@ -2325,6 +2325,15 @@ impl Waku {
                             this.steer_composer_submission(submission, cx);
                         }
                     }
+                    ComposerEvent::SteerQueued => {
+                        // Staged attachments make this a real draft even when
+                        // the text field is empty. Preserve the shortcut's
+                        // previous no-op behavior until that draft is sent or
+                        // cleared.
+                        if this.composer_attachments.is_empty() {
+                            this.steer_oldest_queued_message(cx);
+                        }
+                    }
                     ComposerEvent::Edited => {
                         this.schedule_composer_draft_save(cx);
                         cx.notify();

@@ -2517,7 +2517,8 @@ impl Focusable for TextInput {
 }
 
 /// What the composer tells its owner. `Submit` and `SubmitSteer` carry the
-/// trimmed prompt; the rest mirror [`InputEvent`] from the embedded field.
+/// trimmed prompt; the remaining events report composer-level interactions
+/// or mirror [`InputEvent`] from the embedded field.
 #[derive(Clone)]
 pub enum ComposerEvent {
     /// Enter: send the prompt, or queue it behind the running turn.
@@ -2525,6 +2526,9 @@ pub enum ComposerEvent {
     /// Primary modifier + Enter: deliver the prompt into the running turn
     /// instead of queueing it behind the turn.
     SubmitSteer(String),
+    /// Primary modifier + Enter in an empty composer: activate the oldest
+    /// queued follow-up's Steer control.
+    SteerQueued,
     Focus,
     Edited,
     /// Backspace in an already-empty composer — the chat idiom for "remove
@@ -2667,6 +2671,7 @@ impl Render for ComposerInput {
             .on_action(cx.listener(|composer, _: &SubmitSteer, _, cx| {
                 let value = composer.content(cx).trim().to_owned();
                 if value.is_empty() {
+                    cx.emit(ComposerEvent::SteerQueued);
                     return;
                 }
                 composer.input.update(cx, |input, cx| input.clear(cx));
@@ -2687,7 +2692,9 @@ impl EventEmitter<ComposerAttachmentPaste> for ComposerInput {}
 
 #[cfg(test)]
 mod tests {
+    use std::cell::RefCell;
     use std::path::PathBuf;
+    use std::rc::Rc;
     use std::time::{Duration, Instant};
 
     use gpui::{
@@ -2698,10 +2705,10 @@ mod tests {
 
     use super::TokenClass;
     use super::{
-        TextInput, EditHistory, FieldMode, SearchPaint, UNDO_GROUP_INTERVAL, UNDO_HISTORY_CAP,
-        media_paste_entries, cursor_should_be_visible, input_text_runs, next_word_boundary,
-        pasted_text_for_mode, previous_word_boundary, single_line_scroll, trimmed_splice,
-        visual_row_count, word_range_at,
+        ComposerEvent, ComposerInput, EditHistory, FieldMode, SearchPaint, TextInput,
+        UNDO_GROUP_INTERVAL, UNDO_HISTORY_CAP, cursor_should_be_visible, input_text_runs,
+        media_paste_entries, next_word_boundary, pasted_text_for_mode, previous_word_boundary,
+        single_line_scroll, trimmed_splice, visual_row_count, word_range_at,
     };
 
     struct InputHarness {
@@ -2712,6 +2719,16 @@ mod tests {
     impl Render for InputHarness {
         fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
             div().w(self.width).child(self.input.clone())
+        }
+    }
+
+    struct ComposerHarness {
+        composer: Entity<ComposerInput>,
+    }
+
+    impl Render for ComposerHarness {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div().w(px(300.)).child(self.composer.clone())
         }
     }
 
@@ -2734,6 +2751,51 @@ mod tests {
         cx.update(|window, cx| window.focus(&input.read(cx).focus(), cx));
         cx.run_until_parked();
         (input, cx)
+    }
+
+    fn setup_composer<'a>(
+        cx: &'a mut TestAppContext,
+    ) -> (Entity<ComposerInput>, &'a mut gpui::VisualTestContext) {
+        cx.update(super::init);
+        let (harness, cx) = cx.add_window_view(|window, cx| {
+            let composer = cx.new(|cx| ComposerInput::new(window, cx));
+            ComposerHarness { composer }
+        });
+        let composer = cx.read_entity(&harness, |harness, _| harness.composer.clone());
+        cx.update(|window, cx| window.focus(&composer.read(cx).focus(), cx));
+        cx.run_until_parked();
+        (composer, cx)
+    }
+
+    #[gpui::test]
+    fn secondary_enter_steers_text_or_activates_the_queue(cx: &mut TestAppContext) {
+        let (composer, cx) = setup_composer(cx);
+        let events: Rc<RefCell<Vec<ComposerEvent>>> = Rc::default();
+        let sink = events.clone();
+        cx.update(|_, cx| {
+            cx.subscribe(&composer, move |_, event: &ComposerEvent, _| {
+                sink.borrow_mut().push(event.clone());
+            })
+            .detach();
+        });
+
+        cx.simulate_keystrokes("secondary-enter");
+        assert!(matches!(
+            events.borrow().last(),
+            Some(ComposerEvent::SteerQueued)
+        ));
+
+        composer.update(cx, |composer, cx| composer.set_content("hold on", cx));
+        events.borrow_mut().clear();
+        cx.simulate_keystrokes("secondary-enter");
+        assert!(
+            events.borrow().iter().any(
+                |event| matches!(event, ComposerEvent::SubmitSteer(text) if text == "hold on")
+            )
+        );
+        cx.read_entity(&composer, |composer, cx| {
+            assert_eq!(composer.content(cx), "")
+        });
     }
 
     #[gpui::test]
