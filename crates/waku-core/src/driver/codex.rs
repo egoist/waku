@@ -1197,6 +1197,8 @@ struct CodexStreamState {
     citation_numbers: HashMap<String, usize>,
     citation_buffer: String,
     next_citation_number: usize,
+    /// Item id and part index of the reasoning chunk currently streaming.
+    reasoning_part: Option<(String, u64)>,
 }
 
 impl CodexStreamState {
@@ -1205,6 +1207,7 @@ impl CodexStreamState {
         self.citation_numbers.clear();
         self.citation_buffer.clear();
         self.next_citation_number = 1;
+        self.reasoning_part = None;
     }
 
     fn capture_citations(&mut self, item: &Value) {
@@ -1656,6 +1659,29 @@ fn handle_codex_message(
                 .and_then(Value::as_str)
                 .filter(|delta| !delta.is_empty())
             {
+                // Codex splits reasoning into parts and numbers them, but the deltas
+                // carry no separator of their own. Concatenating them runs the parts
+                // together, which also glues the bold headers into `****`.
+                let part = params
+                    .get("summaryIndex")
+                    .or_else(|| params.get("contentIndex"))
+                    .and_then(Value::as_u64)
+                    .map(|index| {
+                        (
+                            params
+                                .get("itemId")
+                                .and_then(Value::as_str)
+                                .unwrap_or_default()
+                                .to_owned(),
+                            index,
+                        )
+                    });
+                if let Some(part) = part {
+                    let previous = stream_state.reasoning_part.replace(part.clone());
+                    if previous.is_some_and(|previous| previous != part) {
+                        let _ = events.send(DriverEvent::ReasoningDelta("\n\n".to_owned()));
+                    }
+                }
                 let _ = events.send(DriverEvent::ReasoningDelta(delta.to_owned()));
             }
         }
@@ -2705,6 +2731,63 @@ mod tests {
         assert_eq!(response_rx.recv().unwrap(), Ok("thread-fork".to_owned()));
         assert!(pending_forks.lock().is_empty());
         assert!(event_rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn reasoning_parts_are_separated_from_each_other() {
+        // Codex numbers reasoning parts but sends no separator with the deltas, so
+        // appending them verbatim runs the headers together as `**one****two**`.
+        let thread_id = Mutex::new(Some("thread-1".to_owned()));
+        let turn_id = Mutex::new(Some("turn-1".to_owned()));
+        let turn_ids = Mutex::new(vec!["turn-1".to_owned()]);
+        let pending_rollbacks = Mutex::new(HashMap::new());
+        let pending_forks = Mutex::new(HashMap::new());
+        let pending_steers = Mutex::new(HashMap::new());
+        let background_rpcs = Mutex::new(BackgroundRpcState::default());
+        let (event_tx, event_rx) = unbounded();
+        let mut stream_state = CodexStreamState::default();
+
+        let deltas = [
+            (0, "**Evaluating cleanup**"),
+            (1, "**Analyzing methods**"),
+            (1, " and detection"),
+        ];
+        for (summary_index, delta) in deltas {
+            handle_codex_message(
+                json!({
+                    "method": "item/reasoning/summaryTextDelta",
+                    "params": {
+                        "threadId": "thread-1",
+                        "turnId": "turn-1",
+                        "itemId": "item-1",
+                        "summaryIndex": summary_index,
+                        "delta": delta,
+                    }
+                }),
+                &thread_id,
+                &turn_id,
+                &turn_ids,
+                &pending_rollbacks,
+                &pending_forks,
+                &pending_steers,
+                &background_rpcs,
+                &event_tx,
+                &mut stream_state,
+            );
+        }
+
+        let mut reasoning = String::new();
+        while let Ok(event) = event_rx.try_recv() {
+            match event {
+                DriverEvent::ReasoningDelta(delta) => reasoning.push_str(&delta),
+                other => panic!("expected reasoning deltas, got {other:?}"),
+            }
+        }
+
+        assert_eq!(
+            reasoning,
+            "**Evaluating cleanup**\n\n**Analyzing methods** and detection"
+        );
     }
 
     #[test]
