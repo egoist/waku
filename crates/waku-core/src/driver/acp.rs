@@ -16,7 +16,8 @@ use agent_client_protocol::schema::v1::{
     CancelNotification, ClientCapabilities, ContentBlock, Implementation, InitializeRequest,
     InitializeResponse, LoadSessionRequest, NewSessionRequest, PermissionOptionKind, PromptRequest,
     PromptResponse, RequestId, RequestPermissionOutcome, RequestPermissionRequest,
-    RequestPermissionResponse, ResumeSessionRequest, SelectedPermissionOutcome, SessionId,
+    RequestPermissionResponse, ResumeSessionRequest, SelectedPermissionOutcome, SessionConfigKind,
+    SessionConfigOption, SessionConfigOptionCategory, SessionConfigSelectOptions, SessionId,
     SessionModeId, SessionModeState, SessionNotification, SetSessionConfigOptionRequest,
     SetSessionModeRequest, StopReason, TextContent,
 };
@@ -26,7 +27,7 @@ use agent_client_protocol::{
 };
 use anyhow::{Context as _, anyhow};
 use parking_lot::Mutex;
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 
 use super::activity;
 use crate::driver::{
@@ -446,15 +447,24 @@ async fn run_sdk_connection(
             agent_client_protocol::on_receive_request!(),
         )
         .connect_with(agent, async move |connection: ConnectionTo<Agent>| {
+            let mut client_capabilities = ClientCapabilities::new().terminal(false);
+            if provider == ProviderKind::Cursor {
+                // Cursor only exposes its parameterized model controls to
+                // clients that opt in. Waku applies the returned config option
+                // ids rather than assuming Cursor's private ids stay stable.
+                let mut meta = Map::new();
+                meta.insert("parameterizedModelPicker".to_owned(), Value::Bool(true));
+                client_capabilities = client_capabilities.meta(meta);
+            }
             let initialize = connection
                 .send_request(
                     InitializeRequest::new(ProtocolVersion::V1)
-                        .client_capabilities(ClientCapabilities::new().terminal(false))
+                        .client_capabilities(client_capabilities)
                         .client_info(Implementation::new("waku", env!("CARGO_PKG_VERSION"))),
                 )
                 .block_task()
                 .await?;
-            let (session_id, modes) = establish_session(
+            let (session_id, modes, config_options) = establish_session(
                 &connection,
                 &initialize,
                 resume_session_id.as_deref(),
@@ -485,6 +495,7 @@ async fn run_sdk_connection(
                 &connection,
                 provider,
                 &session_id,
+                config_options.as_deref(),
                 current_model.as_deref(),
                 reasoning_effort.as_deref(),
                 &events,
@@ -596,6 +607,7 @@ async fn run_sdk_connection(
                                 &connection,
                                 provider,
                                 &session_id,
+                                config_options.as_deref(),
                                 current_model.as_deref(),
                                 options.reasoning_effort.as_deref(),
                                 &events,
@@ -619,7 +631,11 @@ async fn establish_session(
     resume_session_id: Option<&str>,
     cwd: &Path,
     suppress_session_updates: &AtomicBool,
-) -> agent_client_protocol::Result<(SessionId, Option<SessionModeState>)> {
+) -> agent_client_protocol::Result<(
+    SessionId,
+    Option<SessionModeState>,
+    Option<Vec<SessionConfigOption>>,
+)> {
     if let Some(existing) = resume_session_id {
         if initialize
             .agent_capabilities
@@ -631,7 +647,11 @@ async fn establish_session(
                 .block_task()
                 .await
         {
-            return Ok((SessionId::new(existing.to_owned()), response.modes));
+            return Ok((
+                SessionId::new(existing.to_owned()),
+                response.modes,
+                response.config_options,
+            ));
         }
 
         if initialize.agent_capabilities.load_session {
@@ -642,7 +662,11 @@ async fn establish_session(
                 .await;
             suppress_session_updates.store(false, Ordering::Release);
             if let Ok(response) = response {
-                return Ok((SessionId::new(existing.to_owned()), response.modes));
+                return Ok((
+                    SessionId::new(existing.to_owned()),
+                    response.modes,
+                    response.config_options,
+                ));
             }
         }
     }
@@ -651,7 +675,7 @@ async fn establish_session(
         .send_request(NewSessionRequest::new(cwd))
         .block_task()
         .await?;
-    Ok((response.session_id, response.modes))
+    Ok((response.session_id, response.modes, response.config_options))
 }
 
 fn desired_mode(
@@ -682,10 +706,206 @@ fn reasoning_effort_config_id(provider: ProviderKind) -> &'static str {
     }
 }
 
+#[derive(Debug, Eq, PartialEq)]
+struct CursorModelSelection {
+    value: String,
+    suffix: String,
+}
+
+fn session_config_select_values(option: &SessionConfigOption) -> Vec<&str> {
+    let SessionConfigKind::Select(select) = &option.kind else {
+        return Vec::new();
+    };
+    match &select.options {
+        SessionConfigSelectOptions::Ungrouped(options) => options
+            .iter()
+            .map(|option| option.value.0.as_ref())
+            .collect(),
+        SessionConfigSelectOptions::Grouped(groups) => groups
+            .iter()
+            .flat_map(|group| group.options.iter())
+            .map(|option| option.value.0.as_ref())
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+fn cursor_model_aliases(requested: &str) -> Vec<String> {
+    let mut aliases = vec![requested.to_owned()];
+    if let Some(alias) = requested.strip_prefix("cursor-") {
+        aliases.push(alias.to_owned());
+    }
+
+    // Cursor's CLI spells a few aliases as `claude-4.6-sonnet-*`, while ACP
+    // advertises the same family as `claude-sonnet-4-6`.
+    if let Some(rest) = requested.strip_prefix("claude-")
+        && let Some((version, family_and_suffix)) = rest.split_once('-')
+    {
+        let (family, suffix) = family_and_suffix
+            .split_once('-')
+            .map_or((family_and_suffix, ""), |(family, suffix)| (family, suffix));
+        if matches!(family, "haiku" | "opus" | "sonnet") {
+            let mut alias = format!("claude-{family}-{}", version.replace('.', "-"));
+            if !suffix.is_empty() {
+                alias.push('-');
+                alias.push_str(suffix);
+            }
+            if !aliases.contains(&alias) {
+                aliases.push(alias);
+            }
+        }
+    }
+    aliases
+}
+
+/// Resolves Cursor's CLI-facing model aliases against the base values its
+/// parameterized ACP picker advertises. The unconsumed suffix carries values
+/// such as `thinking`, `xhigh`, and `fast` for the dynamic options returned
+/// after the base model changes.
+fn cursor_model_selection(
+    option: &SessionConfigOption,
+    requested: &str,
+) -> Option<CursorModelSelection> {
+    let values = session_config_select_values(option);
+    let aliases = cursor_model_aliases(requested);
+
+    for alias in &aliases {
+        if let Some(value) = values.iter().find(|value| **value == alias) {
+            return Some(CursorModelSelection {
+                value: (*value).to_owned(),
+                suffix: String::new(),
+            });
+        }
+    }
+    if requested == "auto"
+        && let Some(value) = values.iter().find(|value| **value == "default")
+    {
+        return Some(CursorModelSelection {
+            value: (*value).to_owned(),
+            suffix: String::new(),
+        });
+    }
+
+    aliases
+        .iter()
+        .flat_map(|alias| {
+            values.iter().filter_map(move |value| {
+                alias
+                    .strip_prefix(*value)
+                    .and_then(|suffix| suffix.strip_prefix('-'))
+                    .map(|suffix| CursorModelSelection {
+                        value: (*value).to_owned(),
+                        suffix: suffix.to_owned(),
+                    })
+            })
+        })
+        .max_by_key(|selection| selection.value.len())
+}
+
+fn cursor_suffix_has(suffix: &str, value: &str) -> bool {
+    suffix.split('-').any(|part| part == value)
+}
+
+fn cursor_desired_select_value(
+    option: &SessionConfigOption,
+    selection: &CursorModelSelection,
+    reasoning_effort: Option<&str>,
+) -> Option<String> {
+    let values = session_config_select_values(option);
+    match option.category.as_ref()? {
+        SessionConfigOptionCategory::ThoughtLevel => {
+            if let Some(effort) = reasoning_effort
+                && values.contains(&effort)
+            {
+                return Some(effort.to_owned());
+            }
+            if selection.suffix.contains("extra-high") && values.contains(&"xhigh") {
+                return Some("xhigh".to_owned());
+            }
+            values
+                .iter()
+                .find(|value| cursor_suffix_has(&selection.suffix, value))
+                .map(|value| (*value).to_owned())
+        }
+        SessionConfigOptionCategory::ModelConfig => {
+            let id = option.id.to_string().to_ascii_lowercase();
+            let enabled = match id.as_str() {
+                "fast" => cursor_suffix_has(&selection.suffix, "fast"),
+                "thinking" => cursor_suffix_has(&selection.suffix, "thinking"),
+                _ => return None,
+            };
+            let value = if enabled { "true" } else { "false" };
+            values.contains(&value).then(|| value.to_owned())
+        }
+        _ => None,
+    }
+}
+
+fn session_config_current_value(option: &SessionConfigOption) -> Option<&str> {
+    let SessionConfigKind::Select(select) = &option.kind else {
+        return None;
+    };
+    Some(select.current_value.0.as_ref())
+}
+
+async fn apply_cursor_variant_configs(
+    connection: &ConnectionTo<Agent>,
+    session_id: &SessionId,
+    mut options: Vec<SessionConfigOption>,
+    selection: &CursorModelSelection,
+    reasoning_effort: Option<&str>,
+) -> agent_client_protocol::Result<()> {
+    // Thinking can reveal a thought-level option, so apply it first and use
+    // each response's refreshed option set for the next selection.
+    for target in ["thinking", "thought_level", "fast"] {
+        let Some(option) = options.iter().find(|option| match target {
+            "thinking" => {
+                option.category == Some(SessionConfigOptionCategory::ModelConfig)
+                    && option.id.to_string().eq_ignore_ascii_case("thinking")
+            }
+            "thought_level" => option.category == Some(SessionConfigOptionCategory::ThoughtLevel),
+            "fast" => {
+                option.category == Some(SessionConfigOptionCategory::ModelConfig)
+                    && option.id.to_string().eq_ignore_ascii_case("fast")
+            }
+            _ => false,
+        }) else {
+            continue;
+        };
+        let Some(value) = cursor_desired_select_value(option, selection, reasoning_effort) else {
+            continue;
+        };
+        if session_config_current_value(option) == Some(value.as_str()) {
+            continue;
+        }
+        let config_id = option.id.clone();
+        options = connection
+            .send_request(SetSessionConfigOptionRequest::new(
+                session_id.clone(),
+                config_id,
+                value.as_str(),
+            ))
+            .block_task()
+            .await?
+            .config_options;
+    }
+    Ok(())
+}
+
+fn find_config_option(
+    config_options: &[SessionConfigOption],
+    category: SessionConfigOptionCategory,
+) -> Option<&SessionConfigOption> {
+    config_options
+        .iter()
+        .find(|option| option.category.as_ref() == Some(&category))
+}
+
 async fn apply_model(
     connection: &ConnectionTo<Agent>,
     provider: ProviderKind,
     session_id: &SessionId,
+    config_options: Option<&[SessionConfigOption]>,
     model: Option<&str>,
     reasoning_effort: Option<&str>,
     events: &DriverEventSender,
@@ -693,6 +913,50 @@ async fn apply_model(
     let Some(model) = model else {
         return;
     };
+    let cursor_model_option = (provider == ProviderKind::Cursor)
+        .then_some(config_options)
+        .flatten()
+        .and_then(|options| find_config_option(options, SessionConfigOptionCategory::Model));
+    if let Some(option) = cursor_model_option
+        && let Some(selection) = cursor_model_selection(option, model)
+    {
+        match connection
+            .send_request(SetSessionConfigOptionRequest::new(
+                session_id.clone(),
+                option.id.clone(),
+                selection.value.as_str(),
+            ))
+            .block_task()
+            .await
+        {
+            Ok(response) => {
+                if let Err(error) = apply_cursor_variant_configs(
+                    connection,
+                    session_id,
+                    response.config_options,
+                    &selection,
+                    reasoning_effort,
+                )
+                .await
+                {
+                    let _ = events.send(DriverEvent::Error(tr!(
+                        "errors.select_model",
+                        error = error
+                    )));
+                }
+            }
+            Err(error) => {
+                let _ = events.send(DriverEvent::Error(tr!(
+                    "errors.select_model",
+                    error = error
+                )));
+            }
+        }
+        return;
+    }
+
+    // Grok, Kimi, OpenCode, and Cursor agents that do not advertise a model
+    // config option retain the legacy request unchanged.
     let request = match UntypedMessage::new(
         "session/set_model",
         json!({"sessionId": session_id, "modelId": model}),
@@ -1507,8 +1771,27 @@ impl Drop for AcpDriver {
 mod tests {
     use super::*;
     use agent_client_protocol::schema::v1::{
-        SessionMode, SessionModeState, ToolCallUpdate, ToolCallUpdateFields,
+        SessionConfigSelectOption, SessionMode, SessionModeState, ToolCallUpdate,
+        ToolCallUpdateFields,
     };
+
+    fn select_config_option(
+        id: &str,
+        category: SessionConfigOptionCategory,
+        current: &str,
+        values: &[&str],
+    ) -> SessionConfigOption {
+        SessionConfigOption::select(
+            id.to_owned(),
+            id.to_owned(),
+            current.to_owned(),
+            values
+                .iter()
+                .map(|value| SessionConfigSelectOption::new((*value).to_owned(), *value))
+                .collect::<Vec<_>>(),
+        )
+        .category(category)
+    }
 
     #[test]
     fn cursor_question_response_uses_native_scalar_and_array_answers() {
@@ -1635,6 +1918,88 @@ mod tests {
                 InteractionMode::Build
             )
             .is_none()
+        );
+    }
+
+    #[test]
+    fn cursor_model_aliases_resolve_to_advertised_parameterized_picker_values() {
+        let option = select_config_option(
+            "model",
+            SessionConfigOptionCategory::Model,
+            "default",
+            &["default", "grok-4.6", "composer-2.5", "claude-sonnet-4-6"],
+        );
+
+        assert_eq!(
+            cursor_model_selection(&option, "auto"),
+            Some(CursorModelSelection {
+                value: "default".into(),
+                suffix: String::new(),
+            })
+        );
+        assert_eq!(
+            cursor_model_selection(&option, "composer-2.5"),
+            Some(CursorModelSelection {
+                value: "composer-2.5".into(),
+                suffix: String::new(),
+            })
+        );
+        assert_eq!(
+            cursor_model_selection(&option, "cursor-grok-4.6-xhigh-fast"),
+            Some(CursorModelSelection {
+                value: "grok-4.6".into(),
+                suffix: "xhigh-fast".into(),
+            })
+        );
+        assert_eq!(
+            cursor_model_selection(&option, "claude-4.6-sonnet-medium-thinking"),
+            Some(CursorModelSelection {
+                value: "claude-sonnet-4-6".into(),
+                suffix: "medium-thinking".into(),
+            })
+        );
+    }
+
+    #[test]
+    fn cursor_model_suffix_selects_dynamic_effort_thinking_and_fast_options() {
+        let selection = CursorModelSelection {
+            value: "claude-opus-5".into(),
+            suffix: "thinking-extra-high-fast".into(),
+        };
+        let effort = select_config_option(
+            "effort",
+            SessionConfigOptionCategory::ThoughtLevel,
+            "high",
+            &["low", "medium", "high", "xhigh"],
+        );
+        let thinking = select_config_option(
+            "thinking",
+            SessionConfigOptionCategory::ModelConfig,
+            "false",
+            &["false", "true"],
+        );
+        let fast = select_config_option(
+            "fast",
+            SessionConfigOptionCategory::ModelConfig,
+            "false",
+            &["false", "true"],
+        );
+
+        assert_eq!(
+            cursor_desired_select_value(&effort, &selection, None).as_deref(),
+            Some("xhigh")
+        );
+        assert_eq!(
+            cursor_desired_select_value(&thinking, &selection, None).as_deref(),
+            Some("true")
+        );
+        assert_eq!(
+            cursor_desired_select_value(&fast, &selection, None).as_deref(),
+            Some("true")
+        );
+        assert_eq!(
+            cursor_desired_select_value(&effort, &selection, Some("low")).as_deref(),
+            Some("low")
         );
     }
 
@@ -1843,6 +2208,64 @@ mod tests {
                 _ => {}
             }
         }
+        assert_eq!(finished, Some(true));
+    }
+
+    /// Covers Cursor's provider-private parameterized picker with a model id
+    /// whose CLI alias carries both effort and fast-mode values.
+    #[test]
+    #[ignore = "requires an installed, authenticated cursor-agent"]
+    fn cursor_parameterized_model_selection_finishes_a_real_turn() {
+        let binary = crate::command_env::find_executable("cursor-agent")
+            .expect("cursor-agent is not installed");
+        let (events, event_rx) = crate::driver::test_event_channel();
+        let driver = AcpDriver::start(
+            ProviderKind::Cursor,
+            DriverStartOptions {
+                binary,
+                cwd: std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")),
+                mode: RuntimeMode::FullAccess,
+                interaction_mode: InteractionMode::Build,
+                model: Some("cursor-grok-4.6-xhigh".into()),
+                reasoning_effort: None,
+                service_tier: None,
+                context_window: None,
+                agent_preset: None,
+                computer_use_enabled: false,
+                provider_cursor: None,
+            },
+            events,
+        )
+        .expect("the ACP session should open");
+
+        loop {
+            let event = event_rx
+                .recv_timeout(Duration::from_secs(60))
+                .expect("the agent should report its session");
+            match event {
+                DriverEvent::Connected {
+                    provider_cursor: Some(ProviderResumeCursor::Cursor { .. }),
+                } => break,
+                DriverEvent::Error(error) => panic!("the agent reported: {error}"),
+                _ => {}
+            }
+        }
+        driver.prompt("Reply exactly OK.".into());
+
+        let mut produced_text = false;
+        let mut finished = None;
+        while let Ok(event) = event_rx.recv_timeout(Duration::from_secs(120)) {
+            match event {
+                DriverEvent::TextDelta(text) => produced_text |= !text.is_empty(),
+                DriverEvent::TurnFinished { success, .. } => {
+                    finished = Some(success);
+                    break;
+                }
+                DriverEvent::Error(error) => panic!("the agent reported: {error}"),
+                _ => {}
+            }
+        }
+        assert!(produced_text, "the Cursor turn produced no text");
         assert_eq!(finished, Some(true));
     }
 

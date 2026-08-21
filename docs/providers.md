@@ -586,7 +586,8 @@ a process per turn; Kimi Code arrived on this transport directly.
 
 **Handshake** — `initialize` (advertising **no** `fs` or `terminal` client
 capability, since Waku does not proxy the agent's file or terminal access — an
-advertised capability the client cannot honor strands the agent mid-tool-call) →
+advertised capability the client cannot honor strands the agent mid-tool-call;
+Cursor alone receives its `_meta.parameterizedModelPicker` opt-in) →
 `session/resume` when resuming and the agent advertises it (so history is not
 replayed), otherwise a replay-suppressed `session/load` when it reports
 `loadSession`, else `session/new` → optional `session/set_mode`. A restore the
@@ -594,6 +595,13 @@ agent no longer recognizes falls back to a fresh session rather than stranding
 the task. Mode selection is applied after both new and restored sessions. Kimi
 Code advertises both, so it takes the first rung — `session/resume`, verified
 against a session left by an earlier process.
+
+Cursor's picker opt-in makes `session/new`, `session/load`, and
+`session/resume` return provider-owned `configOptions`. Waku resolves the CLI's
+flat model alias to the advertised `model` value, then applies any dynamic
+`thought_level`, `thinking`, and `fast` options returned by that selection. If
+an older Cursor agent advertises no model option, Waku retains the legacy
+`session/set_model` request.
 
 **Per turn** — `session/prompt`, whose response stays open until the turn ends.
 It is tracked apart from the blocking request table precisely so the writer stays
