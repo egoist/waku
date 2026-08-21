@@ -183,7 +183,11 @@ impl Waku {
         // asks when the thumb is let go: did the reader come to rest on the
         // tail?
         let scrollbar_dragging = self.transcript_scrollbar.is_grabbed();
-        if self.transcript_scrollbar_dragging.replace(scrollbar_dragging) != scrollbar_dragging {
+        if self
+            .transcript_scrollbar_dragging
+            .replace(scrollbar_dragging)
+            != scrollbar_dragging
+        {
             if scrollbar_dragging {
                 self.transcript_anchor_following.set(false);
                 self.transcript_is_scrolled.set(true);
@@ -600,8 +604,8 @@ impl Render for ConversationNavigationRail {
                     div()
                         .w_full()
                         .truncate()
-                        .text_size(px(14.0))
-                        .line_height(px(20.0))
+                        .text_size(sp(14.0))
+                        .line_height(sp(20.0))
                         .font_weight(FontWeight::SEMIBOLD)
                         .text_color(theme.text)
                         .child(SharedString::from(turn.prompt.clone())),
@@ -613,8 +617,8 @@ impl Render for ConversationNavigationRail {
                             .max_h(px(60.0))
                             .overflow_hidden()
                             .whitespace_normal()
-                            .text_size(px(13.0))
-                            .line_height(px(20.0))
+                            .text_size(sp(13.0))
+                            .line_height(sp(20.0))
                             .text_color(theme.text_tertiary)
                             .child(SharedString::from(turn.response.clone())),
                     )
@@ -1117,6 +1121,18 @@ impl Waku {
         })
     }
 
+    /// `metrics` rescaled to the user's UI and code font size settings.
+    pub(super) fn scaled_markdown_metrics(&self, metrics: MarkdownMetrics) -> MarkdownMetrics {
+        metrics.scaled(self.state.ui_font_size, self.state.code_font_size)
+    }
+
+    /// Mono text scale for plain tool-output sections: the code font size
+    /// itself, the way every dedicated code surface takes it.
+    fn activity_mono_text(&self) -> (f32, f32) {
+        let size = self.state.code_font_size;
+        (size, (size * 1.5 * 2.0).round() / 2.0)
+    }
+
     /// The markdown render context for one transcript row. Element keys are
     /// scoped to the row, so a virtualized remount recreates the same keys and
     /// an in-progress selection survives scrolling.
@@ -1260,11 +1276,12 @@ impl Waku {
                         .collect();
                     let attachments_can_reveal = !self.daemon.is_remote();
                     let menu = self.menu_handle(format!("message-{}", message.id), cx);
-                    let metrics = if message.role == MessageRole::User {
+                    let metrics = self.scaled_markdown_metrics(if message.role == MessageRole::User
+                    {
                         MarkdownMetrics::USER_MESSAGE
                     } else {
                         MarkdownMetrics::BODY
-                    };
+                    });
                     let animate_streaming = message.streaming && !cx.reduce_motion();
                     let ctx = self.markdown_ctx(
                         format!("message-{}", message.id),
@@ -1420,7 +1437,7 @@ impl Waku {
             .items_center()
             .gap(px(5.0))
             .cursor_default()
-            .text_size(px(11.5))
+            .text_size(sp(11.5))
             .font_weight(FontWeight::MEDIUM)
             .text_color(theme.text_secondary)
             .focus_visible(|style| style.border_color(theme.accent))
@@ -1484,7 +1501,7 @@ impl Waku {
                             .child(
                                 div()
                                     .truncate()
-                                    .text_size(px(12.5))
+                                    .text_size(sp(12.5))
                                     .font_weight(FontWeight::MEDIUM)
                                     .text_color(theme.text)
                                     .child(title),
@@ -1494,8 +1511,8 @@ impl Waku {
                                     .flex()
                                     .items_center()
                                     .gap(px(6.0))
-                                    .text_size(px(11.0))
-                                    .line_height(px(14.0))
+                                    .text_size(sp(11.0))
+                                    .line_height(sp(14.0))
                                     .child(
                                         div()
                                             .text_color(theme.success)
@@ -1535,7 +1552,7 @@ impl Waku {
                             .min_w_0()
                             .flex_1()
                             .truncate()
-                            .text_size(px(11.5))
+                            .text_size(sp(11.5))
                             .text_color(theme.text_secondary)
                             .tooltip(Tooltip::text(file.path.clone()))
                             .child(file.path.clone()),
@@ -1543,14 +1560,14 @@ impl Waku {
                     .child(
                         div()
                             .flex_none()
-                            .text_size(px(10.5))
+                            .text_size(sp(10.5))
                             .text_color(theme.success)
                             .child(format!("+{}", file.additions)),
                     )
                     .child(
                         div()
                             .flex_none()
-                            .text_size(px(10.5))
+                            .text_size(sp(10.5))
                             .text_color(theme.danger)
                             .child(format!("-{}", file.deletions)),
                     ),
@@ -1584,7 +1601,7 @@ impl Waku {
                     .items_center()
                     .gap(px(6.0))
                     .cursor_default()
-                    .text_size(px(11.5))
+                    .text_size(sp(11.5))
                     .font_weight(FontWeight::MEDIUM)
                     .text_color(theme.text_secondary)
                     .focus_visible(|style| style.bg(theme.overlay_strong))
@@ -1660,8 +1677,8 @@ impl Waku {
                     .items_center()
                     .gap(px(5.0))
                     .cursor_default()
-                    .text_size(px(11.5))
-                    .line_height(px(16.0))
+                    .text_size(sp(11.5))
+                    .line_height(sp(16.0))
                     .font_weight(FontWeight::MEDIUM)
                     .text_color(theme.text_tertiary)
                     .child(SharedString::from(label))
@@ -1701,8 +1718,8 @@ impl Waku {
             .child(working_wave_dots(theme.text_tertiary))
             .child(
                 div()
-                    .text_size(px(11.5))
-                    .line_height(px(16.0))
+                    .text_size(sp(11.5))
+                    .line_height(sp(16.0))
                     .font_weight(FontWeight::MEDIUM)
                     .text_color(theme.text_tertiary)
                     .child(SharedString::from(tr!(
@@ -1794,8 +1811,8 @@ impl Waku {
                     .flex()
                     .items_center()
                     .gap(px(6.0))
-                    .text_size(px(12.5))
-                    .line_height(px(16.0))
+                    .text_size(sp(12.5))
+                    .line_height(sp(16.0))
                     .cursor_default()
                     .focus_visible(|style| style.text_color(theme.text))
                     .hover(|style| style.text_color(theme.text))
@@ -1871,7 +1888,7 @@ impl Waku {
                     .flex()
                     .items_center()
                     .cursor_default()
-                    .text_size(px(9.5))
+                    .text_size(sp(9.5))
                     .text_color(color)
                     .focus_visible(|style| style.border_color(theme.accent))
                     .hover(|style| style.bg(theme.overlay_strong))
@@ -1957,8 +1974,8 @@ impl Waku {
                         .when(!item_expanded, |element| {
                             element.rounded_bl(px(8.0)).rounded_br(px(8.0))
                         })
-                        .text_size(px(12.0))
-                        .line_height(px(16.0))
+                        .text_size(sp(12.0))
+                        .line_height(sp(16.0))
                         .when(has_detail, |element| {
                             element
                                 .track_focus(&item_focus)
@@ -2052,7 +2069,7 @@ impl Waku {
                 let ctx = self.markdown_ctx(
                     format!("reasoning-{id}"),
                     &palette,
-                    MarkdownMetrics::COMPACT,
+                    self.scaled_markdown_metrics(MarkdownMetrics::COMPACT),
                     reasoning_live && !cx.reduce_motion(),
                 );
                 let reasoning_viewport = self
@@ -2084,7 +2101,7 @@ impl Waku {
                     // The reasoning dissolve rides the half-rate lease: fast
                     // thinking keeps a fade active for the whole phase, every
                     // tick rebuilds each visible transcript row, and 15 fps
-                    // alpha on the dim 11.5px peek is indistinguishable. The
+                    // alpha on the dim compact peek is indistinguishable. The
                     // answer text keeps the full-rate dissolve.
                     motion::pulse_lease_slow(window.current_view(), cx);
                 }
@@ -2154,9 +2171,10 @@ impl Waku {
                 let ctx = self.markdown_ctx(
                     format!("activity-{id}"),
                     &palette,
-                    MarkdownMetrics::COMPACT,
+                    self.scaled_markdown_metrics(MarkdownMetrics::COMPACT),
                     false,
                 );
+                let (mono_size, mono_line) = self.activity_mono_text();
                 let mut detail_card = div()
                     .w_full()
                     .min_w_0()
@@ -2168,8 +2186,8 @@ impl Waku {
                     .flex_col()
                     .gap(px(8.0))
                     .font_family(md::render::MONO_FAMILY)
-                    .text_size(px(10.5))
-                    .line_height(px(16.0))
+                    .text_size(px(mono_size))
+                    .line_height(px(mono_line))
                     .text_color(theme.text_secondary)
                     .whitespace_normal()
                     .overflow_hidden();
@@ -2272,8 +2290,6 @@ impl Waku {
                                             .track_scroll(&output_viewport.scroll_handle)
                                             .py(px(4.0))
                                             .pr(px(8.0))
-                                            .text_size(px(10.5))
-                                            .line_height(px(16.0))
                                             .child(md::render::plain_text(
                                                 content.clone(),
                                                 md::render::MONO_FAMILY,
@@ -2315,8 +2331,6 @@ impl Waku {
                                 div()
                                     .w_full()
                                     .min_w_0()
-                                    .text_size(px(10.5))
-                                    .line_height(px(16.0))
                                     .child(md::render::plain_text(
                                         content.clone(),
                                         md::render::MONO_FAMILY,
@@ -2366,6 +2380,7 @@ impl Waku {
             .or_default()
             .clone();
         let wheel_scroll = viewport.scroll_handle.clone();
+        let (diff_mono_size, diff_mono_line) = self.activity_mono_text();
         let mut rows = div()
             .id(SharedString::from(format!("activity-diff-scroll-{id}")))
             .w_full()
@@ -2376,8 +2391,8 @@ impl Waku {
             .flex()
             .flex_col()
             .font_family(md::render::MONO_FAMILY)
-            .text_size(px(10.5))
-            .line_height(px(16.0))
+            .text_size(px(diff_mono_size))
+            .line_height(px(diff_mono_line))
             .on_scroll_wheel(move |_, _, cx| contain_scroll(&wheel_scroll, cx));
         for (index, line) in diff.snapshot.lines.iter().enumerate() {
             rows = rows.child(self.render_activity_diff_row(
@@ -2507,7 +2522,7 @@ impl Waku {
                 index,
                 &format!("activity-diff-{id}"),
                 &self.transcript_selection,
-                DiffRowStyle::ACTIVITY,
+                DiffRowStyle::activity(self.state.code_font_size),
                 theme,
             ),
         }
@@ -2524,6 +2539,8 @@ fn activity_diff_break_row(label: Option<String>, theme: &Theme) -> AnyElement {
         .flex()
         .items_center()
         .font_family(md::render::MONO_FAMILY)
+        // Fixed like the Review panel's gap and hunk captions: a caption in
+        // the code surface follows neither font setting.
         .text_size(px(10.5))
         .bg(theme.overlay)
         .text_color(theme.text_ghost)

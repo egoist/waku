@@ -77,6 +77,8 @@ argument**; `NO_COLOR=1` and `CI=1` are set for all of them.
 | OpenCode | `opencode run` | `--pure --agent plan` | `--model` | `--variant` |
 | Grok Build | `grok` | `--single <prompt> --output-format plain --permission-mode plan --tools "" --no-memory --no-subagents --disable-web-search --verbatim` | `--model` | `--reasoning-effort` |
 | Pi | `pi` | `--print --no-session --no-tools --no-context-files --no-extensions --no-skills --no-prompt-templates --no-approve` | `--model` | `--thinking` |
+| Oh My Pi | `omp` | `--print --no-session --no-tools --no-rules --no-extensions --no-skills` | `--model` | `--thinking` |
+| Kimi Code | `kimi` | `--prompt <prompt> --output-format text` | `--model` | — |
 
 Where a provider is not simply "flags plus prompt":
 
@@ -104,6 +106,15 @@ Where a provider is not simply "flags plus prompt":
   ([git_commit.rs:303](../crates/waku-core/src/git_commit.rs#L303)).
   `--verbatim` stops the CLI re-wrapping the answer; `--no-memory` keeps a
   commit subject out of Grok's long-term memory.
+- **Kimi** is the other exception to prompt-last: `--prompt` takes the prompt as
+  its value, so the function returns early rather than appending it twice. It
+  has no tool, session, or context switch to turn off, and `--plan` — its
+  read-only mode — is rejected outright when combined with `--prompt`, so the
+  prompt's "do not call tools" is the whole guard, as with DeepSeek. Prompt mode
+  exposes no thinking-level flag, hence no effort column.
+- **Oh My Pi** rejects unknown flags outright, so it gets its own list rather
+  than Pi's: context files are `--no-rules`, and it has no prompt-template or
+  project-trust switch to turn off.
 - **Pi** needs the long list because each capability is its own switch.
   `--no-context-files` is its "disable `AGENTS.md` and `CLAUDE.md` discovery"
   flag, so repo instructions cannot contradict the fixed prompt.

@@ -12,14 +12,16 @@ pub mod text_field;
 pub mod tooltip;
 
 use crate::model::{ActivityKind, ProviderKind, SessionStatus};
-use crate::theme::Theme;
+use crate::theme::{Theme, sp};
 
-/// A monochrome icon from the embedded set, tinted via text color.
+/// A monochrome icon from the embedded set, tinted via text color. Sized in
+/// `sp` so icons keep pace with the chrome text they sit beside when the UI
+/// font size setting moves.
 pub fn icon(path: &'static str, size: f32, color: Hsla) -> Svg {
     svg()
         .path(path)
-        .w(px(size))
-        .h(px(size))
+        .w(sp(size))
+        .h(sp(size))
         .flex_none()
         .text_color(color)
 }
@@ -28,7 +30,7 @@ pub fn icon(path: &'static str, size: f32, color: Hsla) -> Svg {
 /// are preserved. GPUI's `svg()` element intentionally renders an alpha mask
 /// tinted with one text color.
 pub fn file_icon(path: &'static str, size: f32) -> Img {
-    img(path).w(px(size)).h(px(size)).flex_none()
+    img(path).w(sp(size)).h(sp(size)).flex_none()
 }
 
 /// A compact ghost icon button: the only button shape outside the composer's
@@ -164,6 +166,8 @@ pub fn provider_color(theme: &Theme, provider: ProviderKind) -> Hsla {
         | ProviderKind::Cursor
         | ProviderKind::OpenCode
         | ProviderKind::Grok
+        | ProviderKind::Kimi
+        | ProviderKind::OhMyPi
         | ProviderKind::Pi => {
             if theme.is_dark {
                 rgb(0xF3F3F3).into()
@@ -184,6 +188,8 @@ pub fn provider_icon(provider: ProviderKind) -> &'static str {
         ProviderKind::DeepSeek => "icons/provider-deepseek.svg",
         ProviderKind::OpenCode => "icons/provider-opencode.svg",
         ProviderKind::Grok => "icons/provider-grok.svg",
+        ProviderKind::Kimi => "icons/provider-kimi.svg",
+        ProviderKind::OhMyPi => "icons/provider-ohmypi.svg",
         ProviderKind::Pi => "icons/provider-pi.svg",
     }
 }
@@ -332,8 +338,8 @@ impl RenderOnce for MenuChip {
             .flex()
             .items_center()
             .gap(px(6.0))
-            .text_size(px(11.5))
-            .line_height(px(14.0))
+            .text_size(sp(11.5))
+            .line_height(sp(14.0))
             .cursor_default()
             .focus_visible(|style| style.border_1().border_color(theme.accent))
             .when(self.outlined, |element| {

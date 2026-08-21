@@ -121,7 +121,7 @@ settings.computer_use:
 settings.general_keywords:
   en: general local projects conversations privacy analytics telemetry anonymous sharing updates automatic sparkle version
 settings.appearance_keywords:
-  en: appearance theme system light dark language english chinese simplified
+  en: appearance theme system light dark language english chinese simplified font size text editor
 settings.providers_keywords:
   en: providers agents models cli version install detect claude codex cursor opencode amp grok pi
 settings.skills:
@@ -272,6 +272,14 @@ settings.theme:
   en: Theme
 settings.theme_description:
   en: Choose between system, light, or dark themes
+settings.ui_font_size:
+  en: UI font size
+settings.ui_font_size_description:
+  en: Text size across the interface and messages
+settings.code_font_size:
+  en: Code font size
+settings.code_font_size_description:
+  en: Text size in the file editor, diffs, code blocks, and tool output
 settings.theme_system:
   en: System
 settings.theme_light:
@@ -863,6 +871,9 @@ common.close:
 common.default:
   en: Default
 
+composer.no_providers:
+  en: Install or switch on a provider to send
+
 models.none_found:
   en: No models found
 models.favorite_hint:
@@ -871,6 +882,14 @@ models.loading:
   en: Loading models…
 models.none_reported:
   en: No models reported by this provider
+models.no_providers:
+  en: No providers
+models.no_providers_title:
+  en: No providers available
+models.no_providers_description:
+  en: Install an agent CLI, or switch one back on in Provider settings.
+models.open_provider_settings:
+  en: Open Provider Settings
 models.choose:
   en: Choose model
 models.favorites:
@@ -1184,8 +1203,10 @@ errors.claude_fork_checkpoint_missing:
   en: Claude omitted the fork checkpoint
 errors.claude_turn_checkpoint_unavailable:
   en: "Claude's native checkpoint for that turn is unavailable: %{error}"
-errors.pi_session_file_unavailable:
-  en: Pi's native session file is unavailable
+errors.provider_session_file_unavailable:
+  en: "%{provider}'s native session file is unavailable"
+errors.provider_turn_branching_unsupported:
+  en: "%{provider} cannot rewind or branch a conversation at a turn"
 errors.fork_task:
   en: "Could not fork the task: %{error}"
 errors.create_rewind_snapshot:
@@ -1296,8 +1317,8 @@ errors.provider_rejected_prompt:
   en: "%{provider} rejected the prompt before it ran"
 errors.provider_complete_turn:
   en: "%{provider} could not complete this turn"
-errors.pi_reported_error:
-  en: Pi reported an error
+errors.provider_reported_error:
+  en: "%{provider} reported an error"
 
 session.response_unavailable:
   en: That response is no longer available
@@ -1368,6 +1389,11 @@ right_panel.hide:
   en: Hide right panel
 right_panel.close_tab:
   en: Close %{title}
+
+open_in.open:
+  en: Open project in %{app}
+open_in.choose:
+  en: Open project in…
 
 environment.title:
   en: Environment
@@ -1506,6 +1532,10 @@ files.could_not_save_read_only:
   en: "Could not save %{path}: file is not editable"
 files.could_not_save:
   en: "Could not save %{path}: %{error}"
+files.preview_markdown:
+  en: Preview markdown
+files.edit_markdown_source:
+  en: Edit source
 files.resize_tree:
   en: Resize file tree
 files.refresh:

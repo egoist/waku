@@ -1,10 +1,12 @@
 //! Block-level markdown parsing over `pulldown-cmark`.
 //!
 //! A full parse produces a [`BlockTree`]: top-level blocks paired with their
-//! byte ranges in the source. The range start of the last top-level block is a
-//! *stable boundary* — appending to the source cannot change anything before
-//! it — which is what [`IncrementalParser`] exploits so a streamed delta costs
-//! roughly O(delta + last block) instead of O(document).
+//! byte ranges in the source. The range start of the second-to-last
+//! source-level block is a *stable boundary* — appending to the source cannot
+//! change anything before it (see [`IncrementalParser::settled_prefix`] for
+//! why the final block alone is not enough) — which is what
+//! [`IncrementalParser`] exploits so a streamed delta costs roughly
+//! O(delta + last two blocks) instead of O(document).
 //!
 //! Soundness guard: link reference definitions (`[label]: url`) resolve
 //! non-locally, so a source containing one drops back to full reparses.
@@ -820,10 +822,31 @@ impl IncrementalParser {
         BlockTree { blocks }
     }
 
-    /// All blocks but the last are settled: markdown block structure only ever
-    /// extends the final block, so everything before it is immune to appends.
+    /// Index of the first block an append could still change.
+    ///
+    /// Appending mostly only extends the final block, but two cases reach
+    /// further back, so the last *two* source-level groups stay unsettled:
+    ///
+    /// - A GFM table absorbs the line after it once that line becomes a valid
+    ///   row, yet a partial row of just `|` transiently parses as its own
+    ///   paragraph. Settling the table then would strand every later row in
+    ///   that trailing paragraph.
+    /// - A paragraph split around an inline image yields several blocks that
+    ///   share one source range; they must settle and reparse as a unit or the
+    ///   pieces before the image get re-emitted on the next append.
     fn settled_prefix(&self) -> usize {
-        self.tree.blocks.len().saturating_sub(1)
+        let blocks = &self.tree.blocks;
+        let mut index = blocks.len();
+        for _ in 0..2 {
+            let Some(group_start) = index.checked_sub(1).map(|last| blocks[last].range.start)
+            else {
+                break;
+            };
+            while index > 0 && blocks[index - 1].range.start == group_start {
+                index -= 1;
+            }
+        }
+        index
     }
 }
 
@@ -1042,6 +1065,61 @@ mod tests {
     fn incremental_appends_match_full_parses() {
         let source = "# Heading\n\nA paragraph with **bold**.\n\n- one\n- two\n\n```js\nlet x = 1;\n```\n\nTail.";
         for chunk_size in [1, 3, 7, 64] {
+            let mut incremental = IncrementalParser::new();
+            let mut built = String::new();
+            let mut chars = source.chars().peekable();
+            while chars.peek().is_some() {
+                let chunk = chars.by_ref().take(chunk_size).collect::<String>();
+                built.push_str(&chunk);
+                incremental.append(&chunk);
+                assert_eq!(
+                    incremental.tree(),
+                    &parse(&built),
+                    "divergence at {} bytes with chunk size {chunk_size}",
+                    built.len()
+                );
+            }
+        }
+    }
+
+    /// Tables must survive streaming: a chunk boundary that lands after the
+    /// delimiter row must not settle a header-only table and strand the body
+    /// rows in a trailing paragraph.
+    #[test]
+    fn streamed_tables_match_full_parses() {
+        let source = "**After** \u{2014} it's a proper neutral chip:\n\n\
+            | State | Fill | Icon |\n\
+            |---|---|---|\n\
+            | Rest | white @ 0.12 | `.labelColor` (~85%) |\n\
+            | Hover | white @ 0.20 | pure white |\n\
+            | Pressed | white @ 0.26 | pure white |\n\
+            | Copied | green @ 0.12 | `.systemGreen` |\n\n\
+            It now reads as a real button sitting beside Export.";
+        for chunk_size in [1, 2, 3, 5, 7, 11, 17, 64] {
+            let mut incremental = IncrementalParser::new();
+            let mut built = String::new();
+            let mut chars = source.chars().peekable();
+            while chars.peek().is_some() {
+                let chunk = chars.by_ref().take(chunk_size).collect::<String>();
+                built.push_str(&chunk);
+                incremental.append(&chunk);
+                assert_eq!(
+                    incremental.tree(),
+                    &parse(&built),
+                    "divergence at {} bytes with chunk size {chunk_size}",
+                    built.len()
+                );
+            }
+        }
+    }
+
+    /// The blocks a paragraph splits into around an inline image share one
+    /// source range, so they must settle and reparse as a unit: settling only
+    /// part of the group would re-emit the earlier pieces on the next append.
+    #[test]
+    fn streamed_inline_images_do_not_duplicate_blocks() {
+        let source = "before ![a shot](https://example.com/x.png) after, and more prose.";
+        for chunk_size in [1, 3, 7] {
             let mut incremental = IncrementalParser::new();
             let mut built = String::new();
             let mut chars = source.chars().peekable();

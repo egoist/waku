@@ -26,8 +26,8 @@ pub(super) struct FileSearch {
     /// empty string when the list must not be trusted, e.g. after a session
     /// switch swapped every editor out from under it.
     path: String,
-    query: Entity<ComposerInput>,
-    replace: Entity<ComposerInput>,
+    query: Entity<TextInput>,
+    replace: Entity<TextInput>,
     replace_visible: bool,
     case_sensitive: bool,
     whole_word: bool,
@@ -230,7 +230,7 @@ impl Waku {
     }
 
     /// The editor entity the open search operates on.
-    fn file_search_editor(&self) -> Option<Entity<ComposerInput>> {
+    fn file_search_editor(&self) -> Option<Entity<TextInput>> {
         let search = self.file_search.as_ref().filter(|search| search.open)?;
         self.right_panel_file_editors
             .get(&search.path)
@@ -242,28 +242,25 @@ impl Waku {
             return;
         }
         let query = cx.new(|cx| {
-            ComposerInput::new(window, cx)
-                .search_field()
+            TextInput::new(window, cx)
                 .placeholder(tr!("input.find"))
         });
         cx.subscribe(
             &query,
-            |this: &mut Self, _, event: &ComposerEvent, cx| match event {
-                ComposerEvent::Edited => this.refresh_file_search(SearchRefresh::Query, cx),
-                ComposerEvent::Submit(_) => this.file_search_navigate(false, cx),
-                ComposerEvent::SubmitSteer(_) => {}
-                ComposerEvent::Focus => {}
-                ComposerEvent::BackspaceOnEmpty => {}
+            |this: &mut Self, _, event: &InputEvent, cx| match event {
+                InputEvent::Edited => this.refresh_file_search(SearchRefresh::Query, cx),
+                InputEvent::Submit(_) => this.file_search_navigate(false, cx),
+                InputEvent::Focus => {}
+                InputEvent::BackspaceOnEmpty => {}
             },
         )
         .detach();
         let replace = cx.new(|cx| {
-            ComposerInput::new(window, cx)
-                .search_field()
+            TextInput::new(window, cx)
                 .placeholder(tr!("input.replace"))
         });
-        cx.subscribe(&replace, |this: &mut Self, _, event: &ComposerEvent, cx| {
-            if matches!(event, ComposerEvent::Submit(_)) {
+        cx.subscribe(&replace, |this: &mut Self, _, event: &InputEvent, cx| {
+            if matches!(event, InputEvent::Submit(_)) {
                 this.file_search_replace_current(cx);
             }
         })
@@ -500,7 +497,7 @@ impl Waku {
     /// land a line off; the next navigation corrects it.
     fn reveal_file_search_match(
         &self,
-        editor: &Entity<ComposerInput>,
+        editor: &Entity<TextInput>,
         offset: usize,
         cx: &Context<Self>,
     ) {
@@ -855,7 +852,7 @@ impl Waku {
                 div()
                     .min_w(px(56.0))
                     .flex_none()
-                    .text_size(px(10.5))
+                    .text_size(sp(10.5))
                     .whitespace_nowrap()
                     .text_color(if count_is_bad {
                         theme.danger
@@ -1008,7 +1005,7 @@ impl Waku {
     fn find_input_box(
         &self,
         id: &'static str,
-        input: &Entity<ComposerInput>,
+        input: &Entity<TextInput>,
         width: f32,
         invalid: bool,
         window: &Window,
@@ -1036,8 +1033,8 @@ impl Waku {
             .flex()
             .items_center()
             .gap(px(2.0))
-            .text_size(px(11.5))
-            .line_height(px(16.0))
+            .text_size(sp(11.5))
+            .line_height(sp(16.0))
             .child(div().min_w_0().flex_1().child(input.clone()))
     }
 }

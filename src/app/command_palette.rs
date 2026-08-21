@@ -26,7 +26,7 @@ actions!(
     ]
 );
 
-const SEARCH_CONTEXT: &str = "CommandPalette > ComposerInput";
+const SEARCH_CONTEXT: &str = "CommandPalette > TextInput";
 const MAX_TASK_RESULTS: usize = 12;
 const MESSAGE_SEARCH_LIMIT: usize = 50;
 const MESSAGE_SEARCH_CACHE_CAPACITY: usize = 24;
@@ -56,7 +56,10 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("pagedown", SelectPageDown, Some(SEARCH_CONTEXT)),
         KeyBinding::new("pageup", SelectPageUp, Some(SEARCH_CONTEXT)),
         KeyBinding::new("enter", Confirm, Some(SEARCH_CONTEXT)),
-        KeyBinding::new("escape", Dismiss, Some(SEARCH_CONTEXT)),
+        // Bound at the palette, not the field: the query field's own
+        // clear-on-escape outranks this (deeper context) while it has text,
+        // and an empty field propagates the keystroke down to it.
+        KeyBinding::new("escape", Dismiss, Some("CommandPalette")),
     ]);
 }
 
@@ -275,7 +278,7 @@ fn command_palette_results_height(results: &[CommandPaletteItem], show_empty_sta
 }
 
 pub(super) struct CommandPaletteUi {
-    search: Entity<ComposerInput>,
+    search: Entity<TextInput>,
     open: bool,
     focus_generation: u64,
     previous_focus: Option<FocusHandle>,
@@ -291,7 +294,7 @@ pub(super) struct CommandPaletteUi {
 }
 
 impl CommandPaletteUi {
-    pub(super) fn new(search: Entity<ComposerInput>) -> Self {
+    pub(super) fn new(search: Entity<TextInput>) -> Self {
         Self {
             search,
             open: false,
@@ -992,7 +995,7 @@ impl Waku {
                     .child(
                         div()
                             .mt(px(12.0))
-                            .text_size(px(13.0))
+                            .text_size(sp(13.0))
                             .font_weight(FontWeight::MEDIUM)
                             .text_color(theme.text_secondary)
                             .child(tr!("command_palette.no_results")),
@@ -1000,7 +1003,7 @@ impl Waku {
                     .child(
                         div()
                             .mt(px(5.0))
-                            .text_size(px(11.5))
+                            .text_size(sp(11.5))
                             .text_color(theme.text_tertiary)
                             .child(tr!("command_palette.no_results_hint")),
                     ),
@@ -1016,7 +1019,7 @@ impl Waku {
                             .pt(px(10.0))
                             .flex()
                             .items_center()
-                            .text_size(px(11.0))
+                            .text_size(sp(11.0))
                             .font_weight(FontWeight::MEDIUM)
                             .text_color(theme.text_tertiary)
                             .child(item.section.label()),
@@ -1091,7 +1094,7 @@ impl Waku {
                                             div()
                                                 .min_w_0()
                                                 .truncate()
-                                                .text_size(px(14.0))
+                                                .text_size(sp(14.0))
                                                 .font_weight(if highlighted {
                                                     FontWeight::MEDIUM
                                                 } else {
@@ -1109,7 +1112,7 @@ impl Waku {
                                                 div()
                                                     .min_w_0()
                                                     .truncate()
-                                                    .text_size(px(11.5))
+                                                    .text_size(sp(11.5))
                                                     .text_color(theme.text_tertiary)
                                                     .child(detail),
                                             )
@@ -1122,7 +1125,7 @@ impl Waku {
                                             .w_full()
                                             .overflow_hidden()
                                             .whitespace_nowrap()
-                                            .text_size(px(11.5))
+                                            .text_size(sp(11.5))
                                             .child(palette_content_match_text(
                                                 &matched,
                                                 &search_query,
@@ -1144,7 +1147,7 @@ impl Waku {
                                     .items_center()
                                     .justify_center()
                                     .bg(theme.overlay_strong)
-                                    .text_size(px(11.5))
+                                    .text_size(sp(11.5))
                                     .text_color(theme.text_tertiary)
                                     .child(shortcut),
                             )
@@ -1202,7 +1205,7 @@ impl Waku {
                         .items_center()
                         .border_b_1()
                         .border_color(theme.border)
-                        .text_size(px(15.5))
+                        .text_size(sp(15.5))
                         .text_color(theme.text)
                         .child(
                             div()

@@ -309,12 +309,14 @@ impl Render for Waku {
                         .flex_none()
                         .w(px(panels.sidebar))
                         .when(panels.sidebar_sliding, |element| element.overflow_hidden())
-                        .child(self.sidebar_pane.clone().cached(
-                            StyleRefinement::default()
-                                .w(px(panels.sidebar_content))
-                                .h_full()
-                                .flex_none(),
-                        )),
+                        .child(
+                            self.sidebar_pane.clone().cached(
+                                StyleRefinement::default()
+                                    .w(px(panels.sidebar_content))
+                                    .h_full()
+                                    .flex_none(),
+                            ),
+                        ),
                 )
             })
             .child(
@@ -334,9 +336,7 @@ impl Render for Waku {
                     } else {
                         self.transcript_pane
                             .clone()
-                            .cached(
-                                StyleRefinement::default().flex_1().min_h(px(0.0)).w_full(),
-                            )
+                            .cached(StyleRefinement::default().flex_1().min_h(px(0.0)).w_full())
                             .into_any_element()
                     })
                     .children(permission)
@@ -371,14 +371,16 @@ impl Render for Waku {
                         // Pinned to the window's right edge, so the panel is
                         // uncovered from that edge inward rather than dragged
                         // across the screen.
-                        .child(self.right_panel_pane.clone().cached(
-                            StyleRefinement::default()
-                                .absolute()
-                                .top_0()
-                                .right_0()
-                                .w(px(panels.right_panel_content))
-                                .h_full(),
-                        )),
+                        .child(
+                            self.right_panel_pane.clone().cached(
+                                StyleRefinement::default()
+                                    .absolute()
+                                    .top_0()
+                                    .right_0()
+                                    .w(px(panels.right_panel_content))
+                                    .h_full(),
+                            ),
+                        ),
                 )
             })
             .children(command_palette)
@@ -440,7 +442,7 @@ impl Waku {
         let text_ctx = MarkdownCtx::new(
             format!("toast-{generation}"),
             &palette,
-            MarkdownMetrics::COMPACT,
+            self.scaled_markdown_metrics(MarkdownMetrics::COMPACT),
             self.toast_selection.clone(),
         );
         let message = md::render::plain_text(
@@ -503,8 +505,8 @@ impl Waku {
                     .flex()
                     .items_center()
                     .gap(px(8.0))
-                    .text_size(px(11.5))
-                    .line_height(px(16.0))
+                    .text_size(sp(11.5))
+                    .line_height(sp(16.0))
                     .text_color(theme.text)
                     .on_hover(cx.listener(|this, hovering: &bool, _, cx| {
                         this.set_toast_hovered(*hovering, cx);

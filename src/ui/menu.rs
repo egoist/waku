@@ -30,7 +30,7 @@ use gpui::{
     AnyElement, App, Bounds, Display, Element, ElementId, FocusHandle, FontWeight, GlobalElementId,
     InspectorElementId, InteractiveElement, IntoElement, KeyDownEvent, LayoutId, MouseButton,
     MouseDownEvent, ParentElement, Pixels, Point, Position, RenderOnce, SharedString, Size, Style,
-    Styled, Window, actions, anchored, canvas, deferred, div, prelude::FluentBuilder, px,
+    Styled, Window, actions, anchored, canvas, deferred, div, img, prelude::FluentBuilder, px,
 };
 
 actions!(
@@ -58,7 +58,7 @@ const TRIGGER_GAP: f32 = 4.0;
 /// be claimed from under the focused field, and only a binding can do that:
 /// `enter`, `tab`, and the arrows reach the field as *actions*, and an action
 /// consumes the keystroke before any `on_key_down` listener above it ever runs.
-const PANEL_FIELD_CONTEXT: &str = "WakuMenu > ComposerInput";
+const PANEL_FIELD_CONTEXT: &str = "WakuMenu > TextInput";
 
 /// Bind the menu's own keys. Called once at startup.
 ///
@@ -77,7 +77,7 @@ pub fn init(cx: &mut App) {
     ]);
 }
 
-use crate::theme::Theme;
+use crate::theme::{Theme, sp};
 use crate::ui::icon;
 
 /// One row of a menu.
@@ -85,6 +85,9 @@ pub enum MenuItem {
     Entry {
         label: SharedString,
         icon: Option<&'static str>,
+        /// A full-color raster icon — a real app icon — where `icon` would
+        /// draw a tinted glyph.
+        image: Option<std::sync::Arc<gpui::Image>>,
         /// Draws a trailing check, for menus that present a current choice.
         selected: bool,
         /// Shown greyed and inert. Preferred over omitting the row when the
@@ -114,6 +117,7 @@ impl MenuItem {
         Self::Entry {
             label: label.into(),
             icon: None,
+            image: None,
             selected: false,
             disabled: false,
             on_click: Rc::new(on_click),
@@ -152,6 +156,13 @@ impl MenuItem {
     pub fn icon(mut self, path: &'static str) -> Self {
         if let Self::Entry { icon, .. } = &mut self {
             *icon = Some(path);
+        }
+        self
+    }
+
+    pub fn image(mut self, value: std::sync::Arc<gpui::Image>) -> Self {
+        if let Self::Entry { image, .. } = &mut self {
+            *image = Some(value);
         }
         self
     }
@@ -950,8 +961,8 @@ impl RenderOnce for MenuCard {
                     .px(px(10.0))
                     .pt(px(6.0))
                     .pb(px(2.0))
-                    .text_size(px(10.0))
-                    .line_height(px(14.0))
+                    .text_size(sp(10.0))
+                    .line_height(sp(14.0))
                     .font_weight(FontWeight::MEDIUM)
                     .text_color(theme.text_tertiary)
                     .child(label)
@@ -959,6 +970,7 @@ impl RenderOnce for MenuCard {
                 MenuItem::Entry {
                     label,
                     icon: item_icon,
+                    image,
                     selected,
                     disabled,
                     on_click,
@@ -979,6 +991,9 @@ impl RenderOnce for MenuCard {
                     .when(selected, |element| element.font_weight(FontWeight::MEDIUM))
                     .when_some(item_icon, |element, path| {
                         element.child(icon(path, 12.0, color))
+                    })
+                    .when_some(image, |element, image| {
+                        element.child(img(image).size(px(16.0)).flex_none())
                     })
                     .child(div().flex_1().min_w_0().truncate().child(label))
                     .when(selected, |element| {
@@ -1030,8 +1045,8 @@ fn row(
         .flex()
         .items_center()
         .gap(px(8.0))
-        .text_size(px(11.5))
-        .line_height(px(15.0))
+        .text_size(sp(11.5))
+        .line_height(sp(15.0))
         .when(highlighted, |element| element.bg(highlight))
         .when_some(on_click, |element, on_click| {
             element

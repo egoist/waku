@@ -51,7 +51,7 @@ What differs is how the title reaches that event:
 
 1. **Pushed on the provider's own stream.** The agent sends a title event and
    the driver forwards it. Nothing to poll, nothing to schedule. OpenCode, Pi,
-   DeepSeek, and Codex's native paths work this way.
+   Oh My Pi, Kimi Code, DeepSeek, and Codex's native paths work this way.
 2. **Polled from a native store.** The agent writes the title to disk (or to a
    store reachable by CLI) but never puts it on the wire. The driver polls with
    [`NativeTitleRefresh`](../crates/waku-core/src/driver/title_refresh.rs) on a
@@ -80,8 +80,10 @@ title near when the provider writes it, and long enough to survive a slow start.
 | Amp | Amp | `amp threads list --json` subprocess | poll at turn end | [title_refresh.rs:53](../crates/waku-core/src/driver/title_refresh.rs#L53) |
 | Grok Build | Grok | `summary.json` on disk | poll at turn end | [title_refresh.rs:53](../crates/waku-core/src/driver/title_refresh.rs#L53) |
 | OpenCode | OpenCode | SSE stream | `session.updated` | [opencode.rs:894](../crates/waku-core/src/driver/opencode.rs#L894) |
-| Pi | Pi | NDJSON stream | connect, `session_info_changed` | [pi.rs:305](../crates/waku-core/src/driver/pi.rs#L305), [pi.rs:852](../crates/waku-core/src/driver/pi.rs#L852) |
+| Pi | Pi | NDJSON stream | connect, `session_info_changed` | [pi.rs:472](../crates/waku-core/src/driver/pi.rs#L472), [pi.rs:1214](../crates/waku-core/src/driver/pi.rs#L1214) |
+| Oh My Pi | Oh My Pi | NDJSON stream | connect, `session_info_update` | [pi.rs:472](../crates/waku-core/src/driver/pi.rs#L472), [pi.rs:1214](../crates/waku-core/src/driver/pi.rs#L1214) |
 | DeepSeek | Harness | stream + projections | `session/title`, projection replay | [deepseek.rs:782](../crates/waku-core/src/driver/deepseek.rs#L782), [deepseek.rs:1139](../crates/waku-core/src/driver/deepseek.rs#L1139) |
+| Kimi Code | Kimi (placeholder) | ACP stream | `session_info_update` | [acp.rs:1305](../crates/waku-core/src/driver/acp.rs#L1305) |
 | Cursor CLI | — | — | — | none; fallback only |
 
 ### Claude Code
@@ -197,20 +199,38 @@ All three push titles on their own streams, so there is nothing to schedule.
   with `"New session - "` are dropped ([opencode.rs:892](../crates/waku-core/src/driver/opencode.rs#L892)):
   that is OpenCode's own placeholder, and letting it through would replace
   Waku's prompt fallback with something strictly less useful.
-- **Pi** — `/data/sessionName` at connect, then `session_info_changed`. Pi may
-  send an empty name, which becomes `AutoTitleUpdated(None)` and clears the
-  title back to the fallback.
+- **Pi and Oh My Pi** — `/data/sessionName` at connect, then the stream event.
+  The connect read is shared, but the event is not: Pi sends
+  `session_info_changed` with the title under `name`, Oh My Pi sends
+  `session_info_update` with it under `title`, and `PiFlavor` resolves both
+  ([pi.rs:69](../crates/waku-core/src/driver/pi.rs#L69)). Either may send an
+  empty value, which becomes `AutoTitleUpdated(None)` and clears the title back
+  to the fallback.
 - **DeepSeek** — the Harness `session/title` event, plus a `title` projection
   replayed from history at connect, so a reattached session gets its title
   without waiting for a new one.
 
+### Kimi Code
+
+Kimi is the first provider to actually exercise the generic ACP
+`session_info_update` handler
+([acp.rs:1305](../crates/waku-core/src/driver/acp.rs#L1305)): it emits one at
+the start of the first turn and Waku forwards the `title` as `AutoTitleUpdated`,
+no polling and no extra process.
+
+What it sends, though, is **the first prompt verbatim** — the same content as
+Waku's own fallback, arriving through a different door. Kimi files it in its
+session state as `titleKind: "replaceable"`, so it treats the prompt as a
+placeholder it may overwrite later; no model-generated replacement has been
+observed yet, and every failed turn keeps the placeholder. Nothing is lost
+either way — the fallback would have shown the same words — but do not read a
+Kimi title as evidence that an agent summarized anything.
+
 ### Cursor
 
 Cursor has no title path. It shows the truncated-prompt fallback for the life
-of the session. The generic ACP `session_info_update` handler at
-[acp.rs:1259](../crates/waku-core/src/driver/acp.rs#L1259) would forward a
-`title` key if the agent sent one, but there is no evidence in the protocol
-traffic that it does.
+of the session. It shares the `session_info_update` handler Kimi uses, but there
+is no evidence in Cursor's protocol traffic that it ever sends one.
 
 ## Adding a provider
 

@@ -528,7 +528,7 @@ fn perform_provider_rewind(
                 .cursor;
             Ok((Some(cursor), None, None))
         }
-        ProviderKind::Codex | ProviderKind::DeepSeek | ProviderKind::Pi => {
+        ProviderKind::Codex | ProviderKind::DeepSeek | ProviderKind::OhMyPi | ProviderKind::Pi => {
             let mut prepared_driver = None;
             let driver = if let Some(driver) = request.driver.as_ref() {
                 driver.clone()
@@ -547,6 +547,12 @@ fn perform_provider_rewind(
             let cursor = driver.rollback(request.rollback_turns)?;
             Ok((cursor, None, prepared_driver))
         }
+        // Unreachable through the UI, which hides rewinding for providers that
+        // answer `supports_conversation_rollback` with false.
+        ProviderKind::Kimi => Err(anyhow::anyhow!(tr!(
+            "errors.provider_turn_branching_unsupported",
+            provider = "Kimi Code"
+        ))),
     }
 }
 
@@ -808,11 +814,36 @@ fn perform_response_fork(mut request: ResponseForkRequest) -> Result<PreparedRes
                         ..
                     })
                 ) {
-                    anyhow::bail!(tr!("errors.pi_session_file_unavailable"));
+                    anyhow::bail!(tr!(
+                        "errors.provider_session_file_unavailable",
+                        provider = "Pi"
+                    ));
                 }
                 let (cursor, prepared_driver) = fork_response_with_driver(&mut request)?;
                 Ok((cursor, None, prepared_driver))
             }
+            ProviderKind::OhMyPi => {
+                if !matches!(
+                    request.source.provider_cursor.as_ref(),
+                    Some(ProviderResumeCursor::OhMyPi {
+                        session_file: Some(_),
+                        ..
+                    })
+                ) {
+                    anyhow::bail!(tr!(
+                        "errors.provider_session_file_unavailable",
+                        provider = "Oh My Pi"
+                    ));
+                }
+                let (cursor, prepared_driver) = fork_response_with_driver(&mut request)?;
+                Ok((cursor, None, prepared_driver))
+            }
+            // Unreachable through the UI, which hides branching for providers
+            // that answer `supports_conversation_fork` with false.
+            ProviderKind::Kimi => anyhow::bail!(tr!(
+                "errors.provider_turn_branching_unsupported",
+                provider = "Kimi Code"
+            )),
         }
     })();
 
@@ -1489,6 +1520,23 @@ impl Waku {
                 .is_some_and(|probe| probe.installed)
     }
 
+    /// Whether the model picker has no provider left to offer — nothing
+    /// detected on this machine, or everything switched off — so the
+    /// composer's trigger, the picker panel, and the send button all swap to
+    /// their unavailable state.
+    pub(super) fn model_picker_has_no_providers(&self) -> bool {
+        let locked_provider = self
+            .selected_session()
+            .filter(|session| !session.messages.is_empty())
+            .map(|session| session.provider);
+        super::composer::picker_has_no_providers(
+            &self.probes,
+            &self.state.disabled_providers,
+            locked_provider,
+            self.provider_detection_checked_at.is_some(),
+        )
+    }
+
     pub(super) fn model_for_session<'a>(&'a self, session: &'a AgentSession) -> Option<&'a str> {
         session.model.as_deref().or_else(|| {
             self.provider_probe(session.provider)
@@ -1813,7 +1861,7 @@ impl Waku {
         }
         let driver_start = if matches!(
             provider,
-            ProviderKind::Codex | ProviderKind::DeepSeek | ProviderKind::Pi
+            ProviderKind::Codex | ProviderKind::DeepSeek | ProviderKind::OhMyPi | ProviderKind::Pi
         ) && driver.is_none()
         {
             match self.driver_start_request_for_session(&source, source_workspace_path.clone()) {
@@ -1877,10 +1925,10 @@ impl Waku {
         } = match result {
             Ok(prepared) => prepared,
             Err(error) => {
-                if provider == ProviderKind::Pi {
-                    // A failed restore after Pi creates a fork can leave the
-                    // resident RPC process on that fork. Recreate it lazily
-                    // from the source cursor on its next prompt.
+                if matches!(provider, ProviderKind::Pi | ProviderKind::OhMyPi) {
+                    // A failed restore after one of these creates a fork can
+                    // leave the resident RPC process on that fork. Recreate it
+                    // lazily from the source cursor on its next prompt.
                     if let Some(runtime) = self.runtimes.remove(&session_id) {
                         runtime.driver.close();
                     }
@@ -1934,7 +1982,7 @@ impl Waku {
             let _ = waku.update(cx, |waku, cx| {
                 if waku.state.selected_session == Some(session_id) {
                     composer.update(cx, |input, cx| {
-                        if input.content().is_empty() {
+                        if input.content(cx).is_empty() {
                             input.set_content(prompt, cx);
                         }
                     });
@@ -1992,7 +2040,7 @@ impl Waku {
             return;
         };
 
-        let input = cx.new(|cx| ComposerInput::new(window, cx).padding_x(px(12.0)));
+        let input = cx.new(|cx| ComposerInput::new(window, cx).padding_x(px(12.0), cx));
         input.update(cx, |input, cx| input.set_content(initial_message, cx));
         cx.subscribe(
             &input,
@@ -2054,7 +2102,7 @@ impl Waku {
         let prompt = self
             .message_edit
             .as_ref()
-            .map(|edit| edit.input.read(cx).content().to_owned())
+            .map(|edit| edit.input.read(cx).content(cx).to_owned())
             .unwrap_or_default();
         self.submit_message_edit_prompt(prompt, cx);
     }
@@ -2185,7 +2233,10 @@ impl Waku {
         let driver_start = if rollback_turns > 0
             && matches!(
                 source.provider,
-                ProviderKind::Codex | ProviderKind::DeepSeek | ProviderKind::Pi
+                ProviderKind::Codex
+                    | ProviderKind::DeepSeek
+                    | ProviderKind::OhMyPi
+                    | ProviderKind::Pi
             )
             && driver.is_none()
         {
@@ -2526,7 +2577,7 @@ impl Waku {
 
     /// Releases provider processes for sessions nobody has touched in a while.
     ///
-    /// Codex and Pi keep a process resident between turns, so an abandoned task
+    /// Codex, Pi and Oh My Pi keep a process resident between turns, so an abandoned task
     /// otherwise holds an agent — and, with Computer Use on, a whole process
     /// tree — for as long as the app runs. Recreating a runtime is exactly the
     /// work the next prompt already does after Stop, and the resume cursor is

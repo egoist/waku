@@ -201,18 +201,23 @@ pub fn show_task_notification(tag: &str, title: &str, body: &str, cx: &gpui::App
 }
 
 #[cfg(target_os = "macos")]
-pub fn load_app_icon_for_bundle_id(bundle_id: &str) -> Option<std::sync::Arc<gpui::Image>> {
+fn app_icon_for_application_path(
+    application_path: &objc2_foundation::NSString,
+) -> Option<std::sync::Arc<gpui::Image>> {
+    use objc2::AnyThread;
     use objc2_app_kit::{NSBitmapImageFileType, NSBitmapImageRep, NSWorkspace};
-    use objc2_foundation::{NSDictionary, NSSize, NSString};
+    use objc2_foundation::{NSDictionary, NSPoint, NSRect, NSSize};
 
-    let bundle_id = NSString::from_str(bundle_id);
-    let workspace = NSWorkspace::sharedWorkspace();
-    let application_url = workspace.URLForApplicationWithBundleIdentifier(&bundle_id)?;
-    let application_path = application_url.path()?;
-    let image = workspace.iconForFile(&application_path);
+    let image = NSWorkspace::sharedWorkspace().iconForFile(application_path);
     image.setSize(NSSize::new(32.0, 32.0));
-    let tiff_data = image.TIFFRepresentation()?;
-    let bitmap_rep = NSBitmapImageRep::imageRepWithData(&tiff_data)?;
+    // Extract one small representation. `TIFFRepresentation` would serialize
+    // the icon's entire rep stack — ~72 MB and hundreds of milliseconds per
+    // app for a 1024px icon — and then hand GPUI a 1024px PNG to decode on
+    // first paint. Proposing a 32pt rect selects the nearest small rep.
+    let mut proposed = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(32.0, 32.0));
+    let cg_image =
+        unsafe { image.CGImageForProposedRect_context_hints(&mut proposed, None, None) }?;
+    let bitmap_rep = NSBitmapImageRep::initWithCGImage(NSBitmapImageRep::alloc(), &cg_image);
     let properties = NSDictionary::new();
     let png_data = unsafe {
         bitmap_rep.representationUsingType_properties(NSBitmapImageFileType::PNG, &properties)
@@ -226,10 +231,107 @@ pub fn load_app_icon_for_bundle_id(bundle_id: &str) -> Option<std::sync::Arc<gpu
     })
 }
 
+#[cfg(target_os = "macos")]
+pub fn load_app_icon_for_bundle_id(bundle_id: &str) -> Option<std::sync::Arc<gpui::Image>> {
+    use objc2_app_kit::NSWorkspace;
+    use objc2_foundation::NSString;
+
+    let bundle_id = NSString::from_str(bundle_id);
+    let application_url =
+        NSWorkspace::sharedWorkspace().URLForApplicationWithBundleIdentifier(&bundle_id)?;
+    let application_path = application_url.path()?;
+    app_icon_for_application_path(&application_path)
+}
+
 #[cfg(not(target_os = "macos"))]
 pub fn load_app_icon_for_bundle_id(_: &str) -> Option<std::sync::Arc<gpui::Image>> {
     None
 }
+
+/// A folder-capable application the header's "open project in" control can
+/// target, resolved against what is installed on this machine.
+#[derive(Clone)]
+pub struct ExternalApp {
+    /// Stable identifier persisted as the user's preferred target.
+    pub id: &'static str,
+    pub label: &'static str,
+    /// The bundle id that resolved here, for launching.
+    pub bundle_id: &'static str,
+    pub icon: std::sync::Arc<gpui::Image>,
+}
+
+/// Known folder-capable apps in menu order — editors, the file manager,
+/// terminals, IDEs. An entry lists every bundle id it ships under; the first
+/// installed one wins.
+#[cfg(target_os = "macos")]
+const OPEN_IN_CATALOG: &[(&str, &str, &[&str])] = &[
+    ("vscode", "VS Code", &["com.microsoft.VSCode"]),
+    ("cursor", "Cursor", &["com.todesktop.230313mzl4w4u92"]),
+    ("zed", "Zed", &["dev.zed.Zed", "dev.zed.Zed-Preview"]),
+    ("finder", "Finder", &["com.apple.finder"]),
+    ("terminal", "Terminal", &["com.apple.Terminal"]),
+    ("iterm2", "iTerm2", &["com.googlecode.iterm2"]),
+    ("kitty", "Kitty", &["net.kovidgoyal.kitty"]),
+    ("ghostty", "Ghostty", &["com.mitchellh.ghostty"]),
+    ("warp", "Warp", &["dev.warp.Warp-Stable", "dev.warp.Warp"]),
+    ("xcode", "Xcode", &["com.apple.dt.Xcode"]),
+    ("android-studio", "Android Studio", &["com.google.android.studio"]),
+];
+
+/// Resolve which catalog apps are installed, with their icons.
+#[cfg(target_os = "macos")]
+pub fn detect_open_in_apps() -> Vec<ExternalApp> {
+    use objc2_app_kit::NSWorkspace;
+    use objc2_foundation::NSString;
+
+    let workspace = NSWorkspace::sharedWorkspace();
+    OPEN_IN_CATALOG
+        .iter()
+        .filter_map(|&(id, label, bundle_ids)| {
+            bundle_ids.iter().find_map(|&bundle_id| {
+                let application_url = workspace
+                    .URLForApplicationWithBundleIdentifier(&NSString::from_str(bundle_id))?;
+                let application_path = application_url.path()?;
+                Some(ExternalApp {
+                    id,
+                    label,
+                    bundle_id,
+                    icon: app_icon_for_application_path(&application_path)?,
+                })
+            })
+        })
+        .collect()
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn detect_open_in_apps() -> Vec<ExternalApp> {
+    Vec::new()
+}
+
+/// Open `path` in the application `bundle_id`, activating it. Launch Services
+/// delivers the open asynchronously, so this never blocks.
+#[cfg(target_os = "macos")]
+pub fn open_path_in_app(path: &std::path::Path, bundle_id: &str) {
+    use objc2_app_kit::{NSWorkspace, NSWorkspaceOpenConfiguration};
+    use objc2_foundation::{NSArray, NSString, NSURL};
+
+    let workspace = NSWorkspace::sharedWorkspace();
+    let Some(application_url) =
+        workspace.URLForApplicationWithBundleIdentifier(&NSString::from_str(bundle_id))
+    else {
+        return;
+    };
+    let url = NSURL::fileURLWithPath(&NSString::from_str(&path.to_string_lossy()));
+    workspace.openURLs_withApplicationAtURL_configuration_completionHandler(
+        &NSArray::from_retained_slice(&[url]),
+        &application_url,
+        &NSWorkspaceOpenConfiguration::configuration(),
+        None,
+    );
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn open_path_in_app(_: &std::path::Path, _: &str) {}
 
 /// Select `path` in the platform file manager. GPUI dispatches Linux portal
 /// and subprocess work away from the UI thread.

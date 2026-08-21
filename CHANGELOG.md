@@ -16,6 +16,18 @@ the original feature bullet instead of adding separate entries for them.
 
 ## [unreleased]
 
+## [0.1.11]
+
+- Highlight Markdown in the file editor, and toggle between source and a rendered preview
+- Add UI and code font size settings
+- macOS: Add "Open in.." button to open project folder in selected application
+
+## [0.1.10]
+
+- Add Kimi Code support
+- Add Oh My Pi support
+- Fix markdown table rendering
+
 ## [0.1.8]
 
 - Fix `PATH` resolution on Windows

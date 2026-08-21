@@ -219,8 +219,8 @@ fn render_message_footer(
         .px(px(4.0))
         .flex()
         .items_center()
-        .text_size(px(11.5))
-        .line_height(px(14.0))
+        .text_size(sp(11.5))
+        .line_height(sp(14.0))
         .text_color(footer_color)
         .child(format_message_time(footer_time));
     let copy_button = div()
@@ -494,7 +494,7 @@ fn render_sent_message_attachments(
                             .w_full()
                             .truncate()
                             .text_center()
-                            .text_size(px(9.5))
+                            .text_size(sp(9.5))
                             .text_color(theme.text_secondary)
                             .child(attachment.name.clone()),
                     ),
@@ -590,7 +590,7 @@ pub(super) fn render_message(params: MessageRender, cx: &mut App) -> AnyElement 
                 column = column.child(attachments);
             }
             if let Some(edit_input) = message_edit_input {
-                let can_submit = !edit_input.read(cx).content().trim().is_empty()
+                let can_submit = !edit_input.read(cx).content(cx).trim().is_empty()
                     || !message.attachments.is_empty();
                 let cancel_waku = waku.clone();
                 let submit_waku = waku.clone();
@@ -623,7 +623,7 @@ pub(super) fn render_message(params: MessageRender, cx: &mut App) -> AnyElement 
                                         .bg(theme.overlay)
                                         .flex()
                                         .items_center()
-                                        .text_size(px(11.5))
+                                        .text_size(sp(11.5))
                                         .text_color(theme.text_secondary)
                                         .cursor_default()
                                         .hover(|element| element.bg(theme.overlay_strong))
@@ -649,7 +649,7 @@ pub(super) fn render_message(params: MessageRender, cx: &mut App) -> AnyElement 
                                         })
                                         .flex()
                                         .items_center()
-                                        .text_size(px(11.5))
+                                        .text_size(sp(11.5))
                                         .font_weight(FontWeight::MEDIUM)
                                         .text_color(if can_submit {
                                             theme.on_inverse
@@ -683,8 +683,8 @@ pub(super) fn render_message(params: MessageRender, cx: &mut App) -> AnyElement 
                             .bg(theme.raised)
                             .px(px(12.0))
                             .py(px(8.0))
-                            .text_size(px(14.0))
-                            .line_height(px(20.0))
+                            .text_size(sp(14.0))
+                            .line_height(sp(20.0))
                             .child(body),
                     );
                 }
@@ -740,8 +740,8 @@ pub(super) fn render_message(params: MessageRender, cx: &mut App) -> AnyElement 
                 .py(px(4.0))
                 .rounded_full()
                 .bg(theme.overlay)
-                .text_size(px(11.0))
-                .line_height(px(16.0))
+                .text_size(sp(11.0))
+                .line_height(sp(16.0))
                 .child(md::render::plain_text(
                     content.clone(),
                     md::render::SANS_FAMILY,

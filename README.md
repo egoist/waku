@@ -33,6 +33,7 @@ Waku works with:
 - Codex CLI
 - Cursor CLI
 - Grok Build
+- Kimi Code
 - OpenCode
 - Pi
 

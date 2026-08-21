@@ -421,9 +421,8 @@ fn merge_windows_environment(mut environment: ShellEnvironment) -> Option<ShellE
         }
     }
     let mut seen = HashSet::new();
-    directories.retain(|directory| {
-        seen.insert(directory.as_os_str().to_string_lossy().to_lowercase())
-    });
+    directories
+        .retain(|directory| seen.insert(directory.as_os_str().to_string_lossy().to_lowercase()));
     if directories.is_empty() {
         return None;
     }
@@ -1101,8 +1100,16 @@ mod tests {
             ]
         );
         assert!(environment.contains(&(OsString::from("FNM_DIR"), OsString::from("C:\\fnm"))));
-        assert!(!environment.iter().any(|(name, _)| name == OsStr::new("WAKU_USER_PATH")));
-        assert!(!environment.iter().any(|(name, _)| name == OsStr::new("WAKU_MACHINE_PATH")));
+        assert!(
+            !environment
+                .iter()
+                .any(|(name, _)| name == OsStr::new("WAKU_USER_PATH"))
+        );
+        assert!(
+            !environment
+                .iter()
+                .any(|(name, _)| name == OsStr::new("WAKU_MACHINE_PATH"))
+        );
     }
 
     #[cfg(windows)]
@@ -1216,5 +1223,3 @@ mod tests {
         let _ = fs::remove_dir(directory);
     }
 }
-
-

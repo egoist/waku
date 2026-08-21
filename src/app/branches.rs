@@ -202,6 +202,22 @@ impl Waku {
         cx.notify();
     }
 
+    /// Escape from the create form: back to browsing with the filter
+    /// refocused — the reverse of [`begin_branch_creation`], with the same
+    /// double-frame focus dance because the search field only exists once
+    /// the browse body has rendered.
+    ///
+    /// [`begin_branch_creation`]: Self::begin_branch_creation
+    pub(super) fn cancel_branch_creation(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.branch_picker_mode = BranchPickerMode::Browse;
+        self.branch_picker_highlight = None;
+        let focus = self.branch_search.read(cx).focus_handle(cx);
+        window.on_next_frame(move |window, _| {
+            window.on_next_frame(move |window, cx| window.focus(&focus, cx));
+        });
+        cx.notify();
+    }
+
     pub(super) fn confirm_branch_creation(&mut self, cx: &mut Context<Self>) -> bool {
         if self.branch_picker_mode != BranchPickerMode::Create || self.branch_operation_pending {
             return false;

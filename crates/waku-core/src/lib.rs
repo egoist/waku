@@ -35,6 +35,7 @@ pub mod git_commit;
 pub mod grok_session;
 pub mod i18n;
 pub mod identity;
+pub mod kimi_session;
 pub mod model;
 pub mod model_catalog;
 pub mod opencode_pool;

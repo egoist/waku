@@ -323,6 +323,39 @@ fn agent_arguments(
             }
             return args;
         }
+        // Kimi carries the prompt as `--prompt`'s value rather than a trailing
+        // positional, so it returns early. It has no tool or session switches
+        // to turn off; the commit prompt is what forbids tool use.
+        ProviderKind::Kimi => {
+            push(&mut args, "--prompt");
+            push(&mut args, prompt);
+            push(&mut args, "--output-format");
+            push(&mut args, "text");
+            if let Some(model) = model {
+                push(&mut args, "--model");
+                push(&mut args, model);
+            }
+            return args;
+        }
+        // Oh My Pi rejects unknown flags outright, so it gets its own list
+        // rather than Pi's: context files are `--no-rules`, and it has no
+        // prompt-template or project-trust switch to turn off.
+        ProviderKind::OhMyPi => {
+            push(&mut args, "--print");
+            push(&mut args, "--no-session");
+            push(&mut args, "--no-tools");
+            push(&mut args, "--no-rules");
+            push(&mut args, "--no-extensions");
+            push(&mut args, "--no-skills");
+            if let Some(model) = model {
+                push(&mut args, "--model");
+                push(&mut args, model);
+            }
+            if let Some(effort) = reasoning_effort {
+                push(&mut args, "--thinking");
+                push(&mut args, effort);
+            }
+        }
         ProviderKind::Pi => {
             push(&mut args, "--print");
             push(&mut args, "--no-session");
@@ -744,6 +777,18 @@ mod tests {
                     assert!(has(&args, "--no-session"));
                     assert!(has(&args, "--no-tools"));
                     assert!(has_pair(&args, "--thinking", "low"));
+                }
+                ProviderKind::OhMyPi => {
+                    assert!(has(&args, "--print"));
+                    assert!(has(&args, "--no-session"));
+                    assert!(has(&args, "--no-tools"));
+                    assert!(has(&args, "--no-rules"));
+                    assert!(has_pair(&args, "--thinking", "low"));
+                }
+                ProviderKind::Kimi => {
+                    assert!(has_pair(&args, "--prompt", prompt));
+                    assert!(has_pair(&args, "--output-format", "text"));
+                    assert!(has_pair(&args, "--model", "model"));
                 }
             }
         }

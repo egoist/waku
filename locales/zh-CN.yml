@@ -58,7 +58,7 @@ settings.usage: 用量
 settings.daemon: 守护进程
 settings.computer_use: 电脑操作
 settings.general_keywords: 通用 本地 项目 对话 隐私 匿名 使用数据 分析 分享 更新 自动 版本
-settings.appearance_keywords: 外观 主题 系统 浅色 深色 语言 英语 中文 简体
+settings.appearance_keywords: 外观 主题 系统 浅色 深色 语言 英语 中文 简体 字号 字体 大小 编辑器
 settings.providers_keywords: 服务商 智能体 模型 命令行 版本 安装 检测 claude codex cursor opencode amp grok pi
 settings.skills: 技能
 settings.skills_keywords: 技能 技能库 智能体 禁用 启用 删除 claude codex cursor opencode pi amp 共享
@@ -134,6 +134,10 @@ web.error_secure_websocket_required: 安全的 Waku Web 页面只能通过 wss:/
 web.error_daemon_token_required: 请输入守护进程令牌
 settings.theme: 主题
 settings.theme_description: 选择跟随系统、浅色或深色主题
+settings.ui_font_size: 界面字号
+settings.ui_font_size_description: 整个界面与消息的文字大小
+settings.code_font_size: 代码字号
+settings.code_font_size_description: 文件编辑器、差分视图、代码块与工具输出的文字大小
 settings.theme_system: 跟随系统
 settings.theme_light: 浅色
 settings.theme_dark: 深色
@@ -420,10 +424,15 @@ permission.agent_asks_for_permission: 智能体正在请求权限
 permission.agent_wants_to: 智能体想要执行 %{action}
 common.close: 关闭
 common.default: 默认
+composer.no_providers: 请安装或启用一个服务商后再发送
 models.none_found: 未找到模型
 models.favorite_hint: 为模型加星标即可固定在这里
 models.loading: 正在加载模型…
 models.none_reported: 此服务商未提供任何模型
+models.no_providers: 无可用服务商
+models.no_providers_title: 没有可用的服务商
+models.no_providers_description: 请安装一个智能体 CLI，或在服务商设置中重新启用。
+models.open_provider_settings: 打开服务商设置
 models.choose: 选择模型
 models.favorites: 收藏
 models.add_favorite: 添加到收藏
@@ -575,7 +584,8 @@ errors.provider_not_installed: "尚未安装 %{provider}"
 errors.provider_not_found: "尚未安装 %{provider}，或无法找到该程序"
 errors.claude_fork_checkpoint_missing: Claude 未返回派生任务所需的检查点
 errors.claude_turn_checkpoint_unavailable: "Claude 中该轮任务的原生检查点不可用：%{error}"
-errors.pi_session_file_unavailable: Pi 的原生会话文件不可用
+errors.provider_session_file_unavailable: "%{provider} 的原生会话文件不可用"
+errors.provider_turn_branching_unsupported: "%{provider} 无法在指定轮次回退或分支对话"
 errors.fork_task: "无法派生任务：%{error}"
 errors.create_rewind_snapshot: "无法创建回退前的安全快照：%{error}"
 errors.restore_checkpoint: "无法恢复检查点：%{error}"
@@ -631,7 +641,7 @@ errors.provider_stopped_receiving: "%{provider} 已停止接收消息"
 errors.provider_initialize_session: "%{provider} 未能初始化此任务"
 errors.provider_rejected_prompt: "%{provider} 在开始处理前拒绝了消息"
 errors.provider_complete_turn: "%{provider} 未能完成本轮任务"
-errors.pi_reported_error: Pi 报告了错误
+errors.provider_reported_error: "%{provider} 报告了错误"
 session.response_unavailable: 该回复已不可用
 session.response_cannot_fork: 目前无法从该回复派生任务
 session.response_fork_in_progress: 请等待任务派生完成后再移除原任务
@@ -666,6 +676,8 @@ right_panel.tabs: 右侧面板标签页
 right_panel.add_tab: 添加面板标签页
 right_panel.hide: 隐藏右侧面板
 right_panel.close_tab: 关闭%{title}
+open_in.open: 用%{app}打开项目
+open_in.choose: 选择打开项目的应用…
 environment.title: 环境
 environment.summary: 环境和后台工作
 environment.changes: 更改
@@ -733,6 +745,8 @@ files.unable_to_edit: "无法编辑此文件：%{error}"
 files.could_not_save_opening: "无法保存 %{path}：文件仍在打开"
 files.could_not_save_read_only: "无法保存 %{path}：文件不可编辑"
 files.could_not_save: "无法保存 %{path}：%{error}"
+files.preview_markdown: 预览 Markdown
+files.edit_markdown_source: 编辑源码
 files.resize_tree: 调整文件树宽度
 files.refresh: 刷新文件
 files.loading: 正在加载文件…

@@ -62,7 +62,7 @@ settings.usage: 使用状況
 settings.daemon: デーモン
 settings.computer_use: コンピュータ操作
 settings.general_keywords: 一般 ローカル プロジェクト 会話 プライバシー 分析 テレメトリ 匿名 共有 アップデート 自動 バージョン
-settings.appearance_keywords: 外観 テーマ システム ライト ダーク 言語 英語 中国語 簡体字 日本語
+settings.appearance_keywords: 外観 テーマ システム ライト ダーク 言語 英語 中国語 簡体字 日本語 フォント サイズ 文字 エディタ
 settings.providers_keywords: プロバイダー エージェント モデル CLI バージョン インストール 検出 claude codex cursor opencode amp grok pi
 settings.skills: スキル
 settings.skills_keywords: スキル ライブラリ エージェント 無効 有効 削除 claude codex cursor opencode pi amp 共有
@@ -138,6 +138,10 @@ web.error_secure_websocket_required: 安全な Waku Web ページからは wss:/
 web.error_daemon_token_required: デーモントークンを入力してください
 settings.theme: テーマ
 settings.theme_description: システム、ライト、ダークのいずれかのテーマを選択します
+settings.ui_font_size: UI のフォントサイズ
+settings.ui_font_size_description: インターフェース全体とメッセージの文字サイズ
+settings.code_font_size: コードのフォントサイズ
+settings.code_font_size_description: ファイルエディタ、差分表示、コードブロック、ツール出力の文字サイズ
 settings.theme_system: システム
 settings.theme_light: ライト
 settings.theme_dark: ダーク
@@ -445,10 +449,15 @@ permission.agent_wants_to: エージェントが次の操作を実行しよう�
 common.close: 閉じる
 common.default: デフォルト
 
+composer.no_providers: 送信するにはプロバイダーをインストールするか有効にしてください
 models.none_found: モデルが見つかりません
 models.favorite_hint: モデルにスターを付けると、ここに固定できます
 models.loading: モデルを読み込み中…
 models.none_reported: このプロバイダーにモデルがありません
+models.no_providers: プロバイダーなし
+models.no_providers_title: 利用できるプロバイダーがありません
+models.no_providers_description: エージェント CLI をインストールするか、プロバイダー設定で再度有効にしてください。
+models.open_provider_settings: プロバイダー設定を開く
 models.choose: モデルを選択
 models.favorites: お気に入り
 models.add_favorite: お気に入りに追加
@@ -611,7 +620,8 @@ errors.provider_not_installed: "%{provider} はインストールされていま
 errors.provider_not_found: "%{provider} はインストールされていないか、見つかりませんでした"
 errors.claude_fork_checkpoint_missing: Claude からフォーク用チェックポイントが返されませんでした
 errors.claude_turn_checkpoint_unavailable: "そのターンの Claude ネイティブチェックポイントは利用できません：%{error}"
-errors.pi_session_file_unavailable: Pi のネイティブセッションファイルは利用できません
+errors.provider_session_file_unavailable: "%{provider} のネイティブセッションファイルは利用できません"
+errors.provider_turn_branching_unsupported: "%{provider} は特定のターンでの巻き戻しや分岐ができません"
 errors.fork_task: "タスクをフォークできませんでした：%{error}"
 errors.create_rewind_snapshot: "巻き戻し用の安全スナップショットを作成できませんでした：%{error}"
 errors.restore_checkpoint: "チェックポイントを復元できませんでした：%{error}"
@@ -667,7 +677,7 @@ errors.provider_stopped_receiving: "%{provider} はメッセージの受信を�
 errors.provider_initialize_session: "%{provider} はこのセッションを初期化できませんでした"
 errors.provider_rejected_prompt: "%{provider} は実行前にプロンプトを拒否しました"
 errors.provider_complete_turn: "%{provider} はこのターンを完了できませんでした"
-errors.pi_reported_error: Pi からエラーが報告されました
+errors.provider_reported_error: "%{provider} からエラーが報告されました"
 
 session.response_unavailable: その回答は利用できなくなりました
 session.response_cannot_fork: その回答からは現在タスクをフォークできません
@@ -704,6 +714,9 @@ right_panel.tabs: 右パネルのタブ
 right_panel.add_tab: パネルタブを追加
 right_panel.hide: 右パネルを隠す
 right_panel.close_tab: "%{title} を閉じる"
+
+open_in.open: "プロジェクトを %{app} で開く"
+open_in.choose: プロジェクトを開くアプリを選択…
 
 environment.title: 環境
 environment.summary: 環境とバックグラウンド作業
@@ -775,6 +788,8 @@ files.unable_to_edit: "このファイルを編集できません：%{error}"
 files.could_not_save_opening: "%{path} を保存できませんでした：まだ開いています"
 files.could_not_save_read_only: "%{path} を保存できませんでした：このファイルは編集できません"
 files.could_not_save: "%{path} を保存できませんでした：%{error}"
+files.preview_markdown: Markdown をプレビュー
+files.edit_markdown_source: ソースを編集
 files.resize_tree: ファイルツリーの幅を変更
 files.refresh: ファイルを更新
 files.loading: ファイルを読み込み中…

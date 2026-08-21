@@ -89,14 +89,52 @@ impl Metrics {
         block_gap: 10.0,
     };
 
-    /// Compact scale for tool output and other secondary detail.
+    /// Compact scale for reasoning, tool detail, and other secondary content.
+    /// One notch under [`Metrics::BODY`], not a miniature: secondary reading
+    /// text stays close to prose size and leans on color for its hierarchy.
     pub const COMPACT: Self = Self {
-        text_size: 11.5,
-        line_height: 17.0,
-        code_text_size: 10.5,
-        code_line_height: 16.0,
-        block_gap: 6.0,
+        text_size: 13.0,
+        line_height: 19.5,
+        code_text_size: 12.0,
+        code_line_height: 18.0,
+        block_gap: 7.0,
     };
+
+    /// The UI and code font sizes the constants above were authored against.
+    /// [`Metrics::scaled`] is the identity at these values, so the settings'
+    /// defaults reproduce the authored transcript exactly.
+    const AUTHORED_UI_FONT_SIZE: f32 = 14.0;
+    const AUTHORED_CODE_FONT_SIZE: f32 = 13.0;
+
+    /// These metrics rescaled to the user's font settings: prose follows the
+    /// UI font size, code spans and blocks follow the code font size, and each
+    /// surface keeps its authored proportions. Values land on half pixels so
+    /// scaled text stays as crisp as the authored sizes.
+    pub fn scaled(self, ui_font_size: f32, code_font_size: f32) -> Self {
+        let ui = ui_font_size / Self::AUTHORED_UI_FONT_SIZE;
+        let code = code_font_size / Self::AUTHORED_CODE_FONT_SIZE;
+        let half = |value: f32| (value * 2.0).round() / 2.0;
+        Self {
+            text_size: half(self.text_size * ui),
+            line_height: half(self.line_height * ui),
+            code_text_size: half(self.code_text_size * code),
+            code_line_height: half(self.code_line_height * code),
+            block_gap: half(self.block_gap * ui),
+        }
+    }
+
+    /// Document scale for a full-page reading surface: prose at the user's UI
+    /// font size and code at the code font size, keeping [`Metrics::BODY`]'s
+    /// proportions.
+    pub fn document(text_size: f32, code_text_size: f32) -> Self {
+        Self {
+            text_size,
+            line_height: (text_size * 1.55).round(),
+            code_text_size,
+            code_line_height: (code_text_size * 1.5).round(),
+            block_gap: (text_size * 0.72).round(),
+        }
+    }
 }
 
 pub const SANS_FAMILY: &str = ".SystemUIFont";
@@ -998,8 +1036,7 @@ fn markdown_capped<'a>(
         ctx.next_ordinal.set(block_ordinal_base(block_ix));
         children.push(render_block(block, &ctx));
         debug_assert!(
-            ctx.next_ordinal.get() - block_ordinal_base(block_ix)
-                < 1 << BLOCK_ORDINAL_STRIDE_BITS,
+            ctx.next_ordinal.get() - block_ordinal_base(block_ix) < 1 << BLOCK_ORDINAL_STRIDE_BITS,
             "a single block overflowed its ordinal stride"
         );
     }

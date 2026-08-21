@@ -1939,3 +1939,102 @@ fn tab_cycle_walks_favorites_then_usable_providers_in_rail_order() {
         ]
     );
 }
+
+#[test]
+fn the_picker_is_empty_only_once_detection_has_answered() {
+    use super::composer::picker_has_no_providers;
+    use crate::model::{ProviderModel, ProviderProbe};
+
+    let probe = |provider: ProviderKind, installed: bool| ProviderProbe {
+        provider,
+        installed,
+        path: installed.then(|| std::path::PathBuf::from(format!("/bin/{}", provider.id()))),
+        models: vec![ProviderModel::new("model", "model")],
+        agent_presets: Vec::new(),
+    };
+    // What every probe looks like before detection answers: seeded with a
+    // fallback catalog and not yet installed.
+    let undetected = [
+        probe(ProviderKind::Claude, false),
+        probe(ProviderKind::Codex, false),
+    ];
+    let detected = [
+        probe(ProviderKind::Claude, true),
+        probe(ProviderKind::Codex, false),
+    ];
+
+    // An unsettled first pass reads as "not known yet", so the composer keeps
+    // showing the remembered model instead of flashing an empty state.
+    assert!(!picker_has_no_providers(&undetected, &[], None, false));
+    // Once it settles, the same probes really do mean nothing is installed.
+    assert!(picker_has_no_providers(&undetected, &[], None, true));
+    // One detected CLI is enough to keep the picker populated...
+    assert!(!picker_has_no_providers(&detected, &[], None, true));
+    // ...until it is switched off, which empties the picker just as surely as
+    // never having been installed.
+    assert!(picker_has_no_providers(
+        &detected,
+        &[ProviderKind::Claude],
+        None,
+        true
+    ));
+    // A session already locked to that provider keeps it, switched off or not.
+    assert!(!picker_has_no_providers(
+        &detected,
+        &[ProviderKind::Claude],
+        Some(ProviderKind::Claude),
+        true
+    ));
+}
+
+#[test]
+fn the_rail_draws_only_installed_providers_the_settings_left_on() {
+    use super::composer::picker_rail_shows_provider;
+    use crate::model::{ProviderModel, ProviderProbe};
+
+    let probe = |provider: ProviderKind, installed: bool| ProviderProbe {
+        provider,
+        installed,
+        path: installed.then(|| std::path::PathBuf::from(format!("/bin/{}", provider.id()))),
+        models: vec![ProviderModel::new("model", "model")],
+        agent_presets: Vec::new(),
+    };
+    let probes = [
+        probe(ProviderKind::Claude, true),
+        probe(ProviderKind::Codex, true),
+        probe(ProviderKind::Cursor, false),
+    ];
+
+    // An undetected CLI and a switched-off provider both leave the rail
+    // outright, rather than sitting in it dimmed.
+    assert!(!picker_rail_shows_provider(
+        &probes,
+        &[],
+        None,
+        ProviderKind::Cursor
+    ));
+    assert!(!picker_rail_shows_provider(
+        &probes,
+        &[ProviderKind::Claude],
+        None,
+        ProviderKind::Claude
+    ));
+
+    // A provider only the *current* session locks out stays drawn: that is a
+    // fact about this session, not about what the user configured.
+    assert!(picker_rail_shows_provider(
+        &probes,
+        &[],
+        Some(ProviderKind::Codex),
+        ProviderKind::Claude
+    ));
+
+    // ...and the locked session keeps its own tab even once it is switched
+    // off, since the picker is its only route to another model.
+    assert!(picker_rail_shows_provider(
+        &probes,
+        &[ProviderKind::Claude],
+        Some(ProviderKind::Claude),
+        ProviderKind::Claude
+    ));
+}
