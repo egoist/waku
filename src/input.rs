@@ -1702,7 +1702,7 @@ impl EntityInputHandler for TextInput {
         &mut self,
         range_utf16: Option<Range<usize>>,
         new_text: &str,
-        _: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         if self.read_only {
@@ -1735,6 +1735,10 @@ impl EntityInputHandler for TextInput {
         if previous != self.content {
             cx.emit(InputEvent::Edited);
         }
+        // The caret moved; the layout that answers the next IME rect query
+        // only exists after the next paint, so have AppKit re-query the
+        // candidate window position once that frame lands.
+        window.invalidate_character_coordinates();
         cx.notify();
     }
 
@@ -1743,7 +1747,7 @@ impl EntityInputHandler for TextInput {
         range_utf16: Option<Range<usize>>,
         new_text: &str,
         new_selected_range_utf16: Option<Range<usize>>,
-        _: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         if self.read_only {
@@ -1787,6 +1791,10 @@ impl EntityInputHandler for TextInput {
         if previous != self.content {
             cx.emit(InputEvent::Edited);
         }
+        // The composition moved the caret; the candidate window follows it,
+        // but the layout answering the IME rect query is still the previous
+        // frame's. Re-ask AppKit for the rect once the fresh frame paints.
+        window.invalidate_character_coordinates();
         cx.notify();
     }
 
@@ -1797,10 +1805,30 @@ impl EntityInputHandler for TextInput {
         _: &mut Window,
         _: &mut Context<Self>,
     ) -> Option<Bounds<Pixels>> {
-        let layout = self.last_layout.as_ref()?;
+        // AppKit can ask for the candidate rect before this field has painted
+        // once. Returning None becomes a zero NSRect in the macOS backend,
+        // which puts the candidate window at the screen origin.
+        let Some(layout) = self.last_layout.as_ref() else {
+            return Some(Bounds::new(bounds.origin, size(px(1.), px(1.))));
+        };
         let range = self.range_from_utf16(&range_utf16);
-        let start = layout.position_for_index(range.start)?;
-        let end = layout.position_for_index(range.end)?;
+        // The layout trails the content by one frame — it is only refreshed in
+        // `paint` — but AppKit asks for the IME candidate rect synchronously
+        // after `setMarkedText:`, before that frame lands. A composition that
+        // has grown past the last painted text would then miss every line and
+        // yield `None`, which the mac platform turns into a zero rect at the
+        // screen origin: the candidate window pops into the bottom-left corner
+        // of the display. Clamp to the layout's end instead, degrading to the
+        // caret's previous position until the fresh frame lands.
+        let layout_len = layout.len();
+        let end_index = range.end.min(layout_len);
+        let start_index = range.start.min(end_index);
+        let Some(start) = layout.position_for_index(start_index) else {
+            return Some(Bounds::new(bounds.origin, size(px(1.), px(1.))));
+        };
+        let Some(end) = layout.position_for_index(end_index) else {
+            return Some(Bounds::new(bounds.origin, size(px(1.), px(1.))));
+        };
         let line_height = layout.line_height();
         if start.y == end.y {
             Some(Bounds::from_corners(
@@ -3279,6 +3307,65 @@ mod tests {
             assert_eq!(input.content(), "あk");
             assert_eq!(input.marked_range, Some(3..4));
             assert_eq!(input.selected_range, 4..4);
+        });
+    }
+
+    /// The layout trails the content by one frame — it is only refreshed in
+    /// `paint` — but AppKit asks for the IME candidate rect synchronously
+    /// after `setMarkedText:`, before that frame lands. A composition that has
+    /// grown past the last painted text must still answer a bounds rect
+    /// (clamped to the layout's end) instead of `None`: the mac platform turns
+    /// a `None` into a zero rect at the screen origin and pops the candidate
+    /// window into the bottom-left corner of the display.
+    #[gpui::test]
+    fn ime_candidate_bounds_never_yield_none_for_a_stale_layout(cx: &mut TestAppContext) {
+        let (input, cx) = setup_input(cx, "hi", px(300.));
+
+        // Grow the composition past the last painted text ("hi") and answer
+        // the IME rect query in the same update, before any frame can land —
+        // the way AppKit asks for `firstRect(forCharacterRange:)` right after
+        // `setMarkedText:`. `last_layout` is still the two-byte "hi" layout.
+        cx.update(|window, cx| {
+            input.update(cx, |input, cx| {
+                input.replace_and_mark_text_in_range(None, "nihao", Some(2..2), window, cx);
+                assert_eq!(
+                    input.last_layout.as_ref().map(|layout| layout.len()),
+                    Some(2),
+                    "fixture must leave the layout one frame behind the content"
+                );
+                let bounds = input.bounds_for_range(2..7, window.bounds(), window, cx);
+                let bounds = bounds.expect(
+                    "a stale layout must still answer the IME rect, or the candidate \
+                     window falls back to the screen origin",
+                );
+                // The clamped answer is the end of the last painted text — the
+                // caret's previous position — which sits inside the window.
+                assert!(bounds.origin.x >= px(0.0));
+                assert!(bounds.origin.y >= px(0.0));
+                let expected = input.last_layout.as_ref().unwrap().position_for_index(2).unwrap();
+                assert_eq!(bounds.origin, expected);
+            })
+        });
+    }
+
+    /// The first IME query can arrive before the input has painted a layout;
+    /// it must still return a non-zero anchor instead of macOS's screen-origin
+    /// fallback for a missing rect.
+    #[gpui::test]
+    fn ime_candidate_bounds_have_a_fallback_before_first_layout(cx: &mut TestAppContext) {
+        let (input, cx) = setup_input(cx, "hi", px(300.));
+
+        cx.update(|window, cx| {
+            input.update(cx, |input, cx| {
+                input.last_layout = None;
+                let element_bounds = window.bounds();
+                let bounds = input
+                    .bounds_for_range(0..0, element_bounds, window, cx)
+                    .expect("IME queries must have an anchor before the first layout");
+                assert_eq!(bounds.origin, element_bounds.origin);
+                assert!(bounds.size.width > px(0.));
+                assert!(bounds.size.height > px(0.));
+            })
         });
     }
 
