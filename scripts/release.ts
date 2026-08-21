@@ -17,6 +17,7 @@ import { extractReleaseNotes } from "./changelog";
 const appName = "Waku";
 const executableName = "Waku";
 const jsReplExecutableName = "waku_js_repl";
+const daemonExecutableName = "waku-daemon";
 const computerUseHelperName = "Waku Computer Use";
 const packageName = "waku";
 const defaultNotaryProfile = "NOTARY";
@@ -33,7 +34,8 @@ releases), and uploads everything to Cloudflare R2 — the bucket behind
 https://releases.waku.sh. One-time setup lives in RELEASING.md.
 
 Options:
-  --local                       Build and notarize without publishing to R2
+  --local                       Build, notarize, and write the DMG + zip
+                                without publishing to R2
   --force                       Publish even if this version is already in R2
   --output <path>               DMG output path (default: dist/Waku-<version>.dmg)
   --signing-identity <name>     Developer ID Application identity selector
@@ -44,7 +46,8 @@ Options:
                                 default derives a monotonic number from the
                                 Cargo version)
   --volume-name <name>          Mounted DMG name (default: Waku)
-  --skip-build                  Reuse target/release/waku and waku_js_repl
+  --skip-build                  Reuse target/release/waku, waku_js_repl, and
+                                waku-daemon
   --skip-notarize               Unnotarized signed DMG (implies --local)
   --adhoc                       Ad-hoc sign, no notarization (implies --local)
   --help                        Show this help
@@ -61,6 +64,7 @@ Environment:
   WAKU_NO_HISTORY=1             skip pulling prior archives (no deltas)
   SPARKLE_BIN                   Sparkle tools dir (default: the bundle.sh cache
                                 under .waku-cache/sparkle)
+  SPARKLE_PRIVATE_KEY           Sparkle EdDSA private key (otherwise keychain)
 
 Before the first production release:
   xcrun notarytool store-credentials NOTARY   # notarization credentials
@@ -270,12 +274,18 @@ const releaseJsReplExecutable = join(
   releaseDirectory,
   jsReplExecutableName,
 );
+const releaseDaemonExecutable = join(releaseDirectory, daemonExecutableName);
 const appBundle = join(releaseDirectory, `${appName}.app`);
 const contentsDirectory = join(appBundle, "Contents");
 const bundledJsReplExecutable = join(
   contentsDirectory,
   "Resources",
   jsReplExecutableName,
+);
+const bundledDaemonExecutable = join(
+  contentsDirectory,
+  "MacOS",
+  daemonExecutableName,
 );
 const bundledComputerUseSkill = join(
   contentsDirectory,
@@ -380,7 +390,11 @@ const identity = adhoc ? "-" : configuredSigningIdentity!;
 
 try {
   if (values["skip-build"]) {
-    for (const executable of [releaseExecutable, releaseJsReplExecutable]) {
+    for (const executable of [
+      releaseExecutable,
+      releaseJsReplExecutable,
+      releaseDaemonExecutable,
+    ]) {
       try {
         await access(executable);
       } catch {
@@ -400,6 +414,7 @@ try {
   await $`env WAKU_CODESIGN_IDENTITY=${identity} WAKU_ANALYTICS_ENDPOINT=${analyticsEndpoint ?? ""} WAKU_ANALYTICS_WEBSITE_ID=${analyticsWebsiteId ?? ""} WAKU_SKIP_CARGO_BUILD=${values["skip-build"] ? "1" : "0"} ${join(projectRoot, "scripts", "bundle.sh")} release`;
   for (const artifact of [
     join(contentsDirectory, "MacOS", executableName),
+    bundledDaemonExecutable,
     bundledJsReplExecutable,
     bundledComputerUseSkill,
     bundledPiComputerUseExtension,
@@ -413,6 +428,7 @@ try {
   await $`xattr -cr ${appBundle}`;
 
   await $`codesign --verify --strict --verbose=2 ${bundledJsReplExecutable}`;
+  await $`codesign --verify --strict --verbose=2 ${bundledDaemonExecutable}`;
   await $`codesign --verify --deep --strict --verbose=2 ${bundledComputerUseHelper}`;
   await verifyJavaScriptRepl(bundledJsReplExecutable);
   logStep(
@@ -463,6 +479,11 @@ try {
     "Resources",
     jsReplExecutableName,
   );
+  const mountedDaemon = join(
+    mountedContents,
+    "MacOS",
+    daemonExecutableName,
+  );
   const mountedComputerUseHelper = join(
     mountedContents,
     "Helpers",
@@ -475,6 +496,7 @@ try {
   );
   for (const artifact of [
     join(mountedContents, "MacOS", executableName),
+    mountedDaemon,
     mountedJsRepl,
     join(
       mountedContents,
@@ -504,6 +526,7 @@ try {
     );
   }
   await $`codesign --verify --strict --verbose=2 ${mountedJsRepl}`;
+  await $`codesign --verify --strict --verbose=2 ${mountedDaemon}`;
   await $`codesign --verify --deep --strict --verbose=2 ${mountedComputerUseHelper}`;
   await $`codesign --verify --strict --verbose=2 ${mountedSparkleFramework}`;
   await $`codesign --verify --deep --strict --verbose=2 ${mountedApp}`;
@@ -534,6 +557,10 @@ try {
     await $`xcrun stapler staple -v ${outputPath}`;
     await $`xcrun stapler validate -v ${outputPath}`;
     await $`spctl --assess --type open --context context:primary-signature --verbose=2 ${outputPath}`;
+    // Notarizing the DMG also notarized the app's code, so the same
+    // submission staples the app for the Sparkle archive.
+    logStep("Stapling the app for the update archive");
+    await $`xcrun stapler staple -v ${appBundle}`;
   } else if (adhoc) {
     console.warn(
       "\nCreated an ad-hoc signed DMG. It is suitable for local testing only.",
@@ -545,89 +572,88 @@ try {
     );
   }
 
+  const zipPath = resolve(projectRoot, "dist", zipName);
+  await mkdir(dirname(zipPath), { recursive: true });
+  logStep(`Packaging ${zipName}`);
+  await $`ditto -c -k --keepParent ${appBundle} ${zipPath}`;
+
+  // A clean staging directory holds this release plus, when publishing, the
+  // recent history generate_appcast needs to build binary deltas.
+  const updatesDirectory = join(projectRoot, "dist", "updates");
+  await rm(updatesDirectory, { force: true, recursive: true });
+  await mkdir(updatesDirectory, { recursive: true });
+
+  if (publishing && !skipHistory) {
+    logStep(
+      `Selecting the ${historyCount} most recent archives from R2 (for deltas)`,
+    );
+    type RemoteFile = { Name: string; IsDir: boolean };
+    const remoteFiles = JSON.parse(
+      await $`rclone lsjson ${r2Destination} ${rcloneFlags} --files-only --include ${"*.zip"} --include ${"appcast.xml"}`
+        .quiet()
+        .text(),
+    ) as RemoteFile[];
+    const archivePattern = new RegExp(`^${appName}-.+\\.zip$`);
+    const archiveVersion = (name: string) =>
+      name.slice(appName.length + 1, -".zip".length);
+    const versionOrder = new Intl.Collator("en", { numeric: true });
+    const recentArchives = remoteFiles
+      .filter(
+        ({ Name, IsDir }) =>
+          !IsDir && archivePattern.test(Name) && Name !== zipName,
+      )
+      .sort((a, b) =>
+        versionOrder.compare(archiveVersion(b.Name), archiveVersion(a.Name)),
+      )
+      .slice(0, historyCount)
+      .map(({ Name }) => Name);
+    const historyFiles = [
+      ...(remoteFiles.some(({ Name }) => Name === "appcast.xml")
+        ? ["appcast.xml"]
+        : []),
+      ...recentArchives,
+    ];
+    if (historyFiles.length > 0) {
+      const includeFlags = historyFiles.flatMap((name) => [
+        "--include",
+        `/${name}`,
+      ]);
+      await $`rclone copy ${r2Destination} ${updatesDirectory} ${rcloneFlags} ${includeFlags}`;
+    }
+    console.log(
+      recentArchives.length > 0
+        ? `Pulled ${recentArchives.join(", ")}`
+        : "No prior archives found.",
+    );
+  }
+
+  await $`ditto ${zipPath} ${join(updatesDirectory, zipName)}`;
+
+  // Release notes: this version's CHANGELOG.md section ships next to the
+  // archive as Waku-<version>.md; generate_appcast links it as the update's
+  // release notes, which Sparkle renders in the prompt.
+  const changelogFile = Bun.file(join(projectRoot, "CHANGELOG.md"));
+  const notes = (await changelogFile.exists())
+    ? extractReleaseNotes(await changelogFile.text(), version)
+    : null;
+  const notesName = `${appName}-${version}.md`;
+  const notesContents = `${notes ?? "See CHANGELOG.md for details."}\n`;
+  await Bun.write(join(updatesDirectory, notesName), notesContents);
+  // The tag workflow publishes files from dist/ as GitHub release assets;
+  // sync-release then mirrors those assets to R2. Keep the notes beside the
+  // appcast there as well so Sparkle's release-notes URL cannot 404.
+  await Bun.write(join(projectRoot, "dist", notesName), notesContents);
+  console.log(
+    notes
+      ? `Attached release notes for ${version}.`
+      : `No "${version}" section in CHANGELOG.md — attached fallback notes.`,
+  );
+
+  logStep("Generating the signed appcast");
+  await generateAppcast(updatesDirectory, downloadUrlPrefix);
+  await $`ditto ${join(updatesDirectory, "appcast.xml")} ${join(projectRoot, "dist", "appcast.xml")}`;
+
   if (publishing) {
-    // Notarizing the DMG also notarized the app's code, so the same
-    // submission staples the app for the Sparkle archive.
-    logStep("Stapling the app for the update archive");
-    await $`xcrun stapler staple -v ${appBundle}`;
-
-    // A clean staging directory holds this release plus the recent history
-    // generate_appcast needs to build binary deltas, and nothing else.
-    const updatesDirectory = join(projectRoot, "dist", "updates");
-    await rm(updatesDirectory, { force: true, recursive: true });
-    await mkdir(updatesDirectory, { recursive: true });
-
-    if (!skipHistory) {
-      logStep(
-        `Selecting the ${historyCount} most recent archives from R2 (for deltas)`,
-      );
-      type RemoteFile = { Name: string; IsDir: boolean };
-      const remoteFiles = JSON.parse(
-        await $`rclone lsjson ${r2Destination} ${rcloneFlags} --files-only --include ${"*.zip"} --include ${"appcast.xml"}`
-          .quiet()
-          .text(),
-      ) as RemoteFile[];
-      const archivePattern = new RegExp(`^${appName}-.+\\.zip$`);
-      const archiveVersion = (name: string) =>
-        name.slice(appName.length + 1, -".zip".length);
-      const versionOrder = new Intl.Collator("en", { numeric: true });
-      const recentArchives = remoteFiles
-        .filter(
-          ({ Name, IsDir }) =>
-            !IsDir && archivePattern.test(Name) && Name !== zipName,
-        )
-        .sort((a, b) =>
-          versionOrder.compare(archiveVersion(b.Name), archiveVersion(a.Name)),
-        )
-        .slice(0, historyCount)
-        .map(({ Name }) => Name);
-      const historyFiles = [
-        ...(remoteFiles.some(({ Name }) => Name === "appcast.xml")
-          ? ["appcast.xml"]
-          : []),
-        ...recentArchives,
-      ];
-      if (historyFiles.length > 0) {
-        const includeFlags = historyFiles.flatMap((name) => [
-          "--include",
-          `/${name}`,
-        ]);
-        await $`rclone copy ${r2Destination} ${updatesDirectory} ${rcloneFlags} ${includeFlags}`;
-      }
-      console.log(
-        recentArchives.length > 0
-          ? `Pulled ${recentArchives.join(", ")}`
-          : "No prior archives found.",
-      );
-    }
-
-    logStep(`Packaging ${zipName}`);
-    await $`ditto -c -k --keepParent ${appBundle} ${join(updatesDirectory, zipName)}`;
-
-    // Release notes: this version's CHANGELOG.md section ships next to the
-    // archive as Waku-<version>.md; generate_appcast links it as the update's
-    // release notes, which Sparkle renders in the prompt.
-    const changelogFile = Bun.file(join(projectRoot, "CHANGELOG.md"));
-    if (await changelogFile.exists()) {
-      const notes = extractReleaseNotes(await changelogFile.text(), version);
-      if (notes) {
-        await Bun.write(
-          join(updatesDirectory, `${appName}-${version}.md`),
-          `${notes}\n`,
-        );
-        console.log(`Attached release notes for ${version}.`);
-      } else {
-        console.log(
-          `No "${version}" section in CHANGELOG.md — releasing without notes.`,
-        );
-      }
-    } else {
-      console.log("No CHANGELOG.md — releasing without notes.");
-    }
-
-    logStep("Generating the signed appcast");
-    await generateAppcast(updatesDirectory, downloadUrlPrefix);
-
     // Archives and the DMG are immutable once published → cache forever.
     // appcast.xml changes every release → keep it fresh so update checks are
     // never served stale.
@@ -647,6 +673,7 @@ try {
   }
 
   console.log(`\nDMG ready: ${outputPath}`);
+  console.log(`ZIP ready: ${zipPath}`);
 } finally {
   if (mountedDmg && mountDirectory) {
     const result = await $`diskutil eject ${mountDirectory}`.quiet().nothrow();

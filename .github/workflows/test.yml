@@ -13,8 +13,12 @@ concurrency:
 
 jobs:
   test:
-    name: Rust
-    runs-on: macos-latest
+    name: Rust (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, ubuntu-24.04, windows-latest]
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 60
 
     steps:
@@ -26,16 +30,47 @@ jobs:
           rustup toolchain install 1.96.0 --profile minimal
           rustup default 1.96.0
 
+      - name: Install Bun
+        uses: oven-sh/setup-bun@v2
+
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes \
+            clang \
+            cmake \
+            libfontconfig-dev \
+            libvulkan1 \
+            libwayland-dev \
+            libx11-xcb-dev \
+            libxkbcommon-x11-dev \
+            pkg-config \
+            xdg-desktop-portal
+
       - name: Cache Cargo
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: ${{ runner.os }}-${{ runner.arch }}-rust-1.96.0-cargo-${{ hashFiles('Cargo.lock') }}
+          key: ${{ matrix.os }}-rust-1.96.0-cargo-${{ hashFiles('Cargo.lock') }}
           restore-keys: |
-            ${{ runner.os }}-${{ runner.arch }}-rust-1.96.0-cargo-
+            ${{ matrix.os }}-rust-1.96.0-cargo-
 
       - name: Run tests
         run: cargo test --locked
+
+      # The generated protocol and browser client are platform-independent, so
+      # one runner is enough to catch a drifted checked-in artifact.
+      - name: Install JavaScript dependencies
+        if: runner.os == 'Linux'
+        run: bun install --frozen-lockfile
+
+      - name: Check generated protocol and browser client
+        if: runner.os == 'Linux'
+        run: |
+          bun run protocol:check
+          bun run --filter @waku/client check
+          bun run --filter @waku/client test

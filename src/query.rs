@@ -48,13 +48,6 @@ pub struct FetchToken<K> {
     generation: u64,
 }
 
-impl<K> FetchToken<K> {
-    #[cfg(test)]
-    pub fn key(&self) -> &K {
-        &self.key
-    }
-}
-
 /// What a read found.
 #[derive(Debug)]
 pub enum Query<K, V> {
@@ -64,16 +57,6 @@ pub enum Query<K, V> {
     Pending,
     /// Nobody is fetching yet, and the caller now owns doing so.
     Missing(FetchToken<K>),
-}
-
-impl<K, V> Query<K, V> {
-    #[cfg(test)]
-    pub fn ready(&self) -> Option<&Arc<V>> {
-        match self {
-            Self::Ready(value) => Some(value),
-            _ => None,
-        }
-    }
 }
 
 #[derive(Debug)]

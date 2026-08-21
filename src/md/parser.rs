@@ -1,17 +1,28 @@
 //! Block-level markdown parsing over `pulldown-cmark`.
 //!
 //! A full parse produces a [`BlockTree`]: top-level blocks paired with their
-//! byte ranges in the source. The range start of the last top-level block is a
-//! *stable boundary* — appending to the source cannot change anything before
-//! it — which is what [`IncrementalParser`] exploits so a streamed delta costs
-//! roughly O(delta + last block) instead of O(document).
+//! byte ranges in the source. The range start of the second-to-last
+//! source-level block is a *stable boundary* — appending to the source cannot
+//! change anything before it (see [`IncrementalParser::settled_prefix`] for
+//! why the final block alone is not enough) — which is what
+//! [`IncrementalParser`] exploits so a streamed delta costs roughly
+//! O(delta + last two blocks) instead of O(document).
 //!
 //! Soundness guard: link reference definitions (`[label]: url`) resolve
 //! non-locally, so a source containing one drops back to full reparses.
 
 use std::ops::Range;
+use std::sync::LazyLock;
 
 use pulldown_cmark::{Alignment, CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag};
+use regex::Regex;
+
+/// CommonMark only recognizes angle-bracket autolinks. Transcript content is
+/// conversational, so bare web URLs should be useful without requiring the
+/// author to write `<https://...>` or `[label](https://...)`.
+static BARE_WEB_URL: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#"(?i)\bhttps?://[^\s<>"`\\]+"#).expect("bare web URL regex should compile")
+});
 
 // ── Tree model ─────────────────────────────────────────────────────────────
 
@@ -117,10 +128,6 @@ pub struct BlockTree {
 
 #[cfg(test)]
 impl BlockTree {
-    pub fn is_empty(&self) -> bool {
-        self.blocks.is_empty()
-    }
-
     pub fn len(&self) -> usize {
         self.blocks.len()
     }
@@ -549,6 +556,48 @@ fn parse_inline_event(cursor: &mut Cursor, pieces: &mut Vec<InlinePiece>, style:
     }
 }
 
+/// Sentence punctuation and unmatched closing delimiters are prose around a
+/// URL, not part of it. Balanced delimiters remain valid URL characters, as in
+/// Wikipedia paths ending in `(disambiguation)`.
+fn trimmed_bare_url_end(text: &str, start: usize, candidate_end: usize) -> usize {
+    let mut end = candidate_end;
+    let mut parens = delimiter_balance(&text[start..end], '(', ')');
+    let mut brackets = delimiter_balance(&text[start..end], '[', ']');
+    let mut braces = delimiter_balance(&text[start..end], '{', '}');
+    loop {
+        let Some((offset, last)) = text[start..end].char_indices().next_back() else {
+            return start;
+        };
+        let last_index = start + offset;
+        let should_trim = match last {
+            '.' | ',' | ':' | ';' | '?' | '!' | '\'' => true,
+            ')' if parens < 0 => {
+                parens += 1;
+                true
+            }
+            ']' if brackets < 0 => {
+                brackets += 1;
+                true
+            }
+            '}' if braces < 0 => {
+                braces += 1;
+                true
+            }
+            _ => false,
+        };
+        if !should_trim {
+            return end;
+        }
+        end = last_index;
+    }
+}
+
+fn delimiter_balance(text: &str, open: char, close: char) -> i32 {
+    text.chars().fold(0, |balance, character| {
+        balance + i32::from(character == open) - i32::from(character == close)
+    })
+}
+
 /// Coalesce neighbouring runs that share a style, leaving images in place.
 fn merge_pieces(pieces: Vec<InlinePiece>) -> Vec<InlinePiece> {
     let mut merged: Vec<InlinePiece> = Vec::with_capacity(pieces.len());
@@ -564,7 +613,55 @@ fn merge_pieces(pieces: Vec<InlinePiece>) -> Vec<InlinePiece> {
             image => merged.push(image),
         }
     }
-    merged
+    linkify_bare_urls(merged)
+}
+
+/// Linkify after Markdown has produced and merged its inline runs. Pulldown
+/// can split ordinary text at potential emphasis punctuation inside a URL;
+/// merging first lets the detector recover the whole displayed target.
+fn linkify_bare_urls(pieces: Vec<InlinePiece>) -> Vec<InlinePiece> {
+    let mut linked = Vec::with_capacity(pieces.len());
+    for piece in pieces {
+        match piece {
+            InlinePiece::Run(run) if !run.style.code && run.style.link.is_none() => {
+                push_linkified_run(run, &mut linked);
+            }
+            piece => linked.push(piece),
+        }
+    }
+    linked
+}
+
+fn push_linkified_run(run: InlineRun, pieces: &mut Vec<InlinePiece>) {
+    let mut cursor = 0;
+    for candidate in BARE_WEB_URL.find_iter(&run.text) {
+        let end = trimmed_bare_url_end(&run.text, candidate.start(), candidate.end());
+        if end <= candidate.start() {
+            continue;
+        }
+        if cursor < candidate.start() {
+            pieces.push(InlinePiece::Run(InlineRun {
+                text: run.text[cursor..candidate.start()].to_owned(),
+                style: run.style.clone(),
+            }));
+        }
+
+        let url = &run.text[candidate.start()..end];
+        let mut link_style = run.style.clone();
+        link_style.link = Some(url.to_owned());
+        pieces.push(InlinePiece::Run(InlineRun {
+            text: url.to_owned(),
+            style: link_style,
+        }));
+        cursor = end;
+    }
+
+    if cursor < run.text.len() {
+        pieces.push(InlinePiece::Run(InlineRun {
+            text: run.text[cursor..].to_owned(),
+            style: run.style,
+        }));
+    }
 }
 
 /// Coalesce neighbouring runs that share a style, so shaping sees the fewest
@@ -725,10 +822,31 @@ impl IncrementalParser {
         BlockTree { blocks }
     }
 
-    /// All blocks but the last are settled: markdown block structure only ever
-    /// extends the final block, so everything before it is immune to appends.
+    /// Index of the first block an append could still change.
+    ///
+    /// Appending mostly only extends the final block, but two cases reach
+    /// further back, so the last *two* source-level groups stay unsettled:
+    ///
+    /// - A GFM table absorbs the line after it once that line becomes a valid
+    ///   row, yet a partial row of just `|` transiently parses as its own
+    ///   paragraph. Settling the table then would strand every later row in
+    ///   that trailing paragraph.
+    /// - A paragraph split around an inline image yields several blocks that
+    ///   share one source range; they must settle and reparse as a unit or the
+    ///   pieces before the image get re-emitted on the next append.
     fn settled_prefix(&self) -> usize {
-        self.tree.blocks.len().saturating_sub(1)
+        let blocks = &self.tree.blocks;
+        let mut index = blocks.len();
+        for _ in 0..2 {
+            let Some(group_start) = index.checked_sub(1).map(|last| blocks[last].range.start)
+            else {
+                break;
+            };
+            while index > 0 && blocks[index - 1].range.start == group_start {
+                index -= 1;
+            }
+        }
+        index
     }
 }
 
@@ -812,6 +930,62 @@ mod tests {
     }
 
     #[test]
+    fn bare_web_urls_become_links_without_swallowing_prose_punctuation() {
+        let tree = parse(
+            "See https://example.com/docs?q=one, then \
+             (https://en.wikipedia.org/wiki/Rust_(programming_language)).",
+        );
+        let Block::Paragraph { runs } = &tree.blocks[0].block else {
+            panic!("expected a paragraph");
+        };
+        let links = runs
+            .iter()
+            .filter_map(|run| {
+                run.style
+                    .link
+                    .as_deref()
+                    .map(|target| (run.text.as_str(), target))
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            links,
+            vec![
+                (
+                    "https://example.com/docs?q=one",
+                    "https://example.com/docs?q=one"
+                ),
+                (
+                    "https://en.wikipedia.org/wiki/Rust_(programming_language)",
+                    "https://en.wikipedia.org/wiki/Rust_(programming_language)"
+                ),
+            ]
+        );
+        assert_eq!(
+            paragraph_text(&tree.blocks[0].block),
+            "See https://example.com/docs?q=one, then \
+             (https://en.wikipedia.org/wiki/Rust_(programming_language))."
+        );
+    }
+
+    #[test]
+    fn explicit_links_and_inline_code_are_not_relinkified() {
+        let tree =
+            parse("[docs at https://example.com](https://waku.gg) and `https://example.com/code`");
+        let Block::Paragraph { runs } = &tree.blocks[0].block else {
+            panic!("expected a paragraph");
+        };
+
+        assert!(runs.iter().any(|run| {
+            run.text == "docs at https://example.com"
+                && run.style.link.as_deref() == Some("https://waku.gg")
+        }));
+        assert!(runs.iter().any(|run| {
+            run.text == "https://example.com/code" && run.style.code && run.style.link.is_none()
+        }));
+    }
+
+    #[test]
     fn task_list_markers_lift_out_of_item_content() {
         let tree = parse("- [x] done\n- [ ] pending\n- plain\n");
         let Block::List { items, .. } = &tree.blocks[0].block else {
@@ -891,6 +1065,61 @@ mod tests {
     fn incremental_appends_match_full_parses() {
         let source = "# Heading\n\nA paragraph with **bold**.\n\n- one\n- two\n\n```js\nlet x = 1;\n```\n\nTail.";
         for chunk_size in [1, 3, 7, 64] {
+            let mut incremental = IncrementalParser::new();
+            let mut built = String::new();
+            let mut chars = source.chars().peekable();
+            while chars.peek().is_some() {
+                let chunk = chars.by_ref().take(chunk_size).collect::<String>();
+                built.push_str(&chunk);
+                incremental.append(&chunk);
+                assert_eq!(
+                    incremental.tree(),
+                    &parse(&built),
+                    "divergence at {} bytes with chunk size {chunk_size}",
+                    built.len()
+                );
+            }
+        }
+    }
+
+    /// Tables must survive streaming: a chunk boundary that lands after the
+    /// delimiter row must not settle a header-only table and strand the body
+    /// rows in a trailing paragraph.
+    #[test]
+    fn streamed_tables_match_full_parses() {
+        let source = "**After** \u{2014} it's a proper neutral chip:\n\n\
+            | State | Fill | Icon |\n\
+            |---|---|---|\n\
+            | Rest | white @ 0.12 | `.labelColor` (~85%) |\n\
+            | Hover | white @ 0.20 | pure white |\n\
+            | Pressed | white @ 0.26 | pure white |\n\
+            | Copied | green @ 0.12 | `.systemGreen` |\n\n\
+            It now reads as a real button sitting beside Export.";
+        for chunk_size in [1, 2, 3, 5, 7, 11, 17, 64] {
+            let mut incremental = IncrementalParser::new();
+            let mut built = String::new();
+            let mut chars = source.chars().peekable();
+            while chars.peek().is_some() {
+                let chunk = chars.by_ref().take(chunk_size).collect::<String>();
+                built.push_str(&chunk);
+                incremental.append(&chunk);
+                assert_eq!(
+                    incremental.tree(),
+                    &parse(&built),
+                    "divergence at {} bytes with chunk size {chunk_size}",
+                    built.len()
+                );
+            }
+        }
+    }
+
+    /// The blocks a paragraph splits into around an inline image share one
+    /// source range, so they must settle and reparse as a unit: settling only
+    /// part of the group would re-emit the earlier pieces on the next append.
+    #[test]
+    fn streamed_inline_images_do_not_duplicate_blocks() {
+        let source = "before ![a shot](https://example.com/x.png) after, and more prose.";
+        for chunk_size in [1, 3, 7] {
             let mut incremental = IncrementalParser::new();
             let mut built = String::new();
             let mut chars = source.chars().peekable();

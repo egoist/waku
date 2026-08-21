@@ -3,52 +3,51 @@ use super::*;
 use chrono::{Datelike, Days};
 use std::path::Path;
 
-pub(super) fn pulse_dot(id: impl Into<SharedString>, size: f32, color: Hsla) -> AnyElement {
-    div()
-        .w(px(size))
-        .h(px(size))
-        .flex_none()
-        .rounded_full()
-        .bg(color)
-        .with_animation(
-            id.into(),
-            Animation::new(Duration::from_millis(1600))
-                .repeat()
-                .with_easing(pulsating_between(0.3, 1.0)),
-            |element, delta| element.opacity(delta),
-        )
-        .into_any_element()
+pub(super) fn pulse_dot(size: f32, color: Hsla) -> AnyElement {
+    motion::pulse(Duration::from_millis(1600), move |phase| {
+        div()
+            .w(px(size))
+            .h(px(size))
+            .flex_none()
+            .rounded_full()
+            .bg(color)
+            .opacity(pulsating_between(0.3, 1.0)(phase))
+            .into_any_element()
+    })
+    // Mounted for whole activities; its pane must not tick at full rate.
+    .every(2)
+    .into_any_element()
 }
 
 /// Three dots chasing a brightness wave, the transcript's "still working"
-/// signal. Each dot runs the same repeating cycle with a phase offset, so the
-/// bright spot travels left to right. Under reduce-motion GPUI holds the
+/// signal. Each dot rides the shared pulse clock with a phase offset, so the
+/// bright spot travels left to right. Under reduce-motion the clock holds the
 /// cycle's first frame — the lead dot bright, the tail dim — which reads as a
 /// static ellipsis.
 pub(super) fn working_wave_dots(color: Hsla) -> AnyElement {
     const DOT_PHASE_STEP: f32 = 0.18;
-    div()
-        .flex()
-        .items_center()
-        .gap(px(3.5))
-        .children((0..3).map(|index| {
-            let phase_offset = index as f32 * DOT_PHASE_STEP;
-            div()
-                .size(px(4.5))
-                .flex_none()
-                .rounded_full()
-                .bg(color)
-                .with_animation(
-                    SharedString::from(format!("working-wave-dot-{index}")),
-                    Animation::new(Duration::from_millis(1400)).repeat(),
-                    move |element, delta| {
-                        let phase = (delta + 1.0 - phase_offset) % 1.0;
-                        let wave = ((phase * std::f32::consts::TAU).sin() + 1.0) / 2.0;
-                        element.opacity(0.25 + 0.75 * wave)
-                    },
-                )
-        }))
-        .into_any_element()
+    motion::pulse(Duration::from_millis(1400), move |phase| {
+        div()
+            .flex()
+            .items_center()
+            .gap(px(3.5))
+            .children((0..3).map(|index| {
+                let dot_phase = (phase + 1.0 - index as f32 * DOT_PHASE_STEP) % 1.0;
+                let wave = ((dot_phase * std::f32::consts::TAU).sin() + 1.0) / 2.0;
+                div()
+                    .size(px(4.5))
+                    .flex_none()
+                    .rounded_full()
+                    .bg(color)
+                    .opacity(0.25 + 0.75 * wave)
+            }))
+            .into_any_element()
+    })
+    // Mounted for the whole turn: this is what sets the transcript pane's
+    // tick floor, and every tick rebuilds each visible row. The 1400 ms wave
+    // reads identically at half cadence.
+    .every(2)
+    .into_any_element()
 }
 
 pub(super) fn format_message_time(created_at: u64) -> String {
@@ -149,6 +148,33 @@ fn format_message_time_at(created_at: u64, now: DateTime<Local>) -> String {
 }
 
 impl Waku {
+    pub(super) fn control_was_copied(&self, control_id: &str) -> bool {
+        self.copied_control_feedback.contains_key(control_id)
+    }
+
+    pub(super) fn show_control_copied(
+        &mut self,
+        control_id: impl Into<String>,
+        cx: &mut Context<Self>,
+    ) {
+        let control_id = control_id.into();
+        self.copied_control_generation = self.copied_control_generation.wrapping_add(1);
+        let generation = self.copied_control_generation;
+        self.copied_control_feedback
+            .insert(control_id.clone(), generation);
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(Duration::from_secs(2)).await;
+            let _ = this.update(cx, |this, cx| {
+                if this.copied_control_feedback.get(&control_id) == Some(&generation) {
+                    this.copied_control_feedback.remove(&control_id);
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
     fn show_message_copied(&mut self, message_id: Uuid, cx: &mut Context<Self>) {
         self.copied_message_generation = self.copied_message_generation.wrapping_add(1);
         let generation = self.copied_message_generation;
@@ -172,7 +198,7 @@ fn render_message_footer(
     theme: &Theme,
     message: &Message,
     footer_time: u64,
-    copy_content: String,
+    copy_content: SharedString,
     copied: bool,
     group_name: SharedString,
     align_right: bool,
@@ -193,8 +219,8 @@ fn render_message_footer(
         .px(px(4.0))
         .flex()
         .items_center()
-        .text_size(px(11.5))
-        .line_height(px(14.0))
+        .text_size(sp(11.5))
+        .line_height(sp(14.0))
         .text_color(footer_color)
         .child(format_message_time(footer_time));
     let copy_button = div()
@@ -222,7 +248,7 @@ fn render_message_footer(
             tr!("common.copy_message")
         }))
         .on_click(move |_, _, cx| {
-            cx.write_to_clipboard(ClipboardItem::new_string(copy_content.clone()));
+            cx.write_to_clipboard(ClipboardItem::new_string(copy_content.to_string()));
             let _ = copy_waku.update(cx, |this, cx| {
                 this.show_message_copied(message_id, cx);
             });
@@ -245,19 +271,7 @@ fn render_message_footer(
         if let Some(action) = assistant_message_action {
             let fork_waku = waku.clone();
             let fork_icon = if action.preparing {
-                icon("icons/loader-circle.svg", 14.0, footer_color)
-                    .with_animation(
-                        SharedString::from(format!("response-fork-spinner-{message_id}")),
-                        Animation::new(Duration::from_millis(900))
-                            .repeat()
-                            .with_easing(gpui::linear),
-                        |icon, delta| {
-                            icon.with_transformation(gpui::Transformation::rotate(
-                                gpui::percentage(delta),
-                            ))
-                        },
-                    )
-                    .into_any_element()
+                motion::spin(icon("icons/loader-circle.svg", 14.0, footer_color))
             } else {
                 icon("icons/fork.svg", 14.0, footer_color).into_any_element()
             };
@@ -317,7 +331,7 @@ fn render_message_footer(
                 .tooltip(Tooltip::text(tr_cow!("session.revert_to_here")))
                 .on_click(move |_, window, cx| {
                     let _ = edit_waku.update(cx, |this, cx| {
-                        this.begin_message_edit(action.session_id, action.turn_count, window, cx);
+                        this.begin_message_edit(action, window, cx);
                     });
                 }),
         );
@@ -331,7 +345,7 @@ fn render_message_footer(
 pub(super) struct MessageRender<'a> {
     pub(super) theme: &'a Theme,
     pub(super) message: &'a Message,
-    pub(super) assistant_footer_copy_content: Option<String>,
+    pub(super) assistant_footer_copy_content: Option<SharedString>,
     pub(super) assistant_footer_time: Option<u64>,
     pub(super) assistant_before_footer: Option<AnyElement>,
     pub(super) copied: bool,
@@ -339,8 +353,13 @@ pub(super) struct MessageRender<'a> {
     pub(super) user_message_action: Option<UserMessageAction>,
     pub(super) message_edit_input: Option<Entity<ComposerInput>>,
     pub(super) attachment_menus: Vec<ContextMenuHandle>,
-    /// The parsed response body. `None` for user and system messages, which are
-    /// shown verbatim rather than as markdown.
+    pub(super) attachment_images: Vec<Option<Arc<gpui::Image>>>,
+    /// Captured from the selected daemon before the virtualized row is built.
+    /// A row is laid out while the root `Waku` entity is already updating, so
+    /// it must not read that entity again just to decide whether Finder reveal
+    /// is available.
+    pub(super) attachments_can_reveal: bool,
+    /// The parsed human or assistant body. System messages remain verbatim.
     pub(super) markdown: Option<&'a MarkdownView>,
     pub(super) ctx: &'a MarkdownCtx<'a>,
     pub(super) menu: ContextMenuHandle,
@@ -352,6 +371,8 @@ fn render_sent_message_attachments(
     message_id: Uuid,
     attachments: &[MessageAttachment],
     attachment_menus: &[ContextMenuHandle],
+    attachment_images: &[Option<Arc<gpui::Image>>],
+    can_reveal: bool,
     waku: &gpui::WeakEntity<Waku>,
     theme: &Theme,
 ) -> Option<AnyElement> {
@@ -373,6 +394,7 @@ fn render_sent_message_attachments(
         } else {
             right_panel::file_icon_for_path(&attachment.mention)
         };
+        let attachment_image = attachment_images.get(index).and_then(|image| image.clone());
         let mut tile = div()
             .id(SharedString::from(format!(
                 "message-{message_id}-attachment-{index}"
@@ -389,49 +411,72 @@ fn render_sent_message_attachments(
             .focus_visible(|style| style.border_color(theme.accent))
             .tooltip(Tooltip::text(attachment.name.clone()));
         if attachment.is_image {
-            let preview_waku = waku.clone();
-            let key_waku = waku.clone();
-            let preview_path = attachment.path.clone();
-            let key_path = attachment.path.clone();
-            let preview_name = SharedString::from(attachment.name.clone());
-            let key_name = preview_name.clone();
             let key_menu = menu.clone();
-            tile = tile.child(
-                div()
-                    .id(SharedString::from(format!(
-                        "message-{message_id}-attachment-{index}-preview"
-                    )))
-                    .size_full()
-                    .cursor_default()
-                    .on_click(move |_, window, cx| {
-                        let _ = preview_waku.update(cx, |this, cx| {
+            if let Some(attachment_image) = attachment_image.as_ref() {
+                let preview_waku = waku.clone();
+                let key_waku = waku.clone();
+                let preview_image = attachment_image.clone();
+                let key_image = attachment_image.clone();
+                let preview_name = SharedString::from(attachment.name.clone());
+                let key_name = preview_name.clone();
+                tile = tile.child(
+                    div()
+                        .id(SharedString::from(format!(
+                            "message-{message_id}-attachment-{index}-preview"
+                        )))
+                        .size_full()
+                        .cursor_default()
+                        .on_click(move |_, window, cx| {
+                            let _ = preview_waku.update(cx, |this, cx| {
+                                this.open_image_preview(
+                                    preview_image.clone(),
+                                    preview_name.clone(),
+                                    window,
+                                    cx,
+                                );
+                            });
+                            cx.stop_propagation();
+                        })
+                        .child(
+                            img(attachment_image.clone())
+                                .size_full()
+                                .object_fit(ObjectFit::Cover),
+                        ),
+                );
+                tile = tile.on_key_down(move |event: &KeyDownEvent, window, cx| {
+                    let key = event.keystroke.key.as_str();
+                    if matches!(key, "enter" | "space") {
+                        let _ = key_waku.update(cx, |this, cx| {
                             this.open_image_preview(
-                                preview_path.clone(),
-                                preview_name.clone(),
+                                key_image.clone(),
+                                key_name.clone(),
                                 window,
                                 cx,
                             );
                         });
                         cx.stop_propagation();
-                    })
+                    } else if key == "f10" && event.keystroke.modifiers.shift {
+                        key_menu.open_context_menu(window, cx);
+                        cx.stop_propagation();
+                    }
+                });
+            } else {
+                tile = tile
                     .child(
-                        img(attachment.path.clone())
+                        div()
                             .size_full()
-                            .object_fit(ObjectFit::Cover),
-                    ),
-            );
-            tile = tile.on_key_down(move |event: &KeyDownEvent, window, cx| {
-                let key = event.keystroke.key.as_str();
-                if matches!(key, "enter" | "space") {
-                    let _ = key_waku.update(cx, |this, cx| {
-                        this.open_image_preview(key_path.clone(), key_name.clone(), window, cx);
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .child(icon("icons/file-types/image.svg", 18.0, theme.text_ghost)),
+                    )
+                    .on_key_down(move |event: &KeyDownEvent, window, cx| {
+                        if event.keystroke.key == "f10" && event.keystroke.modifiers.shift {
+                            key_menu.open_context_menu(window, cx);
+                            cx.stop_propagation();
+                        }
                     });
-                    cx.stop_propagation();
-                } else if key == "f10" && event.keystroke.modifiers.shift {
-                    key_menu.open_context_menu(window, cx);
-                    cx.stop_propagation();
-                }
-            });
+            }
         } else {
             let key_menu = menu.clone();
             tile = tile.child(
@@ -449,7 +494,7 @@ fn render_sent_message_attachments(
                             .w_full()
                             .truncate()
                             .text_center()
-                            .text_size(px(9.5))
+                            .text_size(sp(9.5))
                             .text_color(theme.text_secondary)
                             .child(attachment.name.clone()),
                     ),
@@ -466,10 +511,30 @@ fn render_sent_message_attachments(
             tile,
             SharedString::from(format!("message-{message_id}-attachment-{index}-menu")),
             menu,
-            move |_| image_preview::attachment_menu_items(reveal_path.clone()),
+            move |_| image_preview::attachment_menu_items(reveal_path.clone(), can_reveal),
         ));
     }
     Some(row.into_any_element())
+}
+
+fn render_markdown_message_body<'a>(
+    content: &str,
+    markdown: Option<&'a MarkdownView>,
+    theme: &Theme,
+    ctx: &MarkdownCtx<'a>,
+) -> AnyElement {
+    markdown
+        .and_then(|markdown| md::render::markdown(markdown, ctx))
+        // Empty or not-yet-parsed content still needs a selectable fallback.
+        .unwrap_or_else(|| {
+            md::render::plain_text(
+                content.to_owned(),
+                md::render::SANS_FAMILY,
+                FontWeight::NORMAL,
+                theme.text,
+                ctx,
+            )
+        })
 }
 
 pub(super) fn render_message(params: MessageRender, cx: &mut App) -> AnyElement {
@@ -484,6 +549,8 @@ pub(super) fn render_message(params: MessageRender, cx: &mut App) -> AnyElement 
         user_message_action,
         message_edit_input,
         attachment_menus,
+        attachment_images,
+        attachments_can_reveal,
         markdown,
         ctx,
         menu,
@@ -498,7 +565,7 @@ pub(super) fn render_message(params: MessageRender, cx: &mut App) -> AnyElement 
     // stay out — rather than copying the final part alone.
     let menu_copy_content = assistant_footer_copy_content
         .clone()
-        .unwrap_or_else(|| content.clone());
+        .unwrap_or_else(|| SharedString::from(content.clone()));
     let message_id = message.id;
     let role = message.role;
     let element = match role {
@@ -515,13 +582,15 @@ pub(super) fn render_message(params: MessageRender, cx: &mut App) -> AnyElement 
                 message_id,
                 &message.attachments,
                 &attachment_menus,
+                &attachment_images,
+                attachments_can_reveal,
                 &waku,
                 theme,
             ) {
                 column = column.child(attachments);
             }
             if let Some(edit_input) = message_edit_input {
-                let can_submit = !edit_input.read(cx).content().trim().is_empty()
+                let can_submit = !edit_input.read(cx).content(cx).trim().is_empty()
                     || !message.attachments.is_empty();
                 let cancel_waku = waku.clone();
                 let submit_waku = waku.clone();
@@ -531,13 +600,13 @@ pub(super) fn render_message(params: MessageRender, cx: &mut App) -> AnyElement 
                         .max_w(px(540.0))
                         .rounded(px(12.0))
                         .bg(theme.raised)
-                        .px(px(12.0))
                         .pt(px(9.0))
                         .pb(px(8.0))
                         .child(edit_input)
                         .child(
                             div()
                                 .mt(px(7.0))
+                                .px(px(12.0))
                                 .flex()
                                 .justify_end()
                                 .gap(px(6.0))
@@ -554,7 +623,7 @@ pub(super) fn render_message(params: MessageRender, cx: &mut App) -> AnyElement 
                                         .bg(theme.overlay)
                                         .flex()
                                         .items_center()
-                                        .text_size(px(11.5))
+                                        .text_size(sp(11.5))
                                         .text_color(theme.text_secondary)
                                         .cursor_default()
                                         .hover(|element| element.bg(theme.overlay_strong))
@@ -580,7 +649,7 @@ pub(super) fn render_message(params: MessageRender, cx: &mut App) -> AnyElement 
                                         })
                                         .flex()
                                         .items_center()
-                                        .text_size(px(11.5))
+                                        .text_size(sp(11.5))
                                         .font_weight(FontWeight::MEDIUM)
                                         .text_color(if can_submit {
                                             theme.on_inverse
@@ -605,29 +674,25 @@ pub(super) fn render_message(params: MessageRender, cx: &mut App) -> AnyElement 
                 );
             } else {
                 if !content.trim().is_empty() {
+                    let body = render_markdown_message_body(&content, markdown, theme, ctx);
                     column = column.child(
                         div()
                             .max_w(px(540.0))
+                            .min_w_0()
                             .rounded(px(12.0))
                             .bg(theme.raised)
                             .px(px(12.0))
                             .py(px(8.0))
-                            .text_size(px(14.0))
-                            .line_height(px(20.0))
-                            .child(md::render::plain_text(
-                                content.clone(),
-                                md::render::SANS_FAMILY,
-                                FontWeight::NORMAL,
-                                theme.text,
-                                ctx,
-                            )),
+                            .text_size(sp(14.0))
+                            .line_height(sp(20.0))
+                            .child(body),
                     );
                 }
                 column = column.child(render_message_footer(
                     theme,
                     message,
                     message.created_at,
-                    content.clone(),
+                    SharedString::from(content.clone()),
                     copied,
                     group_name,
                     true,
@@ -640,19 +705,7 @@ pub(super) fn render_message(params: MessageRender, cx: &mut App) -> AnyElement 
         }
         MessageRole::Assistant => {
             let group_name = SharedString::from(format!("assistant-message-{message_id}"));
-            let body = markdown
-                .and_then(|markdown| md::render::markdown(markdown, ctx))
-                // A response whose text has not reached the parser yet (or is
-                // pure whitespace) still needs a row, so fall back to verbatim.
-                .unwrap_or_else(|| {
-                    md::render::plain_text(
-                        content.clone(),
-                        md::render::SANS_FAMILY,
-                        FontWeight::NORMAL,
-                        theme.text,
-                        ctx,
-                    )
-                });
+            let body = render_markdown_message_body(&content, markdown, theme, ctx);
             let mut column = div()
                 .w_full()
                 .min_w_0()
@@ -687,8 +740,8 @@ pub(super) fn render_message(params: MessageRender, cx: &mut App) -> AnyElement 
                 .py(px(4.0))
                 .rounded_full()
                 .bg(theme.overlay)
-                .text_size(px(11.0))
-                .line_height(px(16.0))
+                .text_size(sp(11.0))
+                .line_height(sp(16.0))
                 .child(md::render::plain_text(
                     content.clone(),
                     md::render::SANS_FAMILY,
@@ -775,7 +828,7 @@ fn message_menu_items(
         items.push(
             MenuItem::new(tr!("session.revert_to_here_title"), move |window, cx| {
                 let _ = waku.update(cx, |this, cx| {
-                    this.begin_message_edit(action.session_id, action.turn_count, window, cx);
+                    this.begin_message_edit(action, window, cx);
                 });
             })
             .icon("icons/rewind.svg"),
@@ -854,6 +907,94 @@ pub(super) fn activity_summary(activities: &[ActivityItem]) -> String {
     } else {
         tr!("activity.ran", activities = parts.join(" · "))
     }
+}
+
+pub(super) fn activity_header_title(
+    activities: &[ActivityItem],
+    live_turn: bool,
+    live_reasoning_id: Option<Uuid>,
+) -> String {
+    if live_turn && let Some(activity) = activities.last() {
+        return activity.reasoning.as_ref().map_or_else(
+            || activity_display_title(activity),
+            |reasoning| reasoning_activity_title(reasoning, live_reasoning_id == Some(activity.id)),
+        );
+    }
+
+    activity_summary(activities)
+}
+
+fn tool_name_leaf(name: &str) -> &str {
+    let name = name.trim();
+    let leaf = name.rsplit("__").next().unwrap_or(name);
+    leaf.rsplit([':', '.', '/']).next().unwrap_or(leaf)
+}
+
+fn is_ask_user_question(activity: &ActivityItem) -> bool {
+    activity.kind == crate::model::ActivityKind::Tool
+        && tool_name_leaf(&activity.title)
+            .chars()
+            .filter(|character| !matches!(*character, '_' | '-' | ' '))
+            .flat_map(char::to_lowercase)
+            .collect::<String>()
+            == "askuserquestion"
+}
+
+fn humanize_tool_name(name: &str) -> String {
+    let name = name.trim();
+    if name.chars().any(char::is_whitespace) {
+        return name.to_owned();
+    }
+
+    let leaf = tool_name_leaf(name);
+    let characters = leaf.chars().collect::<Vec<_>>();
+    let mut display = String::with_capacity(leaf.len() + 4);
+    for (index, character) in characters.iter().copied().enumerate() {
+        if matches!(character, '_' | '-') {
+            if !display.ends_with(' ') {
+                display.push(' ');
+            }
+            continue;
+        }
+        let previous = index.checked_sub(1).and_then(|index| characters.get(index));
+        let next = characters.get(index + 1);
+        let starts_word = character.is_ascii_uppercase()
+            && previous.is_some_and(|previous| {
+                previous.is_ascii_lowercase()
+                    || previous.is_ascii_digit()
+                    || (previous.is_ascii_uppercase()
+                        && next.is_some_and(|next| next.is_ascii_lowercase()))
+            });
+        if starts_word && !display.ends_with(' ') {
+            display.push(' ');
+        }
+        display.push(character);
+    }
+
+    let display = display.trim();
+    let mut characters = display.chars();
+    characters
+        .next()
+        .map(|first| first.to_uppercase().collect::<String>() + characters.as_str())
+        .unwrap_or_else(|| tr!("activity.tool"))
+}
+
+fn activity_tool_display_name(activity: &ActivityItem) -> String {
+    if is_ask_user_question(activity) {
+        return tr!("activity.ask_questions");
+    }
+    if let Some(target) = activity
+        .display_target
+        .as_deref()
+        .map(str::trim)
+        .filter(|target| !target.is_empty())
+    {
+        return target.to_owned();
+    }
+    if !crate::model::is_generic_activity_title(activity.kind, &activity.title) {
+        return humanize_tool_name(&activity.title);
+    }
+    tr!("activity.tool")
 }
 
 pub(super) fn activity_display_title(activity: &ActivityItem) -> String {
@@ -937,6 +1078,25 @@ pub(super) fn activity_display_title(activity: &ActivityItem) -> String {
             }
         }
         ActivityKind::Command => {
+            if let Some(description) = activity.display_description.as_deref() {
+                return match (activity.complete, activity.failed) {
+                    (false, _) => {
+                        tr!(
+                            "activity.running_described_command",
+                            description = description
+                        )
+                    }
+                    (true, false) => {
+                        tr!("activity.ran_described_command", description = description)
+                    }
+                    (true, true) => {
+                        tr!(
+                            "activity.described_command_failed",
+                            description = description
+                        )
+                    }
+                };
+            }
             if let Some(command) = activity.display_target.as_deref() {
                 return match (activity.complete, activity.failed) {
                     (false, _) => tr!("activity.running_named_command", command = command),
@@ -980,11 +1140,92 @@ pub(super) fn activity_display_title(activity: &ActivityItem) -> String {
                 (true, true) => tr!("activity.plan_update_failed"),
             }
         }
-        ActivityKind::Tool => activity
-            .display_target
-            .clone()
-            .unwrap_or_else(|| activity.title.clone()),
+        ActivityKind::Tool => activity_tool_display_name(activity),
         ActivityKind::Reasoning => activity.title.clone(),
+    }
+}
+
+pub(super) fn activity_action_label(activity: &ActivityItem) -> String {
+    use crate::model::ActivityKind;
+
+    match activity.kind {
+        ActivityKind::Reasoning => tr!("activity.action_think"),
+        ActivityKind::Command => tr!("activity.action_run"),
+        ActivityKind::FileChange => tr!("activity.action_edit"),
+        ActivityKind::FileRead => tr!("activity.action_read"),
+        ActivityKind::FileSearch | ActivityKind::Search => tr!("activity.action_search"),
+        ActivityKind::FileList => tr!("activity.action_list"),
+        ActivityKind::Plan => tr!("activity.action_plan"),
+        ActivityKind::Tool if is_ask_user_question(activity) => tr!("activity.ask_questions"),
+        ActivityKind::Tool => tr!("activity.tool"),
+    }
+}
+
+pub(super) fn activity_row_detail(activity: &ActivityItem, reasoning_live: bool) -> String {
+    use crate::model::ActivityKind;
+
+    let custom_title = || {
+        (!crate::model::is_generic_activity_title(activity.kind, &activity.title))
+            .then(|| activity.title.clone())
+    };
+    match activity.kind {
+        ActivityKind::Reasoning => activity.reasoning.as_ref().map_or_else(
+            || activity.title.clone(),
+            |reasoning| reasoning_activity_title(reasoning, reasoning_live),
+        ),
+        ActivityKind::Command => activity
+            .display_description
+            .clone()
+            .or_else(|| activity.display_target.clone())
+            .or_else(custom_title)
+            .unwrap_or_default(),
+        ActivityKind::FileChange => match activity.file_changes.as_slice() {
+            [change] => change.display_name().to_owned(),
+            changes if !changes.is_empty() => {
+                tr!("activity.file_count", count = changes.len())
+            }
+            _ => custom_title().unwrap_or_default(),
+        },
+        ActivityKind::FileRead | ActivityKind::FileList => activity
+            .display_target
+            .as_deref()
+            .map(activity_path_name)
+            .or_else(custom_title)
+            .unwrap_or_default(),
+        ActivityKind::FileSearch => activity_display_title(activity),
+        ActivityKind::Search => activity.display_target.as_deref().map_or_else(
+            || custom_title().unwrap_or_default(),
+            |query| tr!("activity.search_for", query = query),
+        ),
+        ActivityKind::Plan => custom_title().unwrap_or_default(),
+        ActivityKind::Tool if is_ask_user_question(activity) => String::new(),
+        ActivityKind::Tool => {
+            let has_name = activity
+                .display_target
+                .as_deref()
+                .is_some_and(|target| !target.trim().is_empty())
+                || !crate::model::is_generic_activity_title(activity.kind, &activity.title);
+            has_name
+                .then(|| activity_tool_display_name(activity))
+                .unwrap_or_default()
+        }
+    }
+}
+
+pub(super) fn reasoning_activity_title(reasoning: &ReasoningBlock, live: bool) -> String {
+    if live {
+        tr!("transcript.thinking")
+    } else {
+        tr!(
+            "transcript.thought_for",
+            duration = format_worked_duration(
+                reasoning
+                    .finished_at_ms
+                    .saturating_sub(reasoning.started_at_ms)
+                    .div_ceil(1000)
+                    .max(1)
+            )
+        )
     }
 }
 
@@ -995,6 +1236,16 @@ fn activity_path_name(path: &str) -> String {
         .filter(|name| !name.is_empty())
         .unwrap_or(path)
         .to_owned()
+}
+
+/// Whether this activity's expanded view shows a diff instead of the tool
+/// arguments that produced it.
+pub(super) fn activity_shows_diff(activity: &ActivityItem) -> bool {
+    activity.kind == ActivityKind::FileChange
+        && activity
+            .file_changes
+            .iter()
+            .any(|change| change.diff.is_some())
 }
 
 pub(super) fn activity_file_change_stats(activity: &ActivityItem) -> Option<(u64, u64)> {
@@ -1020,6 +1271,7 @@ pub(super) fn activity_file_change_stats(activity: &ActivityItem) -> Option<(u64
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub(super) enum ActivityDisclosureSectionKind {
+    Command,
     Arguments,
     Output,
     Detail,
@@ -1028,6 +1280,7 @@ pub(super) enum ActivityDisclosureSectionKind {
 impl ActivityDisclosureSectionKind {
     pub(super) fn id(self) -> &'static str {
         match self {
+            Self::Command => "command",
             Self::Arguments => "arguments",
             Self::Output => "output",
             Self::Detail => "detail",
@@ -1036,6 +1289,7 @@ impl ActivityDisclosureSectionKind {
 
     pub(super) fn label(self) -> Option<String> {
         match self {
+            Self::Command => Some(tr!("activity.command_detail")),
             Self::Arguments => Some(tr!("activity.arguments")),
             Self::Output => Some(tr!("activity.output")),
             Self::Detail => None,
@@ -1053,11 +1307,46 @@ pub(super) fn activity_disclosure_sections(
     activity: &ActivityItem,
 ) -> Vec<ActivityDisclosureSection> {
     let mut sections = Vec::new();
+    if activity.kind == ActivityKind::Command {
+        if let Some(command) = activity
+            .arguments
+            .as_deref()
+            .or(activity.display_target.as_deref())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            sections.push(ActivityDisclosureSection {
+                kind: ActivityDisclosureSectionKind::Command,
+                content: command.to_owned(),
+            });
+        }
+        if let Some(output) = activity
+            .output
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            sections.push(ActivityDisclosureSection {
+                kind: ActivityDisclosureSectionKind::Output,
+                content: output.to_owned(),
+            });
+        } else if !activity.image_urls.is_empty() {
+            sections.push(ActivityDisclosureSection {
+                kind: ActivityDisclosureSectionKind::Output,
+                content: String::new(),
+            });
+        }
+        return sections;
+    }
+    // An edit renders as a diff, which says everything the raw arguments would
+    // and reads. What the tool replied is only worth the room when it failed.
+    let shows_diff = activity_shows_diff(activity);
     if let Some(arguments) = activity
         .arguments
         .as_deref()
         .map(str::trim)
         .filter(|value| !value.is_empty())
+        .filter(|_| !shows_diff)
     {
         sections.push(ActivityDisclosureSection {
             kind: ActivityDisclosureSectionKind::Arguments,
@@ -1069,6 +1358,7 @@ pub(super) fn activity_disclosure_sections(
         .as_deref()
         .map(str::trim)
         .filter(|value| !value.is_empty())
+        .filter(|_| !shows_diff || activity.failed)
     {
         sections.push(ActivityDisclosureSection {
             kind: ActivityDisclosureSectionKind::Output,
@@ -1247,6 +1537,39 @@ mod message_time_tests {
     }
 
     #[test]
+    fn command_disclosure_shows_only_the_command_and_output() {
+        let activity = ActivityItem::new(
+            Some("command-1".into()),
+            crate::model::ActivityKind::Command,
+            "bash",
+            Some("Completed".into()),
+            true,
+        )
+        .with_arguments(Some(
+            r#"{"command":"git status --short","description":"Check status"}"#.into(),
+        ))
+        .with_output(Some("clean".into()));
+
+        assert_eq!(
+            activity_disclosure_sections(&activity),
+            vec![
+                ActivityDisclosureSection {
+                    kind: ActivityDisclosureSectionKind::Command,
+                    content: "git status --short".into(),
+                },
+                ActivityDisclosureSection {
+                    kind: ActivityDisclosureSectionKind::Output,
+                    content: "clean".into(),
+                },
+            ]
+        );
+        assert_eq!(
+            activity_disclosure_text(&activity).as_deref(),
+            Some("Command\ngit status --short\n\nOutput\nclean")
+        );
+    }
+
+    #[test]
     fn activity_display_title_prefers_the_human_facing_tool_argument() {
         let titled = ActivityItem::new(
             Some("tool-1".into()),
@@ -1269,6 +1592,88 @@ mod message_time_tests {
 
         assert_eq!(activity_display_title(&titled), "Inspect Helium browser");
         assert_eq!(activity_display_title(&untitled), "Js");
+    }
+
+    #[test]
+    fn generic_tool_rows_keep_a_humanized_provider_name() {
+        let named = ActivityItem::new(
+            Some("tool-1".into()),
+            crate::model::ActivityKind::Tool,
+            "mcp__threads__create_thread",
+            None,
+            true,
+        );
+        let unnamed = ActivityItem::new(
+            Some("tool-2".into()),
+            crate::model::ActivityKind::Tool,
+            "Tool",
+            None,
+            true,
+        );
+
+        assert_eq!(activity_action_label(&named), "Tool");
+        assert_eq!(activity_row_detail(&named, false), "Create thread");
+        assert_eq!(activity_display_title(&named), "Create thread");
+        assert_eq!(activity_action_label(&unnamed), "Tool");
+        assert_eq!(activity_row_detail(&unnamed, false), "");
+    }
+
+    #[test]
+    fn ask_user_question_has_a_purpose_specific_label() {
+        let activity = ActivityItem::new(
+            Some("tool-1".into()),
+            crate::model::ActivityKind::Tool,
+            "AskUserQuestion",
+            None,
+            true,
+        )
+        .with_arguments(Some(r#"{"questions":[]}"#.into()));
+
+        assert_eq!(activity_action_label(&activity), "Ask questions");
+        assert_eq!(activity_row_detail(&activity, false), "");
+        assert_eq!(activity_display_title(&activity), "Ask questions");
+    }
+
+    #[test]
+    fn live_activity_header_tracks_the_latest_child_until_the_turn_settles() {
+        let reasoning = ActivityItem::from_reasoning(
+            ReasoningBlock {
+                content: "Inspecting history".into(),
+                started_at_ms: 1_000,
+                finished_at_ms: 2_000,
+            },
+            true,
+        );
+        let command = ActivityItem::new(
+            Some("command-1".into()),
+            crate::model::ActivityKind::Command,
+            "bash",
+            None,
+            false,
+        )
+        .with_arguments(Some(
+            serde_json::json!({"command": "git log --oneline -15"}).to_string(),
+        ));
+        let mut activities = vec![reasoning, command];
+
+        assert_eq!(
+            activity_header_title(&activities, true, None),
+            "Running git log --oneline -15"
+        );
+        activities[1].complete = true;
+        assert_eq!(
+            activity_header_title(&activities, true, None),
+            "Ran git log --oneline -15"
+        );
+        assert_eq!(
+            activity_header_title(&activities, false, None),
+            "Ran 1 thought · 1 command"
+        );
+        assert_eq!(activity_action_label(&activities[1]), "Run");
+        assert_eq!(
+            activity_row_detail(&activities[1], false),
+            "git log --oneline -15"
+        );
     }
 
     #[test]
@@ -1379,7 +1784,7 @@ mod message_time_tests {
 
     #[test]
     fn command_web_search_and_plan_titles_include_their_state() {
-        let command = ActivityItem::new(
+        let mut command = ActivityItem::new(
             Some("command-1".into()),
             crate::model::ActivityKind::Command,
             "bash",
@@ -1393,7 +1798,15 @@ mod message_time_tests {
             })
             .to_string(),
         ));
-        assert_eq!(activity_display_title(&command), "Ran cargo test activity");
+        assert_eq!(
+            activity_display_title(&command),
+            "Ran command: Run focused tests"
+        );
+        command.complete = false;
+        assert_eq!(
+            activity_display_title(&command),
+            "Running command: Run focused tests"
+        );
 
         let web_search = ActivityItem::new(
             Some("search-1".into()),

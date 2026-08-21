@@ -53,14 +53,27 @@ impl Waku {
             Query::Pending => fallback,
             Query::Missing(token) => {
                 let fetch_path = workspace_path.clone();
+                let workspace = waku_client::WorkspaceClient::new(self.daemon.client());
                 cx.spawn(async move |waku, cx| {
                     let result = cx
                         .background_executor()
                         .spawn({
                             let fetch_path = fetch_path.clone();
                             async move {
-                                crate::git_branch::inspect(&fetch_path)
-                                    .map_err(|error| error.to_string())
+                                match workspace.request(
+                                    waku_client::WorkspaceOperation::InspectBranches {
+                                        cwd: fetch_path.clone(),
+                                    },
+                                ) {
+                                    Ok(waku_client::WorkspaceResult::Branches { snapshot }) => {
+                                        Ok(snapshot)
+                                    }
+                                    Ok(_) => {
+                                        Err("the daemon returned an invalid branch response"
+                                            .to_owned())
+                                    }
+                                    Err(error) => Err(error.to_string()),
+                                }
                             }
                         })
                         .await;
@@ -189,6 +202,22 @@ impl Waku {
         cx.notify();
     }
 
+    /// Escape from the create form: back to browsing with the filter
+    /// refocused — the reverse of [`begin_branch_creation`], with the same
+    /// double-frame focus dance because the search field only exists once
+    /// the browse body has rendered.
+    ///
+    /// [`begin_branch_creation`]: Self::begin_branch_creation
+    pub(super) fn cancel_branch_creation(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.branch_picker_mode = BranchPickerMode::Browse;
+        self.branch_picker_highlight = None;
+        let focus = self.branch_search.read(cx).focus_handle(cx);
+        window.on_next_frame(move |window, _| {
+            window.on_next_frame(move |window, cx| window.focus(&focus, cx));
+        });
+        cx.notify();
+    }
+
     pub(super) fn confirm_branch_creation(&mut self, cx: &mut Context<Self>) -> bool {
         if self.branch_picker_mode != BranchPickerMode::Create || self.branch_operation_pending {
             return false;
@@ -280,19 +309,28 @@ impl Waku {
         }
         self.branch_operation_pending = true;
         cx.notify();
+        let workspace = waku_client::WorkspaceClient::new(self.daemon.client());
         cx.spawn(async move |waku, cx| {
             let result = cx
                 .background_executor()
                 .spawn({
                     let path = path.clone();
                     async move {
-                        match operation {
-                            BranchOperation::Checkout(branch) => {
-                                crate::git_branch::checkout(&path, &branch)
+                        let (branch, create) = match operation {
+                            BranchOperation::Checkout(branch) => (branch, false),
+                            BranchOperation::Create(branch) => (branch, true),
+                        };
+                        match workspace.request(
+                            waku_client::WorkspaceOperation::CheckoutBranch {
+                                cwd: path,
+                                branch,
+                                create,
+                            },
+                        )? {
+                            waku_client::WorkspaceResult::BranchChanged { snapshot } => {
+                                Ok(snapshot)
                             }
-                            BranchOperation::Create(branch) => {
-                                crate::git_branch::create_and_checkout(&path, &branch)
-                            }
+                            _ => anyhow::bail!("the daemon returned an invalid branch response"),
                         }
                     }
                 })

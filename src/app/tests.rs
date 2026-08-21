@@ -2,30 +2,70 @@ use super::composer::{
     ComposerSubmitAction, composer_submit_action, dropped_file_mention, merged_submission,
     next_picker_highlight, visible_branch_entries,
 };
+use super::runtime::merge_remote_session_catalog;
 use super::settings::visible_settings_pages;
 use super::{
     ESCAPE_STOP_CONFIRMATION_TIMEOUT, EscapeStopConfirmation, EscapeStopPress, EscapeStopTarget,
-    NAVIGATION_RAIL_TICK_HEIGHT, NAVIGATION_RAIL_TURN_HEIGHT, SessionNavigation, StreamDeltaKind,
-    TranscriptRowKind::*, active_navigation_turn_index, append_text_delta_to_session,
-    assistant_response_footer, assistant_response_footer_index, assistant_response_footer_time,
-    changed_files_inline_message_index, compact_driver_error, disclosure_leading_space,
-    fenced_code, fitted_file_tree_width, fitted_panel_widths, folded_transcript_row_kinds,
-    format_worked_duration, format_working_elapsed, maintain_transcript_anchor,
-    message_starts_followup_turn, navigation_preview_snippet, navigation_rail_height,
-    navigation_rail_scale, navigation_rail_tick_count, navigation_rail_tick_turn,
-    navigation_rail_turn_tick, paused_toast_duration, pop_stream_chunk, push_transcript_activity,
-    session_is_reapable, should_show_navigation_rail, should_show_scroll_to_bottom,
-    take_stream_prefix, task_id_from_notification_tag, task_notification_tag,
-    transcript_anchor_end_space, transcript_navigation_turns, transcript_row_kinds,
-    transcript_row_splice, transcript_rows_fingerprint, widened_panel_width_for_file_editor,
-    widened_panel_width_for_review,
+    NAVIGATION_RAIL_TICK_HEIGHT, NAVIGATION_RAIL_TURN_HEIGHT, PendingUserInput, SessionNavigation,
+    StreamDeltaKind, TranscriptRowKind::*, active_navigation_turn_index,
+    append_text_delta_to_session, assistant_response_footer, assistant_response_footer_index,
+    assistant_response_footer_time, changed_files_inline_message_index, compact_driver_error,
+    disclosure_leading_space, fenced_code, fitted_file_tree_width, fitted_panel_widths,
+    folded_transcript_row_kinds, format_worked_duration, format_working_elapsed,
+    maintain_transcript_anchor, message_opens_turn, message_starts_followup_turn,
+    navigation_preview_snippet, navigation_rail_fade_visibility, navigation_rail_height,
+    navigation_rail_scale, paused_toast_duration, pop_stream_batch, push_transcript_activity,
+    session_is_reapable, should_refresh_branch_after_activity, should_show_navigation_rail,
+    should_show_scroll_to_bottom, task_id_from_notification_tag, task_notification_tag,
+    transcript_anchor_end_space, transcript_navigation_turns, transcript_rests_at_tail,
+    transcript_row_kinds, transcript_row_splice, transcript_rows_fingerprint,
+    widened_panel_width_for_file_editor, widened_panel_width_for_review,
 };
 use crate::git_branch::BranchEntry;
 use crate::model::{
     ActivityItem, ActivityKind, AgentSession, Checkpoint, CheckpointFile, CheckpointStatus,
-    DriverEvent, Message, MessageRole, ProviderKind, ReasoningBlock, SessionStatus,
-    TranscriptBlock, TurnStatus,
+    DriverEvent, Message, MessageRole, ProviderKind, ReasoningBlock, RuntimeEventCursor,
+    SessionStatus, TranscriptBlock, TurnStatus, UserInputOption, UserInputQuestion,
 };
+
+#[test]
+fn structured_user_input_preserves_question_order_and_custom_answer_precedence() {
+    let questions = vec![
+        UserInputQuestion {
+            id: "environment".into(),
+            header: "Environment".into(),
+            question: "Where should this deploy?".into(),
+            options: vec![UserInputOption {
+                label: "Preview".into(),
+                description: None,
+            }],
+            multi_select: false,
+        },
+        UserInputQuestion {
+            id: "notes".into(),
+            header: "Notes".into(),
+            question: "Anything else?".into(),
+            options: Vec::new(),
+            multi_select: false,
+        },
+    ];
+    let mut pending = PendingUserInput::new("request-1".into(), questions);
+    pending
+        .selections
+        .insert("environment".into(), vec!["Preview".into()]);
+    pending
+        .selections
+        .insert("notes".into(), vec!["stale choice".into()]);
+    pending
+        .custom_answers
+        .insert("notes".into(), "Use the EU region".into());
+
+    let answers = pending.answers();
+    assert_eq!(answers[0].question_id, "environment");
+    assert_eq!(answers[0].answers, ["Preview"]);
+    assert_eq!(answers[1].question_id, "notes");
+    assert_eq!(answers[1].answers, ["Use the EU region"]);
+}
 use gpui::{ListAlignment, ListState, Pixels, px};
 use std::{
     collections::{HashSet, VecDeque},
@@ -51,6 +91,42 @@ fn attach_changed_files(session: &mut AgentSession, files: Vec<CheckpointFile>) 
 }
 
 #[test]
+fn remote_task_catalog_adds_web_tasks_without_replacing_hydrated_detail() {
+    let project_id = Uuid::new_v4();
+    let mut local = AgentSession::new(project_id, ProviderKind::Codex);
+    local.title = "Local title".into();
+    local
+        .messages
+        .push(Message::new(MessageRole::User, "keep this transcript"));
+    let local_id = local.id;
+
+    let mut local_projection = local.list_projection();
+    local_projection.title = "Renamed elsewhere".into();
+    local_projection.status = SessionStatus::Waiting;
+    local_projection.updated_at += 10;
+
+    let mut web_task = AgentSession::new(project_id, ProviderKind::Claude).list_projection();
+    web_task.title = "Created in Web".into();
+    let web_task_id = web_task.id;
+
+    let mut catalog = vec![local];
+    let removed =
+        merge_remote_session_catalog(&mut catalog, vec![local_projection, web_task], |_| false);
+
+    assert!(removed.is_empty());
+    assert_eq!(catalog.len(), 2);
+    let merged_local = catalog
+        .iter()
+        .find(|session| session.id == local_id)
+        .unwrap();
+    assert_eq!(merged_local.title, "Renamed elsewhere");
+    assert_eq!(merged_local.status, SessionStatus::Waiting);
+    assert_eq!(merged_local.messages.len(), 1);
+    assert_eq!(merged_local.messages[0].content, "keep this transcript");
+    assert!(catalog.iter().any(|session| session.id == web_task_id));
+}
+
+#[test]
 fn composer_only_offers_stop_after_submission_preparation() {
     assert_eq!(
         composer_submit_action(Some(SessionStatus::Idle), false),
@@ -72,6 +148,26 @@ fn composer_only_offers_stop_after_submission_preparation() {
         composer_submit_action(Some(SessionStatus::Failed), false),
         ComposerSubmitAction::Send
     );
+}
+
+#[test]
+fn completed_mutating_activities_refresh_git_status() {
+    assert!(should_refresh_branch_after_activity(
+        ActivityKind::FileChange,
+        true
+    ));
+    assert!(should_refresh_branch_after_activity(
+        ActivityKind::Command,
+        true
+    ));
+    assert!(!should_refresh_branch_after_activity(
+        ActivityKind::FileChange,
+        false
+    ));
+    assert!(!should_refresh_branch_after_activity(
+        ActivityKind::FileRead,
+        true
+    ));
 }
 
 #[test]
@@ -278,8 +374,8 @@ fn conversation_navigation_rail_visibility_uses_all_three_gates() {
 #[test]
 fn conversation_navigation_rail_height_caps_at_eighty_percent() {
     assert_eq!(navigation_rail_height(10, 600.0), 120.0);
-    // 80% of 600px holds 40 whole ticks; the rail quantizes to them instead
-    // of squeezing one hundred sub-pixel rows into the 480px budget.
+    // Every turn keeps its full 12px scroll position; only the viewport is
+    // capped, so the remaining turns are reached by scrolling the rail.
     assert_eq!(navigation_rail_height(100, 600.0), 480.0);
     assert!(navigation_rail_height(100, 600.0) <= 600.0 * 0.80);
     assert_eq!(
@@ -289,40 +385,23 @@ fn conversation_navigation_rail_height_caps_at_eighty_percent() {
 }
 
 #[test]
-fn conversation_navigation_rail_samples_ticks_when_turns_cannot_fit() {
-    // While every turn fits, each keeps its own tick and the maps are the
-    // identity.
-    assert_eq!(navigation_rail_tick_count(10, 600.0), 10);
-    assert_eq!(navigation_rail_tick_turn(3, 10, 10), 3);
-    assert_eq!(navigation_rail_turn_tick(3, 10, 10), 3);
-
-    // A thousand turns sample down to the 40 full-pitch ticks a 600px
-    // viewport can hold, spanning the whole conversation.
-    let tick_count = navigation_rail_tick_count(1000, 600.0);
-    assert_eq!(tick_count, 40);
-    assert_eq!(navigation_rail_tick_turn(0, tick_count, 1000), 0);
+fn conversation_navigation_rail_fades_point_toward_hidden_turns() {
     assert_eq!(
-        navigation_rail_tick_turn(tick_count - 1, tick_count, 1000),
-        975
+        navigation_rail_fade_visibility(px(0.0), px(120.0)),
+        (false, true)
     );
-
-    // Every turn resolves to exactly the tick whose bucket holds it, and each
-    // tick's representative turn maps back to that tick.
-    for turn_index in 0..1000 {
-        let tick = navigation_rail_turn_tick(turn_index, tick_count, 1000);
-        assert!(tick < tick_count);
-        assert!(navigation_rail_tick_turn(tick, tick_count, 1000) <= turn_index);
-        if tick + 1 < tick_count {
-            assert!(turn_index < navigation_rail_tick_turn(tick + 1, tick_count, 1000));
-        }
-    }
-    for tick_index in 0..tick_count {
-        let representative = navigation_rail_tick_turn(tick_index, tick_count, 1000);
-        assert_eq!(
-            navigation_rail_turn_tick(representative, tick_count, 1000),
-            tick_index
-        );
-    }
+    assert_eq!(
+        navigation_rail_fade_visibility(px(-40.0), px(120.0)),
+        (true, true)
+    );
+    assert_eq!(
+        navigation_rail_fade_visibility(px(-120.0), px(120.0)),
+        (true, false)
+    );
+    assert_eq!(
+        navigation_rail_fade_visibility(px(0.0), px(0.0)),
+        (false, false)
+    );
 }
 
 #[test]
@@ -455,57 +534,84 @@ fn anchor_end_space_keeps_a_short_new_turn_at_the_viewport_top() {
 fn scroll_to_bottom_only_appears_while_the_tail_is_below_the_viewport() {
     let viewport_bottom = px(700.0);
 
-    assert!(!should_show_scroll_to_bottom(
-        false,
-        false,
-        true,
-        viewport_bottom,
-        None,
-        Pixels::ZERO,
-    ));
-    assert!(!should_show_scroll_to_bottom(
-        true,
-        true,
-        true,
-        viewport_bottom,
-        Some(px(900.0)),
-        Pixels::ZERO,
-    ));
+    assert_eq!(
+        should_show_scroll_to_bottom(false, false, true, viewport_bottom, None, Pixels::ZERO),
+        Some(false)
+    );
+    assert_eq!(
+        should_show_scroll_to_bottom(
+            true,
+            true,
+            true,
+            viewport_bottom,
+            Some(px(900.0)),
+            Pixels::ZERO,
+        ),
+        Some(false)
+    );
     // Disclosure pinning keeps `is_scrolled` true and a splice can leave the
     // tail temporarily unmeasured, but a collapsed transcript that fits the
     // viewport has nowhere to scroll back to.
-    assert!(!should_show_scroll_to_bottom(
-        true,
-        false,
-        false,
-        viewport_bottom,
-        None,
-        Pixels::ZERO,
-    ));
-    assert!(should_show_scroll_to_bottom(
-        true,
-        false,
-        true,
-        viewport_bottom,
-        None,
-        Pixels::ZERO,
-    ));
-    assert!(should_show_scroll_to_bottom(
-        true,
-        false,
-        true,
-        viewport_bottom,
-        Some(px(701.0)),
-        Pixels::ZERO,
-    ));
-    assert!(!should_show_scroll_to_bottom(
-        true,
-        false,
-        true,
-        viewport_bottom,
-        Some(px(500.0)),
-        px(200.0),
-    ));
+    assert_eq!(
+        should_show_scroll_to_bottom(true, false, false, viewport_bottom, None, Pixels::ZERO),
+        Some(false)
+    );
+    assert_eq!(
+        should_show_scroll_to_bottom(
+            true,
+            false,
+            true,
+            viewport_bottom,
+            Some(px(701.0)),
+            Pixels::ZERO,
+        ),
+        Some(true)
+    );
+    assert_eq!(
+        should_show_scroll_to_bottom(
+            true,
+            false,
+            true,
+            viewport_bottom,
+            Some(px(500.0)),
+            px(200.0),
+        ),
+        Some(false)
+    );
+    // A stream commit remeasures the tail rows, so the frame after each one has
+    // no bounds to read. Answering "show" there strobes the button against the
+    // measured frames between commits; the caller holds its last answer instead.
+    assert_eq!(
+        should_show_scroll_to_bottom(true, false, true, viewport_bottom, None, Pixels::ZERO),
+        None
+    );
+}
+
+#[test]
+fn scrolling_back_onto_the_tail_is_told_apart_from_an_unmeasured_tail() {
+    let viewport_bottom = px(700.0);
+
+    // Landed on the tail: the reply's last row ends at the viewport bottom,
+    // with or without the anchor's reserved end space below it.
+    assert_eq!(
+        transcript_rests_at_tail(viewport_bottom, Some(px(700.0)), Pixels::ZERO),
+        Some(true)
+    );
+    assert_eq!(
+        transcript_rests_at_tail(viewport_bottom, Some(px(500.0)), px(200.0)),
+        Some(true)
+    );
+    // Stopped short of it, so the stream must not reclaim the view.
+    assert_eq!(
+        transcript_rests_at_tail(viewport_bottom, Some(px(701.0)), Pixels::ZERO),
+        Some(false)
+    );
+    // Unmeasured this frame: unknown, not "stopped short" — concluding the
+    // latter would drop the re-engage whenever a scroll settles on a commit.
+    assert_eq!(
+        transcript_rests_at_tail(viewport_bottom, None, Pixels::ZERO),
+        None
+    );
 }
 
 #[test]
@@ -597,6 +703,27 @@ fn only_later_user_messages_start_followup_turns() {
 }
 
 #[test]
+fn only_the_turn_opening_prompt_is_a_rewind_boundary() {
+    let mut session = AgentSession::new(Uuid::new_v4(), ProviderKind::Codex);
+    session.begin_turn("first prompt");
+    session.push_message(MessageRole::Assistant, "working on it");
+    // A steer the provider folded into the live turn.
+    session.push_user_message_with_presentation("actually, also this", None, Vec::new());
+    session.push_message(MessageRole::Assistant, "answer");
+    session.finish_active_turn(TurnStatus::Interrupted);
+    session.begin_turn("second prompt");
+
+    assert!(message_opens_turn(&session.messages, 0));
+    assert!(!message_opens_turn(&session.messages, 1));
+    assert!(
+        !message_opens_turn(&session.messages, 2),
+        "a steer shares the turn's checkpoint, so it cannot be rewound to on its own"
+    );
+    assert!(!message_opens_turn(&session.messages, 3));
+    assert!(message_opens_turn(&session.messages, 4));
+}
+
+#[test]
 fn fenced_code_collects_all_blocks_without_languages() {
     let markdown = "Before\n```rust\nfn main() {}\n```\nAfter\n```\ncargo test\n```";
     assert_eq!(
@@ -607,25 +734,22 @@ fn fenced_code_collects_all_blocks_without_languages() {
 }
 
 #[test]
-fn stream_prefix_stops_at_lines_without_splitting_graphemes() {
-    let mut text = "hello 👋🏽\nnext line".to_owned();
-    let (first, count) = take_stream_prefix(&mut text, 100);
-    assert_eq!(first, "hello 👋🏽\n");
-    assert_eq!(count, 8);
-    assert_eq!(text, "next line");
-
-    let mut emoji = "👨‍👩‍👧‍👦x".to_owned();
-    let (first, count) = take_stream_prefix(&mut emoji, 1);
-    assert_eq!(first, "👨‍👩‍👧‍👦");
-    assert_eq!(count, 1);
-    assert_eq!(emoji, "x");
-}
-
-#[test]
-fn stream_chunks_coalesce_deltas_and_preserve_event_order() {
+fn stream_batches_commit_full_adjacent_text_and_preserve_event_order() {
+    let runtime_id = Uuid::new_v4();
+    let epoch = Uuid::new_v4();
     let mut events = VecDeque::from([
         DriverEvent::TextDelta("first ".into()),
+        DriverEvent::RuntimeEventCursorAdvanced(RuntimeEventCursor {
+            runtime_id,
+            epoch,
+            sequence: 1,
+        }),
         DriverEvent::TextDelta("line\nsecond line".into()),
+        DriverEvent::RuntimeEventCursorAdvanced(RuntimeEventCursor {
+            runtime_id,
+            epoch,
+            sequence: 2,
+        }),
         DriverEvent::Activity {
             id: None,
             kind: ActivityKind::Tool,
@@ -637,19 +761,18 @@ fn stream_chunks_coalesce_deltas_and_preserve_event_order() {
     ]);
 
     assert!(matches!(
-        pop_stream_chunk(&mut events, StreamDeltaKind::Text),
-        Some(DriverEvent::TextDelta(text)) if text == "first line\n"
+        pop_stream_batch(&mut events, StreamDeltaKind::Text),
+        Some(DriverEvent::TextDelta(text)) if text == "first line\nsecond line"
     ));
     assert!(matches!(
-        events.front(),
-        Some(DriverEvent::TextDelta(text)) if text == "second line"
-    ));
-
-    assert!(matches!(
-        pop_stream_chunk(&mut events, StreamDeltaKind::Text),
-        Some(DriverEvent::TextDelta(text)) if text == "second line"
+        events.pop_front(),
+        Some(DriverEvent::RuntimeEventCursorAdvanced(cursor)) if cursor.sequence == 2
     ));
     assert!(matches!(events.front(), Some(DriverEvent::Activity { .. })));
+    assert!(matches!(
+        events.get(1),
+        Some(DriverEvent::TextDelta(text)) if text == "after tool"
+    ));
 }
 
 #[test]
@@ -1644,8 +1767,9 @@ fn settings_search_filters_pages_for_arrow_cycling() {
         SettingsPage::Providers,
         SettingsPage::Skills,
         SettingsPage::Usage,
+        SettingsPage::Daemon,
     ];
-    if cfg!(debug_assertions) {
+    if cfg!(all(debug_assertions, target_os = "macos")) {
         all_pages.push(SettingsPage::ComputerUse);
     }
     assert_eq!(pages(""), all_pages);
@@ -1659,7 +1783,7 @@ fn settings_search_filters_pages_for_arrow_cycling() {
         SettingsPage::Skills,
         SettingsPage::Usage,
     ];
-    if cfg!(debug_assertions) {
+    if cfg!(all(debug_assertions, target_os = "macos")) {
         codex_pages.push(SettingsPage::ComputerUse);
     }
     assert_eq!(pages("codex"), codex_pages);
@@ -1668,13 +1792,13 @@ fn settings_search_filters_pages_for_arrow_cycling() {
 }
 
 #[test]
-fn computer_use_navigation_is_debug_only() {
+fn computer_use_navigation_is_macos_debug_only() {
     use super::SettingsPage;
 
     assert!(SettingsPage::General.is_visible_in_navigation());
     assert_eq!(
         SettingsPage::ComputerUse.is_visible_in_navigation(),
-        cfg!(debug_assertions)
+        cfg!(all(debug_assertions, target_os = "macos"))
     );
 }
 
@@ -1689,6 +1813,7 @@ fn switched_off_providers_leave_the_picker_except_for_their_locked_session() {
         installed: true,
         path: Some(std::path::PathBuf::from(format!("/bin/{}", provider.id()))),
         models: vec![ProviderModel::new(model, model)],
+        agent_presets: Vec::new(),
     };
     let probes = [
         probe(ProviderKind::Claude, "claude-sonnet-5"),
@@ -1753,6 +1878,20 @@ fn switched_off_providers_leave_the_picker_except_for_their_locked_session() {
 }
 
 #[test]
+fn model_picker_subtitle_deduplicates_the_provider_name() {
+    use super::composer::model_picker_subtitle;
+
+    assert_eq!(
+        model_picker_subtitle(ProviderKind::DeepSeek, Some("DeepSeek")),
+        "DeepSeek"
+    );
+    assert_eq!(
+        model_picker_subtitle(ProviderKind::DeepSeek, Some("OpenAI")),
+        "OpenAI · DeepSeek"
+    );
+}
+
+#[test]
 fn tab_cycle_walks_favorites_then_usable_providers_in_rail_order() {
     use super::ModelPickerTab;
     use super::composer::visible_picker_tabs;
@@ -1763,6 +1902,7 @@ fn tab_cycle_walks_favorites_then_usable_providers_in_rail_order() {
         installed,
         path: installed.then(|| std::path::PathBuf::from(format!("/bin/{}", provider.id()))),
         models: vec![ProviderModel::new("model", "model")],
+        agent_presets: Vec::new(),
     };
     let probes = [
         probe(ProviderKind::Claude, true),
@@ -1798,4 +1938,103 @@ fn tab_cycle_walks_favorites_then_usable_providers_in_rail_order() {
             ModelPickerTab::Provider(ProviderKind::Claude),
         ]
     );
+}
+
+#[test]
+fn the_picker_is_empty_only_once_detection_has_answered() {
+    use super::composer::picker_has_no_providers;
+    use crate::model::{ProviderModel, ProviderProbe};
+
+    let probe = |provider: ProviderKind, installed: bool| ProviderProbe {
+        provider,
+        installed,
+        path: installed.then(|| std::path::PathBuf::from(format!("/bin/{}", provider.id()))),
+        models: vec![ProviderModel::new("model", "model")],
+        agent_presets: Vec::new(),
+    };
+    // What every probe looks like before detection answers: seeded with a
+    // fallback catalog and not yet installed.
+    let undetected = [
+        probe(ProviderKind::Claude, false),
+        probe(ProviderKind::Codex, false),
+    ];
+    let detected = [
+        probe(ProviderKind::Claude, true),
+        probe(ProviderKind::Codex, false),
+    ];
+
+    // An unsettled first pass reads as "not known yet", so the composer keeps
+    // showing the remembered model instead of flashing an empty state.
+    assert!(!picker_has_no_providers(&undetected, &[], None, false));
+    // Once it settles, the same probes really do mean nothing is installed.
+    assert!(picker_has_no_providers(&undetected, &[], None, true));
+    // One detected CLI is enough to keep the picker populated...
+    assert!(!picker_has_no_providers(&detected, &[], None, true));
+    // ...until it is switched off, which empties the picker just as surely as
+    // never having been installed.
+    assert!(picker_has_no_providers(
+        &detected,
+        &[ProviderKind::Claude],
+        None,
+        true
+    ));
+    // A session already locked to that provider keeps it, switched off or not.
+    assert!(!picker_has_no_providers(
+        &detected,
+        &[ProviderKind::Claude],
+        Some(ProviderKind::Claude),
+        true
+    ));
+}
+
+#[test]
+fn the_rail_draws_only_installed_providers_the_settings_left_on() {
+    use super::composer::picker_rail_shows_provider;
+    use crate::model::{ProviderModel, ProviderProbe};
+
+    let probe = |provider: ProviderKind, installed: bool| ProviderProbe {
+        provider,
+        installed,
+        path: installed.then(|| std::path::PathBuf::from(format!("/bin/{}", provider.id()))),
+        models: vec![ProviderModel::new("model", "model")],
+        agent_presets: Vec::new(),
+    };
+    let probes = [
+        probe(ProviderKind::Claude, true),
+        probe(ProviderKind::Codex, true),
+        probe(ProviderKind::Cursor, false),
+    ];
+
+    // An undetected CLI and a switched-off provider both leave the rail
+    // outright, rather than sitting in it dimmed.
+    assert!(!picker_rail_shows_provider(
+        &probes,
+        &[],
+        None,
+        ProviderKind::Cursor
+    ));
+    assert!(!picker_rail_shows_provider(
+        &probes,
+        &[ProviderKind::Claude],
+        None,
+        ProviderKind::Claude
+    ));
+
+    // A provider only the *current* session locks out stays drawn: that is a
+    // fact about this session, not about what the user configured.
+    assert!(picker_rail_shows_provider(
+        &probes,
+        &[],
+        Some(ProviderKind::Codex),
+        ProviderKind::Claude
+    ));
+
+    // ...and the locked session keeps its own tab even once it is switched
+    // off, since the picker is its only route to another model.
+    assert!(picker_rail_shows_provider(
+        &probes,
+        &[ProviderKind::Claude],
+        Some(ProviderKind::Claude),
+        ProviderKind::Claude
+    ));
 }

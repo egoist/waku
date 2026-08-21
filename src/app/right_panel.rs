@@ -144,13 +144,9 @@ fn workspace_relative_file_path(workspace: &Path, target: &Path) -> Option<Strin
 
     let workspace = normalized_path(workspace);
     let target = normalized_path(target);
-    match (
-        std::fs::canonicalize(&workspace),
-        std::fs::canonicalize(&target),
-    ) {
-        (Ok(workspace), Ok(target)) => relative(&workspace, &target),
-        _ => relative(&workspace, &target),
-    }
+    // These are daemon-host paths. Routing is intentionally lexical: probing
+    // the desktop filesystem would reinterpret a remote workspace locally.
+    relative(&workspace, &target)
 }
 
 fn transcript_link_route(target: &str, workspace: Option<&Path>) -> TranscriptLinkRoute {
@@ -295,6 +291,185 @@ fn review_diff_tree_rows(
         }
     }
     rows
+}
+
+/// How wide and tall a diff row is drawn. The Review panel is a reading
+/// surface; the copy embedded in a transcript activity is a summary and gives
+/// its space back to the code.
+#[derive(Clone, Copy)]
+pub(super) struct DiffRowStyle {
+    gutter_width: f32,
+    row_height: f32,
+    text_size: f32,
+    /// What to put in the gutter of a row that has no line number. Git always
+    /// reports positions, so this only comes up on a diff synthesized from a
+    /// provider's before/after text: there the `+`/`-` marker stands in, which
+    /// keeps the gutter from going blank and the meaning off color alone.
+    marker_fallback: bool,
+}
+
+impl DiffRowStyle {
+    /// Review-tab rows at the user's code font size. The gutter holds a
+    /// right-aligned line number: ~0.6em per mono digit, five digits, plus
+    /// its padding and border.
+    pub(super) fn review(text_size: f32) -> Self {
+        Self {
+            gutter_width: (text_size * 3.0 + 14.0).round(),
+            row_height: (text_size * 1.5).round(),
+            text_size,
+            marker_fallback: false,
+        }
+    }
+
+    /// The same rows the Review tab draws, so an edit reads the same wherever
+    /// it is opened.
+    pub(super) fn activity(text_size: f32) -> Self {
+        Self {
+            marker_fallback: true,
+            ..Self::review(text_size)
+        }
+    }
+
+    pub(super) fn gutter_width(&self) -> f32 {
+        self.gutter_width
+    }
+}
+
+/// Selection identity for one diff code row. Selection resolves a drag by
+/// looking rows up by key, so every row must have its own.
+///
+/// Rows with line numbers key on them: they survive Review's gap expansion,
+/// where a revealed gap shifts every later row's index. Rows without them — a
+/// diff synthesized from a provider's before/after text — key on the row index
+/// instead, which is stable there because an activity diff is only ever
+/// rebuilt whole. Keying those on their (absent) numbers gave every added row
+/// the same key, and a drag resolved against whichever duplicate registered
+/// first: selections jumped rows, skipped wrapped lines, and collapsed when
+/// the head crossed into context.
+fn diff_row_selection_key(
+    key_prefix: &str,
+    line: &crate::review_diff::Line,
+    index: usize,
+) -> String {
+    let kind = match &line.kind {
+        crate::review_diff::LineKind::Context => "context",
+        crate::review_diff::LineKind::Addition => "addition",
+        crate::review_diff::LineKind::Deletion => "deletion",
+        _ => "other",
+    };
+    match (line.old_line, line.new_line) {
+        (None, None) => format!("{key_prefix}-line-{}-{kind}-i{index}", line.file_index),
+        (old, new) => format!(
+            "{key_prefix}-line-{}-{kind}-{}-{}",
+            line.file_index,
+            old.unwrap_or(0),
+            new.unwrap_or(0),
+        ),
+    }
+}
+
+/// One context, addition, or deletion row, shared by the Review panel and the
+/// diff inside an expanded file-change activity so the two never drift.
+pub(super) fn render_diff_code_row(
+    line: &crate::review_diff::Line,
+    index: usize,
+    key_prefix: &str,
+    selection: &TranscriptSelection,
+    style: DiffRowStyle,
+    theme: &Theme,
+) -> AnyElement {
+    let semantic_body_opacity = if theme.is_dark { 0.20 } else { 0.12 };
+    let semantic_gutter_opacity = if theme.is_dark { 0.15 } else { 0.09 };
+    let (marker, body_background, gutter_background, edge, number_color) = match &line.kind {
+        crate::review_diff::LineKind::Addition => (
+            "+",
+            Some(theme.success.opacity(semantic_body_opacity)),
+            Some(theme.success.opacity(semantic_gutter_opacity)),
+            Some(theme.success),
+            theme.success,
+        ),
+        crate::review_diff::LineKind::Deletion => (
+            "-",
+            Some(theme.danger.opacity(semantic_body_opacity)),
+            Some(theme.danger.opacity(semantic_gutter_opacity)),
+            Some(theme.danger),
+            theme.danger,
+        ),
+        _ => (" ", None, None, None, theme.text_tertiary),
+    };
+    let shown_line = line.new_line.or(line.old_line);
+    let flat = review_diff_flat_text(line, theme);
+    let selectable = md::render::selectable_flat_text(
+        &flat,
+        crate::md::selection::TextKey::new(diff_row_selection_key(key_prefix, line, index), 0),
+        selection.clone(),
+        theme.code_wash,
+        theme.selection,
+        false,
+    );
+    let gutter = div()
+        .w(px(style.gutter_width))
+        .min_h(px(style.row_height))
+        .self_stretch()
+        .flex_none()
+        .pr(px(9.0))
+        .flex()
+        .items_start()
+        .justify_end()
+        .border_r_1()
+        .border_color(theme.border)
+        .text_color(number_color)
+        .when_some(gutter_background, |gutter, background| {
+            gutter.bg(background)
+        })
+        .child(
+            shown_line
+                .map(|line| line.to_string())
+                .or_else(|| style.marker_fallback.then(|| marker.to_owned()))
+                .unwrap_or_default(),
+        );
+    let body = div()
+        .min_h(px(style.row_height))
+        .self_stretch()
+        .min_w_0()
+        .flex_1()
+        .pl(px(12.0))
+        .flex()
+        .items_start()
+        .when_some(body_background, |body, background| body.bg(background))
+        .child(
+            div()
+                .id(SharedString::from(format!(
+                    "{key_prefix}-line-content-{index}"
+                )))
+                .min_h(px(style.row_height))
+                .min_w_0()
+                .flex_1()
+                .pr(px(10.0))
+                .flex()
+                .items_start()
+                .overflow_hidden()
+                .whitespace_normal()
+                .child(selectable),
+        );
+    div()
+        .id(SharedString::from(format!("{key_prefix}-row-{index}")))
+        .w_full()
+        .min_w_0()
+        .min_h(px(style.row_height))
+        // A wrapped line makes the row taller than one line. Stacked in a
+        // scrolling column, a shrinkable row would be squeezed back to one
+        // and paint its overflow over the row beneath it.
+        .flex_none()
+        .flex()
+        .items_stretch()
+        .font_family(md::render::MONO_FAMILY)
+        .text_size(px(style.text_size))
+        .line_height(px(style.row_height))
+        .when_some(edge, |row, edge| row.border_l_2().border_color(edge))
+        .child(gutter)
+        .child(body)
+        .into_any_element()
 }
 
 fn review_diff_flat_text(line: &crate::review_diff::Line, theme: &Theme) -> md::render::FlatText {
@@ -534,6 +709,7 @@ fn file_icon_for_name(name: &str) -> &'static str {
     }
 }
 
+#[cfg(test)]
 fn visible_working_tree_entries(
     root: &Path,
     expanded_paths: &HashSet<PathBuf>,
@@ -669,9 +845,23 @@ fn file_highlighter_language(relative_path: &str) -> &'static str {
 ///
 /// One unbounded `read_to_string`, so callers keep it off the UI thread; the
 /// only caller is [`Waku::read_right_panel_file_into_editor`].
-fn read_right_panel_file(project_path: &Path, relative_path: &str) -> (String, bool) {
-    match std::fs::read_to_string(project_path.join(relative_path)) {
-        Ok(content) => (content, true),
+fn read_right_panel_file(
+    workspace: &waku_client::WorkspaceClient,
+    project_path: &Path,
+    relative_path: &str,
+) -> (String, bool) {
+    match workspace.request(waku_client::WorkspaceOperation::ReadTextFile {
+        root: project_path.to_path_buf(),
+        relative_path: PathBuf::from(relative_path),
+    }) {
+        Ok(waku_client::WorkspaceResult::TextFile { content }) => (content, true),
+        Ok(_) => (
+            tr!(
+                "files.unable_to_edit",
+                error = "the daemon returned an invalid file response"
+            ),
+            false,
+        ),
         Err(error) => (
             tr!("files.unable_to_edit", error = error.to_string()),
             false,
@@ -935,6 +1125,51 @@ mod tests {
         );
     }
 
+    /// Selection resolves rows by key, so a repeated key makes a drag jump
+    /// between the duplicates. Numbered rows keep their number-derived keys
+    /// (stable across Review's gap expansion); rows a provider never
+    /// positioned fall back to the row index.
+    #[test]
+    fn diff_row_selection_keys_are_unique_even_without_line_numbers() {
+        let positionless =
+            crate::review_diff::from_file_changes(&[crate::model::ActivityFileChange {
+                path: "a.md".into(),
+                additions: Some(2),
+                deletions: Some(0),
+                status: None,
+                diff: Some("@@\n+one\n+two\n \n+three\n".into()),
+            }]);
+        let keys = positionless
+            .lines
+            .iter()
+            .enumerate()
+            .filter(|(_, line)| {
+                matches!(
+                    line.kind,
+                    crate::review_diff::LineKind::Context
+                        | crate::review_diff::LineKind::Addition
+                        | crate::review_diff::LineKind::Deletion
+                )
+            })
+            .map(|(index, line)| diff_row_selection_key("activity", line, index))
+            .collect::<Vec<_>>();
+        let unique = keys.iter().collect::<HashSet<_>>();
+        assert_eq!(unique.len(), keys.len(), "{keys:?}");
+
+        let numbered = crate::review_diff::Line {
+            file_index: 0,
+            old_line: Some(4),
+            new_line: Some(6),
+            kind: crate::review_diff::LineKind::Context,
+            content: "kept".into(),
+            tokens: Vec::new(),
+        };
+        assert_eq!(
+            diff_row_selection_key("review-diff", &numbered, 9),
+            "review-diff-line-0-context-4-6",
+        );
+    }
+
     fn review_file(path: &str) -> crate::review_diff::File {
         crate::review_diff::File {
             path: path.into(),
@@ -1117,6 +1352,36 @@ mod tests {
         }
     }
 
+    /// A wrapped diff line must grow its row rather than be clipped by it.
+    /// Both the panel's own rows and the shared code row have to hold this,
+    /// and the shared one is also what the transcript's diff paints with.
+    #[test]
+    fn diff_text_rows_soft_wrap() {
+        let source = include_str!("right_panel.rs");
+        let panel = source
+            .split_once("\n    fn render_right_panel_diff_line(")
+            .expect("review diff line renderer")
+            .1
+            .split_once("\n    #[allow(clippy::too_many_arguments)]")
+            .expect("review diff line renderer end")
+            .0;
+        let shared = source
+            .split_once("\npub(super) fn render_diff_code_row(")
+            .expect("shared diff code row")
+            .1
+            .split_once("\nfn review_diff_flat_text(")
+            .expect("shared diff code row end")
+            .0;
+
+        for body in [panel, shared] {
+            assert!(!body.contains(".whitespace_nowrap()"));
+        }
+        assert!(panel.matches(".whitespace_normal()").count() >= 2);
+        assert!(shared.contains(".whitespace_normal()"));
+        assert!(shared.contains(".min_h(px(style.row_height))"));
+        assert!(!shared.contains(".h(px(style.row_height))"));
+    }
+
     /// The render path must never reach the filesystem. This reads the source
     /// rather than the behaviour, because the cost of a regression here is a
     /// syscall per directory entry on every frame — invisible until a project
@@ -1252,6 +1517,7 @@ mod tests {
             ("yaml", Some(Lang::Yaml)),
             ("make", Some(Lang::Shell)),
             ("cpp", Some(Lang::C)),
+            ("markdown", Some(Lang::Markdown)),
             // Not yet lexed; these fall back to unhighlighted monospace.
             ("elixir", None),
             ("text", None),
@@ -1325,19 +1591,6 @@ mod tests {
             right_panel_tab_icon(&file, None),
             "icons/file-types/rust.svg"
         );
-    }
-
-    #[test]
-    fn editable_file_reader_keeps_the_complete_disk_content() {
-        let root = std::env::temp_dir().join(format!("waku-editor-file-{}", Uuid::new_v4()));
-        std::fs::create_dir_all(&root).unwrap();
-        let content = "line\n".repeat(10_000);
-        std::fs::write(root.join("large.txt"), &content).unwrap();
-
-        assert_eq!(read_right_panel_file(&root, "large.txt"), (content, true));
-        assert!(!read_right_panel_file(&root, "missing.txt").1);
-
-        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -1467,10 +1720,35 @@ impl Waku {
                 self.open_right_panel_surface(RightPanelSurface::Files, cx);
                 self.open_right_panel_file(relative_path, cx);
             }
-            TranscriptLinkRoute::Finder(path) => crate::platform::reveal_in_finder(&path),
+            TranscriptLinkRoute::Finder(path) => {
+                if self.daemon.is_remote() {
+                    self.show_toast(tr!("errors.remote_host_path"));
+                    cx.notify();
+                } else {
+                    crate::platform::reveal_in_file_manager(&path, cx);
+                }
+            }
             TranscriptLinkRoute::External => return false,
         }
         true
+    }
+
+    /// Open a path a tool reported, from an activity in the transcript.
+    ///
+    /// Providers name a changed file however they like — absolute, or relative
+    /// to the session's workspace — so resolve it before routing. Inside the
+    /// workspace it opens in the file viewer; anywhere else it goes to the file
+    /// manager, the same split a file link in the transcript takes.
+    pub(super) fn open_activity_file(&mut self, path: &str, cx: &mut Context<Self>) {
+        let path = Path::new(path.trim());
+        let resolved = if path.is_absolute() {
+            path.to_path_buf()
+        } else if let Some(workspace) = self.selected_workspace_path() {
+            workspace.join(path)
+        } else {
+            return;
+        };
+        self.open_transcript_link(&resolved.to_string_lossy(), cx);
     }
 
     pub(super) fn store_selected_right_panel_state(&mut self) {
@@ -1914,7 +2192,7 @@ impl Waku {
             .border_color(theme.border_strong)
             .bg(theme.surface)
             .relative()
-            .child(self.render_right_panel_header(cx))
+            .child(self.render_right_panel_header(window, cx))
             .child(body)
             .child(self.render_panel_resize_handle(
                 "right-panel-resize-handle",
@@ -1966,7 +2244,7 @@ impl Waku {
             || self.command_palette.is_open()
             || self.commit_dialog.is_some()
             || self.image_preview.is_some()
-            || self.composer.read(cx).context_menu_open()
+            || self.composer.read(cx).context_menu_open(cx)
             || self
                 .right_panel_browsers
                 .values()
@@ -1986,7 +2264,13 @@ impl Waku {
         // native views, open menus never occlude the webview — the snapshot
         // swap is purely the fallback for a window where enabling it failed.
         let overlay_open = !self.scene_overlay_enabled && self.any_overlay_open(cx);
-        let active_browser = if self.settings_page.is_none() && self.right_panel_visible {
+        // A webview composites above the GPUI scene, so the panel's clip does
+        // not apply to it: shown mid-slide it would hang over the transcript
+        // at full width. Keep it down until the panel has finished moving.
+        let active_browser = if self.settings_page.is_none()
+            && self.right_panel_visible
+            && self.right_panel_slide.is_none()
+        {
             self.active_right_panel_surface()
                 .and_then(RightPanelSurface::browser_id)
         } else {
@@ -2001,6 +2285,13 @@ impl Waku {
     }
 
     fn ensure_right_panel_terminal(&mut self, terminal_id: Uuid, cx: &mut Context<Self>) {
+        if self.daemon.is_remote() {
+            // A desktop PTY would interpret the daemon's cwd on the wrong
+            // machine. Keep the surface unavailable until the protocol grows
+            // a daemon-owned streaming terminal.
+            self.right_panel_terminals.remove(&terminal_id);
+            return;
+        }
         let Some(working_directory) = self
             .selected_workspace_path()
             .map(std::path::Path::to_path_buf)
@@ -2043,7 +2334,7 @@ impl Waku {
         }
     }
 
-    fn render_right_panel_header(&self, cx: &mut Context<Self>) -> Stateful<Div> {
+    fn render_right_panel_header(&self, window: &Window, cx: &mut Context<Self>) -> Stateful<Div> {
         let theme = Theme::current(cx);
         let active_surface = self.right_panel_active_surface;
         let mut tabs = div()
@@ -2109,7 +2400,7 @@ impl Waku {
                             .flex_1()
                             .line_clamp(1)
                             .text_ellipsis()
-                            .text_size(px(12.0))
+                            .text_size(sp(12.0))
                             .text_color(if active {
                                 theme.text
                             } else {
@@ -2126,7 +2417,12 @@ impl Waku {
                                 .rounded_full()
                                 .bg(theme.warning)
                                 .tooltip(|window, cx| {
-                                    Tooltip::new(tr!("files.unsaved_changes")).build(window, cx)
+                                    Tooltip::new(tr!(
+                                        "files.unsaved_changes",
+                                        shortcut =
+                                            crate::platform::primary_shortcut("⌘S", "Ctrl+S")
+                                    ))
+                                    .build(window, cx)
                                 }),
                         )
                     })
@@ -2241,7 +2537,16 @@ impl Waku {
             );
         }
 
-        self.window_drag_region(header.child(self.render_right_panel_toggle(cx)), cx)
+        self.window_drag_region(
+            header.child(self.render_right_panel_toggle(cx)).children(
+                self.render_client_window_controls(
+                    super::window_chrome::WindowControlSide::Right,
+                    window,
+                    cx,
+                ),
+            ),
+            cx,
+        )
     }
 
     fn render_right_panel_chooser(&self, cx: &mut Context<Self>) -> Stateful<Div> {
@@ -2264,7 +2569,7 @@ impl Waku {
                     .items_center()
                     .child(
                         div()
-                            .text_size(px(13.0))
+                            .text_size(sp(13.0))
                             .font_weight(FontWeight::MEDIUM)
                             .text_color(theme.text)
                             .child(tr!("right_panel.open_surface")),
@@ -2272,7 +2577,7 @@ impl Waku {
                     .child(
                         div()
                             .mt(px(5.0))
-                            .text_size(px(11.0))
+                            .text_size(sp(11.0))
                             .text_color(theme.text_tertiary)
                             .child(tr!("right_panel.choose_surface")),
                     )
@@ -2345,7 +2650,7 @@ impl Waku {
             .child(
                 div()
                     .mt(px(12.0))
-                    .text_size(px(12.5))
+                    .text_size(sp(12.5))
                     .font_weight(FontWeight::MEDIUM)
                     .text_color(theme.text)
                     .child(label),
@@ -2353,8 +2658,8 @@ impl Waku {
             .child(
                 div()
                     .mt(px(4.0))
-                    .text_size(px(10.5))
-                    .line_height(px(15.0))
+                    .text_size(sp(10.5))
+                    .line_height(sp(15.0))
                     .text_color(theme.text_tertiary)
                     .whitespace_normal()
                     .line_clamp(2)
@@ -2440,7 +2745,7 @@ impl Waku {
                         .min_w_0()
                         .flex_1()
                         .truncate()
-                        .text_size(px(11.5))
+                        .text_size(sp(11.5))
                         .text_color(theme.text_secondary)
                         .child(entry.name),
                 );
@@ -2481,7 +2786,7 @@ impl Waku {
                             .min_w_0()
                             .flex_1()
                             .truncate()
-                            .text_size(px(11.5))
+                            .text_size(sp(11.5))
                             .font_weight(FontWeight::MEDIUM)
                             .text_color(theme.text_secondary)
                             .child(project_name),
@@ -2519,6 +2824,53 @@ impl Waku {
         let (editor_state, writable, _) =
             self.ensure_right_panel_file_editor(&relative_path, window, cx);
 
+        // Markdown files carry the global source/preview toggle; every other
+        // language always shows source.
+        let is_markdown = file_highlighter_language(&relative_path) == "markdown";
+        let preview = is_markdown && self.state.markdown_preview;
+        let body = if preview {
+            self.render_file_markdown_preview(&relative_path, &editor_state, cx)
+        } else {
+            self.render_file_editor_body(
+                &relative_path,
+                &editor_state,
+                panel_width - file_tree_width,
+                writable,
+                window,
+                cx,
+            )
+        };
+        let preview_toggle = is_markdown.then(|| {
+            let focus = self.transcript_control_focus("file-markdown-preview-toggle", cx);
+            let (icon_path, label) = if preview {
+                ("icons/pencil.svg", tr!("files.edit_markdown_source"))
+            } else {
+                ("icons/eye.svg", tr!("files.preview_markdown"))
+            };
+            div()
+                .id("file-markdown-preview-toggle")
+                .track_focus(&focus)
+                .tab_index(0)
+                .size(px(26.0))
+                .rounded(px(7.0))
+                .flex_none()
+                .flex()
+                .items_center()
+                .justify_center()
+                .cursor_default()
+                .focus_visible(|style| style.border_1().border_color(theme.accent))
+                .hover(|style| style.bg(theme.overlay))
+                .child(icon(icon_path, 12.0, theme.text_tertiary))
+                .tooltip(move |window, cx| Tooltip::new(label.clone()).build(window, cx))
+                .on_click(cx.listener(|this, _, _, cx| this.toggle_markdown_preview(cx)))
+                .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
+                    if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                        this.toggle_markdown_preview(cx);
+                        cx.stop_propagation();
+                    }
+                }))
+        });
+
         let editor = div()
             .flex_1()
             .min_h_0()
@@ -2541,19 +2893,13 @@ impl Waku {
                             .min_w_0()
                             .flex_1()
                             .truncate()
-                            .text_size(px(11.0))
+                            .text_size(sp(11.0))
                             .text_color(theme.text_secondary)
                             .child(relative_path.clone()),
-                    ),
+                    )
+                    .children(preview_toggle),
             )
-            .child(self.render_file_editor_body(
-                &relative_path,
-                &editor_state,
-                panel_width - file_tree_width,
-                writable,
-                window,
-                cx,
-            ));
+            .child(body);
 
         div()
             .flex_1()
@@ -2586,7 +2932,7 @@ impl Waku {
         relative_path: &str,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> (Entity<ComposerInput>, bool, bool) {
+    ) -> (Entity<TextInput>, bool, bool) {
         if let Some(editor) = self.right_panel_file_editors.get(relative_path) {
             return (editor.state.clone(), editor.writable, editor.dirty);
         }
@@ -2596,8 +2942,9 @@ impl Waku {
         // fills it in from the background executor a frame or two later.
         let language = file_highlighter_language(relative_path);
         let state = cx.new(|cx| {
-            ComposerInput::new(window, cx)
-                .code_editor(Some(language))
+            TextInput::new(window, cx)
+                .multi_line()
+                .syntax(Some(language))
                 .read_only(true)
         });
 
@@ -2619,8 +2966,8 @@ impl Waku {
         let subscribed_path = relative_path.to_owned();
         cx.subscribe(
             &state,
-            move |this: &mut Self, state, event: &ComposerEvent, cx| {
-                if !matches!(event, ComposerEvent::Edited) {
+            move |this: &mut Self, state, event: &InputEvent, cx| {
+                if !matches!(event, InputEvent::Edited) {
                     return;
                 }
                 let value = state.read(cx).content().to_owned();
@@ -2644,8 +2991,8 @@ impl Waku {
         let focused_path = relative_path.to_owned();
         cx.subscribe(
             &state,
-            move |this: &mut Self, _, event: &ComposerEvent, cx| {
-                if matches!(event, ComposerEvent::Focus) {
+            move |this: &mut Self, _, event: &InputEvent, cx| {
+                if matches!(event, InputEvent::Focus) {
                     this.reload_right_panel_file_if_clean(focused_path.as_str(), cx);
                 }
             },
@@ -2693,6 +3040,7 @@ impl Waku {
         editor.reading = true;
         editor.read_epoch += 1;
         let epoch = editor.read_epoch;
+        let workspace = waku_client::WorkspaceClient::new(self.daemon.client());
 
         cx.spawn(async move |waku, cx| {
             let read = cx
@@ -2700,7 +3048,7 @@ impl Waku {
                 .spawn({
                     let project_path = project_path.clone();
                     let relative_path = relative_path.clone();
-                    async move { read_right_panel_file(&project_path, &relative_path) }
+                    async move { read_right_panel_file(&workspace, &project_path, &relative_path) }
                 })
                 .await;
             waku.update(cx, |waku, cx| {
@@ -2763,16 +3111,17 @@ impl Waku {
     fn render_file_editor_body(
         &mut self,
         relative_path: &str,
-        editor_state: &Entity<ComposerInput>,
+        editor_state: &Entity<TextInput>,
         pane_width: f32,
         writable: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Div {
-        const LINE_HEIGHT: f32 = 16.0;
-        const TEXT_SIZE: f32 = 10.5;
         const GUTTER_PAD_RIGHT: f32 = 8.0;
         const CONTENT_PAD_TOP: f32 = 6.0;
+
+        let text_size = self.state.code_font_size;
+        let line_height = (text_size * 1.5).round();
 
         // An open find bar follows whichever file this body is showing; a
         // cheap comparison every frame, one recompute on the frame after the
@@ -2784,9 +3133,11 @@ impl Waku {
         let field = editor_state.read(cx);
         let line_count = field.content().split('\n').count().max(1);
         let heights = field.wrapped_line_heights();
-        let gutter_width = 20.0 + 6.0 * (line_count.to_string().len() as f32);
+        // A mono digit advances ~0.6em, so the gutter tracks the font size.
+        let digit_width = (text_size * 0.6).ceil();
+        let gutter_width = 20.0 + digit_width * (line_count.to_string().len() as f32);
         let content_height = if heights.is_empty() {
-            px(LINE_HEIGHT) * line_count as f32
+            px(line_height) * line_count as f32
         } else {
             heights.iter().fold(Pixels::ZERO, |total, h| total + *h)
         };
@@ -2802,7 +3153,7 @@ impl Waku {
                     let height = heights
                         .get(number - 1)
                         .copied()
-                        .unwrap_or_else(|| px(LINE_HEIGHT));
+                        .unwrap_or_else(|| px(line_height));
                     // Everything below the viewport is unreachable from here on.
                     if y > visible.bottom() {
                         break;
@@ -2818,11 +3169,11 @@ impl Waku {
                         let line =
                             window
                                 .text_system()
-                                .shape_line(text, px(TEXT_SIZE), &[run], None);
+                                .shape_line(text, px(text_size), &[run], None);
                         let origin = point(bounds.right() - line.width, y);
                         let _ = line.paint(
                             origin,
-                            px(LINE_HEIGHT),
+                            px(line_height),
                             gpui::TextAlign::Left,
                             None,
                             window,
@@ -2848,8 +3199,8 @@ impl Waku {
             .flex_col()
             .bg(theme.surface)
             .font_family(md::render::MONO_FAMILY)
-            .text_size(px(TEXT_SIZE))
-            .line_height(px(LINE_HEIGHT))
+            .text_size(px(text_size))
+            .line_height(px(line_height))
             .children(find_bar)
             .child(
                 div()
@@ -2885,6 +3236,84 @@ impl Waku {
                         &self.right_panel_editor_scrollbar,
                     )),
             )
+    }
+
+    /// Flips the global markdown source/preview mode and persists it, so the
+    /// choice follows the user across files and sessions.
+    fn toggle_markdown_preview(&mut self, cx: &mut Context<Self>) {
+        self.state.markdown_preview = !self.state.markdown_preview;
+        self.save();
+        cx.notify();
+    }
+
+    /// The rendered-markdown alternative to the editor body, shown while the
+    /// global preview toggle is on. It renders the editor's current text —
+    /// unsaved edits included — with the transcript's markdown engine; the
+    /// parse is cached per path, so re-rendering an unchanged document costs
+    /// `Rc` clones, not a re-parse. Reads only in-memory editor state: the
+    /// render path may not touch the filesystem.
+    fn render_file_markdown_preview(
+        &mut self,
+        relative_path: &str,
+        editor_state: &Entity<TextInput>,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let theme = Theme::current(cx);
+        let palette = MarkdownPalette::from_theme(&theme);
+        let mut cache = self.file_preview_markdown.borrow_mut();
+        if !matches!(cache.as_ref(), Some((cached, _)) if cached == relative_path) {
+            *cache = Some((relative_path.to_owned(), MarkdownView::new()));
+        }
+        let (_, view) = cache.as_mut().expect("entry ensured above");
+        view.set_text(editor_state.read(cx).content(), false);
+        let ctx = MarkdownCtx::new(
+            format!("file-preview-{relative_path}"),
+            &palette,
+            MarkdownMetrics::document(self.state.ui_font_size, self.state.code_font_size),
+            self.file_preview_selection.clone(),
+        )
+        .with_link_handler(self.markdown_link_handler.clone());
+        let document = md::render::markdown(view, &ctx);
+
+        let selection_input = {
+            let selection = self.file_preview_selection.clone();
+            canvas(
+                |_, _, _| (),
+                move |_, _, window, _| md::render::install_selection_input(window, &selection),
+            )
+            .absolute()
+            .w(px(0.0))
+            .h(px(0.0))
+        };
+
+        div()
+            .flex_1()
+            .min_h_0()
+            .relative()
+            .bg(theme.surface)
+            .child(
+                div()
+                    .id(SharedString::from(format!("file-preview-{relative_path}")))
+                    .size_full()
+                    .overflow_y_scroll()
+                    .track_scroll(&self.file_preview_scroll_handle)
+                    // Painted before the document, so the frame's selection
+                    // registry holds exactly this frame's text elements.
+                    .child(md::render::frame_reset(self.file_preview_selection.clone()))
+                    .child(
+                        div()
+                            .px(px(16.0))
+                            .pt(px(14.0))
+                            .pb(px(24.0))
+                            .text_color(theme.text)
+                            .children(document),
+                    ),
+            )
+            .child(selection_input)
+            .child(scrollbar::vertical(
+                &self.file_preview_scroll_handle,
+                &self.file_preview_scrollbar,
+            ))
     }
 
     /// Picks up an external edit to a file the user has not modified here.
@@ -2943,27 +3372,64 @@ impl Waku {
         }
 
         let content = editor.state.read(cx).content().to_owned();
-        match std::fs::write(project_path.join(&relative_path), content.as_bytes()) {
-            Ok(()) => {
-                if let Some(editor) = self.right_panel_file_editors.get_mut(&relative_path) {
-                    editor.disk_content = content;
-                    editor.dirty = false;
-                    // Any read still in flight predates this write, so its
-                    // result must not land back over what was just saved.
-                    editor.reading = false;
-                    editor.read_epoch += 1;
+        let Some(session_id) = self.state.selected_session else {
+            return;
+        };
+        let epoch = if let Some(editor) = self.right_panel_file_editors.get_mut(&relative_path) {
+            editor.reading = false;
+            editor.read_epoch += 1;
+            editor.read_epoch
+        } else {
+            return;
+        };
+        let workspace = waku_client::WorkspaceClient::new(self.daemon.client());
+        cx.spawn(async move |waku, cx| {
+            let result = cx
+                .background_executor()
+                .spawn({
+                    let project_path = project_path.clone();
+                    let relative_path = relative_path.clone();
+                    let content = content.clone();
+                    async move {
+                        match workspace.request(waku_client::WorkspaceOperation::WriteTextFile {
+                            root: project_path,
+                            relative_path: PathBuf::from(relative_path),
+                            content,
+                        })? {
+                            waku_client::WorkspaceResult::Ack => Ok(()),
+                            _ => anyhow::bail!("the daemon returned an invalid file response"),
+                        }
+                    }
+                })
+                .await;
+            let _ = waku.update(cx, |waku, cx| {
+                if waku.state.selected_session != Some(session_id)
+                    || waku
+                        .selected_workspace_path()
+                        .is_none_or(|path| path != project_path)
+                {
+                    return;
+                }
+                match result {
+                    Ok(()) => {
+                        if let Some(editor) = waku.right_panel_file_editors.get_mut(&relative_path)
+                            && editor.read_epoch == epoch
+                        {
+                            let current = editor.state.read(cx).content();
+                            editor.disk_content = content.clone();
+                            editor.dirty = current != content;
+                        }
+                    }
+                    Err(error) => waku.show_toast(tr!(
+                        "files.could_not_save",
+                        path = relative_path,
+                        error = error.to_string()
+                    )),
                 }
                 cx.notify();
-            }
-            Err(error) => {
-                self.show_toast(tr!(
-                    "files.could_not_save",
-                    path = relative_path,
-                    error = error.to_string()
-                ));
-                cx.notify();
-            }
-        }
+            });
+        })
+        .detach();
     }
 
     fn render_right_panel_diff(
@@ -3117,19 +3583,7 @@ impl Waku {
             });
         let refresh_focus = self.transcript_control_focus("right-panel-diff-refresh", cx);
         let refresh_icon: AnyElement = if self.right_panel_diff_loading {
-            icon("icons/loader-circle.svg", 12.0, theme.text_tertiary)
-                .with_animation(
-                    "right-panel-diff-refresh-spinner",
-                    Animation::new(Duration::from_millis(900))
-                        .repeat()
-                        .with_easing(gpui::linear),
-                    |icon, delta| {
-                        icon.with_transformation(gpui::Transformation::rotate(gpui::percentage(
-                            delta,
-                        )))
-                    },
-                )
-                .into_any_element()
+            motion::spin(icon("icons/loader-circle.svg", 12.0, theme.text_tertiary))
         } else {
             icon("icons/rotate-cw.svg", 12.0, theme.text_tertiary).into_any_element()
         };
@@ -3168,14 +3622,14 @@ impl Waku {
             .child(source)
             .child(
                 div()
-                    .text_size(px(11.5))
+                    .text_size(sp(11.5))
                     .font_weight(FontWeight::MEDIUM)
                     .text_color(theme.success)
                     .child(format!("+{additions}")),
             )
             .child(
                 div()
-                    .text_size(px(11.5))
+                    .text_size(sp(11.5))
                     .font_weight(FontWeight::MEDIUM)
                     .text_color(theme.danger)
                     .child(format!("-{deletions}")),
@@ -3183,7 +3637,7 @@ impl Waku {
             .when(truncated, |row| {
                 row.child(
                     div()
-                        .text_size(px(10.5))
+                        .text_size(sp(10.5))
                         .text_color(theme.warning)
                         .child(tr!("diff.truncated")),
                 )
@@ -3247,6 +3701,9 @@ impl Waku {
             return div().into_any_element();
         };
         let theme = Theme::current(cx);
+        let style = DiffRowStyle::review(self.state.code_font_size);
+        // Chrome rows keep their gutters flush with the code rows'.
+        let gutter_width = style.gutter_width();
 
         match &line.kind {
             crate::review_diff::LineKind::FileHeader => div()
@@ -3293,7 +3750,7 @@ impl Waku {
                 let directions = review_diff_gap_directions(gap.position, chunked);
                 let two_directions = directions.len() > 1;
                 let gutter = div()
-                    .w(px(52.0))
+                    .w(px(gutter_width))
                     .h_full()
                     .flex_none()
                     .flex()
@@ -3378,18 +3835,20 @@ impl Waku {
                     .into_any_element()
             }
             crate::review_diff::LineKind::HunkHeader => div()
-                .h(px(24.0))
+                .min_h(px(24.0))
                 .w_full()
                 .min_w_0()
                 .flex()
-                .items_center()
+                .items_stretch()
                 .font_family(md::render::MONO_FAMILY)
                 .text_size(px(10.0))
+                .line_height(px(16.0))
                 .text_color(theme.text_tertiary)
                 .child(
                     div()
-                        .w(px(52.0))
-                        .h_full()
+                        .w(px(gutter_width))
+                        .min_h(px(24.0))
+                        .self_stretch()
                         .flex_none()
                         .border_r_1()
                         .border_color(theme.border)
@@ -3397,135 +3856,58 @@ impl Waku {
                 )
                 .child(
                     div()
-                        .h_full()
+                        .min_h(px(24.0))
                         .min_w_0()
                         .flex_1()
                         .px(px(12.0))
+                        .py(px(4.0))
                         .flex()
-                        .items_center()
+                        .items_start()
                         .overflow_hidden()
-                        .whitespace_nowrap()
+                        .whitespace_normal()
                         .bg(theme.overlay)
                         .child(line.content.clone()),
                 )
                 .into_any_element(),
             crate::review_diff::LineKind::Meta => div()
-                .h(px(24.0))
+                .min_h(px(24.0))
                 .w_full()
                 .min_w_0()
                 .flex()
-                .items_center()
+                .items_stretch()
                 .font_family(md::render::MONO_FAMILY)
                 .text_size(px(10.5))
+                .line_height(px(16.0))
                 .text_color(theme.text_tertiary)
-                .child(div().w(px(52.0)).h_full().flex_none())
                 .child(
                     div()
+                        .w(px(gutter_width))
+                        .min_h(px(24.0))
+                        .self_stretch()
+                        .flex_none(),
+                )
+                .child(
+                    div()
+                        .min_h(px(24.0))
                         .min_w_0()
                         .flex_1()
+                        .py(px(4.0))
                         .overflow_hidden()
-                        .whitespace_nowrap()
+                        .whitespace_normal()
                         .pr(px(10.0))
                         .child(line.content.clone()),
                 )
                 .into_any_element(),
             crate::review_diff::LineKind::Context
             | crate::review_diff::LineKind::Addition
-            | crate::review_diff::LineKind::Deletion => {
-                let semantic_body_opacity = if theme.is_dark { 0.20 } else { 0.12 };
-                let semantic_gutter_opacity = if theme.is_dark { 0.15 } else { 0.09 };
-                let (body_background, gutter_background, edge, number_color) = match &line.kind {
-                    crate::review_diff::LineKind::Addition => (
-                        Some(theme.success.opacity(semantic_body_opacity)),
-                        Some(theme.success.opacity(semantic_gutter_opacity)),
-                        Some(theme.success),
-                        theme.success,
-                    ),
-                    crate::review_diff::LineKind::Deletion => (
-                        Some(theme.danger.opacity(semantic_body_opacity)),
-                        Some(theme.danger.opacity(semantic_gutter_opacity)),
-                        Some(theme.danger),
-                        theme.danger,
-                    ),
-                    _ => (None, None, None, theme.text_tertiary),
-                };
-                let shown_line = line.new_line.or(line.old_line);
-                let flat = review_diff_flat_text(line, &theme);
-                let selectable = md::render::selectable_flat_text(
-                    &flat,
-                    crate::md::selection::TextKey::new(
-                        format!(
-                            "review-diff-line-{}-{}-{}-{}",
-                            line.file_index,
-                            match &line.kind {
-                                crate::review_diff::LineKind::Context => "context",
-                                crate::review_diff::LineKind::Addition => "addition",
-                                crate::review_diff::LineKind::Deletion => "deletion",
-                                _ => "other",
-                            },
-                            line.old_line.unwrap_or(0),
-                            line.new_line.unwrap_or(0),
-                        ),
-                        0,
-                    ),
-                    self.right_panel_diff_selection.clone(),
-                    theme.code_wash,
-                    theme.selection,
-                    false,
-                );
-                let gutter = div()
-                    .w(px(52.0))
-                    .h_full()
-                    .flex_none()
-                    .pr(px(9.0))
-                    .flex()
-                    .items_center()
-                    .justify_end()
-                    .border_r_1()
-                    .border_color(theme.border)
-                    .text_color(number_color)
-                    .when_some(gutter_background, |gutter, background| {
-                        gutter.bg(background)
-                    })
-                    .child(shown_line.map(|line| line.to_string()).unwrap_or_default());
-                let body = div()
-                    .h_full()
-                    .min_w_0()
-                    .flex_1()
-                    .pl(px(12.0))
-                    .flex()
-                    .items_center()
-                    .when_some(body_background, |body, background| body.bg(background))
-                    .child(
-                        div()
-                            .id(SharedString::from(format!(
-                                "review-diff-line-content-{index}"
-                            )))
-                            .h_full()
-                            .min_w_0()
-                            .flex_1()
-                            .pr(px(10.0))
-                            .flex()
-                            .items_center()
-                            .overflow_hidden()
-                            .whitespace_nowrap()
-                            .child(selectable),
-                    );
-                div()
-                    .id(SharedString::from(format!("review-diff-row-{index}")))
-                    .w_full()
-                    .min_w_0()
-                    .h(px(20.0))
-                    .flex()
-                    .items_center()
-                    .font_family(md::render::MONO_FAMILY)
-                    .text_size(px(10.5))
-                    .line_height(px(20.0))
-                    .when_some(edge, |row, edge| row.border_l_2().border_color(edge))
-                    .child(gutter)
-                    .child(body)
-                    .into_any_element()
-            }
+            | crate::review_diff::LineKind::Deletion => render_diff_code_row(
+                line,
+                index,
+                "review-diff",
+                &self.right_panel_diff_selection,
+                style,
+                &theme,
+            ),
         }
     }
 
@@ -3750,7 +4132,7 @@ impl Waku {
                                 .min_w_0()
                                 .flex_1()
                                 .truncate()
-                                .text_size(px(11.0))
+                                .text_size(sp(11.0))
                                 .font_weight(FontWeight::MEDIUM)
                                 .text_color(theme.text_secondary)
                                 .child(name),
@@ -3812,7 +4194,7 @@ impl Waku {
                                     .min_w_0()
                                     .flex_1()
                                     .truncate()
-                                    .text_size(px(11.0))
+                                    .text_size(sp(11.0))
                                     .text_color(if selected {
                                         theme.text
                                     } else {
@@ -3832,7 +4214,7 @@ impl Waku {
                                     .flex()
                                     .items_center()
                                     .justify_center()
-                                    .text_size(px(9.0))
+                                    .text_size(sp(9.0))
                                     .font_weight(FontWeight::SEMIBOLD)
                                     .text_color(status_color)
                                     .child(status),
@@ -3867,7 +4249,7 @@ impl Waku {
             .pb(px(32.0))
             .child(
                 div()
-                    .text_size(px(13.0))
+                    .text_size(sp(13.0))
                     .font_weight(FontWeight::MEDIUM)
                     .text_color(theme.text)
                     .child(title),
@@ -3877,8 +4259,8 @@ impl Waku {
                     .mt(px(6.0))
                     .max_w(px(300.0))
                     .text_center()
-                    .text_size(px(11.0))
-                    .line_height(px(17.0))
+                    .text_size(sp(11.0))
+                    .line_height(sp(17.0))
                     .text_color(theme.text_tertiary)
                     .child(description),
             )
@@ -3917,12 +4299,35 @@ impl Waku {
             Query::Pending => {}
             Query::Missing(token) => {
                 let expanded = self.right_panel_expanded_paths.clone();
+                let workspace = waku_client::WorkspaceClient::new(self.daemon.client());
                 cx.spawn(async move |waku, cx| {
                     let entries = cx
                         .background_executor()
                         .spawn({
                             let path = project_path.clone();
-                            async move { visible_working_tree_entries(&path, &expanded) }
+                            async move {
+                                match workspace.request(waku_client::WorkspaceOperation::ListTree {
+                                    root: path,
+                                    expanded_paths: expanded.into_iter().collect(),
+                                }) {
+                                    Ok(waku_client::WorkspaceResult::WorkingTree { entries }) => {
+                                        entries
+                                            .into_iter()
+                                            .map(|entry| WorkingTreeEntry {
+                                                file_icon: (!entry.is_dir)
+                                                    .then(|| file_icon_for_name(&entry.name)),
+                                                relative_path: entry.relative_path,
+                                                absolute_path: entry.absolute_path,
+                                                name: entry.name,
+                                                is_dir: entry.is_dir,
+                                                expanded: entry.expanded,
+                                                depth: entry.depth,
+                                            })
+                                            .collect()
+                                    }
+                                    Ok(_) | Err(_) => Vec::new(),
+                                }
+                            }
                         })
                         .await;
                     waku.update(cx, |waku, cx| {
@@ -4042,12 +4447,30 @@ impl Waku {
         self.right_panel_diff_error = None;
         cx.notify();
 
+        let workspace = waku_client::WorkspaceClient::new(self.daemon.client());
         cx.spawn(async move |waku, cx| {
             let result = cx
                 .background_executor()
                 .spawn({
                     let project_path = project_path.clone();
-                    async move { crate::review_diff::collect(&project_path, source) }
+                    async move {
+                        match workspace.request(
+                            waku_client::WorkspaceOperation::CollectReviewDiff {
+                                cwd: project_path,
+                                source: crate::review_diff::wire_source(source),
+                            },
+                        )? {
+                            waku_client::WorkspaceResult::ReviewDiff { data } => {
+                                Ok(crate::review_diff::parse_collected(
+                                    source,
+                                    &data.numstat,
+                                    &data.patch,
+                                    data.complete_context,
+                                ))
+                            }
+                            _ => anyhow::bail!("the daemon returned an invalid diff response"),
+                        }
+                    }
                 })
                 .await;
             waku.update(cx, |waku, cx| {

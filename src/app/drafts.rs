@@ -19,6 +19,7 @@ impl From<crate::persistence::ComposerDraftAttachment> for ComposerAttachment {
     fn from(attachment: crate::persistence::ComposerDraftAttachment) -> Self {
         Self {
             path: attachment.path,
+            client_preview_image: None,
             mention: attachment.mention,
             name: SharedString::from(attachment.name),
             is_dir: attachment.is_dir,
@@ -45,6 +46,7 @@ impl From<MessageAttachment> for ComposerAttachment {
     fn from(attachment: MessageAttachment) -> Self {
         Self {
             path: attachment.path,
+            client_preview_image: None,
             mention: attachment.mention,
             name: SharedString::from(attachment.name),
             is_dir: attachment.is_dir,
@@ -71,7 +73,7 @@ impl Waku {
 
     fn current_composer_draft(&self, cx: &App) -> crate::persistence::ComposerDraft {
         crate::persistence::ComposerDraft {
-            text: self.composer.read(cx).content().to_owned(),
+            text: self.composer.read(cx).content(cx).to_owned(),
             attachments: self
                 .composer_attachments
                 .iter()

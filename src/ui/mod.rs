@@ -1,23 +1,27 @@
 use gpui::{
-    AnyElement, App, Div, ElementId, Hsla, Img, InteractiveElement, Interactivity, ParentElement,
-    PathBuilder, Pixels, RenderOnce, SharedString, Stateful, StyleRefinement, Styled, Svg, Window,
-    canvas, div, img, point, prelude::*, px, rgb, svg,
+    AnyElement, App, Context, Div, ElementId, Hsla, Img, InteractiveElement, Interactivity,
+    KeyDownEvent, ParentElement, PathBuilder, Pixels, RenderOnce, ScrollHandle, SharedString,
+    Stateful, StyleRefinement, Styled, Svg, Window, canvas, div, img, point, prelude::*, px, rgb,
+    svg,
 };
 
 pub mod menu;
+pub mod motion;
 pub mod scrollbar;
 pub mod text_field;
 pub mod tooltip;
 
 use crate::model::{ActivityKind, ProviderKind, SessionStatus};
-use crate::theme::Theme;
+use crate::theme::{Theme, sp};
 
-/// A monochrome icon from the embedded set, tinted via text color.
+/// A monochrome icon from the embedded set, tinted via text color. Sized in
+/// `sp` so icons keep pace with the chrome text they sit beside when the UI
+/// font size setting moves.
 pub fn icon(path: &'static str, size: f32, color: Hsla) -> Svg {
     svg()
         .path(path)
-        .w(px(size))
-        .h(px(size))
+        .w(sp(size))
+        .h(sp(size))
         .flex_none()
         .text_color(color)
 }
@@ -26,7 +30,7 @@ pub fn icon(path: &'static str, size: f32, color: Hsla) -> Svg {
 /// are preserved. GPUI's `svg()` element intentionally renders an alpha mask
 /// tinted with one text color.
 pub fn file_icon(path: &'static str, size: f32) -> Img {
-    img(path).w(px(size)).h(px(size)).flex_none()
+    img(path).w(sp(size)).h(sp(size)).flex_none()
 }
 
 /// A compact ghost icon button: the only button shape outside the composer's
@@ -45,15 +49,125 @@ pub fn icon_button(id: impl Into<ElementId>, path: &'static str, theme: Theme) -
         .child(icon(path, 13.0, theme.text_tertiary))
 }
 
+/// Keeps a wheel gesture inside a scrollable nested in another scrollable
+/// (activity output inside the transcript list, command output inside the
+/// background-work page), matching AppKit: while the viewport under the
+/// pointer has overflow of its own, the ancestor must not scroll it away.
+/// Call from an `on_scroll_wheel` listener. The viewport's own scroll
+/// handler registers after user listeners, so it has already consumed the
+/// delta when this stops the bubble; a viewport whose content fits keeps
+/// chaining so short blocks do not dead-zone the page. Stopping propagation
+/// also skips wheel listeners pushed earlier on the same element, so fold
+/// any sibling wheel logic into the listener that calls this.
+pub fn contain_scroll(handle: &ScrollHandle, cx: &mut App) {
+    if handle.max_offset().y > px(0.5) {
+        cx.stop_propagation();
+    }
+}
+
+/// Add conventional mouse and keyboard activation to a focusable element.
+pub trait ActivationExt: Sized {
+    fn on_activation<E>(
+        self,
+        cx: &mut Context<E>,
+        activate: impl Fn(&mut E, &mut Window, &mut Context<E>) + 'static,
+    ) -> Self
+    where
+        E: 'static;
+}
+
+impl ActivationExt for Stateful<Div> {
+    fn on_activation<E>(
+        self,
+        cx: &mut Context<E>,
+        activate: impl Fn(&mut E, &mut Window, &mut Context<E>) + 'static,
+    ) -> Self
+    where
+        E: 'static,
+    {
+        let activate = std::rc::Rc::new(activate);
+        let click_activate = activate.clone();
+        let key_activate = activate;
+        self.on_click(cx.listener(move |this, _, window, cx| {
+            click_activate(this, window, cx);
+            cx.stop_propagation();
+        }))
+        .on_key_down(cx.listener(move |this, event: &KeyDownEvent, window, cx| {
+            // Bare Enter/Space only. A modified chord belongs to whatever
+            // command owns it, so a focused control must not swallow it —
+            // this is the guard the hand-rolled settings toggles carried
+            // before they moved onto this helper.
+            if !event.keystroke.modifiers.modified()
+                && matches!(event.keystroke.key.as_str(), "enter" | "space")
+            {
+                key_activate(this, window, cx);
+                cx.stop_propagation();
+            }
+        }))
+    }
+}
+
+/// The shared pill switch used by settings and automation forms.
+///
+/// `activate` is ignored while `disabled` is true, but the control remains in
+/// the tab order so a pending operation does not move focus unexpectedly.
+pub fn toggle_switch<E>(
+    id: impl Into<ElementId>,
+    on: bool,
+    disabled: bool,
+    theme: Theme,
+    cx: &mut Context<E>,
+    activate: impl Fn(&mut E, &mut Window, &mut Context<E>) + 'static,
+) -> Stateful<Div>
+where
+    E: 'static,
+{
+    let base = div()
+        .id(id)
+        .tab_index(0)
+        .focus_visible(|style| style.border_color(theme.accent))
+        .w(px(36.0))
+        .h(px(20.0))
+        .p(px(2.0))
+        .flex_none()
+        .rounded_full()
+        .cursor_default()
+        .when(disabled, |element| element.opacity(0.55))
+        .bg(if on { theme.inverse } else { theme.inset })
+        .border_1()
+        .border_color(if on {
+            theme.inverse
+        } else {
+            theme.border_strong
+        })
+        .flex()
+        .items_center()
+        .when(on, |element| element.justify_end())
+        .child(div().w(px(14.0)).h(px(14.0)).rounded_full().bg(if on {
+            theme.on_inverse
+        } else {
+            theme.text_tertiary
+        }));
+
+    if disabled {
+        base
+    } else {
+        base.on_activation(cx, activate)
+    }
+}
+
 /// Brand hue for each provider's official mark.
 pub fn provider_color(theme: &Theme, provider: ProviderKind) -> Hsla {
     match provider {
         ProviderKind::Amp => rgb(0xF34E3F).into(),
         ProviderKind::Claude => rgb(0xD97757).into(),
+        ProviderKind::DeepSeek => rgb(0x4D6BFE).into(),
         ProviderKind::Codex
         | ProviderKind::Cursor
         | ProviderKind::OpenCode
         | ProviderKind::Grok
+        | ProviderKind::Kimi
+        | ProviderKind::OhMyPi
         | ProviderKind::Pi => {
             if theme.is_dark {
                 rgb(0xF3F3F3).into()
@@ -71,8 +185,11 @@ pub fn provider_icon(provider: ProviderKind) -> &'static str {
         ProviderKind::Claude => "icons/provider-claude.svg",
         ProviderKind::Codex => "icons/provider-openai.svg",
         ProviderKind::Cursor => "icons/provider-cursor.svg",
+        ProviderKind::DeepSeek => "icons/provider-deepseek.svg",
         ProviderKind::OpenCode => "icons/provider-opencode.svg",
         ProviderKind::Grok => "icons/provider-grok.svg",
+        ProviderKind::Kimi => "icons/provider-kimi.svg",
+        ProviderKind::OhMyPi => "icons/provider-ohmypi.svg",
         ProviderKind::Pi => "icons/provider-pi.svg",
     }
 }
@@ -221,8 +338,8 @@ impl RenderOnce for MenuChip {
             .flex()
             .items_center()
             .gap(px(6.0))
-            .text_size(px(11.5))
-            .line_height(px(14.0))
+            .text_size(sp(11.5))
+            .line_height(sp(14.0))
             .cursor_default()
             .focus_visible(|style| style.border_1().border_color(theme.accent))
             .when(self.outlined, |element| {

@@ -5,28 +5,57 @@ import { watch, type FSWatcher } from "node:fs";
 import { join, resolve } from "node:path";
 
 const root = resolve(import.meta.dir, "..");
+const isMacOS = process.platform === "darwin";
 const appName = "Waku Debug";
-const targetDir = resolve(process.env.CARGO_TARGET_DIR || 'target')
-const appPath = join(targetDir, "debug/Waku Debug.app");
-const watchedDirectories = ["src", "assets", "resources", "locales"];
+const targetDir = resolve(root, process.env.CARGO_TARGET_DIR || "target");
+const executableSuffix = process.platform === "win32" ? ".exe" : "";
+const appPath = isMacOS
+  ? join(targetDir, "debug/Waku Debug.app")
+  : join(targetDir, `debug/waku${executableSuffix}`);
+const daemonPath = join(targetDir, `debug/waku-debug-daemon${executableSuffix}`);
+const watchedDirectories = ["src", "crates", "assets", "resources", "locales"];
 const watchedFiles = ["Cargo.toml", "Cargo.lock", "build.rs"];
 const rebuildDebounceMs = 1_000;
+type BuildTarget = "app" | "daemon";
 
 $.cwd(root);
 
 let app: ReturnType<typeof Bun.spawn> | undefined;
 let stopping = false;
 let building = false;
-let buildQueued = false;
-let changeRevision = 0;
+let queuedBuild: BuildTarget | undefined;
+let debouncedBuild: BuildTarget | undefined;
+let appChangeRevision = 0;
+let daemonChangeRevision = 0;
 let rebuildTimer: ReturnType<typeof setTimeout> | undefined;
 const watchers: FSWatcher[] = [];
 
-async function build(): Promise<boolean> {
-  console.log("[waku-dev] Building app bundle...");
-  const result = await $`${join(root, "scripts/bundle.sh")} debug`.nothrow();
+async function build(target: BuildTarget): Promise<boolean> {
+  if (target === "daemon") {
+    return buildDaemon();
+  }
+
+  console.log(`[waku-dev] Building ${isMacOS ? "app bundle" : "app"}...`);
+  if (!(await buildDaemon())) {
+    console.error("[waku-dev] Daemon build failed; keeping the current app open.");
+    return false;
+  }
+  const result = isMacOS
+    ? await $`${join(root, "scripts/bundle.sh")} debug`.nothrow()
+    : await $`cargo build --package waku --bin waku --bin waku_js_repl`.nothrow();
   if (result.exitCode !== 0) {
     console.error("[waku-dev] Build failed; keeping the current app open.");
+    return false;
+  }
+  return true;
+}
+
+async function buildDaemon(): Promise<boolean> {
+  console.log("[waku-dev] Building daemon...");
+  const result =
+    await $`cargo build --package waku-daemon --features dev-binary --bin waku-debug-daemon`.nothrow();
+  if (result.exitCode !== 0) {
+    console.error("[waku-dev] Daemon build failed; keeping the current daemon running.");
     return false;
   }
   return true;
@@ -35,7 +64,11 @@ async function build(): Promise<boolean> {
 async function stopApp(): Promise<void> {
   const waiter = app;
   app = undefined;
-  await $`pkill -TERM -x ${appName}`.quiet().nothrow();
+  if (isMacOS) {
+    await $`pkill -TERM -x ${appName}`.quiet().nothrow();
+  } else if (waiter?.exitCode === null) {
+    waiter.kill("SIGTERM");
+  }
   if (waiter?.exitCode === null) {
     await waiter.exited;
   }
@@ -43,7 +76,10 @@ async function stopApp(): Promise<void> {
 
 function launchApp(): ReturnType<typeof Bun.spawn> {
   console.log(`[waku-dev] Launching ${appPath}`);
-  const launchedApp = Bun.spawn(["open", "-n", "-W", appPath], {
+  const command = isMacOS ? ["open", "-n", "-W", appPath] : [appPath];
+  const launchedApp = Bun.spawn(command, {
+    cwd: root,
+    env: { ...process.env, WAKU_DAEMON_PATH: daemonPath },
     stdout: "inherit",
     stderr: "inherit",
   });
@@ -75,16 +111,37 @@ function reportWatcherError(error: Error): void {
   void cleanup();
 }
 
-function scheduleBuild(): void {
+function mergedTarget(
+  current: BuildTarget | undefined,
+  next: BuildTarget,
+): BuildTarget {
+  return current === "app" || next === "app" ? "app" : "daemon";
+}
+
+function targetForChange(directory: string, filename: string | Buffer | null): BuildTarget {
+  if (directory !== "crates" || filename === null) return "app";
+  const relativePath = filename.toString().replaceAll("\\", "/");
+  if (
+    relativePath.startsWith("waku-daemon/") ||
+    relativePath.startsWith("waku-core/")
+  ) {
+    return "daemon";
+  }
+  return "app";
+}
+
+function scheduleBuild(target: BuildTarget): void {
   if (stopping) return;
-  changeRevision += 1;
-  // A new event invalidates a queued build whose quiet period had elapsed
-  // while another build was still running.
-  buildQueued = false;
+  daemonChangeRevision += 1;
+  if (target === "app") appChangeRevision += 1;
+  debouncedBuild = mergedTarget(debouncedBuild, target);
   clearRebuildTimer();
   rebuildTimer = setTimeout(() => {
     rebuildTimer = undefined;
-    buildQueued = true;
+    if (debouncedBuild !== undefined) {
+      queuedBuild = mergedTarget(queuedBuild, debouncedBuild);
+      debouncedBuild = undefined;
+    }
     void drainBuildQueue();
   }, rebuildDebounceMs);
 }
@@ -94,14 +151,14 @@ function startWatchers(): void {
     const watcher = watch(
       join(root, directory),
       { recursive: true },
-      scheduleBuild,
+      (_eventType, filename) => scheduleBuild(targetForChange(directory, filename)),
     );
     watcher.on("error", reportWatcherError);
     watchers.push(watcher);
   }
 
   const rootWatcher = watch(root, (_eventType, filename) => {
-    if (filename && watchedFiles.includes(filename.toString())) scheduleBuild();
+    if (filename && watchedFiles.includes(filename.toString())) scheduleBuild("app");
   });
   rootWatcher.on("error", reportWatcherError);
   watchers.push(rootWatcher);
@@ -111,19 +168,26 @@ async function drainBuildQueue(): Promise<void> {
   if (building || stopping) return;
   building = true;
   try {
-    while (buildQueued && !stopping) {
-      buildQueued = false;
-      const buildRevision = changeRevision;
-      if (!(await build()) || stopping) continue;
+    while (queuedBuild !== undefined && !stopping) {
+      const target = queuedBuild;
+      queuedBuild = undefined;
+      const buildAppRevision = appChangeRevision;
+      const buildDaemonRevision = daemonChangeRevision;
+      if (!(await build(target)) || stopping) continue;
 
-      // Never relaunch a bundle that became stale while it was compiling.
-      // The debounce timer (or queued flag) will produce one follow-up build
-      // after the current burst of writes settles.
-      if (
-        changeRevision !== buildRevision ||
-        rebuildTimer !== undefined ||
-        buildQueued
-      ) {
+      if (target === "daemon") {
+        if (daemonChangeRevision === buildDaemonRevision) {
+          console.log(
+            "[waku-dev] Daemon rebuilt; Waku will swap the process without relaunching.",
+          );
+        }
+        continue;
+      }
+
+      // App changes make a bundle compiled from an older revision stale. A
+      // daemon-only edit does not: launch the app, then let its supervisor pick
+      // up the independently rebuilt daemon.
+      if (appChangeRevision !== buildAppRevision) {
         console.log(
           "[waku-dev] More changes arrived during the build; waiting to rebuild.",
         );
@@ -135,7 +199,7 @@ async function drainBuildQueue(): Promise<void> {
     }
   } finally {
     building = false;
-    if (buildQueued && !stopping) void drainBuildQueue();
+    if (queuedBuild !== undefined && !stopping) void drainBuildQueue();
   }
 }
 
@@ -153,28 +217,24 @@ process.on("SIGTERM", () => void cleanup());
 
 startWatchers();
 building = true;
-const initialRevision = changeRevision;
-const initialBuildSucceeded = await build();
+const initialAppRevision = appChangeRevision;
+const initialBuildSucceeded = await build("app");
 building = false;
 if (!initialBuildSucceeded) {
   closeWatchers();
   process.exit(1);
 }
 
-if (
-  changeRevision === initialRevision &&
-  rebuildTimer === undefined &&
-  !buildQueued
-) {
+if (appChangeRevision === initialAppRevision) {
   await stopApp();
   app = launchApp();
 } else {
   console.log(
     "[waku-dev] Changes arrived during the initial build; waiting to rebuild.",
   );
-  if (buildQueued) void drainBuildQueue();
+  if (queuedBuild !== undefined) void drainBuildQueue();
 }
 
 console.log(
-  "[waku-dev] Watching for source changes. Quit the app or press Ctrl-C to stop.",
+  "[waku-dev] Watching for source changes. Daemon-only edits hot-reload without relaunching Waku.",
 );

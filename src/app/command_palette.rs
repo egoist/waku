@@ -1,4 +1,4 @@
-//! The window-wide command palette opened with `cmd-k`.
+//! The window-wide command palette opened with the platform's primary shortcut + K.
 //!
 //! The search field keeps real focus while the list cursor is drawn, matching
 //! native pickers and Zed's command palette. Metadata results rebuild when the
@@ -26,7 +26,7 @@ actions!(
     ]
 );
 
-const SEARCH_CONTEXT: &str = "CommandPalette > ComposerInput";
+const SEARCH_CONTEXT: &str = "CommandPalette > TextInput";
 const MAX_TASK_RESULTS: usize = 12;
 const MESSAGE_SEARCH_LIMIT: usize = 50;
 const MESSAGE_SEARCH_CACHE_CAPACITY: usize = 24;
@@ -56,7 +56,10 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("pagedown", SelectPageDown, Some(SEARCH_CONTEXT)),
         KeyBinding::new("pageup", SelectPageUp, Some(SEARCH_CONTEXT)),
         KeyBinding::new("enter", Confirm, Some(SEARCH_CONTEXT)),
-        KeyBinding::new("escape", Dismiss, Some(SEARCH_CONTEXT)),
+        // Bound at the palette, not the field: the query field's own
+        // clear-on-escape outranks this (deeper context) while it has text,
+        // and an empty field propagates the keystroke down to it.
+        KeyBinding::new("escape", Dismiss, Some("CommandPalette")),
     ]);
 }
 
@@ -275,7 +278,7 @@ fn command_palette_results_height(results: &[CommandPaletteItem], show_empty_sta
 }
 
 pub(super) struct CommandPaletteUi {
-    search: Entity<ComposerInput>,
+    search: Entity<TextInput>,
     open: bool,
     focus_generation: u64,
     previous_focus: Option<FocusHandle>,
@@ -291,7 +294,7 @@ pub(super) struct CommandPaletteUi {
 }
 
 impl CommandPaletteUi {
-    pub(super) fn new(search: Entity<ComposerInput>) -> Self {
+    pub(super) fn new(search: Entity<TextInput>) -> Self {
         Self {
             search,
             open: false,
@@ -528,7 +531,7 @@ impl Waku {
                 display_section(PaletteSection::Suggested),
                 tr!("command_palette.new_task"),
                 "icons/pencil.svg",
-                Some("⌘N"),
+                Some(crate::platform::primary_shortcut("⌘N", "Ctrl+N")),
                 PaletteAction::NewTask,
                 "new task session chat conversation start",
                 next(),
@@ -537,7 +540,7 @@ impl Waku {
                 display_section(PaletteSection::Suggested),
                 tr!("command_palette.open_project"),
                 "icons/folder.svg",
-                Some("⌘O"),
+                Some(crate::platform::primary_shortcut("⌘O", "Ctrl+O")),
                 PaletteAction::OpenProject,
                 "open add folder project workspace repository repo",
                 next(),
@@ -552,7 +555,7 @@ impl Waku {
                 display_section(PaletteSection::Suggested),
                 tr!("command_palette.choose_model"),
                 "icons/bot.svg",
-                Some("⌘/"),
+                Some(crate::platform::primary_shortcut("⌘/", "Ctrl+/")),
                 PaletteAction::ChooseModel,
                 "choose change select model provider agent",
                 next(),
@@ -564,7 +567,7 @@ impl Waku {
                 PaletteSection::Commands,
                 tr!("menu.focus_composer"),
                 "icons/pencil.svg",
-                Some("⌘L"),
+                Some(crate::platform::primary_shortcut("⌘L", "Ctrl+L")),
                 PaletteAction::FocusComposer,
                 "focus composer prompt input message",
                 next(),
@@ -574,7 +577,7 @@ impl Waku {
                     PaletteSection::Commands,
                     tr!("menu.toggle_usage_panel"),
                     "icons/gauge.svg",
-                    Some("⌘U"),
+                    Some(crate::platform::primary_shortcut("⌘U", "Ctrl+U")),
                     PaletteAction::ToggleUsage,
                     "toggle usage limits rate quota panel",
                     next(),
@@ -589,7 +592,7 @@ impl Waku {
                         "command_palette.show_sidebar"
                     }),
                     "icons/panel-left.svg",
-                    Some("⌘B"),
+                    Some(crate::platform::primary_shortcut("⌘B", "Ctrl+B")),
                     PaletteAction::ToggleSidebar,
                     "toggle show hide left sidebar history tasks",
                     next(),
@@ -602,7 +605,7 @@ impl Waku {
                         "command_palette.show_right_panel"
                     }),
                     "icons/panel-right.svg",
-                    Some("⇧⌘B"),
+                    Some(crate::platform::primary_shortcut("⇧⌘B", "Ctrl+Shift+B")),
                     PaletteAction::ToggleRightPanel,
                     "toggle show hide right panel files diff terminal browser",
                     next(),
@@ -642,6 +645,12 @@ impl Waku {
                 "settings preferences usage tokens cost history",
             ),
             (
+                SettingsPage::Daemon,
+                "settings.daemon",
+                "icons/server.svg",
+                "settings preferences daemon server remote web network origin token port",
+            ),
+            (
                 SettingsPage::ComputerUse,
                 "settings.computer_use",
                 "icons/cursor-spark.svg",
@@ -655,7 +664,8 @@ impl Waku {
                 PaletteSection::Settings,
                 crate::i18n::translate(label_key),
                 icon,
-                (page == SettingsPage::General).then_some("⌘,"),
+                (page == SettingsPage::General)
+                    .then_some(crate::platform::primary_shortcut("⌘,", "Ctrl+,")),
                 PaletteAction::OpenSettings(page),
                 keywords,
                 next(),
@@ -985,7 +995,7 @@ impl Waku {
                     .child(
                         div()
                             .mt(px(12.0))
-                            .text_size(px(13.0))
+                            .text_size(sp(13.0))
                             .font_weight(FontWeight::MEDIUM)
                             .text_color(theme.text_secondary)
                             .child(tr!("command_palette.no_results")),
@@ -993,7 +1003,7 @@ impl Waku {
                     .child(
                         div()
                             .mt(px(5.0))
-                            .text_size(px(11.5))
+                            .text_size(sp(11.5))
                             .text_color(theme.text_tertiary)
                             .child(tr!("command_palette.no_results_hint")),
                     ),
@@ -1009,7 +1019,7 @@ impl Waku {
                             .pt(px(10.0))
                             .flex()
                             .items_center()
-                            .text_size(px(11.0))
+                            .text_size(sp(11.0))
                             .font_weight(FontWeight::MEDIUM)
                             .text_color(theme.text_tertiary)
                             .child(item.section.label()),
@@ -1084,7 +1094,7 @@ impl Waku {
                                             div()
                                                 .min_w_0()
                                                 .truncate()
-                                                .text_size(px(14.0))
+                                                .text_size(sp(14.0))
                                                 .font_weight(if highlighted {
                                                     FontWeight::MEDIUM
                                                 } else {
@@ -1102,7 +1112,7 @@ impl Waku {
                                                 div()
                                                     .min_w_0()
                                                     .truncate()
-                                                    .text_size(px(11.5))
+                                                    .text_size(sp(11.5))
                                                     .text_color(theme.text_tertiary)
                                                     .child(detail),
                                             )
@@ -1115,7 +1125,7 @@ impl Waku {
                                             .w_full()
                                             .overflow_hidden()
                                             .whitespace_nowrap()
-                                            .text_size(px(11.5))
+                                            .text_size(sp(11.5))
                                             .child(palette_content_match_text(
                                                 &matched,
                                                 &search_query,
@@ -1137,7 +1147,7 @@ impl Waku {
                                     .items_center()
                                     .justify_center()
                                     .bg(theme.overlay_strong)
-                                    .text_size(px(11.5))
+                                    .text_size(sp(11.5))
                                     .text_color(theme.text_tertiary)
                                     .child(shortcut),
                             )
@@ -1195,7 +1205,7 @@ impl Waku {
                         .items_center()
                         .border_b_1()
                         .border_color(theme.border)
-                        .text_size(px(15.5))
+                        .text_size(sp(15.5))
                         .text_color(theme.text)
                         .child(
                             div()

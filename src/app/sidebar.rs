@@ -6,7 +6,7 @@ use super::*;
 actions!(waku_sidebar, [CancelSessionRename]);
 
 const SESSION_RENAME_PARENT_CONTEXT: &str = "SessionRename";
-const SESSION_RENAME_FIELD_CONTEXT: &str = "SessionRename > ComposerInput";
+const SESSION_RENAME_FIELD_CONTEXT: &str = "SessionRename > TextInput";
 
 /// Keep Escape inside the focused inline editor so it cancels the rename,
 /// rather than falling through to the window-wide Stop action.
@@ -103,7 +103,7 @@ fn session_group_header(theme: &Theme) -> Div {
         .px(px(8.0))
         .flex()
         .items_center()
-        .text_size(px(12.5))
+        .text_size(sp(12.5))
         .font_weight(FontWeight::MEDIUM)
         .text_color(theme.text_tertiary)
 }
@@ -223,10 +223,16 @@ impl Waku {
         region: Stateful<Div>,
         cx: &mut Context<Self>,
     ) -> Stateful<Div> {
+        // Windows drags from the hit test, not from a mouse-move handler:
+        // `DefWindowProc` moves the window once the region reports itself as
+        // caption, and performs the user's configured double-click action.
+        #[cfg(target_os = "windows")]
+        let region = region.window_control_area(gpui::WindowControlArea::Drag);
+
         region
             .on_click(|event, window, _| {
                 if event.click_count() == 2 {
-                    window.titlebar_double_click();
+                    crate::platform::titlebar_double_click(window);
                 }
             })
             .on_mouse_down_out(cx.listener(|this, _, _, _| {
@@ -272,8 +278,8 @@ impl Waku {
             .flex()
             .items_center()
             .gap(px(5.0))
-            .text_size(px(11.0))
-            .line_height(px(0.0))
+            .text_size(sp(11.0))
+            .line_height(sp(0.0))
             .child(div().w(px(6.0)).h(px(6.0)).rounded_full().bg(dot))
             .child(
                 div()
@@ -346,13 +352,18 @@ impl Waku {
             .child(icon(icon_path, 14.0, theme.text_tertiary))
     }
 
-    fn render_sidebar_titlebar(&self, cx: &mut Context<Self>) -> Stateful<Div> {
+    fn render_sidebar_titlebar(&self, window: &Window, cx: &mut Context<Self>) -> Stateful<Div> {
         div()
             .id("sidebar-titlebar")
             .h(px(48.0))
             .flex_none()
             .flex()
             .items_center()
+            .children(self.render_client_window_controls(
+                super::window_chrome::WindowControlSide::Left,
+                window,
+                cx,
+            ))
             .child(
                 self.window_drag_region(
                     div()
@@ -446,7 +457,7 @@ impl Waku {
                 div()
                     .min_w_0()
                     .truncate()
-                    .text_size(px(13.0))
+                    .text_size(sp(13.0))
                     .text_color(theme.text_secondary)
                     .child(label),
             )
@@ -531,7 +542,7 @@ impl Waku {
             .cursor_default()
             .bg(theme.gauge)
             .text_color(foreground)
-            .text_size(px(11.0))
+            .text_size(sp(11.0))
             .font_weight(FontWeight::MEDIUM)
             .when(available, |button| {
                 button
@@ -553,28 +564,10 @@ impl Waku {
             });
 
         if !available {
-            let indicator = icon("icons/loader-circle.svg", 14.0, foreground)
-                .with_animation(
-                    "sidebar-updater-spinner",
-                    Animation::new(Duration::from_millis(900))
-                        .repeat()
-                        .with_easing(gpui::linear),
-                    |icon, delta| {
-                        icon.with_transformation(gpui::Transformation::rotate(gpui::percentage(
-                            delta,
-                        )))
-                    },
-                )
-                .into_any_element();
+            let indicator = motion::spin_slow(icon("icons/loader-circle.svg", 14.0, foreground));
             return Some(
                 button
-                    .tooltip(Tooltip::text(
-                        if status == crate::updater::UpdateStatus::Checking {
-                            tr!("updater.checking")
-                        } else {
-                            tr!("updater.updating")
-                        },
-                    ))
+                    .tooltip(Tooltip::text(tr!("updater.updating")))
                     .child(
                         div()
                             .size_full()
@@ -668,15 +661,18 @@ impl Waku {
             })
     }
 
-    pub(super) fn render_sidebar(&self, width: f32, cx: &mut Context<Self>) -> Div {
+    pub(super) fn render_sidebar(
+        &self,
+        width: f32,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> Div {
         let theme = Theme::current(cx);
         let is_resizing = self
             .panel_resize_drag
             .is_some_and(|drag| drag.target == PanelResizeTarget::Sidebar);
 
-        // Building the row snapshot is cheap (a few bytes per session); the
-        // heavy element construction happens only for rows the list can see.
-        let rows = Rc::new(self.sidebar_rows(Local::now().date_naive()));
+        let rows = self.sidebar_rows_cached(Local::now().date_naive());
         self.sync_sidebar_rows(&rows);
         let history_scrolled =
             self.sidebar_list_state.scroll_px_offset_for_scrollbar().y < px(-0.5);
@@ -693,7 +689,7 @@ impl Waku {
             } else {
                 theme.sidebar
             })
-            .child(self.render_sidebar_titlebar(cx))
+            .child(self.render_sidebar_titlebar(window, cx))
             .child(
                 div()
                     .flex_none()
@@ -741,6 +737,42 @@ impl Waku {
                     }),
             )
             .child(self.render_sidebar_footer(cx))
+    }
+
+    /// The sidebar row snapshot, rebuilt only when its inputs move.
+    ///
+    /// The sidebar re-renders at pulse cadence whenever one of its session
+    /// rows shows a working spinner, and rebuilding the snapshot sorts every
+    /// started session and runs calendar math per session — far too much per
+    /// tick for values that move at most once per stream commit. The
+    /// fingerprint is an allocation-free scan of exactly what
+    /// [`Self::sidebar_rows`] reads: started sessions in order with their
+    /// recency timestamps, the collapsed-group set, and today's date.
+    fn sidebar_rows_cached(&self, today: NaiveDate) -> Rc<Vec<SidebarRow>> {
+        let mut fingerprint = mix(0x51de_ba5e_5eed_c0de, today.num_days_from_ce() as u64);
+        for session in &self.state.sessions {
+            if !session.has_started() {
+                continue;
+            }
+            fingerprint = mix_uuid(fingerprint, session.id);
+            fingerprint = mix(fingerprint, sidebar_session_timestamp(session));
+        }
+        // A set has no stable iteration order; combine order-independently.
+        let collapsed = self
+            .sidebar_collapsed_groups
+            .iter()
+            .fold(0u64, |combined, group| {
+                combined.wrapping_add(mix(0, group.index() as u64 + 1))
+            });
+        fingerprint = mix(
+            mix(fingerprint, self.sidebar_collapsed_groups.len() as u64),
+            collapsed,
+        );
+        if self.sidebar_rows_fingerprint.get() != Some(fingerprint) {
+            *self.sidebar_rows_snapshot.borrow_mut() = Rc::new(self.sidebar_rows(today));
+            self.sidebar_rows_fingerprint.set(Some(fingerprint));
+        }
+        self.sidebar_rows_snapshot.borrow().clone()
     }
 
     /// Snapshot the session history as a flat list of lightweight rows, newest
@@ -980,7 +1012,12 @@ impl Waku {
         else {
             return div().into_any_element();
         };
-        let selected = self.state.selected_session == Some(session_id);
+        let selected = sidebar_session_selected(
+            self.state.selected_session,
+            self.pending_session_activation
+                .map(|pending| pending.session_id),
+            session_id,
+        );
         let working = matches!(
             session.status,
             SessionStatus::Connecting | SessionStatus::Working
@@ -1014,7 +1051,7 @@ impl Waku {
                 .bg(theme.inset)
                 .flex()
                 .items_center()
-                .text_size(px(13.5))
+                .text_size(sp(13.5))
                 .text_color(theme.text)
                 .child(rename_input)
                 .into_any_element()
@@ -1025,7 +1062,7 @@ impl Waku {
                 .whitespace_normal()
                 .line_clamp(1)
                 .text_overflow(gpui::TextOverflow::Truncate("...".into()))
-                .text_size(px(13.5))
+                .text_size(sp(13.5))
                 .text_color(theme.text)
                 .child(SharedString::from(localized_session_title(session)))
                 .into_any_element()
@@ -1056,27 +1093,14 @@ impl Waku {
                     .items_center()
                     .gap(px(6.0))
                     .overflow_hidden()
-                    .line_height(px(18.0))
+                    .line_height(sp(18.0))
                     .child(title)
                     .when(working, |element| {
-                        element.child(
-                            icon(
-                                "icons/loader-circle.svg",
-                                12.0,
-                                status_color(&theme, session.status),
-                            )
-                            .with_animation(
-                                SharedString::from(format!("session-spinner-{session_id}")),
-                                Animation::new(Duration::from_millis(900))
-                                    .repeat()
-                                    .with_easing(gpui::linear),
-                                |icon, delta| {
-                                    icon.with_transformation(gpui::Transformation::rotate(
-                                        gpui::percentage(delta),
-                                    ))
-                                },
-                            ),
-                        )
+                        element.child(motion::spin_slow(icon(
+                            "icons/loader-circle.svg",
+                            12.0,
+                            status_color(&theme, session.status),
+                        )))
                     })
                     .when(session.status == SessionStatus::Waiting, |element| {
                         element.child(icon(
@@ -1098,8 +1122,8 @@ impl Waku {
                     .flex()
                     .items_center()
                     .gap(px(5.0))
-                    .text_size(px(11.5))
-                    .line_height(px(15.0))
+                    .text_size(sp(11.5))
+                    .line_height(sp(15.0))
                     .child(icon("icons/folder.svg", 11.0, theme.text_tertiary))
                     .child(
                         div()
@@ -1187,9 +1211,37 @@ impl Waku {
 
     // ── Header ─────────────────────────────────────────────────────────────
 
-    pub(super) fn render_header(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    pub(super) fn render_header(
+        &self,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         let theme = Theme::current(cx);
         let session = self.selected_session();
+        let title = session
+            .map(localized_session_title)
+            .unwrap_or_else(|| tr!("session.new_task"));
+        let agent_preset_label = session
+            .filter(|session| session.provider == ProviderKind::DeepSeek && session.has_started())
+            .and_then(|session| self.agent_preset_label_for_session(session));
+        let left_window_controls = (!self.sidebar_visible)
+            .then(|| {
+                self.render_client_window_controls(
+                    super::window_chrome::WindowControlSide::Left,
+                    window,
+                    cx,
+                )
+            })
+            .flatten();
+        let right_window_controls = (!self.right_panel_visible)
+            .then(|| {
+                self.render_client_window_controls(
+                    super::window_chrome::WindowControlSide::Right,
+                    window,
+                    cx,
+                )
+            })
+            .flatten();
         div()
             .id("window-header")
             .h(px(48.0))
@@ -1197,8 +1249,14 @@ impl Waku {
             .flex()
             .items_center()
             .gap(px(8.0))
+            .children(left_window_controls)
+            // The header starts where the sidebar ends, so until the sidebar
+            // is wide enough to host the traffic lights itself the header has
+            // to clear them. Steady state with the sidebar open adds nothing;
+            // a sidebar sliding in shrinks the inset as it takes the lights
+            // over, which is what keeps the title from passing under them.
             .pl(if self.sidebar_visible {
-                px(14.0)
+                px(14.0 + (TRAFFIC_LIGHT_CLEARANCE - self.sidebar_rendered_width).max(0.0))
             } else {
                 px(0.0)
             })
@@ -1249,17 +1307,36 @@ impl Waku {
                         .id("header-title-drag-region")
                         .h_full()
                         .min_w_0()
+                        .flex_shrink(1.0)
                         .flex()
                         .items_center()
-                        .truncate()
-                        .text_size(px(13.0))
-                        .font_weight(FontWeight::MEDIUM)
-                        .text_color(theme.text)
-                        .child(SharedString::from(
-                            session
-                                .map(localized_session_title)
-                                .unwrap_or_else(|| tr!("session.new_task")),
-                        )),
+                        .gap(px(7.0))
+                        .child(
+                            div()
+                                .min_w_0()
+                                .truncate()
+                                .text_size(sp(13.0))
+                                .font_weight(FontWeight::MEDIUM)
+                                .text_color(theme.text)
+                                .child(SharedString::from(title)),
+                        )
+                        .children(agent_preset_label.map(|label| {
+                            div()
+                                .h(px(22.0))
+                                .max_w(px(180.0))
+                                .px(px(6.0))
+                                .rounded(px(6.0))
+                                .flex_none()
+                                .flex()
+                                .items_center()
+                                .gap(px(4.0))
+                                .bg(theme.overlay)
+                                .text_size(sp(11.0))
+                                .font_weight(FontWeight::MEDIUM)
+                                .text_color(theme.text_secondary)
+                                .child(icon("icons/bot.svg", 10.5, theme.text_tertiary))
+                                .child(div().min_w_0().truncate().child(SharedString::from(label)))
+                        })),
                     cx,
                 ),
             )
@@ -1277,6 +1354,7 @@ impl Waku {
                     })
                     .child(self.render_right_panel_toggle(cx))
             })
+            .children(right_window_controls)
     }
 
     // ── Empty states ───────────────────────────────────────────────────────
@@ -1296,7 +1374,7 @@ impl Waku {
                 .child(
                     div()
                         .mt(px(16.0))
-                        .text_size(px(20.0))
+                        .text_size(sp(20.0))
                         .font_weight(FontWeight::MEDIUM)
                         .text_color(theme.text)
                         .child(tr_cow!("onboarding.open_project_to_begin")),
@@ -1306,8 +1384,8 @@ impl Waku {
                         .mt(px(8.0))
                         .max_w(px(380.0))
                         .text_center()
-                        .text_size(px(12.5))
-                        .line_height(px(19.0))
+                        .text_size(sp(12.5))
+                        .line_height(sp(19.0))
                         .text_color(theme.text_tertiary)
                         .child(tr_cow!("onboarding.description")),
                 )
@@ -1335,7 +1413,7 @@ impl Waku {
                                 .cursor_default()
                                 .bg(theme.inverse)
                                 .text_color(theme.on_inverse)
-                                .text_size(px(12.5))
+                                .text_size(sp(12.5))
                                 .font_weight(FontWeight::SEMIBOLD)
                                 .hover(|element| element.opacity(0.9))
                                 .active(|element| element.opacity(0.8))
@@ -1362,7 +1440,7 @@ impl Waku {
                                 .gap(px(6.0))
                                 .cursor_default()
                                 .text_color(theme.text_secondary)
-                                .text_size(px(12.0))
+                                .text_size(sp(12.0))
                                 .hover(|element| element.bg(theme.overlay))
                                 .active(|element| element.bg(theme.overlay_strong))
                                 .child(icon("icons/x.svg", 11.0, theme.text_tertiary))
@@ -1468,7 +1546,7 @@ impl Waku {
                     .mt(px(14.0))
                     .flex()
                     .items_baseline()
-                    .text_size(px(20.0))
+                    .text_size(sp(20.0))
                     .font_weight(FontWeight::MEDIUM)
                     .text_color(theme.text)
                     .when(projectless_selected, |element| {
@@ -1491,6 +1569,16 @@ fn localized_session_title(session: &AgentSession) -> String {
     } else {
         title.to_owned()
     }
+}
+
+fn sidebar_session_selected(
+    selected_session: Option<Uuid>,
+    pending_session: Option<Uuid>,
+    session_id: Uuid,
+) -> bool {
+    pending_session.map_or(selected_session == Some(session_id), |pending| {
+        pending == session_id
+    })
 }
 
 #[cfg(test)]
@@ -1570,5 +1658,23 @@ mod tests {
         let mut sessions = [&renamed_old_session, &newer_unanswered_session];
         sessions.sort_by_key(|session| std::cmp::Reverse(sidebar_session_timestamp(session)));
         assert_eq!(sessions[0].id, newer_unanswered_session.id);
+    }
+
+    #[test]
+    fn pending_session_replaces_sidebar_selection_immediately() {
+        let current = Uuid::from_u128(1);
+        let pending = Uuid::from_u128(2);
+
+        assert!(!sidebar_session_selected(
+            Some(current),
+            Some(pending),
+            current
+        ));
+        assert!(sidebar_session_selected(
+            Some(current),
+            Some(pending),
+            pending
+        ));
+        assert!(sidebar_session_selected(Some(current), None, current));
     }
 }

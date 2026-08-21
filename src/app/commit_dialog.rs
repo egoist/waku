@@ -13,12 +13,16 @@ actions!(
 );
 
 const DIALOG_CONTEXT: &str = "CommitDialog";
-const DIALOG_INPUT_CONTEXT: &str = "CommitDialog > ComposerInput";
+const DIALOG_INPUT_CONTEXT: &str = "CommitDialog > TextInput";
 
 pub fn init(cx: &mut App) {
     cx.bind_keys([
-        KeyBinding::new("cmd-enter", ConfirmCommitDialog, Some(DIALOG_INPUT_CONTEXT)),
-        KeyBinding::new("cmd-enter", ConfirmCommitDialog, Some(DIALOG_CONTEXT)),
+        KeyBinding::new(
+            "secondary-enter",
+            ConfirmCommitDialog,
+            Some(DIALOG_INPUT_CONTEXT),
+        ),
+        KeyBinding::new("secondary-enter", ConfirmCommitDialog, Some(DIALOG_CONTEXT)),
         KeyBinding::new("escape", DismissCommitDialog, Some(DIALOG_CONTEXT)),
     ]);
 }
@@ -63,7 +67,7 @@ pub(super) struct CommitDialogState {
     id: Uuid,
     workspace: PathBuf,
     invocation: Option<crate::git_commit::AgentInvocation>,
-    message: Entity<ComposerInput>,
+    message: Entity<TextInput>,
     include_unstaged: bool,
     snapshot: crate::git_commit::Snapshot,
     snapshot_loading: bool,
@@ -146,8 +150,8 @@ impl Waku {
             ..Default::default()
         };
         let message = cx.new(|cx| {
-            ComposerInput::new(window, cx)
-                .code_editor(None)
+            TextInput::new(window, cx)
+                .multi_line()
                 .placeholder(tr!("commit.message_placeholder"))
         });
         let message_focus = message.read(cx).focus();
@@ -174,11 +178,20 @@ impl Waku {
         });
         cx.notify();
 
+        let workspace_client = waku_client::WorkspaceClient::new(self.daemon.client());
         cx.spawn(async move |waku, cx| {
             let result = cx
                 .background_executor()
                 .spawn(async move {
-                    crate::git_commit::inspect(&workspace).map_err(|error| error.to_string())
+                    match workspace_client.request(waku_client::WorkspaceOperation::InspectCommit {
+                        cwd: workspace.clone(),
+                    }) {
+                        Ok(waku_client::WorkspaceResult::CommitSnapshot { snapshot }) => {
+                            Ok(snapshot)
+                        }
+                        Ok(_) => Err("the daemon returned an invalid Git response".to_owned()),
+                        Err(error) => Err(error.to_string()),
+                    }
                 })
                 .await;
             let _ = waku.update(cx, |waku, cx| {
@@ -310,17 +323,25 @@ impl Waku {
         window_handle: gpui::AnyWindowHandle,
         cx: &mut Context<Self>,
     ) {
+        let workspace_client = waku_client::WorkspaceClient::new(self.daemon.client());
         cx.spawn(async move |waku, cx| {
             let generation_workspace = workspace.clone();
             let result = cx
                 .background_executor()
                 .spawn(async move {
-                    crate::git_commit::generate_message(
-                        &generation_workspace,
-                        include_unstaged,
-                        &invocation,
-                    )
-                    .map_err(|error| error.to_string())
+                    match workspace_client.request(
+                        waku_client::WorkspaceOperation::GenerateCommitMessage {
+                            cwd: generation_workspace,
+                            include_unstaged,
+                            invocation,
+                        },
+                    ) {
+                        Ok(waku_client::WorkspaceResult::CommitMessage { message }) => Ok(message),
+                        Ok(_) => {
+                            Err("the daemon returned an invalid commit message response".into())
+                        }
+                        Err(error) => Err(error.to_string()),
+                    }
                 })
                 .await;
             let _ = waku.update(cx, |waku, cx| {
@@ -384,29 +405,48 @@ impl Waku {
         window_handle: gpui::AnyWindowHandle,
         cx: &mut Context<Self>,
     ) {
+        let workspace_client = waku_client::WorkspaceClient::new(self.daemon.client());
         cx.spawn(async move |waku, cx| {
             let operation_workspace = workspace.clone();
             let result = cx
                 .background_executor()
                 .spawn(async move {
-                    let result = match action {
-                        CommitAction::Commit => crate::git_commit::commit(
-                            &operation_workspace,
-                            &message,
+                    let operation = match action {
+                        CommitAction::Commit => waku_client::WorkspaceOperation::Commit {
+                            cwd: operation_workspace.clone(),
+                            message,
                             include_unstaged,
-                        ),
-                        CommitAction::CommitAndPush => crate::git_commit::commit(
-                            &operation_workspace,
-                            &message,
+                            push: false,
+                        },
+                        CommitAction::CommitAndPush => waku_client::WorkspaceOperation::Commit {
+                            cwd: operation_workspace.clone(),
+                            message,
                             include_unstaged,
-                        )
-                        .and_then(|()| crate::git_commit::push(&operation_workspace)),
-                        CommitAction::Push => crate::git_commit::push(&operation_workspace),
+                            push: true,
+                        },
+                        CommitAction::Push => waku_client::WorkspaceOperation::Push {
+                            cwd: operation_workspace.clone(),
+                        },
                     };
-                    let snapshot = result
-                        .as_ref()
-                        .err()
-                        .and_then(|_| crate::git_commit::inspect(&operation_workspace).ok());
+                    let result = match workspace_client.request(operation) {
+                        Ok(waku_client::WorkspaceResult::Ack) => Ok(()),
+                        Ok(_) => Err(anyhow::anyhow!(
+                            "the daemon returned an invalid Git response"
+                        )),
+                        Err(error) => Err(error),
+                    };
+                    let snapshot = result.as_ref().err().and_then(|_| {
+                        match workspace_client.request(
+                            waku_client::WorkspaceOperation::InspectCommit {
+                                cwd: operation_workspace.clone(),
+                            },
+                        ) {
+                            Ok(waku_client::WorkspaceResult::CommitSnapshot { snapshot }) => {
+                                Some(snapshot)
+                            }
+                            _ => None,
+                        }
+                    });
                     (result.map_err(|error| error.to_string()), snapshot)
                 })
                 .await;
@@ -537,7 +577,7 @@ impl Waku {
                     div()
                         .min_w_0()
                         .flex_1()
-                        .text_size(px(14.0))
+                        .text_size(sp(14.0))
                         .text_color(if include_enabled {
                             theme.text
                         } else {
@@ -551,7 +591,7 @@ impl Waku {
                         .flex()
                         .items_center()
                         .gap(px(6.0))
-                        .text_size(px(13.5))
+                        .text_size(sp(13.5))
                         .font_weight(FontWeight::MEDIUM)
                         .child(
                             div()
@@ -569,7 +609,7 @@ impl Waku {
                         let _ = click_weak.update(cx, |waku, cx| waku.toggle_include_unstaged(cx));
                     })
                     .on_key_down(move |event: &KeyDownEvent, _, cx| {
-                        if !event.keystroke.modifiers.platform
+                        if !event.keystroke.modifiers.modified()
                             && matches!(event.keystroke.key.as_str(), "enter" | "space")
                         {
                             let _ =
@@ -598,7 +638,7 @@ impl Waku {
             },
             can_commit,
             commit_active,
-            Some("⌘↩"),
+            Some(crate::platform::primary_shortcut("⌘↩", "Ctrl+Enter")),
             CommitAction::Commit,
             weak.clone(),
             &theme,
@@ -672,7 +712,7 @@ impl Waku {
                     .flex()
                     .items_center()
                     .gap(px(9.0))
-                    .text_size(px(14.0))
+                    .text_size(sp(14.0))
                     .text_color(theme.text)
                     .child(icon("icons/git-branch.svg", 15.0, theme.text))
                     .child(div().min_w_0().truncate().child(branch)),
@@ -682,8 +722,8 @@ impl Waku {
                     .h(px(112.0))
                     .px(px(16.0))
                     .py(px(10.0))
-                    .text_size(px(14.0))
-                    .line_height(px(21.0))
+                    .text_size(sp(14.0))
+                    .line_height(sp(21.0))
                     .text_color(theme.text)
                     .child(message),
             )
@@ -693,8 +733,8 @@ impl Waku {
                     div()
                         .px(px(20.0))
                         .pb(px(10.0))
-                        .text_size(px(11.5))
-                        .line_height(px(16.0))
+                        .text_size(sp(11.5))
+                        .line_height(sp(16.0))
                         .text_color(theme.danger)
                         .child(error),
                 )
@@ -756,17 +796,7 @@ fn render_commit_action_row(
         theme.text_ghost
     };
     let indicator = if active {
-        icon("icons/loader-circle.svg", 15.0, theme.text_secondary)
-            .with_animation(
-                SharedString::from(format!("commit-dialog-spinner-{action:?}")),
-                Animation::new(Duration::from_millis(900))
-                    .repeat()
-                    .with_easing(gpui::linear),
-                |icon, delta| {
-                    icon.with_transformation(gpui::Transformation::rotate(gpui::percentage(delta)))
-                },
-            )
-            .into_any_element()
+        motion::spin(icon("icons/loader-circle.svg", 15.0, theme.text_secondary))
     } else {
         icon(icon_path, 15.0, foreground).into_any_element()
     };
@@ -784,7 +814,7 @@ fn render_commit_action_row(
         .items_center()
         .gap(px(10.0))
         .cursor_default()
-        .text_size(px(14.0))
+        .text_size(sp(14.0))
         .text_color(foreground)
         .focus_visible(|style| style.border_1().border_color(theme.accent))
         .when(enabled, |row| {
@@ -804,7 +834,7 @@ fn render_commit_action_row(
                     .items_center()
                     .justify_center()
                     .bg(theme.overlay_strong)
-                    .text_size(px(11.5))
+                    .text_size(sp(11.5))
                     .text_color(if enabled {
                         theme.text_secondary
                     } else {
@@ -820,7 +850,7 @@ fn render_commit_action_row(
                 });
             })
             .on_key_down(move |event: &KeyDownEvent, window, cx| {
-                if !event.keystroke.modifiers.platform
+                if !event.keystroke.modifiers.modified()
                     && matches!(event.keystroke.key.as_str(), "enter" | "space")
                 {
                     let _ = key_weak.update(cx, |waku, cx| {

@@ -1,0 +1,441 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  version:
+    name: Resolve version
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      version: ${{ steps.resolve.outputs.version }}
+      tag: ${{ steps.resolve.outputs.tag }}
+      published: ${{ steps.published.outputs.published }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Resolve version from Cargo.toml
+        id: resolve
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          if [ -z "$version" ]; then
+            echo "::error::No version found in Cargo.toml"
+            exit 1
+          fi
+          # Cargo.toml is the source of truth. A tag push must agree with it;
+          # a manual run has no tag and simply releases what Cargo.toml says.
+          if [ "$GITHUB_EVENT_NAME" = push ]; then
+            tag="${GITHUB_REF_NAME#v}"
+            if [ "$tag" != "$version" ]; then
+              echo "::error::Tag ${GITHUB_REF_NAME} does not match Cargo.toml version ${version}"
+              exit 1
+            fi
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "tag=v$version" >> "$GITHUB_OUTPUT"
+          echo "Releasing $version as v$version"
+
+      # A published release for this version is already the finished product,
+      # so rebuilding it would burn 90 minutes and could replace artifacts
+      # people have downloaded. A leftover draft is this workflow's own
+      # output, so it does not count and gets overwritten as before.
+      - name: Look for an existing published release
+        id: published
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.resolve.outputs.tag }}
+        run: |
+          draft=$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" \
+            --json isDraft --jq .isDraft 2>/dev/null) || draft=missing
+          if [ "$draft" = false ]; then
+            echo "published=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::$TAG is already published; skipping this run"
+          else
+            echo "published=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  linux-x86_64:
+    name: Linux x86_64
+    needs: version
+    if: needs.version.outputs.published != 'true'
+    runs-on: ubuntu-22.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust
+        run: |
+          rustup toolchain install 1.96.0 --profile minimal
+          rustup default 1.96.0
+
+      - name: Install Linux dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes \
+            clang \
+            cmake \
+            libfontconfig-dev \
+            libvulkan1 \
+            libwayland-dev \
+            libx11-xcb-dev \
+            libxkbcommon-x11-dev \
+            pkg-config \
+            xdg-desktop-portal
+
+      - uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ubuntu-22.04-rust-1.96.0-release-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            ubuntu-22.04-rust-1.96.0-release-
+
+      # `target/` is restored from the release cache, so the previous
+      # release's bundles are still sitting in `target/release` when this one
+      # starts. Cargo does not own them, so nothing else clears them.
+      - name: Clear stale bundles
+        run: rm -f target/release/waku-*.tar.gz
+
+      - name: Bundle
+        run: ./scripts/bundle-linux.sh
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: linux-x86_64
+          # Named exactly, not globbed: `if-no-files-found: error` is then a
+          # real check that this version built, rather than something an older
+          # bundle can satisfy.
+          path: target/release/waku-${{ needs.version.outputs.version }}-x86_64-unknown-linux-gnu.tar.gz
+          if-no-files-found: error
+
+  linux-arm64:
+    name: Linux arm64
+    needs: version
+    if: needs.version.outputs.published != 'true'
+    runs-on: ubuntu-22.04-arm
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust
+        run: |
+          rustup toolchain install 1.96.0 --profile minimal
+          rustup default 1.96.0
+
+      - name: Install Linux dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes \
+            clang \
+            cmake \
+            libfontconfig-dev \
+            libvulkan1 \
+            libwayland-dev \
+            libx11-xcb-dev \
+            libxkbcommon-x11-dev \
+            pkg-config \
+            xdg-desktop-portal
+
+      - uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ubuntu-22.04-arm-rust-1.96.0-release-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            ubuntu-22.04-arm-rust-1.96.0-release-
+
+      # `target/` is restored from the release cache, so the previous
+      # release's bundles are still sitting in `target/release` when this one
+      # starts. Cargo does not own them, so nothing else clears them.
+      - name: Clear stale bundles
+        run: rm -f target/release/waku-*.tar.gz
+
+      - name: Bundle
+        run: ./scripts/bundle-linux.sh
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: linux-arm64
+          path: target/release/waku-${{ needs.version.outputs.version }}-aarch64-unknown-linux-gnu.tar.gz
+          if-no-files-found: error
+
+  windows-x86_64:
+    name: Windows x86_64
+    needs: version
+    if: needs.version.outputs.published != 'true'
+    runs-on: windows-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust
+        run: |
+          rustup toolchain install 1.96.0 --profile minimal
+          rustup default 1.96.0
+          rustup target add x86_64-pc-windows-msvc
+
+      - uses: oven-sh/setup-bun@v2
+
+      - name: Install Inno Setup
+        run: choco install innosetup --yes --no-progress
+
+      - uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: windows-latest-rust-1.96.0-release-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            windows-latest-rust-1.96.0-release-
+
+      # `target/` is restored from the release cache, so the previous
+      # release's bundles are still sitting in `target/release` when this one
+      # starts. Cargo does not own them, so nothing else clears them.
+      - name: Clear stale bundles
+        run: Remove-Item -Force -ErrorAction SilentlyContinue target/release/waku-*.zip, target/release/Waku-*-Setup.exe
+
+      - name: Bundle
+        env:
+          WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+        run: bun scripts/bundle-windows.ts
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: windows-x86_64
+          path: |
+            target/release/waku-${{ needs.version.outputs.version }}-x86_64-pc-windows-msvc.zip
+            target/release/Waku-${{ needs.version.outputs.version }}-x86_64-Setup.exe
+          if-no-files-found: error
+
+  windows-arm64:
+    name: Windows arm64
+    needs: version
+    if: needs.version.outputs.published != 'true'
+    runs-on: windows-11-arm
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust
+        run: |
+          rustup toolchain install 1.96.0 --profile minimal
+          rustup default 1.96.0
+          rustup target add aarch64-pc-windows-msvc
+
+      - uses: oven-sh/setup-bun@v2
+
+      - name: Install Inno Setup
+        run: choco install innosetup --yes --no-progress
+
+      - uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: windows-11-arm-rust-1.96.0-release-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            windows-11-arm-rust-1.96.0-release-
+
+      # `target/` is restored from the release cache, so the previous
+      # release's bundles are still sitting in `target/release` when this one
+      # starts. Cargo does not own them, so nothing else clears them.
+      - name: Clear stale bundles
+        run: Remove-Item -Force -ErrorAction SilentlyContinue target/release/waku-*.zip, target/release/Waku-*-Setup.exe
+
+      - name: Bundle
+        env:
+          WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+        run: bun scripts/bundle-windows.ts
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: windows-arm64
+          path: |
+            target/release/waku-${{ needs.version.outputs.version }}-aarch64-pc-windows-msvc.zip
+            target/release/Waku-${{ needs.version.outputs.version }}-aarch64-Setup.exe
+          if-no-files-found: error
+
+  macos:
+    name: macOS
+    needs: version
+    if: needs.version.outputs.published != 'true'
+    runs-on: macos-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust
+        run: |
+          rustup toolchain install 1.96.0 --profile minimal
+          rustup default 1.96.0
+
+      - uses: oven-sh/setup-bun@v2
+
+      - name: Install create-dmg
+        run: brew install create-dmg
+
+      - uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: macos-latest-rust-1.96.0-release-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            macos-latest-rust-1.96.0-release-
+
+      - name: Import Apple Developer Certificate
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+        run: |
+          KEYCHAIN_PASSWORD=$(openssl rand -base64 24)
+          echo $APPLE_CERTIFICATE | base64 --decode > certificate.p12
+          security create-keychain -p "$KEYCHAIN_PASSWORD" build.keychain
+          security default-keychain -s build.keychain
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" build.keychain
+          security set-keychain-settings -t 3600 -u build.keychain
+          security import certificate.p12 -k build.keychain -P "$APPLE_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" build.keychain
+          security find-identity -v -p codesigning build.keychain
+          rm certificate.p12
+
+      - name: Store notary credentials
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          xcrun notarytool store-credentials NOTARY \
+            --apple-id "$APPLE_ID" \
+            --password "$APPLE_APP_SPECIFIC_PASSWORD" \
+            --team-id "$APPLE_TEAM_ID"
+
+      - name: Release
+        env:
+          WAKU_SIGNING_IDENTITY: ${{ secrets.WAKU_SIGNING_IDENTITY }}
+          WAKU_ANALYTICS_ENDPOINT: ${{ secrets.WAKU_ANALYTICS_ENDPOINT }}
+          WAKU_ANALYTICS_WEBSITE_ID: ${{ secrets.WAKU_ANALYTICS_WEBSITE_ID }}
+          SPARKLE_PRIVATE_KEY: ${{ secrets.SPARKLE_PRIVATE_KEY }}
+        run: bun run release --local
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: macos
+          path: |
+            dist/Waku-${{ needs.version.outputs.version }}.dmg
+            dist/Waku-${{ needs.version.outputs.version }}.md
+            dist/Waku-${{ needs.version.outputs.version }}.zip
+            dist/appcast.xml
+          if-no-files-found: error
+
+  draft-release:
+    name: Draft GitHub release
+    needs:
+      [
+        version,
+        linux-x86_64,
+        linux-arm64,
+        windows-x86_64,
+        windows-arm64,
+        macos,
+      ]
+    if: needs.version.outputs.published != 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: oven-sh/setup-bun@v2
+
+      - uses: actions/download-artifact@v8
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Write the version pointers
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          # What `install.sh` and the website's Windows download resolve
+          # "latest" to. In-app updates read the appcasts instead.
+          echo "$VERSION" > artifacts/latest-linux.txt
+          echo "$VERSION" > artifacts/latest-windows.txt
+
+      # Signed here rather than on the Windows runners: this is the only job
+      # that holds both installers, and the signing key stays in one place.
+      - name: Sign the Windows update feeds
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+          SPARKLE_PRIVATE_KEY: ${{ secrets.SPARKLE_PRIVATE_KEY }}
+        run: |
+          # Merge into the live feeds so previously published releases keep
+          # their entries; a first run simply starts from nothing.
+          for arch in x86_64 aarch64; do
+            curl -fsSL --max-time 30 \
+              "https://releases.waku.sh/appcast-windows-$arch.xml" \
+              -o "artifacts/appcast-windows-$arch.xml" || true
+          done
+          bun scripts/appcast-windows.ts artifacts "$VERSION"
+
+      - name: Write release notes
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          bun -e '
+            import { extractReleaseNotes } from "./scripts/changelog.ts";
+            const version = process.env.VERSION;
+            const file = Bun.file("CHANGELOG.md");
+            const notes = (await file.exists())
+              ? extractReleaseNotes(await file.text(), version)
+              : null;
+            await Bun.write(
+              "release-notes.md",
+              `${notes ?? "See CHANGELOG.md for details."}\n`,
+            );
+          '
+
+      - uses: softprops/action-gh-release@v3
+        with:
+          draft: true
+          # A manual run has no tag yet; publishing the draft creates this one
+          # at the commit that was built.
+          tag_name: ${{ needs.version.outputs.tag }}
+          target_commitish: ${{ github.sha }}
+          name: ${{ needs.version.outputs.tag }}
+          body_path: release-notes.md
+          fail_on_unmatched_files: true
+          files: |
+            artifacts/*.tar.gz
+            artifacts/*.dmg
+            artifacts/*.md
+            artifacts/*.zip
+            artifacts/*.exe
+            artifacts/appcast.xml
+            artifacts/appcast-windows-*.xml
+            artifacts/latest-linux.txt
+            artifacts/latest-windows.txt

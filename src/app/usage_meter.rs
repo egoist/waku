@@ -71,26 +71,24 @@ impl Waku {
                 .get(&ProviderKind::Claude)
                 .cloned()
                 .flatten();
-            let grok_binary = self
-                .provider_probe(ProviderKind::Grok)
-                .and_then(|probe| probe.path.clone());
+            let binary_override = self.state.provider_binary_overrides.get(&provider).cloned();
+            let daemon = self.daemon.client();
             cx.background_executor()
                 .spawn(async move {
-                    let result = match provider {
-                        ProviderKind::Claude => {
-                            crate::usage::fetch_claude_plan_usage(claude_version.as_deref())
-                                .map(Some)
-                        }
-                        ProviderKind::Codex => crate::usage::fetch_codex_plan_usage().map(Some),
-                        ProviderKind::OpenCode => crate::usage::fetch_opencode_go_plan_usage(),
-                        ProviderKind::Grok => match grok_binary {
-                            Some(binary) => crate::usage::fetch_grok_plan_usage(&binary).map(Some),
-                            None => Err(anyhow::anyhow!("grok is not installed")),
+                    let result = match daemon.request(
+                        Uuid::nil(),
+                        Uuid::nil(),
+                        waku_client::Command::FetchPlanUsage {
+                            provider,
+                            binary_override,
+                            cli_version: claude_version,
                         },
-                        // A result must always come back: an early return here
-                        // would leave the provider pending forever and freeze
-                        // its panel section on the loading skeleton.
-                        _ => Err(anyhow::anyhow!("no plan usage fetcher")),
+                    ) {
+                        Ok(waku_client::ResponsePayload::PlanUsage { usage }) => Ok(usage),
+                        Ok(_) => Err(anyhow::anyhow!(
+                            "the daemon returned an invalid plan usage response"
+                        )),
+                        Err(error) => Err(error),
                     };
                     if tx
                         .send((provider, result.map_err(|error| format!("{error:#}"))))
@@ -144,7 +142,7 @@ impl Waku {
         self.selected_session().is_some()
     }
 
-    /// `cmd-u`: toggle the usage panel as if its footer trigger were clicked.
+    /// Primary modifier + U: toggle the usage panel as if its footer trigger were clicked.
     pub(super) fn toggle_usage_panel_action(
         &mut self,
         _: &ToggleUsagePanel,
@@ -244,10 +242,15 @@ impl Waku {
         };
         let tooltip = match (&error, percent) {
             (Some(error), _) => SharedString::from(tr!("usage.refresh_failed", error = error)),
-            (None, Some(percent)) => {
-                SharedString::from(tr!("usage.context_used", percent = format!("{percent:.0}")))
-            }
-            (None, None) => SharedString::from(tr!("usage.shortcut")),
+            (None, Some(percent)) => SharedString::from(tr!(
+                "usage.context_used",
+                percent = format!("{percent:.0}"),
+                shortcut = crate::platform::primary_shortcut("⌘U", "Ctrl+U")
+            )),
+            (None, None) => SharedString::from(tr!(
+                "usage.shortcut",
+                shortcut = crate::platform::primary_shortcut("⌘U", "Ctrl+U")
+            )),
         };
 
         let trigger = div()
@@ -388,7 +391,7 @@ fn usage_panel(
         .flex()
         .flex_col()
         .gap(px(12.0))
-        .text_size(px(12.0));
+        .text_size(sp(12.0));
 
     // The context row always renders; a session with nothing measured yet
     // reads "0" over an empty track, exactly like the CLI's own panel.
@@ -421,7 +424,7 @@ fn usage_panel(
                     .child(div().flex_1())
                     .child(
                         div()
-                            .text_size(px(11.0))
+                            .text_size(sp(11.0))
                             .text_color(theme.text_tertiary)
                             .child(SharedString::from(value)),
                     ),
@@ -447,7 +450,7 @@ fn usage_panel(
                 .flex_1()
                 .min_w(px(0.0))
                 .truncate()
-                .text_size(px(11.0))
+                .text_size(sp(11.0))
                 .text_color(theme.text_tertiary)
                 .child(SharedString::from(header)),
         );
@@ -487,14 +490,14 @@ fn usage_panel(
                             .children(window.resets_at.map(|resets_at| {
                                 div()
                                     .flex_none()
-                                    .text_size(px(11.0))
+                                    .text_size(sp(11.0))
                                     .text_color(theme.text_tertiary)
                                     .child(SharedString::from(reset_label(resets_at, now)))
                             }))
                             .child(
                                 div()
                                     .flex_none()
-                                    .text_size(px(11.5))
+                                    .text_size(sp(11.5))
                                     .text_color(theme.text_secondary)
                                     .child(SharedString::from(format!("{:.0}%", window.percent))),
                             ),
@@ -512,13 +515,13 @@ fn usage_panel(
                 .gap(px(4.0))
                 .child(
                     div()
-                        .text_size(px(11.0))
+                        .text_size(sp(11.0))
                         .text_color(theme.text_tertiary)
                         .child(tr!("usage.plan_limits")),
                 )
                 .child(
                     div()
-                        .text_size(px(11.0))
+                        .text_size(sp(11.0))
                         .text_color(theme.text_secondary)
                         .child(SharedString::from(tr!("usage.unavailable", error = error))),
                 ),
@@ -532,7 +535,8 @@ fn usage_panel(
 /// a header bar and two quota rows, pulsing gently. `with_animation` honors
 /// the system's reduce-motion setting on its own.
 fn plan_skeleton(theme: &Theme) -> AnyElement {
-    let bar = |width: f32| {
+    let theme = *theme;
+    let bar = move |width: f32| {
         div()
             .h(px(9.0))
             .w(px(width))
@@ -540,7 +544,7 @@ fn plan_skeleton(theme: &Theme) -> AnyElement {
             .rounded(px(4.5))
             .bg(theme.overlay_strong)
     };
-    let row = |label_width: f32, value_width: f32| {
+    let row = move |label_width: f32, value_width: f32| {
         div()
             .flex()
             .flex_col()
@@ -562,21 +566,19 @@ fn plan_skeleton(theme: &Theme) -> AnyElement {
                     .bg(theme.overlay_strong),
             )
     };
-    div()
-        .flex()
-        .flex_col()
-        .gap(px(12.0))
-        .child(bar(132.0))
-        .child(row(96.0, 64.0))
-        .child(row(120.0, 64.0))
-        .with_animation(
-            "plan-usage-skeleton",
-            Animation::new(Duration::from_millis(1400))
-                .repeat()
-                .with_easing(pulsating_between(0.45, 0.9)),
-            |element, delta| element.opacity(delta),
-        )
-        .into_any_element()
+    motion::pulse(Duration::from_millis(1400), move |phase| {
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(12.0))
+            .child(bar(132.0))
+            .child(row(96.0, 64.0))
+            .child(row(120.0, 64.0))
+            .opacity(pulsating_between(0.45, 0.9)(phase))
+            .into_any_element()
+    })
+    .every(2)
+    .into_any_element()
 }
 
 /// A quota bar: full-width track, fill proportional to `percent`. A lane in
