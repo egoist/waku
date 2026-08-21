@@ -145,6 +145,21 @@ fn parse_claude_line(line: &str) -> Option<UsageRecord> {
 /// no model, so the model is carried forward from the most recent
 /// `turn_context`; sessions that switch models mid-run attribute correctly
 /// from the switch onward.
+#[derive(Clone, Copy)]
+enum CodexForkPrefix {
+    NotForked,
+    /// The first meta marks a fork, but no copied ancestor meta has confirmed
+    /// that this physical rollout actually contains a replay prefix.
+    AwaitingReplay {
+        fork_ms: Option<i64>,
+    },
+    /// Leading usage after a copied ancestor meta is re-stamped parent history.
+    Suppressing {
+        anchor_ms: i64,
+    },
+    Complete,
+}
+
 struct CodexScanState {
     model: String,
     session_id: String,
@@ -152,10 +167,8 @@ struct CodexScanState {
     /// working directory.
     cwd: String,
     last_usage_signature: Option<String>,
-    is_forked_session: bool,
-    /// Leading usage events in a fork are re-stamped copies of parent history.
-    suppressing_fork_copies: bool,
-    fork_copy_anchor_ms: i64,
+    saw_session_meta: bool,
+    fork_prefix: CodexForkPrefix,
 }
 
 impl CodexScanState {
@@ -165,16 +178,23 @@ impl CodexScanState {
             session_id: String::new(),
             cwd: String::new(),
             last_usage_signature: None,
-            is_forked_session: false,
-            suppressing_fork_copies: false,
-            fork_copy_anchor_ms: 0,
+            saw_session_meta: false,
+            fork_prefix: CodexForkPrefix::NotForked,
         }
     }
 }
 
-/// Fork copies are written synchronously (observed gaps up to tens of
-/// milliseconds), while the child's first usage follows a model turn.
+/// Copied history is written synchronously, while the child's first usage
+/// follows a real model turn. This is only a fallback for rollout formats that
+/// do not repeat the child's own `session_meta` at the structural boundary.
 const FORK_COPY_MAX_GAP_MS: i64 = 1_000;
+
+fn codex_session_id(payload: &serde_json::Map<String, Value>) -> Option<&str> {
+    payload
+        .get("id")
+        .or_else(|| payload.get("session_id"))
+        .and_then(Value::as_str)
+}
 
 fn is_forked_codex_session(payload: &serde_json::Map<String, Value>) -> bool {
     payload
@@ -200,27 +220,56 @@ fn parse_codex_line(line: &str, state: &mut CodexScanState) -> Option<UsageRecor
 
     match record.get("type").and_then(Value::as_str) {
         Some("session_meta") => {
-            // Forked rollouts repeat ancestor metas after their own. Only the
-            // first meta describes this file and may initialize scan state.
-            if state.is_forked_session {
+            let id = codex_session_id(payload);
+            if !state.saw_session_meta {
+                // The first meta names the physical rollout. Forks replay
+                // ancestor metas after it, and those must never replace the
+                // child's identity or working directory.
+                state.saw_session_meta = true;
+                if let Some(id) = id {
+                    state.session_id = id.to_owned();
+                }
+                if let Some(cwd) = payload.get("cwd").and_then(Value::as_str) {
+                    state.cwd = cwd.to_owned();
+                }
+                state.fork_prefix = if is_forked_codex_session(payload) {
+                    CodexForkPrefix::AwaitingReplay {
+                        fork_ms: parse_timestamp_ms(record.get("timestamp")),
+                    }
+                } else {
+                    CodexForkPrefix::NotForked
+                };
                 return None;
             }
-            if let Some(id) = payload
-                .get("id")
-                .or_else(|| payload.get("session_id"))
-                .and_then(Value::as_str)
-            {
-                state.session_id = id.to_owned();
-            }
-            if let Some(cwd) = payload.get("cwd").and_then(Value::as_str) {
-                state.cwd = cwd.to_owned();
-            }
-            if is_forked_codex_session(payload) {
-                state.is_forked_session = true;
-                if let Some(timestamp_ms) = parse_timestamp_ms(record.get("timestamp")) {
-                    state.suppressing_fork_copies = true;
-                    state.fork_copy_anchor_ms = timestamp_ms;
+
+            match state.fork_prefix {
+                CodexForkPrefix::AwaitingReplay { fork_ms } => {
+                    if id == Some(state.session_id.as_str()) {
+                        // Some Codex writers repeat the child's meta when copied
+                        // history ends. This is the authoritative boundary.
+                        state.fork_prefix = CodexForkPrefix::Complete;
+                    } else if id.is_some() {
+                        // A different meta confirms that ancestor history really
+                        // follows. A fork marker alone is not enough: subagents can
+                        // start with no copied prefix and may report usage quickly.
+                        if let Some(anchor_ms) =
+                            parse_timestamp_ms(record.get("timestamp")).or(fork_ms)
+                        {
+                            state.fork_prefix = CodexForkPrefix::Suppressing { anchor_ms };
+                        }
+                    }
                 }
+                CodexForkPrefix::Suppressing { anchor_ms } => {
+                    if id == Some(state.session_id.as_str()) {
+                        state.fork_prefix = CodexForkPrefix::Complete;
+                    } else if id.is_some() {
+                        state.fork_prefix = CodexForkPrefix::Suppressing {
+                            anchor_ms: parse_timestamp_ms(record.get("timestamp"))
+                                .unwrap_or(anchor_ms),
+                        };
+                    }
+                }
+                CodexForkPrefix::NotForked | CodexForkPrefix::Complete => {}
             }
             return None;
         }
@@ -259,12 +308,14 @@ fn parse_codex_line(line: &str, state: &mut CodexScanState) -> Option<UsageRecor
     }
     state.last_usage_signature = Some(signature);
 
-    if state.suppressing_fork_copies {
-        if timestamp_ms - state.fork_copy_anchor_ms < FORK_COPY_MAX_GAP_MS {
-            state.fork_copy_anchor_ms = timestamp_ms;
+    if let CodexForkPrefix::Suppressing { anchor_ms } = state.fork_prefix {
+        if timestamp_ms.saturating_sub(anchor_ms) < FORK_COPY_MAX_GAP_MS {
+            state.fork_prefix = CodexForkPrefix::Suppressing {
+                anchor_ms: timestamp_ms,
+            };
             return None;
         }
-        state.suppressing_fork_copies = false;
+        state.fork_prefix = CodexForkPrefix::Complete;
     }
 
     let input = int(last.get("input_tokens"));
@@ -283,6 +334,11 @@ fn parse_codex_line(line: &str, state: &mut CodexScanState) -> Option<UsageRecor
     if totals.total() == 0 {
         return None;
     }
+    if matches!(state.fork_prefix, CodexForkPrefix::AwaitingReplay { .. }) {
+        // Once this physical rollout emits real usage, a replay prefix cannot
+        // begin later in the file.
+        state.fork_prefix = CodexForkPrefix::Complete;
+    }
 
     Some(UsageRecord {
         provider: UsageProvider::Codex,
@@ -293,7 +349,8 @@ fn parse_codex_line(line: &str, state: &mut CodexScanState) -> Option<UsageRecor
         totals,
         // Codex does not report cost in the rollout.
         reported_cost_usd: None,
-        // Rollout files are unique per session; no global dedup needed.
+        // Fork copies were suppressed while parsing the physical rollout, so
+        // surviving events are unique and need no global deduplication.
         dedupe_key: None,
     })
 }
@@ -1121,21 +1178,17 @@ mod tests {
     fn codex_meta(
         timestamp: &str,
         id: &str,
+        cwd: &str,
         forked_from_id: Option<&str>,
         parent_thread_id: Option<&str>,
     ) -> String {
-        let mut payload = serde_json::json!({
-            "id": id,
-            "cwd": "/Users/me/dev/waku",
-        });
-        if let Some(forked_from_id) = forked_from_id {
-            payload["forked_from_id"] = Value::String(forked_from_id.to_owned());
+        let mut payload = serde_json::json!({ "id": id, "cwd": cwd });
+        if let Some(parent) = forked_from_id {
+            payload["forked_from_id"] = Value::String(parent.to_owned());
         }
-        if let Some(parent_thread_id) = parent_thread_id {
+        if let Some(parent) = parent_thread_id {
             payload["source"] = serde_json::json!({
-                "subagent": {
-                    "thread_spawn": { "parent_thread_id": parent_thread_id }
-                }
+                "subagent": { "thread_spawn": { "parent_thread_id": parent } }
             });
         }
         serde_json::json!({
@@ -1146,27 +1199,16 @@ mod tests {
         .to_string()
     }
 
-    fn codex_context(timestamp: &str) -> String {
+    fn codex_context(timestamp: &str, cwd: &str) -> String {
         serde_json::json!({
             "timestamp": timestamp,
             "type": "turn_context",
-            "payload": { "model": "gpt-5.3-codex" },
+            "payload": { "model": "gpt-5.3-codex", "cwd": cwd },
         })
         .to_string()
     }
 
     fn codex_count(timestamp: &str, input: u64, output: u64) -> String {
-        codex_count_with_usage(timestamp, input, 0, 0, output, 0)
-    }
-
-    fn codex_count_with_usage(
-        timestamp: &str,
-        input: u64,
-        cached_input: u64,
-        cache_creation: u64,
-        output: u64,
-        reasoning: u64,
-    ) -> String {
         serde_json::json!({
             "timestamp": timestamp,
             "type": "event_msg",
@@ -1175,10 +1217,10 @@ mod tests {
                 "info": {
                     "last_token_usage": {
                         "input_tokens": input,
-                        "cached_input_tokens": cached_input,
-                        "cache_write_input_tokens": cache_creation,
+                        "cached_input_tokens": 0,
+                        "cache_write_input_tokens": 0,
                         "output_tokens": output,
-                        "reasoning_output_tokens": reasoning,
+                        "reasoning_output_tokens": 0,
                     }
                 }
             },
@@ -1213,11 +1255,19 @@ mod tests {
     }
 
     #[test]
-    fn codex_normal_session_counts_usage() {
+    fn codex_lines_carry_model_forward_and_skip_duplicates() {
         let mut state = CodexScanState::new();
-        let meta = codex_meta("2026-08-06T16:31:19.166Z", "codex-session", None, None);
-        let context = codex_context("2026-08-06T16:31:20.000Z");
-        let count = codex_count_with_usage("2026-08-06T16:31:20.001Z", 21_047, 1_000, 47, 280, 165);
+        let meta = r#"{"timestamp":"2026-08-06T16:31:19.166Z","type":"session_meta",
+            "payload":{"id":"codex-session","cwd":"/Users/me/dev/waku"}}"#
+            .replace('\n', " ");
+        let context = r#"{"timestamp":"2026-08-06T16:31:20.000Z","type":"turn_context",
+            "payload":{"model":"gpt-5.3-codex"}}"#
+            .replace('\n', " ");
+        let count = r#"{"timestamp":"2026-08-06T16:31:25.000Z","type":"event_msg",
+            "payload":{"type":"token_count","info":{"last_token_usage":{
+            "input_tokens":21047,"cached_input_tokens":1000,"cache_write_input_tokens":47,
+            "output_tokens":280,"reasoning_output_tokens":165}}}}"#
+            .replace('\n', " ");
 
         // A token_count before any turn_context has no model and is dropped
         // without consuming the duplicate signature.
@@ -1229,87 +1279,124 @@ mod tests {
         assert_eq!(record.model, "gpt-5.3-codex");
         assert_eq!(record.session_id, "codex-session");
         assert_eq!(record.project, "/Users/me/dev/waku");
-        assert_eq!(record.totals.uncached_input, 21_047 - 1_000 - 47);
-        assert_eq!(record.totals.cached_input, 1_000);
+        // input_tokens includes the cached portion.
+        assert_eq!(record.totals.uncached_input, 21047 - 1000 - 47);
+        assert_eq!(record.totals.cached_input, 1000);
         assert_eq!(record.totals.cache_creation, 47);
-        assert_eq!(record.totals.output, 280);
         assert_eq!(record.totals.reasoning, 165);
+
+        // The identical re-emitted event is a duplicate, not more usage.
+        assert!(parse_codex_line(&count, &mut state).is_none());
     }
 
     #[test]
-    fn codex_forked_from_id_skips_copied_usage() {
+    fn codex_fork_uses_session_metas_as_the_copy_boundary() {
         let mut state = CodexScanState::new();
         parse_codex_line(
-            &codex_meta("2026-08-06T16:31:19.000Z", "child", Some("parent"), None),
+            &codex_meta(
+                "2026-08-06T16:31:19.000Z",
+                "child",
+                "/child",
+                Some("parent"),
+                None,
+            ),
             &mut state,
         );
-        // A fork starts with its own meta followed by copied ancestor metas.
-        // The latter must not reassign child records to the parent session.
+        // Copied history is re-stamped to the fork instant. Its ancestor meta
+        // confirms that the following usage is replay, while leaving the
+        // physical child's identity and cwd intact.
         parse_codex_line(
-            &codex_meta("2026-08-06T16:31:19.000Z", "parent", None, None),
+            &codex_meta("2026-08-06T16:31:19.001Z", "parent", "/parent", None, None),
             &mut state,
         );
-        parse_codex_line(&codex_context("2026-08-06T16:31:19.000Z"), &mut state);
-
+        parse_codex_line(
+            &codex_context("2026-08-06T16:31:19.002Z", "/parent"),
+            &mut state,
+        );
         assert!(
             parse_codex_line(
-                &codex_count("2026-08-06T16:31:19.001Z", 100, 10),
+                &codex_count("2026-08-06T16:31:19.003Z", 100, 10),
                 &mut state,
             )
             .is_none()
         );
-        assert_eq!(state.session_id, "child");
+
+        // This writer repeats the child's meta at the exact structural
+        // boundary. Genuine child usage must count even inside the fallback's
+        // one-second window.
+        parse_codex_line(
+            &codex_meta(
+                "2026-08-06T16:31:19.004Z",
+                "child",
+                "/child",
+                Some("parent"),
+                None,
+            ),
+            &mut state,
+        );
+        parse_codex_line(
+            &codex_context("2026-08-06T16:31:19.050Z", "/child"),
+            &mut state,
+        );
+        let child = parse_codex_line(
+            &codex_count("2026-08-06T16:31:19.100Z", 300, 30),
+            &mut state,
+        )
+        .expect("usage after the child's meta is genuine");
+        assert_eq!(child.session_id, "child");
+        assert_eq!(child.project, "/child");
+        assert_eq!(child.totals.total(), 330);
     }
 
     #[test]
-    fn codex_subagent_parent_thread_id_skips_copied_usage() {
+    fn codex_subagent_without_an_ancestor_meta_counts_fast_usage() {
         let mut state = CodexScanState::new();
         parse_codex_line(
-            &codex_meta("2026-08-06T16:31:19.000Z", "child", None, Some("parent")),
+            &codex_meta(
+                "2026-08-06T16:31:19.000Z",
+                "child",
+                "/child",
+                None,
+                Some("parent"),
+            ),
             &mut state,
         );
-        parse_codex_line(&codex_context("2026-08-06T16:31:19.000Z"), &mut state);
+        parse_codex_line(
+            &codex_context("2026-08-06T16:31:19.050Z", "/child"),
+            &mut state,
+        );
+        let child = parse_codex_line(
+            &codex_count("2026-08-06T16:31:19.100Z", 100, 10),
+            &mut state,
+        )
+        .expect("a fork marker alone does not prove history was copied");
+        assert_eq!(child.session_id, "child");
+    }
 
+    #[test]
+    fn codex_fork_falls_back_to_the_gap_when_no_child_meta_repeats() {
+        let mut state = CodexScanState::new();
+        parse_codex_line(
+            &codex_meta(
+                "2026-08-06T16:31:19.000Z",
+                "child",
+                "/child",
+                Some("parent"),
+                None,
+            ),
+            &mut state,
+        );
+        parse_codex_line(
+            &codex_meta("2026-08-06T16:31:19.001Z", "parent", "/parent", None, None),
+            &mut state,
+        );
+        parse_codex_line(
+            &codex_context("2026-08-06T16:31:19.001Z", "/parent"),
+            &mut state,
+        );
         assert!(
             parse_codex_line(
-                &codex_count("2026-08-06T16:31:19.001Z", 100, 10),
-                &mut state,
-            )
-            .is_none()
-        );
-    }
-
-    #[test]
-    fn codex_fork_with_only_copied_history_counts_nothing() {
-        let mut state = CodexScanState::new();
-        parse_codex_line(
-            &codex_meta("2026-08-06T16:31:19.000Z", "child", Some("parent"), None),
-            &mut state,
-        );
-        parse_codex_line(&codex_context("2026-08-06T16:31:19.000Z"), &mut state);
-
-        let copied = [
-            codex_count("2026-08-06T16:31:19.001Z", 100, 10),
-            codex_count("2026-08-06T16:31:19.040Z", 200, 20),
-        ];
-        let records: Vec<_> = copied
-            .iter()
-            .filter_map(|line| parse_codex_line(line, &mut state))
-            .collect();
-        assert!(records.is_empty());
-    }
-
-    #[test]
-    fn codex_fork_counts_first_usage_at_timestamp_boundary() {
-        let mut state = CodexScanState::new();
-        parse_codex_line(
-            &codex_meta("2026-08-06T16:31:19.000Z", "child", Some("parent"), None),
-            &mut state,
-        );
-        parse_codex_line(&codex_context("2026-08-06T16:31:19.000Z"), &mut state);
-        assert!(
-            parse_codex_line(
-                &codex_count("2026-08-06T16:31:19.001Z", 100, 10),
+                &codex_count("2026-08-06T16:31:19.002Z", 100, 10),
                 &mut state,
             )
             .is_none()
@@ -1322,38 +1409,13 @@ mod tests {
             .is_none()
         );
 
-        // Exactly one second after the last copied event ends suppression,
-        // and this first legitimate child usage must itself be counted.
-        let first_child = parse_codex_line(
+        let child = parse_codex_line(
             &codex_count("2026-08-06T16:31:20.040Z", 300, 30),
             &mut state,
         )
-        .expect("the boundary event belongs to the child");
-        assert_eq!(first_child.session_id, "child");
-        assert_eq!(first_child.totals.output, 30);
-
-        // Suppression does not restart for tightly grouped child events.
-        assert!(
-            parse_codex_line(
-                &codex_count("2026-08-06T16:31:20.041Z", 400, 40),
-                &mut state,
-            )
-            .is_some()
-        );
-    }
-
-    #[test]
-    fn codex_consecutive_duplicate_usage_is_counted_once() {
-        let mut state = CodexScanState::new();
-        let meta = codex_meta("2026-08-06T16:31:19.000Z", "root", None, None);
-        let context = codex_context("2026-08-06T16:31:19.001Z");
-        let count = codex_count("2026-08-06T16:31:20.000Z", 100, 10);
-        parse_codex_line(&meta, &mut state);
-        parse_codex_line(&context, &mut state);
-
-        // The identical re-emitted event is a duplicate, not more usage.
-        assert!(parse_codex_line(&count, &mut state).is_some());
-        assert!(parse_codex_line(&count, &mut state).is_none());
+        .expect("a full-second gap ends copy suppression");
+        assert_eq!(child.session_id, "child");
+        assert_eq!(child.totals.total(), 330);
     }
 
     #[test]
