@@ -273,12 +273,9 @@ impl Backend for WakuBackend {
                 );
                 Ok(ResponsePayload::UsageHistory { history })
             }
-            Command::LoadSkills { projects } => {
-                let locations = crate::skills::skill_locations(&projects);
-                Ok(ResponsePayload::SkillsCatalog {
-                    catalog: crate::skills::scan_skills(&locations),
-                })
-            }
+            Command::LoadSkills { projects } => Ok(ResponsePayload::SkillsCatalog {
+                catalog: crate::skills::scan_skill_catalog(&projects),
+            }),
             Command::SetSkillsEnabled { dirs, enabled } => {
                 for dir in dirs {
                     crate::skills::set_skill_enabled(&dir, enabled)

@@ -39,6 +39,8 @@ pub struct SkillLocation {
     #[ts(type = "string")]
     pub root: PathBuf,
     pub project: Option<String>,
+    #[serde(default)]
+    pub plugin: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize, TS)]
@@ -59,6 +61,8 @@ pub struct SkillEntry {
     pub description: String,
     pub scope: SkillScope,
     pub project: Option<String>,
+    #[serde(default)]
+    pub plugin: Option<String>,
     pub installs: Vec<SkillInstall>,
     pub enabled: bool,
     pub allowed_tools: Option<String>,
@@ -76,11 +80,17 @@ impl SkillEntry {
     }
 
     pub fn sources_label(&self) -> String {
-        self.installs
+        let mut label = self
+            .installs
             .iter()
             .map(|install| install.source.label())
             .collect::<Vec<_>>()
-            .join(" · ")
+            .join(" · ");
+        if let Some(plugin) = &self.plugin {
+            label.push_str(" · ");
+            label.push_str(plugin);
+        }
+        label
     }
 }
 

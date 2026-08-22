@@ -8,7 +8,7 @@
 
 use std::collections::BTreeSet;
 use std::ops::Range;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use crate::model::{ProviderKind, ReportedCommand};
 use nucleo_matcher::pattern::{CaseMatching, Normalization, Pattern};
@@ -209,11 +209,7 @@ fn builtin_claude_commands() -> Vec<SlashCommand> {
 /// and ACP's `available_commands_update` for Cursor, Grok, and Kimi Code.
 pub fn discover_slash_commands(provider: ProviderKind, project_root: &Path) -> Vec<SlashCommand> {
     let home = dirs::home_dir();
-    let claude_config_dir = std::env::var("CLAUDE_CONFIG_DIR")
-        .ok()
-        .map(PathBuf::from)
-        .filter(|path| path.is_absolute())
-        .or_else(|| home.as_deref().map(|home| home.join(".claude")));
+    let claude_config_dir = crate::skills::claude_config_dir();
     let mut commands = Vec::new();
     match provider {
         ProviderKind::Claude => {
