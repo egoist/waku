@@ -601,9 +601,9 @@ struct Frontmatter<'a> {
     body: &'a str,
 }
 
-/// Pull the few keys the picker shows out of a leading YAML block, without a
-/// YAML parser: command files only use flat `key: value` lines in practice,
-/// and an unparsed extra key must not cost the command its listing.
+/// Pull the few keys the picker shows out of a leading YAML block. The shared
+/// frontmatter reader understands simple scalar values and block strings, and
+/// skips unsupported lines so an extra key never costs the command its listing.
 fn parse_frontmatter(contents: &str) -> Frontmatter<'_> {
     let mut front = Frontmatter {
         name: None,
@@ -611,28 +611,12 @@ fn parse_frontmatter(contents: &str) -> Frontmatter<'_> {
         argument_hint: None,
         body: contents,
     };
-    let Some(rest) = contents.strip_prefix("---") else {
-        return front;
-    };
-    let Some((block, body)) = rest.split_once("\n---") else {
-        return front;
-    };
-    front.body = body.trim_start_matches(['-']).trim_start();
-    for line in block.lines() {
-        let Some((key, value)) = line.split_once(':') else {
-            continue;
-        };
-        let value = value.trim().trim_matches('"').trim_matches('\'');
-        if value.is_empty() {
-            continue;
-        }
-        match key.trim() {
-            "name" => front.name = Some(value.to_owned()),
-            "description" => front.description = Some(value.to_owned()),
-            "argument-hint" => front.argument_hint = Some(value.to_owned()),
-            _ => {}
-        }
-    }
+    front.body = crate::frontmatter::parse_frontmatter_fields(contents, |key, value| match key {
+        "name" => front.name = Some(value),
+        "description" => front.description = Some(value),
+        "argument-hint" => front.argument_hint = Some(value),
+        _ => {}
+    });
     front
 }
 
@@ -1039,6 +1023,15 @@ mod tests {
         assert_eq!(front.argument_hint.as_deref(), Some("[pr-number]"));
         assert_eq!(front.body, "Review PR $1.");
 
+        let folded = parse_frontmatter(
+            "---\ndescription: >-\n  Run the review\n  across changed files.\nargument-hint: [pr-number]\n---\nReview PR $1.",
+        );
+        assert_eq!(
+            folded.description.as_deref(),
+            Some("Run the review across changed files.")
+        );
+        assert_eq!(folded.argument_hint.as_deref(), Some("[pr-number]"));
+
         let plain = parse_frontmatter("Just a prompt body.");
         assert!(plain.description.is_none());
         assert_eq!(plain.body, "Just a prompt body.");
@@ -1421,12 +1414,8 @@ mod tests {
             Some("/skill:deploy-runbook staging")
         );
         assert_eq!(
-            resolved_submission(
-                ProviderKind::OhMyPi,
-                "/deploy-runbook staging",
-                &commands
-            )
-            .as_deref(),
+            resolved_submission(ProviderKind::OhMyPi, "/deploy-runbook staging", &commands)
+                .as_deref(),
             Some("/skill:deploy-runbook staging")
         );
         assert_eq!(

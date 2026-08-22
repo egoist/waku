@@ -349,9 +349,9 @@ struct SkillFrontmatter<'a> {
     body: &'a str,
 }
 
-/// Pull the keys the page shows out of a leading YAML block, without a YAML
-/// parser: skill files use flat `key: value` lines in practice, and an
-/// unparsed extra key must not cost the skill its listing.
+/// Pull the keys the page shows out of a leading YAML block. The shared
+/// frontmatter reader understands simple scalar values and block strings, and
+/// skips unsupported lines so an extra key never costs the skill its listing.
 fn parse_skill_frontmatter(contents: &str) -> SkillFrontmatter<'_> {
     let mut front = SkillFrontmatter {
         name: None,
@@ -359,28 +359,12 @@ fn parse_skill_frontmatter(contents: &str) -> SkillFrontmatter<'_> {
         allowed_tools: None,
         body: contents,
     };
-    let Some(rest) = contents.strip_prefix("---") else {
-        return front;
-    };
-    let Some((block, body)) = rest.split_once("\n---") else {
-        return front;
-    };
-    front.body = body.trim_start_matches(['-']).trim_start();
-    for line in block.lines() {
-        let Some((key, value)) = line.split_once(':') else {
-            continue;
-        };
-        let value = value.trim().trim_matches('"').trim_matches('\'');
-        if value.is_empty() {
-            continue;
-        }
-        match key.trim() {
-            "name" => front.name = Some(value.to_owned()),
-            "description" => front.description = Some(value.to_owned()),
-            "allowed-tools" => front.allowed_tools = Some(value.to_owned()),
-            _ => {}
-        }
-    }
+    front.body = crate::frontmatter::parse_frontmatter_fields(contents, |key, value| match key {
+        "name" => front.name = Some(value),
+        "description" => front.description = Some(value),
+        "allowed-tools" => front.allowed_tools = Some(value),
+        _ => {}
+    });
     front
 }
 
@@ -478,6 +462,27 @@ mod tests {
         let dormant = catalog.skills.iter().find(|s| s.name == "dormant").unwrap();
         assert!(!dormant.enabled);
         assert_eq!(catalog.disabled_count(), 1);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn scan_folds_block_scalar_description_frontmatter() {
+        let root = temp_root("folded-description");
+        write_skill(
+            &root,
+            "review",
+            "---\nname: review\ndescription: >-\n  Review the changed code\n  and call out risky behavior.\nallowed-tools: Read\n---\nSteps…",
+        );
+
+        let locations = vec![user_location(SkillSource::Shared, &root)];
+        let catalog = scan_skills(&locations);
+        let review = catalog.skills.iter().find(|s| s.name == "review").unwrap();
+        assert_eq!(
+            review.description,
+            "Review the changed code and call out risky behavior."
+        );
+        assert_eq!(review.allowed_tools.as_deref(), Some("Read"));
+        assert_eq!(review.body, "Steps…");
         let _ = std::fs::remove_dir_all(&root);
     }
 
