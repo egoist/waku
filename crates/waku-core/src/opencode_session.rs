@@ -280,8 +280,7 @@ pub(crate) fn request_json_on_port(
     body: Option<&Value>,
     timeout: Duration,
 ) -> anyhow::Result<Value> {
-    let body = body.map(serde_json::to_vec).transpose()?;
-    let response = http_request(port, method, path, body.as_deref(), timeout)?;
+    let response = request_raw_on_port(port, method, path, body, timeout)?;
     // Some routes answer 204 No Content — `prompt_async` among them — and
     // the status was already checked, so an empty success body is Null.
     if response.iter().all(u8::is_ascii_whitespace) {
@@ -289,6 +288,20 @@ pub(crate) fn request_json_on_port(
     }
     serde_json::from_slice(&response)
         .with_context(|| format!("OpenCode returned invalid JSON for {method} {path}"))
+}
+
+/// Sends one request and returns the raw response body without parsing it.
+/// Callers that deserialize straight into a typed struct (instead of
+/// `serde_json::Value`) avoid building a full value tree for large payloads.
+pub(crate) fn request_raw_on_port(
+    port: u16,
+    method: &str,
+    path: &str,
+    body: Option<&Value>,
+    timeout: Duration,
+) -> anyhow::Result<Vec<u8>> {
+    let body = body.map(serde_json::to_vec).transpose()?;
+    http_request(port, method, path, body.as_deref(), timeout)
 }
 
 fn http_request(
