@@ -454,6 +454,7 @@ models.none_found: モデルが見つかりません
 models.favorite_hint: モデルにスターを付けると、ここに固定できます
 models.loading: モデルを読み込み中…
 models.none_reported: このプロバイダーにモデルがありません
+models.local_config: ローカル設定
 models.no_providers: プロバイダーなし
 models.no_providers_title: 利用できるプロバイダーがありません
 models.no_providers_description: エージェント CLI をインストールするか、プロバイダー設定で再度有効にしてください。

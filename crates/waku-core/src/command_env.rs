@@ -464,6 +464,12 @@ pub(crate) fn shell_environment() -> ShellEnvironment {
         .unwrap_or_default()
 }
 
+/// Resolve one variable with the same precedence used by [`command`]: the
+/// captured login-shell value overrides the environment inherited by Waku.
+pub(crate) fn environment_variable(name: &OsStr) -> Option<OsString> {
+    cached_login_shell_variable(name).or_else(|| std::env::var_os(name))
+}
+
 fn cached_login_shell_variable(name: &OsStr) -> Option<OsString> {
     login_shell_environment()
         .read()

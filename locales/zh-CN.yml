@@ -429,6 +429,7 @@ models.none_found: 未找到模型
 models.favorite_hint: 为模型加星标即可固定在这里
 models.loading: 正在加载模型…
 models.none_reported: 此服务商未提供任何模型
+models.local_config: 本地配置
 models.no_providers: 无可用服务商
 models.no_providers_title: 没有可用的服务商
 models.no_providers_description: 请安装一个智能体 CLI，或在服务商设置中重新启用。

@@ -884,6 +884,8 @@ models.loading:
   en: Loading models…
 models.none_reported:
   en: No models reported by this provider
+models.local_config:
+  en: Local config
 models.no_providers:
   en: No providers
 models.no_providers_title:

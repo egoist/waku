@@ -90,6 +90,105 @@ pub fn fallback_models(provider: ProviderKind) -> Vec<ProviderModel> {
     }
 }
 
+const CLAUDE_CONFIGURED_MODEL_ENVIRONMENT: [(&str, &str); 4] = [
+    (
+        "ANTHROPIC_CUSTOM_MODEL_OPTION",
+        "ANTHROPIC_CUSTOM_MODEL_OPTION_NAME",
+    ),
+    (
+        "ANTHROPIC_DEFAULT_OPUS_MODEL",
+        "ANTHROPIC_DEFAULT_OPUS_MODEL_NAME",
+    ),
+    (
+        "ANTHROPIC_DEFAULT_SONNET_MODEL",
+        "ANTHROPIC_DEFAULT_SONNET_MODEL_NAME",
+    ),
+    (
+        "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+        "ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME",
+    ),
+];
+
+fn discover_claude_models() -> Vec<ProviderModel> {
+    let settings = crate::claude_session::config_directory()
+        .map(|directory| directory.join("settings.json"))
+        .and_then(|path| std::fs::read(path).ok())
+        .and_then(|contents| serde_json::from_slice::<Value>(&contents).ok())
+        .unwrap_or(Value::Null);
+    claude_models_from_settings(&settings, |key| {
+        crate::command_env::environment_variable(std::ffi::OsStr::new(key))
+            .and_then(|value| value.into_string().ok())
+    })
+}
+
+/// Merge Claude Code's user-configured model entries into Waku's curated
+/// catalog. The environment lookup is injected so parsing stays deterministic
+/// in tests and process-level variables can take precedence at runtime.
+fn claude_models_from_settings(
+    settings: &Value,
+    environment: impl Fn(&str) -> Option<String>,
+) -> Vec<ProviderModel> {
+    let settings_environment = settings.get("env").and_then(Value::as_object);
+    let configured_value = |key: &str| {
+        environment(key)
+            .and_then(|value| non_empty_trimmed(&value))
+            .or_else(|| {
+                settings_environment
+                    .and_then(|values| values.get(key))
+                    .and_then(Value::as_str)
+                    .and_then(non_empty_trimmed)
+            })
+    };
+    let settings_model = settings
+        .get("model")
+        .and_then(Value::as_str)
+        .and_then(non_empty_trimmed);
+    let environment_model = configured_value("ANTHROPIC_MODEL");
+    let default_model = environment_model
+        .as_deref()
+        .or(settings_model.as_deref())
+        .map(str::to_owned);
+
+    let mut models = fallback_models(ProviderKind::Claude);
+    let local_label = tr!("models.local_config");
+    {
+        let mut add_model = |id: String, name: String| {
+            if let Some(model) = models.iter_mut().find(|model| model.id == id) {
+                if name != id {
+                    model.name = name;
+                }
+                model.sub_provider = Some(local_label.clone());
+            } else {
+                models.push(ProviderModel::new(id, name).sub_provider(local_label.clone()));
+            }
+        };
+        for (model_key, name_key) in CLAUDE_CONFIGURED_MODEL_ENVIRONMENT {
+            let Some(id) = configured_value(model_key) else {
+                continue;
+            };
+            let name = configured_value(name_key).unwrap_or_else(|| id.clone());
+            add_model(id, name);
+        }
+        if let Some(id) = settings_model {
+            add_model(id.clone(), id);
+        }
+        if let Some(id) = environment_model {
+            add_model(id.clone(), id);
+        }
+    }
+    if let Some(default_model) = default_model {
+        for model in &mut models {
+            model.is_default = model.id == default_model;
+        }
+    }
+    models
+}
+
+fn non_empty_trimmed(value: &str) -> Option<String> {
+    let value = value.trim();
+    (!value.is_empty()).then(|| value.to_owned())
+}
+
 pub fn fallback_agent_presets(provider: ProviderKind) -> Vec<ProviderAgentPreset> {
     if provider != ProviderKind::DeepSeek {
         return Vec::new();
@@ -119,10 +218,10 @@ pub fn discover_catalog(
         // the picker aligned with the modes advertised by the current CLI.
         ProviderKind::Amp => (Vec::new(), None),
         ProviderKind::Codex => (discover_codex_models(binary), None),
-        // Claude Code accepts model aliases and full IDs but does not expose a
-        // model inventory command. Keep this catalog aligned with the
-        // version-gated list used by T3 Code.
-        ProviderKind::Claude => (Vec::new(), None),
+        // Claude Code has no inventory command, but its settings expose the
+        // user's gateway and pinned model entries. Merge those into the
+        // curated catalog without inventing models from search input.
+        ProviderKind::Claude => (discover_claude_models(), None),
         ProviderKind::Cursor => (discover_cursor_models(binary), None),
         ProviderKind::DeepSeek => discover_deepseek_catalog(binary),
         ProviderKind::Fx => (discover_fx_models(binary), None),
@@ -1168,6 +1267,91 @@ mod tests {
         assert_eq!(read_models_file(&path), None);
 
         let _ = std::fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn claude_catalog_appends_only_models_present_in_local_settings() {
+        let settings = json!({
+            "model": "gateway/settings-default",
+            "env": {
+                "ANTHROPIC_MODEL": "@team/gpt-5.6-sol",
+                "ANTHROPIC_CUSTOM_MODEL_OPTION": "gateway/extra",
+                "ANTHROPIC_CUSTOM_MODEL_OPTION_NAME": "Extra Gateway Model",
+                "ANTHROPIC_DEFAULT_OPUS_MODEL": "gateway/opus",
+                "ANTHROPIC_DEFAULT_OPUS_MODEL_NAME": "Gateway Opus"
+            }
+        });
+
+        let models = claude_models_from_settings(&settings, |_| None);
+        let local = models
+            .iter()
+            .filter(|model| model.sub_provider.is_some())
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            local
+                .iter()
+                .map(|model| model.id.as_str())
+                .collect::<Vec<_>>(),
+            [
+                "gateway/extra",
+                "gateway/opus",
+                "gateway/settings-default",
+                "@team/gpt-5.6-sol"
+            ]
+        );
+        assert_eq!(
+            local
+                .iter()
+                .find(|model| model.id == "gateway/extra")
+                .map(|model| model.name.as_str()),
+            Some("Extra Gateway Model")
+        );
+        assert_eq!(
+            local
+                .iter()
+                .find(|model| model.id == "gateway/opus")
+                .map(|model| model.name.as_str()),
+            Some("Gateway Opus")
+        );
+        assert_eq!(
+            models
+                .iter()
+                .find(|model| model.is_default)
+                .map(|model| model.id.as_str()),
+            Some("@team/gpt-5.6-sol")
+        );
+        assert!(!models.iter().any(|model| model.id == "anything-typed"));
+    }
+
+    #[test]
+    fn claude_catalog_without_local_configuration_is_the_curated_fallback() {
+        assert_eq!(
+            claude_models_from_settings(&Value::Null, |_| None),
+            fallback_models(ProviderKind::Claude)
+        );
+    }
+
+    #[test]
+    fn claude_process_environment_overrides_the_same_settings_entry() {
+        let settings = json!({
+            "env": {
+                "ANTHROPIC_CUSTOM_MODEL_OPTION": "settings/custom",
+                "ANTHROPIC_CUSTOM_MODEL_OPTION_NAME": "Settings Name"
+            }
+        });
+        let models = claude_models_from_settings(&settings, |key| match key {
+            "ANTHROPIC_CUSTOM_MODEL_OPTION" => Some("process/custom".into()),
+            "ANTHROPIC_CUSTOM_MODEL_OPTION_NAME" => Some("Process Name".into()),
+            _ => None,
+        });
+
+        assert!(!models.iter().any(|model| model.id == "settings/custom"));
+        assert!(models.iter().any(|model| {
+            model.id == "process/custom"
+                && model.name == "Process Name"
+                && model.sub_provider.is_some()
+        }));
     }
 
     #[test]
