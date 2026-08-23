@@ -24,15 +24,13 @@ use crate::driver::{
     DriverControl, DriverEventSender, DriverEventSink, DriverStartOptions, SessionOptions,
 };
 use crate::model::{ActivityKind, DriverEvent, InteractionMode, ProviderResumeCursor, RuntimeMode};
+use crate::pi_rpc::ChunkAssembly;
 
 const RPC_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Oh My Pi has to start a whole second agent to clone a session, so it needs
 /// more headroom than a request against the already-running process.
 const CLONE_TIMEOUT: Duration = Duration::from_secs(30);
-
-/// Oh My Pi refuses to reassemble beyond this, so neither should Waku.
-const MAX_REASSEMBLED_FRAME_BYTES: usize = 64 * 1024 * 1024;
 
 /// Which dialect of the Pi RPC protocol a session speaks.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -867,99 +865,6 @@ fn cursor_from_state(flavor: PiFlavor, response: &Value) -> Option<ProviderResum
         .and_then(Value::as_str)
         .map(PathBuf::from);
     Some(flavor.cursor(session_id.to_owned(), session_file))
-}
-
-/// Reassembles the `rpc_chunk` runs Oh My Pi emits for frames over its 1 MiB
-/// stdout ceiling. Without this a large tool result degrades to an error frame
-/// and the activity row renders empty.
-#[derive(Default)]
-struct ChunkAssembly {
-    active: Option<PendingChunks>,
-}
-
-struct PendingChunks {
-    chunk_id: String,
-    count: u64,
-    next_index: u64,
-    byte_length: usize,
-    data: Vec<u8>,
-}
-
-impl ChunkAssembly {
-    /// Returns the logical message to dispatch, or `None` while a chunked
-    /// frame is still arriving.
-    fn accept(&mut self, value: Value) -> Result<Option<Value>, String> {
-        if value.get("type").and_then(Value::as_str) != Some("rpc_chunk") {
-            // The run must be uninterrupted, so anything else invalidates a
-            // partial frame rather than silently splicing around it.
-            if self.active.take().is_some() {
-                return Err("chunked frame was interrupted".to_owned());
-            }
-            return Ok(Some(value));
-        }
-        let (chunk_id, index, count, byte_length, data) = (|| {
-            Some((
-                value.get("chunkId").and_then(Value::as_str)?,
-                value.get("index").and_then(Value::as_u64)?,
-                value.get("count").and_then(Value::as_u64)?,
-                value.get("byteLength").and_then(Value::as_u64)?,
-                value.get("data").and_then(Value::as_str)?,
-            ))
-        })()
-        .ok_or_else(|| "chunk frame was malformed".to_owned())?;
-        let byte_length = usize::try_from(byte_length)
-            .map_err(|_| "chunked frame exceeds the reassembly limit".to_owned())?;
-        if count == 0 || index >= count {
-            self.active = None;
-            return Err("chunk frame was malformed".to_owned());
-        }
-        if byte_length > MAX_REASSEMBLED_FRAME_BYTES {
-            self.active = None;
-            return Err("chunked frame exceeds the reassembly limit".to_owned());
-        }
-        let decoded = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, data)
-            .map_err(|error| format!("chunk payload was not valid base64: {error}"))?;
-
-        let pending = match self.active.take() {
-            Some(pending)
-                if pending.chunk_id == chunk_id
-                    && pending.count == count
-                    && pending.byte_length == byte_length
-                    && pending.next_index == index =>
-            {
-                pending
-            }
-            Some(_) => {
-                return Err("chunked frame was interrupted".to_owned());
-            }
-            None if index == 0 => PendingChunks {
-                chunk_id: chunk_id.to_owned(),
-                count,
-                next_index: 0,
-                byte_length,
-                data: Vec::with_capacity(byte_length),
-            },
-            None => return Err("chunked frame started mid-sequence".to_owned()),
-        };
-        let mut pending = pending;
-        pending.data.extend_from_slice(&decoded);
-        pending.next_index += 1;
-        if pending.data.len() > pending.byte_length {
-            return Err("chunked frame overran its declared length".to_owned());
-        }
-        if pending.next_index < pending.count {
-            self.active = Some(pending);
-            return Ok(None);
-        }
-        if pending.data.len() != pending.byte_length {
-            return Err("chunked frame did not match its declared length".to_owned());
-        }
-        let text = String::from_utf8(pending.data)
-            .map_err(|_| "chunked frame was not valid UTF-8".to_owned())?;
-        serde_json::from_str(&text)
-            .map(Some)
-            .map_err(|error| format!("chunked frame was not valid JSON: {error}"))
-    }
 }
 
 /// Pi already computes context occupancy for its own footer. Prefer that
@@ -1902,45 +1807,6 @@ mod tests {
             event_rx.try_recv().unwrap(),
             DriverEvent::AutoTitleUpdated(Some(title)) if title == "Named by Oh My Pi"
         ));
-    }
-
-    #[test]
-    fn chunked_frames_reassemble_and_reject_broken_runs() {
-        use base64::Engine as _;
-        let encode = |bytes: &[u8]| base64::engine::general_purpose::STANDARD.encode(bytes);
-
-        let payload = json!({"type": "response", "id": "waku-1", "success": true});
-        let bytes = serde_json::to_vec(&payload).unwrap();
-        let (first, second) = bytes.split_at(bytes.len() / 2);
-        let chunk = |index: u64, data: &[u8]| {
-            json!({
-                "type": "rpc_chunk",
-                "chunkId": "rpc-1",
-                "index": index,
-                "count": 2,
-                "byteLength": bytes.len(),
-                "data": encode(data),
-            })
-        };
-
-        let mut assembly = ChunkAssembly::default();
-        assert_eq!(assembly.accept(chunk(0, first)).unwrap(), None);
-        assert_eq!(assembly.accept(chunk(1, second)).unwrap(), Some(payload));
-
-        // An ordinary frame passes straight through.
-        let mut assembly = ChunkAssembly::default();
-        let plain = json!({"type": "agent_start"});
-        assert_eq!(assembly.accept(plain.clone()).unwrap(), Some(plain.clone()));
-
-        // Anything interleaved into a run invalidates it rather than splicing.
-        let mut assembly = ChunkAssembly::default();
-        assert_eq!(assembly.accept(chunk(0, first)).unwrap(), None);
-        assert!(assembly.accept(plain).is_err());
-        assert!(assembly.active.is_none());
-
-        // A run that starts mid-sequence is not a frame Waku can trust.
-        let mut assembly = ChunkAssembly::default();
-        assert!(assembly.accept(chunk(1, second)).is_err());
     }
 
     #[test]

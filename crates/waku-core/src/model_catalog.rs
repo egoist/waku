@@ -9,6 +9,7 @@ use std::time::{Duration, Instant};
 use serde_json::{Value, json};
 
 use crate::model::{ProviderAgentPreset, ProviderKind, ProviderModel, ProviderModelOption};
+use crate::pi_rpc::ChunkAssembly;
 
 const CODEX_RPC_TIMEOUT: Duration = Duration::from_secs(5);
 const PI_RPC_TIMEOUT: Duration = Duration::from_secs(10);
@@ -665,13 +666,24 @@ fn discover_pi_models(binary: &Path, dialect: PiDialect) -> Vec<ProviderModel> {
     };
     let (tx, rx) = mpsc::channel();
     std::thread::spawn(move || {
+        let mut chunks = ChunkAssembly::default();
         for line in BufReader::new(stdout).lines().map_while(Result::ok) {
-            if let Ok(value) = serde_json::from_str::<Value>(&line) {
+            let Ok(value) = serde_json::from_str::<Value>(&line) else {
+                continue;
+            };
+            if let Ok(Some(value)) = chunks.accept(value) {
                 let _ = tx.send(value);
             }
         }
     });
 
+    if dialect == PiDialect::OhMyPi {
+        // Negotiate before the catalog request so responses over OMP's 1 MiB
+        // physical-frame limit arrive as lossless `rpc_chunk` runs.
+        let protocol_request =
+            json!({"id": "waku-protocol", "type": "negotiate_protocol", "protocolVersion": 2});
+        let _ = write_json_line(&mut stdin, &protocol_request);
+    }
     let models_request = json!({"id": "waku-models", "type": "get_available_models"});
     let result = if write_json_line(&mut stdin, &models_request).is_ok()
         && let Some(models) = recv_pi_rpc_response(&rx, "waku-models", PI_RPC_TIMEOUT)
@@ -1577,6 +1589,42 @@ done
         assert_eq!(models.len(), 1);
         assert_eq!(models[0].id, "extension-provider/extension-model");
         assert_eq!(models[0].name, "Extension Model");
+        assert!(models[0].is_default);
+        let _ = std::fs::remove_file(binary);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ohmypi_rpc_discovery_negotiates_and_reassembles_chunked_models() {
+        let binary = write_fake_pi(
+            "ohmypi-chunks",
+            r#"#!/bin/sh
+negotiated=false
+while IFS= read -r request; do
+  case "$request" in
+    *waku-protocol*)
+      negotiated=true
+      printf '%s\n' '{"id":"waku-protocol","type":"response","success":true,"data":{"protocolVersion":2}}'
+      ;;
+    *waku-models*)
+      if [ "$negotiated" != true ]; then
+        exit 1
+      fi
+      printf '%s\n' '{"type":"rpc_chunk","chunkId":"models-1","index":0,"count":2,"byteLength":155,"data":"eyJpZCI6Indha3UtbW9kZWxzIiwidHlwZSI6InJlc3BvbnNlIiwic3VjY2VzcyI6dHJ1ZSwiZGF0YSI6eyJtb2RlbHMiOlt7InByb3Y="}'
+      printf '%s\n' '{"type":"rpc_chunk","chunkId":"models-1","index":1,"count":2,"byteLength":155,"data":"aWRlciI6Im9tcC1wcm92aWRlciIsImlkIjoib21wLW1vZGVsIiwibmFtZSI6Ik9NUCBNb2RlbCIsInJlYXNvbmluZyI6ZmFsc2V9XX19"}'
+      ;;
+    *waku-state*)
+      printf '%s\n' '{"id":"waku-state","type":"response","success":true,"data":{"model":{"provider":"omp-provider","id":"omp-model"},"thinkingLevel":"medium"}}'
+      ;;
+  esac
+done
+"#,
+        );
+
+        let models = discover_pi_models(&binary, PiDialect::OhMyPi);
+
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0].id, "omp-provider/omp-model");
         assert!(models[0].is_default);
         let _ = std::fs::remove_file(binary);
     }
