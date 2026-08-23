@@ -16,6 +16,8 @@ the original feature bullet instead of adding separate entries for them.
 
 ## [unreleased]
 
+- Discover Oh My Pi models when the configured catalog exceeds its RPC frame limit
+
 ## [0.1.13]
 
 - Add Vercel Fx support
