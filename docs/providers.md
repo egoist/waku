@@ -323,7 +323,7 @@ both go into the cursor, and resume needs the **file path**, not just the id.
 | `tool_execution_start` / `_update` / `_end` | `RichActivity` |
 | `auto_retry_end` | clears or sets the failure flag |
 | `agent_settled` (Pi) / `agent_end` (Oh My Pi) | `TurnFinished`, then resets stream state |
-| `extension_ui_request` | auto-cancelled — Waku has no UI for extension prompts |
+| `extension_ui_request` | dialog methods (`select`/`confirm`/`input`/`editor`) become `UserInputRequested`; answers go back as `extension_ui_response`. Concurrent dialogs queue behind the visible one, a settled turn forgets unanswered ones, and an unrepresentable dialog is cancelled so the extension never hangs. Fire-and-forget methods (`notify`, `setStatus`, …) stay ignored |
 
 **Access modes** — Build + Full access only, enforced at driver start rather
 than degraded silently: any other combination fails with "currently supports
@@ -845,7 +845,7 @@ What the long-lived session buys, and what Waku pays for not having it:
 
 | Capability | T3 Code | Waku |
 | --- | --- | --- |
-| Interactive approvals | Every provider: Claude via the SDK's `canUseTool` (including `AskUserQuestion` and `ExitPlanMode`), Cursor/Grok via ACP `session/request_permission`, Codex via `*requestApproval*` | Every provider except Amp and Pi, neither of which exposes a request to answer |
+| Interactive approvals | Every provider: Claude via the SDK's `canUseTool` (including `AskUserQuestion` and `ExitPlanMode`), Cursor/Grok via ACP `session/request_permission`, Codex via `*requestApproval*` | Approvals land everywhere except Amp and Pi, neither of which exposes one. Structured questions reach the same UI everywhere except Amp — Pi and Oh My Pi answer extension dialogs (`select`/`confirm`/`input`/`editor`) through the shared `UserInputRequested` path |
 | Interrupt | `session/cancel`, `query.interrupt()` (plus `stopTask()` for runaway subagents) | Protocol interrupt everywhere except Amp, which has none and is stopped outright |
 | Change model mid-session | `capabilities.sessionModelSwitch: "in-session"` → `session/set_model`, `query.setModel()` | Every transport keeps the session except Amp, whose mode is a launch argument |
 | Mid-turn prompt | Queued into the live agent loop as a **steer**, same turn | Steered into the live turn on every provider (`⌘↩`); plain `Enter` queues a visible, editable follow-up instead |

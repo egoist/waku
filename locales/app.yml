@@ -1097,6 +1097,10 @@ user_input.submit:
   en: Submit
 user_input.progress:
   en: "%{current} of %{total}"
+user_input.yes:
+  en: "Yes"
+user_input.no:
+  en: "No"
 composer.preparing_task:
   en: Preparing task…
 composer.queue_followup:

@@ -562,6 +562,8 @@ user_input.back: 戻る
 user_input.next: 次へ
 user_input.submit: 送信
 user_input.progress: "%{current} / %{total}"
+user_input.yes: "はい"
+user_input.no: "いいえ"
 composer.preparing_task: タスクを準備中…
 composer.queue_followup: フォローアップとしてキューに追加（⏎）
 composer.message: メッセージ
