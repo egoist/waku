@@ -82,6 +82,7 @@ const CONTENT_MAX_WIDTH: f32 = 720.0;
 /// Menu-registry id of the composer's model picker, shared by its render site
 /// and the primary-modifier `/` toggle action.
 const MODEL_PICKER_MENU_ID: &str = "provider-model-picker";
+const HANDOFF_MENU_ID: &str = "session-handoff-menu";
 const BRANCH_PICKER_MENU_ID: &str = "workspace-branch-picker";
 const BRANCH_PICKER_ROW_HEIGHT: f32 = 26.0;
 const SIDEBAR_MIN_WIDTH: f32 = 180.0;

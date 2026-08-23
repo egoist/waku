@@ -217,6 +217,13 @@ common.remove: 削除
 common.rename: 名前を変更
 
 session.new_task: 新規タスク
+session.hand_off: 引き継ぐ
+session.hand_off_to: "%{provider} に引き継ぐ"
+session.handoff_available: 別のプロバイダーでこのタスクを続行
+session.handoff_finish_turn: 現在のターンが完了してから引き継いでください
+session.handoff_complete_native_turn: 再度引き継ぐ前にこのプロバイダーでターンを完了してください
+session.handoff_no_targets: 利用可能な他のプロバイダーがありません
+session.handoff_provider_unavailable: このマシンでは %{provider} を利用できません
 
 sidebar.today: 今日
 sidebar.search: 検索

@@ -9,6 +9,7 @@ import type { QueuedMessage } from "./QueuedMessage";
 import type { ReportedCommand } from "./ReportedCommand";
 import type { RuntimeEventCursor } from "./RuntimeEventCursor";
 import type { RuntimeMode } from "./RuntimeMode";
+import type { SessionHandover } from "./SessionHandover";
 import type { SessionStatus } from "./SessionStatus";
 import type { SessionWorkspace } from "./SessionWorkspace";
 import type { ThreadGoal } from "./ThreadGoal";
@@ -38,7 +39,13 @@ context_window?: string | null,
  * Currently populated by DeepSeek Harness; unlike Build/Plan, Harness
  * locks this value once conversation history exists.
  */
-agent_preset?: string | null, status: SessionStatus, created_at: number,
+agent_preset?: string | null,
+/**
+ * Cross-provider provenance plus the one-shot bootstrap state. A handoff
+ * shares the source workspace and transcript, but starts a fresh native
+ * provider conversation.
+ */
+handover?: SessionHandover | null, status: SessionStatus, created_at: number,
 /**
  * Any mutation, including title edits and truncation. Use
  * [`Self::last_reply_at`] for conversation recency.

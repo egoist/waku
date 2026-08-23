@@ -675,6 +675,7 @@ fn session_projection_precedes(
 }
 
 fn merge_stale_session_metadata(existing: &mut AgentSession, incoming: AgentSession) {
+    let incoming_handover = incoming.handover.clone();
     if incoming.updated_at >= existing.updated_at {
         existing.title = incoming.title;
         existing.project_id = incoming.project_id;
@@ -687,8 +688,20 @@ fn merge_stale_session_metadata(existing: &mut AgentSession, incoming: AgentSess
         existing.service_tier = incoming.service_tier;
         existing.context_window = incoming.context_window;
         existing.agent_preset = incoming.agent_preset;
+        existing.handover = incoming_handover.clone();
         existing.updated_at = incoming.updated_at;
         existing.last_reply_at = incoming.last_reply_at.or(existing.last_reply_at);
+    } else if matches!(
+        (&existing.handover, &incoming_handover),
+        (Some(existing), Some(incoming))
+            if existing.source_session == incoming.source_session
+                && existing.bootstrap_pending
+                && !incoming.bootstrap_pending
+    ) {
+        // Bootstrap completion is monotonic. A live daemon runtime may have a
+        // newer transcript cursor than the desktop projection that dispatched
+        // the first prompt, but it must still accept the one-shot flag clear.
+        existing.handover = incoming_handover;
     }
     for queued in incoming.queued_messages {
         if !existing
@@ -1878,6 +1891,27 @@ mod tests {
         assert_eq!(existing.title, "Renamed elsewhere");
         assert_eq!(existing.messages.len(), 1);
         assert_eq!(existing.runtime_event_cursor.unwrap().sequence, 10);
+    }
+
+    #[test]
+    fn stale_runtime_projection_accepts_handoff_bootstrap_completion() {
+        let source_session = Uuid::new_v4();
+        let mut existing = AgentSession::new(Uuid::new_v4(), ProviderKind::Codex);
+        existing.updated_at = 20;
+        existing.handover = Some(waku_protocol::handover::SessionHandover {
+            source_session,
+            source_provider: ProviderKind::Claude,
+            imported_at: 10,
+            imported_message_count: 2,
+            bootstrap_pending: true,
+        });
+
+        let mut stale = existing.clone();
+        stale.updated_at = 10;
+        stale.handover.as_mut().unwrap().bootstrap_pending = false;
+        merge_stale_session_metadata(&mut existing, stale);
+
+        assert!(!existing.handover.unwrap().bootstrap_pending);
     }
 
     #[test]

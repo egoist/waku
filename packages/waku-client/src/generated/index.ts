@@ -68,6 +68,7 @@ export type { RuntimeEventCursor } from "./RuntimeEventCursor";
 export type { RuntimeMode } from "./RuntimeMode";
 export type { SequencedEvent } from "./SequencedEvent";
 export type { ServerMessage } from "./ServerMessage";
+export type { SessionHandover } from "./SessionHandover";
 export type { SessionMessageMatch } from "./SessionMessageMatch";
 export type { SessionStatus } from "./SessionStatus";
 export type { SessionWorkspace } from "./SessionWorkspace";
