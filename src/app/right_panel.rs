@@ -96,26 +96,14 @@ fn percent_decode_file_path(path: &str) -> String {
 
 fn markdown_file_link_path(target: &str) -> Option<PathBuf> {
     let target = strip_file_location(target.trim());
-    let path = if target.starts_with('/') {
-        target
-    } else if let Some(path) = target.strip_prefix("file://") {
-        if path.starts_with('/') {
-            path
-        } else if let Some(path) = path.strip_prefix("localhost")
-            && path.starts_with('/')
-        {
-            path
-        } else {
-            return None;
-        }
-    } else if let Some(path) = target.strip_prefix("file:")
-        && path.starts_with('/')
+    if target
+        .get(..5)
+        .is_some_and(|scheme| scheme.eq_ignore_ascii_case("file:"))
     {
-        path
-    } else {
-        return None;
-    };
-    let path = PathBuf::from(percent_decode_file_path(path));
+        return url::Url::parse(target).ok()?.to_file_path().ok();
+    }
+
+    let path = PathBuf::from(percent_decode_file_path(target));
     path.is_absolute().then_some(path)
 }
 
@@ -300,6 +288,7 @@ fn review_diff_tree_rows(
 pub(super) struct DiffRowStyle {
     gutter_width: f32,
     row_height: f32,
+    text_size: f32,
     /// What to put in the gutter of a row that has no line number. Git always
     /// reports positions, so this only comes up on a diff synthesized from a
     /// provider's before/after text: there the `+`/`-` marker stands in, which
@@ -308,17 +297,30 @@ pub(super) struct DiffRowStyle {
 }
 
 impl DiffRowStyle {
-    pub(super) const REVIEW: Self = Self {
-        gutter_width: 52.0,
-        row_height: 20.0,
-        marker_fallback: false,
-    };
+    /// Review-tab rows at the user's code font size. The gutter holds a
+    /// right-aligned line number: ~0.6em per mono digit, five digits, plus
+    /// its padding and border.
+    pub(super) fn review(text_size: f32) -> Self {
+        Self {
+            gutter_width: (text_size * 3.0 + 14.0).round(),
+            row_height: (text_size * 1.5).round(),
+            text_size,
+            marker_fallback: false,
+        }
+    }
+
     /// The same rows the Review tab draws, so an edit reads the same wherever
     /// it is opened.
-    pub(super) const ACTIVITY: Self = Self {
-        marker_fallback: true,
-        ..Self::REVIEW
-    };
+    pub(super) fn activity(text_size: f32) -> Self {
+        Self {
+            marker_fallback: true,
+            ..Self::review(text_size)
+        }
+    }
+
+    pub(super) fn gutter_width(&self) -> f32 {
+        self.gutter_width
+    }
 }
 
 /// Selection identity for one diff code row. Selection resolves a drag by
@@ -450,7 +452,7 @@ pub(super) fn render_diff_code_row(
         .flex()
         .items_stretch()
         .font_family(md::render::MONO_FAMILY)
-        .text_size(px(10.5))
+        .text_size(px(style.text_size))
         .line_height(px(style.row_height))
         .when_some(edge, |row, edge| row.border_l_2().border_color(edge))
         .child(gutter)
@@ -1075,35 +1077,37 @@ mod tests {
 
     #[test]
     fn transcript_file_links_route_by_the_active_workspace() {
-        let workspace = Path::new("/Users/egoist/dev/waku");
+        let workspace = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let project_file = workspace.join("src/app/right_panel.rs");
+        let project_file_with_line = format!("{}:1596", project_file.display());
+        let project_file_with_column = format!("{}:1596:8", project_file.display());
+        let relative_project_file = Path::new("src")
+            .join("app")
+            .join("right_panel.rs")
+            .to_string_lossy()
+            .into_owned();
 
         assert_eq!(
-            transcript_link_route(
-                "/Users/egoist/dev/waku/src/app/right_panel.rs:1596",
-                Some(workspace),
-            ),
-            TranscriptLinkRoute::ProjectFile("src/app/right_panel.rs".into())
+            transcript_link_route(&project_file_with_line, Some(workspace)),
+            TranscriptLinkRoute::ProjectFile(relative_project_file.clone())
         );
         assert_eq!(
-            transcript_link_route(
-                "/Users/egoist/dev/waku/src/app/right_panel.rs:1596:8",
-                Some(workspace),
-            ),
-            TranscriptLinkRoute::ProjectFile("src/app/right_panel.rs".into())
+            transcript_link_route(&project_file_with_column, Some(workspace)),
+            TranscriptLinkRoute::ProjectFile(relative_project_file)
         );
+
+        let encoded_file_url =
+            url::Url::from_file_path(workspace.join("My File.rs")).expect("absolute file path");
         assert_eq!(
-            transcript_link_route(
-                "file:///Users/egoist/dev/waku/My%20File.rs#L12C4",
-                Some(workspace),
-            ),
+            transcript_link_route(&format!("{encoded_file_url}#L12C4"), Some(workspace)),
             TranscriptLinkRoute::ProjectFile("My File.rs".into())
         );
+
+        let outside_file = workspace.join("../kero/src/app.rs");
+        let outside_file_with_line = format!("{}:20", outside_file.display());
         assert_eq!(
-            transcript_link_route(
-                "/Users/egoist/dev/waku/../kero/src/app.rs:20",
-                Some(workspace),
-            ),
-            TranscriptLinkRoute::Finder(PathBuf::from("/Users/egoist/dev/kero/src/app.rs"))
+            transcript_link_route(&outside_file_with_line, Some(workspace)),
+            TranscriptLinkRoute::Finder(normalized_path(&outside_file))
         );
         assert_eq!(
             transcript_link_route("https://example.com/file.rs:12", Some(workspace)),
@@ -1434,23 +1438,31 @@ mod tests {
         assert_eq!(
             collapsed
                 .iter()
-                .map(|entry| entry.relative_path.as_str())
+                .map(|entry| entry.relative_path.clone())
                 .collect::<Vec<_>>(),
-            vec!["src", "README.md"]
+            vec!["src".to_owned(), "README.md".to_owned()]
         );
 
         let expanded = HashSet::from([root.join("src")]);
         let visible = visible_working_tree_entries(&root, &expanded);
+        let nested = Path::new("src")
+            .join("nested")
+            .to_string_lossy()
+            .into_owned();
+        let main_rs = Path::new("src")
+            .join("main.rs")
+            .to_string_lossy()
+            .into_owned();
         assert_eq!(
             visible
                 .iter()
-                .map(|entry| (entry.relative_path.as_str(), entry.depth))
+                .map(|entry| (entry.relative_path.clone(), entry.depth))
                 .collect::<Vec<_>>(),
             vec![
-                ("src", 0),
-                ("src/nested", 1),
-                ("src/main.rs", 1),
-                ("README.md", 0)
+                ("src".to_owned(), 0),
+                (nested, 1),
+                (main_rs, 1),
+                ("README.md".to_owned(), 0)
             ]
         );
 
@@ -1503,6 +1515,7 @@ mod tests {
             ("yaml", Some(Lang::Yaml)),
             ("make", Some(Lang::Shell)),
             ("cpp", Some(Lang::C)),
+            ("markdown", Some(Lang::Markdown)),
             // Not yet lexed; these fall back to unhighlighted monospace.
             ("elixir", None),
             ("text", None),
@@ -1576,6 +1589,21 @@ mod tests {
             right_panel_tab_icon(&file, None),
             "icons/file-types/rust.svg"
         );
+    }
+
+    #[test]
+    fn right_panel_tab_titles_stay_on_one_line() {
+        let source = include_str!("right_panel.rs");
+        let header = source
+            .split_once("\n    fn render_right_panel_header(")
+            .expect("right panel header renderer")
+            .1
+            .split_once("\n    fn render_right_panel_chooser(")
+            .expect("right panel header renderer end")
+            .0;
+
+        assert!(header.contains(".truncate()"));
+        assert!(!header.contains(".line_clamp(1)"));
     }
 
     #[test]
@@ -2227,9 +2255,10 @@ impl Waku {
     fn any_overlay_open(&self, cx: &App) -> bool {
         self.menus.borrow().values().any(ContextMenuHandle::is_open)
             || self.command_palette.is_open()
+            || self.task_switcher.is_open()
             || self.commit_dialog.is_some()
             || self.image_preview.is_some()
-            || self.composer.read(cx).context_menu_open()
+            || self.composer.read(cx).context_menu_open(cx)
             || self
                 .right_panel_browsers
                 .values()
@@ -2383,9 +2412,8 @@ impl Waku {
                         div()
                             .min_w_0()
                             .flex_1()
-                            .line_clamp(1)
-                            .text_ellipsis()
-                            .text_size(px(12.0))
+                            .truncate()
+                            .text_size(sp(12.5))
                             .text_color(if active {
                                 theme.text
                             } else {
@@ -2554,7 +2582,7 @@ impl Waku {
                     .items_center()
                     .child(
                         div()
-                            .text_size(px(13.0))
+                            .text_size(sp(13.0))
                             .font_weight(FontWeight::MEDIUM)
                             .text_color(theme.text)
                             .child(tr!("right_panel.open_surface")),
@@ -2562,7 +2590,7 @@ impl Waku {
                     .child(
                         div()
                             .mt(px(5.0))
-                            .text_size(px(11.0))
+                            .text_size(sp(12.5))
                             .text_color(theme.text_tertiary)
                             .child(tr!("right_panel.choose_surface")),
                     )
@@ -2635,7 +2663,7 @@ impl Waku {
             .child(
                 div()
                     .mt(px(12.0))
-                    .text_size(px(12.5))
+                    .text_size(sp(12.5))
                     .font_weight(FontWeight::MEDIUM)
                     .text_color(theme.text)
                     .child(label),
@@ -2643,8 +2671,8 @@ impl Waku {
             .child(
                 div()
                     .mt(px(4.0))
-                    .text_size(px(10.5))
-                    .line_height(px(15.0))
+                    .text_size(sp(12.5))
+                    .line_height(sp(15.0))
                     .text_color(theme.text_tertiary)
                     .whitespace_normal()
                     .line_clamp(2)
@@ -2730,7 +2758,7 @@ impl Waku {
                         .min_w_0()
                         .flex_1()
                         .truncate()
-                        .text_size(px(11.5))
+                        .text_size(sp(12.5))
                         .text_color(theme.text_secondary)
                         .child(entry.name),
                 );
@@ -2771,7 +2799,7 @@ impl Waku {
                             .min_w_0()
                             .flex_1()
                             .truncate()
-                            .text_size(px(11.5))
+                            .text_size(sp(12.5))
                             .font_weight(FontWeight::MEDIUM)
                             .text_color(theme.text_secondary)
                             .child(project_name),
@@ -2809,6 +2837,53 @@ impl Waku {
         let (editor_state, writable, _) =
             self.ensure_right_panel_file_editor(&relative_path, window, cx);
 
+        // Markdown files carry the global source/preview toggle; every other
+        // language always shows source.
+        let is_markdown = file_highlighter_language(&relative_path) == "markdown";
+        let preview = is_markdown && self.state.markdown_preview;
+        let body = if preview {
+            self.render_file_markdown_preview(&relative_path, &editor_state, cx)
+        } else {
+            self.render_file_editor_body(
+                &relative_path,
+                &editor_state,
+                panel_width - file_tree_width,
+                writable,
+                window,
+                cx,
+            )
+        };
+        let preview_toggle = is_markdown.then(|| {
+            let focus = self.transcript_control_focus("file-markdown-preview-toggle", cx);
+            let (icon_path, label) = if preview {
+                ("icons/pencil.svg", tr!("files.edit_markdown_source"))
+            } else {
+                ("icons/eye.svg", tr!("files.preview_markdown"))
+            };
+            div()
+                .id("file-markdown-preview-toggle")
+                .track_focus(&focus)
+                .tab_index(0)
+                .size(px(26.0))
+                .rounded(px(7.0))
+                .flex_none()
+                .flex()
+                .items_center()
+                .justify_center()
+                .cursor_default()
+                .focus_visible(|style| style.border_1().border_color(theme.accent))
+                .hover(|style| style.bg(theme.overlay))
+                .child(icon(icon_path, 12.0, theme.text_tertiary))
+                .tooltip(move |window, cx| Tooltip::new(label.clone()).build(window, cx))
+                .on_click(cx.listener(|this, _, _, cx| this.toggle_markdown_preview(cx)))
+                .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
+                    if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                        this.toggle_markdown_preview(cx);
+                        cx.stop_propagation();
+                    }
+                }))
+        });
+
         let editor = div()
             .flex_1()
             .min_h_0()
@@ -2831,19 +2906,13 @@ impl Waku {
                             .min_w_0()
                             .flex_1()
                             .truncate()
-                            .text_size(px(11.0))
+                            .text_size(sp(12.5))
                             .text_color(theme.text_secondary)
                             .child(relative_path.clone()),
-                    ),
+                    )
+                    .children(preview_toggle),
             )
-            .child(self.render_file_editor_body(
-                &relative_path,
-                &editor_state,
-                panel_width - file_tree_width,
-                writable,
-                window,
-                cx,
-            ));
+            .child(body);
 
         div()
             .flex_1()
@@ -2876,7 +2945,7 @@ impl Waku {
         relative_path: &str,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> (Entity<ComposerInput>, bool, bool) {
+    ) -> (Entity<TextInput>, bool, bool) {
         if let Some(editor) = self.right_panel_file_editors.get(relative_path) {
             return (editor.state.clone(), editor.writable, editor.dirty);
         }
@@ -2886,8 +2955,9 @@ impl Waku {
         // fills it in from the background executor a frame or two later.
         let language = file_highlighter_language(relative_path);
         let state = cx.new(|cx| {
-            ComposerInput::new(window, cx)
-                .code_editor(Some(language))
+            TextInput::new(window, cx)
+                .multi_line()
+                .syntax(Some(language))
                 .read_only(true)
         });
 
@@ -2909,8 +2979,8 @@ impl Waku {
         let subscribed_path = relative_path.to_owned();
         cx.subscribe(
             &state,
-            move |this: &mut Self, state, event: &ComposerEvent, cx| {
-                if !matches!(event, ComposerEvent::Edited) {
+            move |this: &mut Self, state, event: &InputEvent, cx| {
+                if !matches!(event, InputEvent::Edited) {
                     return;
                 }
                 let value = state.read(cx).content().to_owned();
@@ -2934,8 +3004,8 @@ impl Waku {
         let focused_path = relative_path.to_owned();
         cx.subscribe(
             &state,
-            move |this: &mut Self, _, event: &ComposerEvent, cx| {
-                if matches!(event, ComposerEvent::Focus) {
+            move |this: &mut Self, _, event: &InputEvent, cx| {
+                if matches!(event, InputEvent::Focus) {
                     this.reload_right_panel_file_if_clean(focused_path.as_str(), cx);
                 }
             },
@@ -3054,16 +3124,17 @@ impl Waku {
     fn render_file_editor_body(
         &mut self,
         relative_path: &str,
-        editor_state: &Entity<ComposerInput>,
+        editor_state: &Entity<TextInput>,
         pane_width: f32,
         writable: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Div {
-        const LINE_HEIGHT: f32 = 16.0;
-        const TEXT_SIZE: f32 = 10.5;
         const GUTTER_PAD_RIGHT: f32 = 8.0;
         const CONTENT_PAD_TOP: f32 = 6.0;
+
+        let text_size = self.state.code_font_size;
+        let line_height = (text_size * 1.5).round();
 
         // An open find bar follows whichever file this body is showing; a
         // cheap comparison every frame, one recompute on the frame after the
@@ -3075,9 +3146,11 @@ impl Waku {
         let field = editor_state.read(cx);
         let line_count = field.content().split('\n').count().max(1);
         let heights = field.wrapped_line_heights();
-        let gutter_width = 20.0 + 6.0 * (line_count.to_string().len() as f32);
+        // A mono digit advances ~0.6em, so the gutter tracks the font size.
+        let digit_width = (text_size * 0.6).ceil();
+        let gutter_width = 20.0 + digit_width * (line_count.to_string().len() as f32);
         let content_height = if heights.is_empty() {
-            px(LINE_HEIGHT) * line_count as f32
+            px(line_height) * line_count as f32
         } else {
             heights.iter().fold(Pixels::ZERO, |total, h| total + *h)
         };
@@ -3093,7 +3166,7 @@ impl Waku {
                     let height = heights
                         .get(number - 1)
                         .copied()
-                        .unwrap_or_else(|| px(LINE_HEIGHT));
+                        .unwrap_or_else(|| px(line_height));
                     // Everything below the viewport is unreachable from here on.
                     if y > visible.bottom() {
                         break;
@@ -3109,11 +3182,11 @@ impl Waku {
                         let line =
                             window
                                 .text_system()
-                                .shape_line(text, px(TEXT_SIZE), &[run], None);
+                                .shape_line(text, px(text_size), &[run], None);
                         let origin = point(bounds.right() - line.width, y);
                         let _ = line.paint(
                             origin,
-                            px(LINE_HEIGHT),
+                            px(line_height),
                             gpui::TextAlign::Left,
                             None,
                             window,
@@ -3139,8 +3212,8 @@ impl Waku {
             .flex_col()
             .bg(theme.surface)
             .font_family(md::render::MONO_FAMILY)
-            .text_size(px(TEXT_SIZE))
-            .line_height(px(LINE_HEIGHT))
+            .text_size(px(text_size))
+            .line_height(px(line_height))
             .children(find_bar)
             .child(
                 div()
@@ -3176,6 +3249,84 @@ impl Waku {
                         &self.right_panel_editor_scrollbar,
                     )),
             )
+    }
+
+    /// Flips the global markdown source/preview mode and persists it, so the
+    /// choice follows the user across files and sessions.
+    fn toggle_markdown_preview(&mut self, cx: &mut Context<Self>) {
+        self.state.markdown_preview = !self.state.markdown_preview;
+        self.save();
+        cx.notify();
+    }
+
+    /// The rendered-markdown alternative to the editor body, shown while the
+    /// global preview toggle is on. It renders the editor's current text —
+    /// unsaved edits included — with the transcript's markdown engine; the
+    /// parse is cached per path, so re-rendering an unchanged document costs
+    /// `Rc` clones, not a re-parse. Reads only in-memory editor state: the
+    /// render path may not touch the filesystem.
+    fn render_file_markdown_preview(
+        &mut self,
+        relative_path: &str,
+        editor_state: &Entity<TextInput>,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let theme = Theme::current(cx);
+        let palette = MarkdownPalette::from_theme(&theme);
+        let mut cache = self.file_preview_markdown.borrow_mut();
+        if !matches!(cache.as_ref(), Some((cached, _)) if cached == relative_path) {
+            *cache = Some((relative_path.to_owned(), MarkdownView::new()));
+        }
+        let (_, view) = cache.as_mut().expect("entry ensured above");
+        view.set_text(editor_state.read(cx).content(), false);
+        let ctx = MarkdownCtx::new(
+            format!("file-preview-{relative_path}"),
+            &palette,
+            MarkdownMetrics::document(self.state.ui_font_size, self.state.code_font_size),
+            self.file_preview_selection.clone(),
+        )
+        .with_link_handler(self.markdown_link_handler.clone());
+        let document = md::render::markdown(view, &ctx);
+
+        let selection_input = {
+            let selection = self.file_preview_selection.clone();
+            canvas(
+                |_, _, _| (),
+                move |_, _, window, _| md::render::install_selection_input(window, &selection),
+            )
+            .absolute()
+            .w(px(0.0))
+            .h(px(0.0))
+        };
+
+        div()
+            .flex_1()
+            .min_h_0()
+            .relative()
+            .bg(theme.surface)
+            .child(
+                div()
+                    .id(SharedString::from(format!("file-preview-{relative_path}")))
+                    .size_full()
+                    .overflow_y_scroll()
+                    .track_scroll(&self.file_preview_scroll_handle)
+                    // Painted before the document, so the frame's selection
+                    // registry holds exactly this frame's text elements.
+                    .child(md::render::frame_reset(self.file_preview_selection.clone()))
+                    .child(
+                        div()
+                            .px(px(16.0))
+                            .pt(px(14.0))
+                            .pb(px(24.0))
+                            .text_color(theme.text)
+                            .children(document),
+                    ),
+            )
+            .child(selection_input)
+            .child(scrollbar::vertical(
+                &self.file_preview_scroll_handle,
+                &self.file_preview_scrollbar,
+            ))
     }
 
     /// Picks up an external edit to a file the user has not modified here.
@@ -3484,14 +3635,14 @@ impl Waku {
             .child(source)
             .child(
                 div()
-                    .text_size(px(11.5))
+                    .text_size(sp(12.5))
                     .font_weight(FontWeight::MEDIUM)
                     .text_color(theme.success)
                     .child(format!("+{additions}")),
             )
             .child(
                 div()
-                    .text_size(px(11.5))
+                    .text_size(sp(12.5))
                     .font_weight(FontWeight::MEDIUM)
                     .text_color(theme.danger)
                     .child(format!("-{deletions}")),
@@ -3499,7 +3650,7 @@ impl Waku {
             .when(truncated, |row| {
                 row.child(
                     div()
-                        .text_size(px(10.5))
+                        .text_size(sp(12.5))
                         .text_color(theme.warning)
                         .child(tr!("diff.truncated")),
                 )
@@ -3563,6 +3714,9 @@ impl Waku {
             return div().into_any_element();
         };
         let theme = Theme::current(cx);
+        let style = DiffRowStyle::review(self.state.code_font_size);
+        // Chrome rows keep their gutters flush with the code rows'.
+        let gutter_width = style.gutter_width();
 
         match &line.kind {
             crate::review_diff::LineKind::FileHeader => div()
@@ -3584,7 +3738,7 @@ impl Waku {
                         .min_w_0()
                         .flex_1()
                         .truncate()
-                        .text_size(px(11.5))
+                        .text_size(px(12.5))
                         .font_weight(FontWeight::MEDIUM)
                         .text_color(theme.text_secondary)
                         .tooltip(Tooltip::text(file.path.clone()))
@@ -3592,13 +3746,13 @@ impl Waku {
                 )
                 .child(
                     div()
-                        .text_size(px(10.5))
+                        .text_size(px(12.5))
                         .text_color(theme.success)
                         .child(format!("+{}", file.additions)),
                 )
                 .child(
                     div()
-                        .text_size(px(10.5))
+                        .text_size(px(12.5))
                         .text_color(theme.danger)
                         .child(format!("-{}", file.deletions)),
                 )
@@ -3609,7 +3763,7 @@ impl Waku {
                 let directions = review_diff_gap_directions(gap.position, chunked);
                 let two_directions = directions.len() > 1;
                 let gutter = div()
-                    .w(px(52.0))
+                    .w(px(gutter_width))
                     .h_full()
                     .flex_none()
                     .flex()
@@ -3687,7 +3841,7 @@ impl Waku {
                     .min_w_0()
                     .flex()
                     .items_center()
-                    .text_size(px(10.5))
+                    .text_size(px(12.5))
                     .text_color(theme.text_tertiary)
                     .child(gutter)
                     .child(label)
@@ -3700,12 +3854,12 @@ impl Waku {
                 .flex()
                 .items_stretch()
                 .font_family(md::render::MONO_FAMILY)
-                .text_size(px(10.0))
+                .text_size(px(12.5))
                 .line_height(px(16.0))
                 .text_color(theme.text_tertiary)
                 .child(
                     div()
-                        .w(px(52.0))
+                        .w(px(gutter_width))
                         .min_h(px(24.0))
                         .self_stretch()
                         .flex_none()
@@ -3735,10 +3889,16 @@ impl Waku {
                 .flex()
                 .items_stretch()
                 .font_family(md::render::MONO_FAMILY)
-                .text_size(px(10.5))
+                .text_size(px(12.5))
                 .line_height(px(16.0))
                 .text_color(theme.text_tertiary)
-                .child(div().w(px(52.0)).min_h(px(24.0)).self_stretch().flex_none())
+                .child(
+                    div()
+                        .w(px(gutter_width))
+                        .min_h(px(24.0))
+                        .self_stretch()
+                        .flex_none(),
+                )
                 .child(
                     div()
                         .min_h(px(24.0))
@@ -3758,7 +3918,7 @@ impl Waku {
                 index,
                 "review-diff",
                 &self.right_panel_diff_selection,
-                DiffRowStyle::REVIEW,
+                style,
                 &theme,
             ),
         }
@@ -3985,7 +4145,7 @@ impl Waku {
                                 .min_w_0()
                                 .flex_1()
                                 .truncate()
-                                .text_size(px(11.0))
+                                .text_size(sp(12.5))
                                 .font_weight(FontWeight::MEDIUM)
                                 .text_color(theme.text_secondary)
                                 .child(name),
@@ -4047,7 +4207,7 @@ impl Waku {
                                     .min_w_0()
                                     .flex_1()
                                     .truncate()
-                                    .text_size(px(11.0))
+                                    .text_size(sp(12.5))
                                     .text_color(if selected {
                                         theme.text
                                     } else {
@@ -4058,8 +4218,8 @@ impl Waku {
                             )
                             .child(
                                 div()
-                                    .w(px(16.0))
-                                    .h(px(16.0))
+                                    .w(px(18.0))
+                                    .h(px(18.0))
                                     .flex_none()
                                     .rounded(px(4.0))
                                     .border_1()
@@ -4067,7 +4227,7 @@ impl Waku {
                                     .flex()
                                     .items_center()
                                     .justify_center()
-                                    .text_size(px(9.0))
+                                    .text_size(sp(12.5))
                                     .font_weight(FontWeight::SEMIBOLD)
                                     .text_color(status_color)
                                     .child(status),
@@ -4102,7 +4262,7 @@ impl Waku {
             .pb(px(32.0))
             .child(
                 div()
-                    .text_size(px(13.0))
+                    .text_size(sp(13.0))
                     .font_weight(FontWeight::MEDIUM)
                     .text_color(theme.text)
                     .child(title),
@@ -4112,8 +4272,8 @@ impl Waku {
                     .mt(px(6.0))
                     .max_w(px(300.0))
                     .text_center()
-                    .text_size(px(11.0))
-                    .line_height(px(17.0))
+                    .text_size(sp(12.5))
+                    .line_height(sp(17.0))
                     .text_color(theme.text_tertiary)
                     .child(description),
             )

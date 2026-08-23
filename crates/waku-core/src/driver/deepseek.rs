@@ -1250,10 +1250,27 @@ fn execute_harness_command(
     session_id: &str,
     line: &str,
 ) -> anyhow::Result<HarnessCommandExecution> {
-    let execution = server.rpc(
-        "commands/execute",
-        json!({"args": {"agentId": session_id, "line": line}}),
-    )?;
+    let execution = server
+        .rpc(
+            "commands/execute",
+            json!({"args": {"agentId": session_id, "line": line, "images": []}}),
+        )
+        .or_else(|error| {
+            // Harness 0.1.1 made the image list a required command argument. Its
+            // older strict descriptor rejects that field, so retry only that
+            // compatibility failure with the legacy payload.
+            let message = error.to_string();
+            if message.contains("args fields do not match the descriptor")
+                && message.contains("images")
+            {
+                server.rpc(
+                    "commands/execute",
+                    json!({"args": {"agentId": session_id, "line": line}}),
+                )
+            } else {
+                Err(error)
+            }
+        })?;
     if execution.is_null() {
         bail!("unknown or malformed command: {line}");
     }

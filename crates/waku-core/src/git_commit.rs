@@ -286,6 +286,12 @@ fn agent_arguments(
             push(&mut args, "--profile");
             push(&mut args, "headless");
         }
+        ProviderKind::Fx => {
+            push(&mut args, "ask");
+            push(&mut args, "--no-save");
+            push(&mut args, "--no-color");
+            push(&mut args, "--");
+        }
         ProviderKind::OpenCode => {
             push(&mut args, "run");
             push(&mut args, "--pure");
@@ -764,6 +770,12 @@ mod tests {
                 }
                 ProviderKind::DeepSeek => {
                     assert!(has_pair(&args, "--profile", "headless"));
+                }
+                ProviderKind::Fx => {
+                    assert_eq!(args.first().and_then(|arg| arg.to_str()), Some("ask"));
+                    assert!(has(&args, "--no-save"));
+                    assert!(has(&args, "--no-color"));
+                    assert!(has(&args, "--"));
                 }
                 ProviderKind::Grok => {
                     assert!(has_pair(&args, "--single", prompt));

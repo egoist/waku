@@ -30,7 +30,8 @@ use gpui::{
     AnyElement, App, Bounds, Display, Element, ElementId, FocusHandle, FontWeight, GlobalElementId,
     InspectorElementId, InteractiveElement, IntoElement, KeyDownEvent, LayoutId, MouseButton,
     MouseDownEvent, ParentElement, Pixels, Point, Position, RenderOnce, SharedString, Size, Style,
-    Styled, Window, actions, anchored, canvas, deferred, div, prelude::FluentBuilder, px,
+    StatefulInteractiveElement, Styled, Window, actions, anchored, canvas, deferred, div, img,
+    prelude::FluentBuilder, px,
 };
 
 actions!(
@@ -58,7 +59,7 @@ const TRIGGER_GAP: f32 = 4.0;
 /// be claimed from under the focused field, and only a binding can do that:
 /// `enter`, `tab`, and the arrows reach the field as *actions*, and an action
 /// consumes the keystroke before any `on_key_down` listener above it ever runs.
-const PANEL_FIELD_CONTEXT: &str = "WakuMenu > ComposerInput";
+const PANEL_FIELD_CONTEXT: &str = "WakuMenu > TextInput";
 
 /// Bind the menu's own keys. Called once at startup.
 ///
@@ -77,7 +78,7 @@ pub fn init(cx: &mut App) {
     ]);
 }
 
-use crate::theme::Theme;
+use crate::theme::{Theme, sp};
 use crate::ui::icon;
 
 /// One row of a menu.
@@ -85,6 +86,9 @@ pub enum MenuItem {
     Entry {
         label: SharedString,
         icon: Option<&'static str>,
+        /// A full-color raster icon — a real app icon — where `icon` would
+        /// draw a tinted glyph.
+        image: Option<std::sync::Arc<gpui::Image>>,
         /// Draws a trailing check, for menus that present a current choice.
         selected: bool,
         /// Shown greyed and inert. Preferred over omitting the row when the
@@ -92,6 +96,15 @@ pub enum MenuItem {
         disabled: bool,
         #[allow(clippy::type_complexity)]
         on_click: Rc<dyn Fn(&mut Window, &mut App)>,
+    },
+    /// Opens a one-level flyout beside the parent card. `value` keeps the
+    /// current choice visible in the parent row, matching native inspector
+    /// menus whose submenu is a preference rather than an action.
+    Submenu {
+        label: SharedString,
+        value: Option<SharedString>,
+        #[allow(clippy::type_complexity)]
+        items: Rc<dyn Fn(&mut App) -> Vec<MenuItem>>,
     },
     /// A caller-drawn row, for choices that need more than a label — a badge, a
     /// secondary line, an inline swatch. Clickable when `on_click` is set.
@@ -114,6 +127,7 @@ impl MenuItem {
         Self::Entry {
             label: label.into(),
             icon: None,
+            image: None,
             selected: false,
             disabled: false,
             on_click: Rc::new(on_click),
@@ -125,6 +139,18 @@ impl MenuItem {
         Self::Custom {
             render: Rc::new(render),
             on_click: None,
+        }
+    }
+
+    pub fn submenu_with_value(
+        label: impl Into<SharedString>,
+        value: impl Into<SharedString>,
+        items: impl Fn(&mut App) -> Vec<MenuItem> + 'static,
+    ) -> Self {
+        Self::Submenu {
+            label: label.into(),
+            value: Some(value.into()),
+            items: Rc::new(items),
         }
     }
 
@@ -156,9 +182,17 @@ impl MenuItem {
         self
     }
 
+    pub fn image(mut self, value: std::sync::Arc<gpui::Image>) -> Self {
+        if let Self::Entry { image, .. } = &mut self {
+            *image = Some(value);
+        }
+        self
+    }
+
     fn is_focusable(&self) -> bool {
         match self {
             Self::Entry { disabled, .. } => !disabled,
+            Self::Submenu { .. } => true,
             Self::Custom { on_click, .. } => on_click.is_some(),
             Self::Header(_) | Self::Separator => false,
         }
@@ -173,7 +207,7 @@ impl MenuItem {
             } => Some(on_click),
             Self::Entry { disabled: true, .. } => None,
             Self::Custom { on_click, .. } => on_click,
-            Self::Header(_) | Self::Separator => None,
+            Self::Submenu { .. } | Self::Header(_) | Self::Separator => None,
         }
     }
 }
@@ -184,6 +218,12 @@ struct MenuState {
     open: Option<Point<Pixels>>,
     /// Keyboard cursor over focusable entries.
     highlighted: Option<usize>,
+    /// Parent item whose flyout is visible.
+    active_submenu: Option<usize>,
+    /// Keyboard cursor inside the visible flyout.
+    submenu_highlighted: Option<usize>,
+    /// Whether arrow-key navigation currently belongs to the flyout.
+    submenu_focused: bool,
     /// A dropdown/popover trigger toggles its own surface on left click. The
     /// outside-click capture must leave that click alone so the later trigger
     /// handler can close it; a context-menu row has no such handler.
@@ -266,6 +306,9 @@ impl ContextMenuHandle {
             let was_open = state.open.is_some();
             state.open = None;
             state.highlighted = None;
+            state.active_submenu = None;
+            state.submenu_highlighted = None;
+            state.submenu_focused = false;
             state.trigger_click_toggles = false;
             was_open
         };
@@ -304,6 +347,9 @@ impl ContextMenuHandle {
             let was_open = state.open.is_some();
             state.open = Some(position);
             state.highlighted = None;
+            state.active_submenu = None;
+            state.submenu_highlighted = None;
+            state.submenu_focused = false;
             state.trigger_click_toggles = trigger_click_toggles;
             was_open
         };
@@ -898,16 +944,55 @@ struct MenuCard {
 impl RenderOnce for MenuCard {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let theme = Theme::current(cx);
-        let _ = window;
         let items = (self.items)(cx);
         let focusable = focusable_indexes(&items);
-        let highlighted = self.handle.state.borrow().highlighted;
+        let (highlighted, active_submenu, submenu_highlighted) = {
+            let state = self.handle.state.borrow();
+            (
+                state.highlighted,
+                state.active_submenu,
+                state.submenu_highlighted,
+            )
+        };
+        let submenu = active_submenu.and_then(|index| {
+            let MenuItem::Submenu { items, .. } = items.get(index)? else {
+                return None;
+            };
+            Some((index, items(cx)))
+        });
 
-        let mut card = div()
+        let mut root_card = div()
             .id(self.id)
+            .min_w(px(176.0))
+            .max_w(px(320.0))
+            .py(px(4.0))
+            .rounded(px(9.0))
+            .border_1()
+            .border_color(theme.border_strong)
+            .bg(theme.raised)
+            .shadow_lg()
+            .flex()
+            .flex_col();
+
+        for (index, item) in items.into_iter().enumerate() {
+            root_card = root_card.child(render_menu_item(
+                item,
+                index,
+                highlighted == Some(index) || active_submenu == Some(index),
+                false,
+                &theme,
+                self.handle.clone(),
+                window,
+                cx,
+            ));
+        }
+
+        let mut surface = div()
             .occlude()
             .track_focus(&self.handle.focus)
             .key_context(MENU_CONTEXT)
+            .flex()
+            .items_start()
             .on_action({
                 let handle = self.handle.clone();
                 move |_: &DismissMenu, window, cx| {
@@ -919,16 +1004,6 @@ impl RenderOnce for MenuCard {
                 let handle = self.handle.clone();
                 move |event, window, cx| handle.dismiss_on_down_out(event, window, cx)
             })
-            .min_w(px(176.0))
-            .max_w(px(320.0))
-            .py(px(4.0))
-            .rounded(px(9.0))
-            .border_1()
-            .border_color(theme.border_strong)
-            .bg(theme.raised)
-            .shadow_lg()
-            .flex()
-            .flex_col()
             .on_key_down({
                 let handle = self.handle.clone();
                 let focusable = focusable.clone();
@@ -936,77 +1011,198 @@ impl RenderOnce for MenuCard {
                 move |event: &KeyDownEvent, window, cx| {
                     on_menu_key(&handle, &focusable, &items, event, window, cx);
                 }
-            });
+            })
+            .child(root_card);
 
-        for (index, item) in items.into_iter().enumerate() {
-            card = card.child(match item {
-                MenuItem::Separator => div()
-                    .my(px(4.0))
-                    .mx(px(6.0))
-                    .h(px(1.0))
-                    .bg(theme.border)
-                    .into_any_element(),
-                MenuItem::Header(label) => div()
-                    .px(px(10.0))
-                    .pt(px(6.0))
-                    .pb(px(2.0))
-                    .text_size(px(10.0))
-                    .line_height(px(14.0))
-                    .font_weight(FontWeight::MEDIUM)
-                    .text_color(theme.text_tertiary)
-                    .child(label)
-                    .into_any_element(),
-                MenuItem::Entry {
-                    label,
-                    icon: item_icon,
-                    selected,
-                    disabled,
-                    on_click,
-                } => {
-                    let color = match (disabled, selected) {
-                        (true, _) => theme.text_ghost,
-                        (false, true) => theme.text,
-                        (false, false) => theme.text_secondary,
-                    };
-                    row(
-                        index,
-                        highlighted == Some(index),
-                        &theme,
-                        self.handle.clone(),
-                        (!disabled).then_some(on_click),
-                    )
-                    .text_color(color)
-                    .when(selected, |element| element.font_weight(FontWeight::MEDIUM))
-                    .when_some(item_icon, |element, path| {
-                        element.child(icon(path, 12.0, color))
-                    })
-                    .child(div().flex_1().min_w_0().truncate().child(label))
-                    .when(selected, |element| {
-                        element.child(icon("icons/check.svg", 11.0, theme.text_tertiary))
-                    })
-                    .into_any_element()
-                }
-                MenuItem::Custom { render, on_click } => {
-                    let body = render(window, cx);
-                    match on_click {
-                        Some(on_click) => row(
-                            index,
-                            highlighted == Some(index),
-                            &theme,
-                            self.handle.clone(),
-                            Some(on_click),
-                        )
-                        .child(body)
-                        .into_any_element(),
-                        // Non-interactive rows still need the row's insets so
-                        // they line up with the entries around them.
-                        None => div().mx(px(4.0)).px(px(8.0)).child(body).into_any_element(),
-                    }
-                }
-            });
+        if let Some((parent_index, submenu_items)) = submenu {
+            let mut submenu_card = div()
+                .id(SharedString::from(format!("submenu-{parent_index}")))
+                .ml(px(-4.0))
+                .min_w(px(176.0))
+                .max_w(px(320.0))
+                .py(px(4.0))
+                .rounded(px(9.0))
+                .border_1()
+                .border_color(theme.border_strong)
+                .bg(theme.raised)
+                .shadow_lg()
+                .flex()
+                .flex_col();
+            for (index, item) in submenu_items.into_iter().enumerate() {
+                submenu_card = submenu_card.child(render_menu_item(
+                    item,
+                    index,
+                    submenu_highlighted == Some(index),
+                    true,
+                    &theme,
+                    self.handle.clone(),
+                    window,
+                    cx,
+                ));
+            }
+            surface = surface.child(submenu_card);
         }
-        card
+        surface
     }
+}
+
+fn render_menu_item(
+    item: MenuItem,
+    index: usize,
+    highlighted: bool,
+    in_submenu: bool,
+    theme: &Theme,
+    handle: ContextMenuHandle,
+    window: &mut Window,
+    cx: &mut App,
+) -> AnyElement {
+    match item {
+        MenuItem::Separator => div()
+            .my(px(4.0))
+            .mx(px(6.0))
+            .h(px(1.0))
+            .bg(theme.border)
+            .into_any_element(),
+        MenuItem::Header(label) => div()
+            .px(px(10.0))
+            .pt(px(6.0))
+            .pb(px(2.0))
+            .text_size(sp(12.5))
+            .line_height(sp(14.0))
+            .font_weight(FontWeight::MEDIUM)
+            .text_color(theme.text_tertiary)
+            .child(label)
+            .into_any_element(),
+        MenuItem::Entry {
+            label,
+            icon: item_icon,
+            image,
+            selected,
+            disabled,
+            on_click,
+        } => {
+            let color = match (disabled, selected) {
+                (true, _) => theme.text_ghost,
+                (false, true) => theme.text,
+                (false, false) => theme.text_secondary,
+            };
+            let entry = row(
+                index,
+                highlighted,
+                theme,
+                handle.clone(),
+                (!disabled).then_some(on_click),
+            )
+            .text_color(color)
+            .when(selected, |element| element.font_weight(FontWeight::MEDIUM))
+            .when_some(item_icon, |element, path| {
+                element.child(icon(path, 12.0, color))
+            })
+            .when_some(image, |element, image| {
+                element.child(img(image).size(px(16.0)).flex_none())
+            })
+            .child(div().flex_1().min_w_0().truncate().child(label))
+            .when(selected, |element| {
+                element.child(icon("icons/check.svg", 11.0, theme.text_tertiary))
+            });
+            track_pointer_highlight(entry, index, in_submenu, disabled, handle).into_any_element()
+        }
+        MenuItem::Submenu {
+            label,
+            value,
+            items: _,
+        } => {
+            // Waku currently exposes one flyout level. Keeping a nested
+            // submenu row inert prevents a child builder from accidentally
+            // stealing the parent flyout's keyboard state.
+            if in_submenu {
+                return row(index, highlighted, theme, handle, None)
+                    .text_color(theme.text_ghost)
+                    .child(div().flex_1().min_w_0().truncate().child(label))
+                    .child(icon("icons/chevron-right.svg", 10.0, theme.text_ghost))
+                    .into_any_element();
+            }
+            let hover = theme.overlay;
+            let hover_handle = handle.clone();
+            let click_handle = handle.clone();
+            row(index, highlighted, theme, handle, None)
+                .cursor_default()
+                .hover(move |element| element.bg(hover))
+                .text_color(theme.text_secondary)
+                .on_hover(move |hovered, window, _| {
+                    if *hovered {
+                        open_submenu(&hover_handle, index, false);
+                        window.refresh();
+                    }
+                })
+                .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+                    open_submenu(&click_handle, index, false);
+                    window.refresh();
+                    cx.stop_propagation();
+                })
+                .child(div().flex_1().min_w_0().truncate().child(label))
+                .when_some(value, |element, value| {
+                    element.child(
+                        div()
+                            .flex_none()
+                            .text_color(theme.text_tertiary)
+                            .child(value),
+                    )
+                })
+                .child(icon("icons/chevron-right.svg", 10.0, theme.text_tertiary))
+                .into_any_element()
+        }
+        MenuItem::Custom { render, on_click } => {
+            let body = render(window, cx);
+            match on_click {
+                Some(on_click) => {
+                    let entry =
+                        row(index, highlighted, theme, handle.clone(), Some(on_click)).child(body);
+                    track_pointer_highlight(entry, index, in_submenu, false, handle)
+                        .into_any_element()
+                }
+                // Non-interactive rows still need the row's insets so they
+                // line up with the entries around them.
+                None => div().mx(px(4.0)).px(px(8.0)).child(body).into_any_element(),
+            }
+        }
+    }
+}
+
+fn open_submenu(handle: &ContextMenuHandle, index: usize, keyboard: bool) {
+    let mut state = handle.state.borrow_mut();
+    if state.active_submenu != Some(index) {
+        state.submenu_highlighted = None;
+    }
+    state.highlighted = Some(index);
+    state.active_submenu = Some(index);
+    state.submenu_focused = keyboard;
+}
+
+fn track_pointer_highlight(
+    row: gpui::Stateful<gpui::Div>,
+    index: usize,
+    in_submenu: bool,
+    disabled: bool,
+    handle: ContextMenuHandle,
+) -> gpui::Stateful<gpui::Div> {
+    row.when(!disabled, |row| {
+        row.on_hover(move |hovered, window, _| {
+            if !*hovered {
+                return;
+            }
+            let mut state = handle.state.borrow_mut();
+            if in_submenu {
+                state.submenu_highlighted = Some(index);
+            } else {
+                state.highlighted = Some(index);
+                state.active_submenu = None;
+                state.submenu_highlighted = None;
+                state.submenu_focused = false;
+            }
+            window.refresh();
+        })
+    })
 }
 
 /// The shared row: consistent insets, plus hover, keyboard highlight and
@@ -1030,8 +1226,8 @@ fn row(
         .flex()
         .items_center()
         .gap(px(8.0))
-        .text_size(px(11.5))
-        .line_height(px(15.0))
+        .text_size(sp(12.5))
+        .line_height(sp(15.0))
         .when(highlighted, |element| element.bg(highlight))
         .when_some(on_click, |element, on_click| {
             element
@@ -1092,39 +1288,127 @@ fn on_menu_key(
         cx.stop_propagation();
         return;
     }
+
+    let (submenu_focused, active_submenu, submenu_current) = {
+        let state = handle.state.borrow();
+        (
+            state.submenu_focused,
+            state.active_submenu,
+            state.submenu_highlighted,
+        )
+    };
+    if submenu_focused {
+        let submenu_items = active_submenu
+            .and_then(|index| items(cx).into_iter().nth(index))
+            .and_then(|item| match item {
+                MenuItem::Submenu { items, .. } => Some(items(cx)),
+                _ => None,
+            });
+        let Some(submenu_items) = submenu_items else {
+            let mut state = handle.state.borrow_mut();
+            state.active_submenu = None;
+            state.submenu_highlighted = None;
+            state.submenu_focused = false;
+            window.refresh();
+            return;
+        };
+
+        if key == "left" {
+            let mut state = handle.state.borrow_mut();
+            state.submenu_focused = false;
+            state.submenu_highlighted = None;
+            window.refresh();
+            cx.stop_propagation();
+            return;
+        }
+
+        let submenu_focusable = focusable_indexes(&submenu_items);
+        if let Some(next) = next_highlight(&submenu_focusable, submenu_current, key) {
+            handle.state.borrow_mut().submenu_highlighted = Some(next);
+            window.refresh();
+            cx.stop_propagation();
+            return;
+        }
+
+        if matches!(key, "enter" | "space") {
+            cx.stop_propagation();
+            let Some(highlighted) = handle.state.borrow().submenu_highlighted else {
+                return;
+            };
+            let activated = submenu_items
+                .into_iter()
+                .nth(highlighted)
+                .and_then(MenuItem::click_handler);
+            if let Some(on_click) = activated {
+                handle.close(window, cx);
+                on_click(window, cx);
+                window.refresh();
+            }
+        }
+        return;
+    }
+
+    if key == "left" && active_submenu.is_some() {
+        let mut state = handle.state.borrow_mut();
+        state.active_submenu = None;
+        state.submenu_highlighted = None;
+        state.submenu_focused = false;
+        window.refresh();
+        cx.stop_propagation();
+        return;
+    }
     if focusable.is_empty() {
         return;
     }
 
     let current = handle.state.borrow().highlighted;
     if let Some(next) = next_highlight(focusable, current, key) {
-        handle.state.borrow_mut().highlighted = Some(next);
+        let mut state = handle.state.borrow_mut();
+        state.highlighted = Some(next);
+        state.active_submenu = None;
+        state.submenu_highlighted = None;
+        state.submenu_focused = false;
         window.refresh();
         cx.stop_propagation();
         return;
     }
 
-    if matches!(key, "enter" | "space") {
+    if matches!(key, "right" | "enter" | "space") {
         cx.stop_propagation();
         let Some(highlighted) = handle.state.borrow().highlighted else {
             return;
         };
         // Rebuild to reach the entry's closure: the item list is intentionally
         // not retained between frames.
-        let activated = items(cx)
-            .into_iter()
-            .nth(highlighted)
-            .and_then(MenuItem::click_handler);
-        if let Some(on_click) = activated {
-            handle.close(window, cx);
-            on_click(window, cx);
-            window.refresh();
+        let Some(item) = items(cx).into_iter().nth(highlighted) else {
+            return;
+        };
+        match item {
+            MenuItem::Submenu { items, .. } => {
+                let submenu_items = items(cx);
+                let first = focusable_indexes(&submenu_items).first().copied();
+                let mut state = handle.state.borrow_mut();
+                state.active_submenu = Some(highlighted);
+                state.submenu_highlighted = first;
+                state.submenu_focused = true;
+                window.refresh();
+            }
+            item if matches!(key, "enter" | "space") => {
+                if let Some(on_click) = item.click_handler() {
+                    handle.close(window, cx);
+                    on_click(window, cx);
+                    window.refresh();
+                }
+            }
+            _ => {}
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::{cell::Cell, rc::Rc};
+
     use gpui::{Context, Modifiers, Render, TestAppContext, point, size};
 
     use super::*;
@@ -1146,6 +1430,11 @@ mod tests {
     struct FocusedPopoverHarness {
         handle: ContextMenuHandle,
         descendant_focus: FocusHandle,
+    }
+
+    struct SubmenuHarness {
+        handle: ContextMenuHandle,
+        activated: Rc<Cell<bool>>,
     }
 
     #[test]
@@ -1255,6 +1544,31 @@ mod tests {
         }
     }
 
+    impl Render for SubmenuHarness {
+        fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+            let activated = self.activated.clone();
+            dropdown_menu(
+                div().w(px(120.0)).h(px(32.0)),
+                "submenu-dropdown",
+                &self.handle,
+                MenuAlign::BelowLeft,
+                move |_| {
+                    let activated = activated.clone();
+                    vec![MenuItem::submenu_with_value(
+                        "Grouping",
+                        "Updated",
+                        move |_| {
+                            let activated = activated.clone();
+                            vec![MenuItem::new("Project", move |_, _| {
+                                activated.set(true);
+                            })]
+                        },
+                    )]
+                },
+            )
+        }
+    }
+
     /// The trigger sits at the window origin, 120×32; the card hangs below it,
     /// so a point inside the trigger is outside the card and vice versa.
     fn assert_trigger_toggles(surface: Surface, cx: &mut TestAppContext) {
@@ -1359,6 +1673,32 @@ mod tests {
         assert_trigger_opens_from_keyboard(Surface::Dropdown, cx);
     }
 
+    #[gpui::test]
+    fn submenu_is_keyboard_operable(cx: &mut TestAppContext) {
+        let handle = cx.update(ContextMenuHandle::new);
+        let activated = Rc::new(Cell::new(false));
+        let harness = SubmenuHarness {
+            handle: handle.clone(),
+            activated: activated.clone(),
+        };
+        let (_view, cx) = cx.add_window_view(|_, _| harness);
+
+        cx.simulate_mouse_down(
+            point(px(10.0), px(10.0)),
+            MouseButton::Left,
+            Modifiers::none(),
+        );
+        cx.run_until_parked();
+        cx.update(|window, cx| window.focus(&handle.focus, cx));
+        cx.simulate_keystrokes("down");
+        cx.simulate_keystrokes("right");
+        assert!(handle.state.borrow().submenu_focused);
+        cx.simulate_keystrokes("enter");
+
+        assert!(activated.get());
+        assert!(!handle.is_open());
+    }
+
     fn items() -> Vec<MenuItem> {
         vec![
             MenuItem::new("Copy", |_, _| {}),
@@ -1371,6 +1711,16 @@ mod tests {
     #[test]
     fn separators_are_not_focusable() {
         assert_eq!(*focusable_indexes(&items()), vec![0, 3]);
+    }
+
+    #[test]
+    fn submenus_are_focusable() {
+        let items = vec![MenuItem::submenu_with_value(
+            "Grouping",
+            "Updated",
+            |_| Vec::new(),
+        )];
+        assert_eq!(*focusable_indexes(&items), vec![0]);
     }
 
     #[test]

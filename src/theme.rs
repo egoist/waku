@@ -1,6 +1,19 @@
-use gpui::{App, Global, Hsla, Window, WindowAppearance, hsla, rgb, transparent_black};
+use gpui::{App, Global, Hsla, Rems, Window, WindowAppearance, hsla, rems, rgb, transparent_black};
 
 pub use waku_client::theme::ThemePreference;
+
+/// Scaled pixels: a dimension authored at the default 14px UI font size,
+/// expressed in rems so the UI font size setting scales it. The window's rem
+/// size *is* the UI font size, so at the default setting this resolves to
+/// exactly the authored pixel value.
+///
+/// Chrome text sizes and their line heights go through here. Content surfaces
+/// that already derive from a font-size setting — markdown metrics, the file
+/// editor, diff rows, tool-output mono — stay in `px` so they never scale
+/// twice.
+pub fn sp(value: f32) -> Rems {
+    rems(value / waku_client::persistence::DEFAULT_UI_FONT_SIZE)
+}
 
 fn resolves_to_dark(preference: ThemePreference, system_appearance: WindowAppearance) -> bool {
     match preference {

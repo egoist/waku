@@ -41,8 +41,17 @@ export function activitySummary(activities: ActivityItem[], t?: Translator) {
     : `${activities.some((activity) => !activity.complete) ? 'Running' : 'Ran'} ${joined}`
 }
 
-export function activityHeaderTitle(activities: ActivityItem[], liveTurn: boolean, t?: Translator) {
-  const latest = liveTurn ? activities.at(-1) : undefined
+export function activityGroupIsLive(
+  liveTurn: boolean,
+  latestBlock: boolean,
+  afterMessage: number,
+  messageCount: number,
+) {
+  return liveTurn && latestBlock && afterMessage === messageCount
+}
+
+export function activityHeaderTitle(activities: ActivityItem[], liveGroup: boolean, t?: Translator) {
+  const latest = liveGroup ? activities.at(-1) : undefined
   if (latest) return latest.reasoning ? reasoningTitle(latest, t) : activityDisplayTitle(latest, t)
   return activitySummary(activities, t)
 }

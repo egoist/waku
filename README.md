@@ -32,6 +32,7 @@ Waku works with:
 - Claude Code
 - Codex CLI
 - Cursor CLI
+- [Fx](https://fx.sh/)
 - Grok Build
 - Kimi Code
 - OpenCode

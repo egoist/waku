@@ -41,6 +41,7 @@ command_palette.settings: 設定
 command_palette.new_task: 新規タスク
 command_palette.open_project: プロジェクトを開く…
 command_palette.choose_model: モデルを選択…
+command_palette.collapse_sidebar_groups: サイドバーのすべてのグループを折りたたむ
 command_palette.show_sidebar: サイドバーを表示
 command_palette.hide_sidebar: サイドバーを隠す
 command_palette.show_right_panel: 右パネルを表示
@@ -62,7 +63,7 @@ settings.usage: 使用状況
 settings.daemon: デーモン
 settings.computer_use: コンピュータ操作
 settings.general_keywords: 一般 ローカル プロジェクト 会話 プライバシー 分析 テレメトリ 匿名 共有 アップデート 自動 バージョン
-settings.appearance_keywords: 外観 テーマ システム ライト ダーク 言語 英語 中国語 簡体字 日本語
+settings.appearance_keywords: 外観 テーマ システム ライト ダーク 言語 英語 中国語 簡体字 日本語 フォント サイズ 文字 エディタ
 settings.providers_keywords: プロバイダー エージェント モデル CLI バージョン インストール 検出 claude codex cursor opencode amp grok pi
 settings.skills: スキル
 settings.skills_keywords: スキル ライブラリ エージェント 無効 有効 削除 claude codex cursor opencode pi amp 共有
@@ -138,6 +139,10 @@ web.error_secure_websocket_required: 安全な Waku Web ページからは wss:/
 web.error_daemon_token_required: デーモントークンを入力してください
 settings.theme: テーマ
 settings.theme_description: システム、ライト、ダークのいずれかのテーマを選択します
+settings.ui_font_size: UI のフォントサイズ
+settings.ui_font_size_description: インターフェース全体とメッセージの文字サイズ
+settings.code_font_size: コードのフォントサイズ
+settings.code_font_size_description: ファイルエディタ、差分表示、コードブロック、ツール出力の文字サイズ
 settings.theme_system: システム
 settings.theme_light: ライト
 settings.theme_dark: ダーク
@@ -215,6 +220,14 @@ session.new_task: 新規タスク
 
 sidebar.today: 今日
 sidebar.search: 検索
+sidebar.options: サイドバーオプション
+sidebar.grouping: グループ化
+sidebar.grouping_project: プロジェクト
+sidebar.grouping_updated: 更新日
+sidebar.ordering: 並び順
+sidebar.ordering_newest: 新しい順
+sidebar.ordering_oldest: 古い順
+sidebar.show_more: もっと見る
 sidebar.yesterday: 昨日
 sidebar.this_week: 今週
 sidebar.this_month: 今月
@@ -711,6 +724,9 @@ right_panel.add_tab: パネルタブを追加
 right_panel.hide: 右パネルを隠す
 right_panel.close_tab: "%{title} を閉じる"
 
+open_in.open: "プロジェクトを %{app} で開く"
+open_in.choose: プロジェクトを開くアプリを選択…
+
 environment.title: 環境
 environment.summary: 環境とバックグラウンド作業
 environment.changes: 変更
@@ -781,6 +797,8 @@ files.unable_to_edit: "このファイルを編集できません：%{error}"
 files.could_not_save_opening: "%{path} を保存できませんでした：まだ開いています"
 files.could_not_save_read_only: "%{path} を保存できませんでした：このファイルは編集できません"
 files.could_not_save: "%{path} を保存できませんでした：%{error}"
+files.preview_markdown: Markdown をプレビュー
+files.edit_markdown_source: ソースを編集
 files.resize_tree: ファイルツリーの幅を変更
 files.refresh: ファイルを更新
 files.loading: ファイルを読み込み中…

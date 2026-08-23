@@ -26,7 +26,7 @@ actions!(
     ]
 );
 
-const SEARCH_CONTEXT: &str = "CommandPalette > ComposerInput";
+const SEARCH_CONTEXT: &str = "CommandPalette > TextInput";
 const MAX_TASK_RESULTS: usize = 12;
 const MESSAGE_SEARCH_LIMIT: usize = 50;
 const MESSAGE_SEARCH_CACHE_CAPACITY: usize = 24;
@@ -56,7 +56,10 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("pagedown", SelectPageDown, Some(SEARCH_CONTEXT)),
         KeyBinding::new("pageup", SelectPageUp, Some(SEARCH_CONTEXT)),
         KeyBinding::new("enter", Confirm, Some(SEARCH_CONTEXT)),
-        KeyBinding::new("escape", Dismiss, Some(SEARCH_CONTEXT)),
+        // Bound at the palette, not the field: the query field's own
+        // clear-on-escape outranks this (deeper context) while it has text,
+        // and an empty field propagates the keystroke down to it.
+        KeyBinding::new("escape", Dismiss, Some("CommandPalette")),
     ]);
 }
 
@@ -80,8 +83,8 @@ impl PaletteSection {
 
     fn query_rank(self) -> usize {
         match self {
-            Self::Tasks => 0,
-            Self::Commands | Self::Suggested => 1,
+            Self::Commands | Self::Suggested => 0,
+            Self::Tasks => 1,
             Self::Settings => 2,
         }
     }
@@ -100,6 +103,7 @@ enum PaletteAction {
     FocusComposer,
     ChooseModel,
     ToggleUsage,
+    CollapseSidebarGroups,
     ToggleSidebar,
     ToggleRightPanel,
     OpenSettings(SettingsPage),
@@ -275,7 +279,7 @@ fn command_palette_results_height(results: &[CommandPaletteItem], show_empty_sta
 }
 
 pub(super) struct CommandPaletteUi {
-    search: Entity<ComposerInput>,
+    search: Entity<TextInput>,
     open: bool,
     focus_generation: u64,
     previous_focus: Option<FocusHandle>,
@@ -291,7 +295,7 @@ pub(super) struct CommandPaletteUi {
 }
 
 impl CommandPaletteUi {
-    pub(super) fn new(search: Entity<ComposerInput>) -> Self {
+    pub(super) fn new(search: Entity<TextInput>) -> Self {
         Self {
             search,
             open: false,
@@ -559,56 +563,63 @@ impl Waku {
             ));
         }
 
-        if searching {
+        commands.push(CommandPaletteItem::command(
+            PaletteSection::Commands,
+            tr!("menu.focus_composer"),
+            "icons/pencil.svg",
+            Some(crate::platform::primary_shortcut("⌘L", "Ctrl+L")),
+            PaletteAction::FocusComposer,
+            "focus composer prompt input message",
+            next(),
+        ));
+        if self.usage_meter_available() {
             commands.push(CommandPaletteItem::command(
                 PaletteSection::Commands,
-                tr!("menu.focus_composer"),
-                "icons/pencil.svg",
-                Some(crate::platform::primary_shortcut("⌘L", "Ctrl+L")),
-                PaletteAction::FocusComposer,
-                "focus composer prompt input message",
+                tr!("menu.toggle_usage_panel"),
+                "icons/command.svg",
+                Some(crate::platform::primary_shortcut("⌘U", "Ctrl+U")),
+                PaletteAction::ToggleUsage,
+                "toggle usage limits rate quota panel",
                 next(),
             ));
-            if self.usage_meter_available() {
-                commands.push(CommandPaletteItem::command(
-                    PaletteSection::Commands,
-                    tr!("menu.toggle_usage_panel"),
-                    "icons/gauge.svg",
-                    Some(crate::platform::primary_shortcut("⌘U", "Ctrl+U")),
-                    PaletteAction::ToggleUsage,
-                    "toggle usage limits rate quota panel",
-                    next(),
-                ));
-            }
-            commands.extend([
-                CommandPaletteItem::command(
-                    PaletteSection::Commands,
-                    tr!(if self.sidebar_visible {
-                        "command_palette.hide_sidebar"
-                    } else {
-                        "command_palette.show_sidebar"
-                    }),
-                    "icons/panel-left.svg",
-                    Some(crate::platform::primary_shortcut("⌘B", "Ctrl+B")),
-                    PaletteAction::ToggleSidebar,
-                    "toggle show hide left sidebar history tasks",
-                    next(),
-                ),
-                CommandPaletteItem::command(
-                    PaletteSection::Commands,
-                    tr!(if self.right_panel_visible {
-                        "command_palette.hide_right_panel"
-                    } else {
-                        "command_palette.show_right_panel"
-                    }),
-                    "icons/panel-right.svg",
-                    Some(crate::platform::primary_shortcut("⇧⌘B", "Ctrl+Shift+B")),
-                    PaletteAction::ToggleRightPanel,
-                    "toggle show hide right panel files diff terminal browser",
-                    next(),
-                ),
-            ]);
         }
+        commands.push(CommandPaletteItem::command(
+            PaletteSection::Commands,
+            tr!("command_palette.collapse_sidebar_groups"),
+            "icons/command.svg",
+            None,
+            PaletteAction::CollapseSidebarGroups,
+            "collapse close fold all sidebar groups projects dates history",
+            next(),
+        ));
+        commands.extend([
+            CommandPaletteItem::command(
+                PaletteSection::Commands,
+                tr!(if self.sidebar_visible {
+                    "command_palette.hide_sidebar"
+                } else {
+                    "command_palette.show_sidebar"
+                }),
+                "icons/panel-left.svg",
+                Some(crate::platform::primary_shortcut("⌘B", "Ctrl+B")),
+                PaletteAction::ToggleSidebar,
+                "toggle show hide left sidebar history tasks",
+                next(),
+            ),
+            CommandPaletteItem::command(
+                PaletteSection::Commands,
+                tr!(if self.right_panel_visible {
+                    "command_palette.hide_right_panel"
+                } else {
+                    "command_palette.show_right_panel"
+                }),
+                "icons/panel-right.svg",
+                Some(crate::platform::primary_shortcut("⇧⌘B", "Ctrl+Shift+B")),
+                PaletteAction::ToggleRightPanel,
+                "toggle show hide right panel files diff terminal browser",
+                next(),
+            ),
+        ]);
 
         for (page, label_key, icon, keywords) in [
             (
@@ -824,9 +835,12 @@ impl Waku {
                 .get(self.command_palette.selected)
                 .map(|item| item.action.clone())
         });
-        let next_results = tasks
+        let mut scored_results = tasks;
+        scored_results.extend(commands);
+        // Stable sorting keeps each section's existing score/recency order.
+        scored_results.sort_by_key(|scored| scored.item.section.query_rank());
+        let next_results = scored_results
             .into_iter()
-            .chain(commands)
             .map(|scored| scored.item)
             .collect::<Vec<_>>();
         // This is the palette equivalent of TanStack Query's
@@ -907,6 +921,7 @@ impl Waku {
             PaletteAction::NewTask => self.new_session_action(&NewSession, window, cx),
             PaletteAction::OpenProject => self.new_project_action(&NewProject, window, cx),
             PaletteAction::FocusComposer => self.focus_composer_action(&FocusComposer, window, cx),
+            PaletteAction::CollapseSidebarGroups => self.collapse_all_sidebar_groups(cx),
             PaletteAction::ToggleSidebar => self.toggle_sidebar_action(&ToggleSidebar, window, cx),
             PaletteAction::ToggleRightPanel => {
                 self.toggle_right_panel_action(&ToggleRightPanel, window, cx)
@@ -992,7 +1007,7 @@ impl Waku {
                     .child(
                         div()
                             .mt(px(12.0))
-                            .text_size(px(13.0))
+                            .text_size(sp(13.0))
                             .font_weight(FontWeight::MEDIUM)
                             .text_color(theme.text_secondary)
                             .child(tr!("command_palette.no_results")),
@@ -1000,7 +1015,7 @@ impl Waku {
                     .child(
                         div()
                             .mt(px(5.0))
-                            .text_size(px(11.5))
+                            .text_size(sp(12.5))
                             .text_color(theme.text_tertiary)
                             .child(tr!("command_palette.no_results_hint")),
                     ),
@@ -1016,7 +1031,7 @@ impl Waku {
                             .pt(px(10.0))
                             .flex()
                             .items_center()
-                            .text_size(px(11.0))
+                            .text_size(sp(12.5))
                             .font_weight(FontWeight::MEDIUM)
                             .text_color(theme.text_tertiary)
                             .child(item.section.label()),
@@ -1091,7 +1106,7 @@ impl Waku {
                                             div()
                                                 .min_w_0()
                                                 .truncate()
-                                                .text_size(px(14.0))
+                                                .text_size(sp(14.0))
                                                 .font_weight(if highlighted {
                                                     FontWeight::MEDIUM
                                                 } else {
@@ -1109,7 +1124,7 @@ impl Waku {
                                                 div()
                                                     .min_w_0()
                                                     .truncate()
-                                                    .text_size(px(11.5))
+                                                    .text_size(sp(12.5))
                                                     .text_color(theme.text_tertiary)
                                                     .child(detail),
                                             )
@@ -1122,7 +1137,7 @@ impl Waku {
                                             .w_full()
                                             .overflow_hidden()
                                             .whitespace_nowrap()
-                                            .text_size(px(11.5))
+                                            .text_size(sp(12.5))
                                             .child(palette_content_match_text(
                                                 &matched,
                                                 &search_query,
@@ -1144,7 +1159,7 @@ impl Waku {
                                     .items_center()
                                     .justify_center()
                                     .bg(theme.overlay_strong)
-                                    .text_size(px(11.5))
+                                    .text_size(sp(12.5))
                                     .text_color(theme.text_tertiary)
                                     .child(shortcut),
                             )
@@ -1202,7 +1217,7 @@ impl Waku {
                         .items_center()
                         .border_b_1()
                         .border_color(theme.border)
-                        .text_size(px(15.5))
+                        .text_size(sp(15.5))
                         .text_color(theme.text)
                         .child(
                             div()
@@ -1293,6 +1308,12 @@ mod tests {
     }
 
     #[test]
+    fn searched_commands_rank_before_tasks() {
+        assert!(PaletteSection::Commands.query_rank() < PaletteSection::Tasks.query_rank());
+        assert!(PaletteSection::Tasks.query_rank() < PaletteSection::Settings.query_rank());
+    }
+
+    #[test]
     fn no_results_appears_only_after_background_search_settles() {
         assert!(!should_show_command_palette_empty_state(0, true));
         assert!(should_show_command_palette_empty_state(0, false));
@@ -1337,7 +1358,9 @@ mod tests {
             .find("\n    pub(super) fn render_command_palette(")
             .expect("render function must exist");
         let end = source[start..]
-            .find("\n}\n\n#[cfg(test)]")
+            // Match from the final newline only so this accepts both LF and
+            // CRLF checkouts.
+            .find("\n#[cfg(test)]")
             .map(|offset| start + offset)
             .expect("test module marker must exist");
         let render = &source[start..end];

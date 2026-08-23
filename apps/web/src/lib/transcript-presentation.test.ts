@@ -5,6 +5,7 @@ import {
   activityDisclosureSections,
   activityDisplayTitle,
   activityFileChangeStats,
+  activityGroupIsLive,
   activityHeaderTitle,
   activityPreview,
   activityRowDetail,
@@ -42,7 +43,7 @@ describe('desktop transcript language', () => {
     expect(activitySummary([reasoning(false, 0, 0)])).toBe('Running 1 thought')
   })
 
-  test('uses the latest child title while an activity group is live', () => {
+  test('summarizes an activity group only after it leaves the live tail', () => {
     const command = {
       ...activity('command', false),
       display_target: 'git log --oneline -15',
@@ -50,9 +51,13 @@ describe('desktop transcript language', () => {
     const activities = [reasoning(true, 0, 1_000), command]
 
     expect(activityHeaderTitle(activities, true)).toBe('Running git log --oneline -15')
+    expect(activityGroupIsLive(true, true, 1, 1)).toBe(true)
     command.complete = true
     expect(activityHeaderTitle(activities, true)).toBe('Ran git log --oneline -15')
+    expect(activityGroupIsLive(true, true, 1, 2)).toBe(false)
     expect(activityHeaderTitle(activities, false)).toBe('Ran 1 thought · 1 command')
+    expect(activityGroupIsLive(true, false, 1, 1)).toBe(false)
+    expect(activityGroupIsLive(false, true, 1, 1)).toBe(false)
     expect(activityActionLabel(command)).toBe('Run')
     expect(activityRowDetail(command)).toBe('git log --oneline -15')
   })

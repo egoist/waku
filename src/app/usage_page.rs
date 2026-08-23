@@ -243,7 +243,7 @@ impl Waku {
             // auditable at a glance.
             div()
                 .mt(px(18.0))
-                .text_size(px(9.5))
+                .text_size(sp(12.5))
                 .text_color(theme.text_ghost)
                 .child(SharedString::from(tr!(
                     "usage.scan_summary",
@@ -292,7 +292,7 @@ impl Waku {
                     .flex()
                     .items_center()
                     .cursor_default()
-                    .text_size(px(10.5))
+                    .text_size(sp(12.5))
                     .text_color(if selected {
                         theme.text
                     } else {
@@ -401,7 +401,7 @@ impl Waku {
                     .flex_1()
                     .min_w_0()
                     .truncate()
-                    .text_size(px(12.5))
+                    .text_size(sp(12.5))
                     .text_color(theme.text_secondary)
                     .child(SharedString::from(range_label)),
             )
@@ -445,7 +445,7 @@ impl Waku {
                     .gap(px(3.0))
                     .child(
                         div()
-                            .text_size(px(10.0))
+                            .text_size(sp(12.5))
                             .text_color(theme.text_tertiary)
                             .child(match metric {
                                 UsageMetric::Cost => tr!("usage.raw_token_cost"),
@@ -454,14 +454,14 @@ impl Waku {
                     )
                     .child(
                         div()
-                            .text_size(px(30.0))
+                            .text_size(sp(30.0))
                             .font_weight(FontWeight::MEDIUM)
                             .text_color(theme.text)
                             .child(SharedString::from(headline)),
                     )
                     .child(
                         div()
-                            .text_size(px(10.5))
+                            .text_size(sp(12.5))
                             .text_color(theme.text_tertiary)
                             .child(SharedString::from(caption)),
                     ),
@@ -512,13 +512,13 @@ impl Waku {
                                     .flex_1()
                                     .min_w_0()
                                     .truncate()
-                                    .text_size(px(12.5))
+                                    .text_size(sp(12.5))
                                     .text_color(theme.text)
                                     .child(provider.provider.label()),
                             )
                             .child(
                                 div()
-                                    .text_size(px(12.5))
+                                    .text_size(sp(12.5))
                                     .text_color(theme.text)
                                     .child(SharedString::from(value)),
                             ),
@@ -539,7 +539,7 @@ impl Waku {
                     )
                     .child(
                         div()
-                            .text_size(px(10.5))
+                            .text_size(sp(12.5))
                             .text_color(theme.text_tertiary)
                             .child(SharedString::from(detail)),
                     ),
@@ -548,7 +548,7 @@ impl Waku {
         if history.providers.is_empty() {
             column = column.child(
                 div()
-                    .text_size(px(11.5))
+                    .text_size(sp(12.5))
                     .text_color(theme.text_tertiary)
                     .child(tr!("usage.no_activity_window")),
             );
@@ -586,7 +586,7 @@ impl Waku {
                     .flex()
                     .items_center()
                     .cursor_default()
-                    .text_size(px(9.0))
+                    .text_size(sp(12.5))
                     .text_color(if selected {
                         theme.text
                     } else {
@@ -617,7 +617,7 @@ impl Waku {
                     .child(icon(provider_icon(kind), 12.0, provider_color(theme, kind)))
                     .child(
                         div()
-                            .text_size(px(10.5))
+                            .text_size(sp(12.5))
                             .text_color(theme.text_secondary)
                             .child(provider.label()),
                     ),
@@ -641,7 +641,7 @@ impl Waku {
                             .flex_1()
                             .min_w_0()
                             .truncate()
-                            .text_size(px(12.5))
+                            .text_size(sp(12.5))
                             .font_weight(FontWeight::MEDIUM)
                             .text_color(theme.text)
                             .child(match metric {
@@ -658,7 +658,7 @@ impl Waku {
                     .pl(px(CHART_GUTTER + 8.0))
                     .flex()
                     .justify_between()
-                    .text_size(px(9.5))
+                    .text_size(sp(12.5))
                     .text_color(theme.text_tertiary)
                     .child(SharedString::from(
                         days.first()
@@ -749,7 +749,7 @@ impl Waku {
                     .absolute()
                     .right(px(0.0))
                     .top(px((to_fraction(*tick) * CHART_HEIGHT - 7.0).max(0.0)))
-                    .text_size(px(9.5))
+                    .text_size(sp(12.5))
                     .text_color(theme.text_tertiary)
                     .child(SharedString::from(if *tick == 0.0 {
                         "0".to_owned()
@@ -986,7 +986,7 @@ impl Waku {
                     .flex()
                     .items_center()
                     .cursor_default()
-                    .text_size(px(9.0))
+                    .text_size(sp(12.5))
                     .text_color(if selected {
                         theme.text
                     } else {
@@ -1020,7 +1020,7 @@ impl Waku {
                     .child(
                         div()
                             .flex_1()
-                            .text_size(px(12.5))
+                            .text_size(sp(12.5))
                             .font_weight(FontWeight::MEDIUM)
                             .text_color(theme.text)
                             .child(tr!("usage.breakdown")),
@@ -1165,7 +1165,7 @@ impl Waku {
                             .min_w_0()
                             .child(
                                 div()
-                                    .text_size(px(13.5))
+                                    .text_size(sp(13.5))
                                     .font_weight(FontWeight::MEDIUM)
                                     .text_color(theme.text)
                                     .child(tr!("usage.by_project")),
@@ -1179,7 +1179,7 @@ impl Waku {
                                     .child(
                                         div()
                                             .flex_none()
-                                            .text_size(px(11.5))
+                                            .text_size(sp(12.5))
                                             .font_weight(FontWeight::MEDIUM)
                                             .text_color(theme.text)
                                             .child(SharedString::from(usage_headline_value(
@@ -1190,7 +1190,7 @@ impl Waku {
                                         div()
                                             .min_w_0()
                                             .truncate()
-                                            .text_size(px(10.5))
+                                            .text_size(sp(12.5))
                                             .text_color(theme.text_tertiary)
                                             .child(SharedString::from(format!("· {caption}"))),
                                     ),
@@ -1304,7 +1304,7 @@ impl Waku {
                     .gap(px(8.0))
                     .child(
                         div()
-                            .text_size(px(13.0))
+                            .text_size(sp(13.0))
                             .font_weight(FontWeight::MEDIUM)
                             .text_color(theme.text)
                             .child(SharedString::from(name)),
@@ -1314,7 +1314,7 @@ impl Waku {
                             div()
                                 .min_w_0()
                                 .truncate()
-                                .text_size(px(9.5))
+                                .text_size(sp(12.5))
                                 .text_color(theme.text_ghost)
                                 .child(SharedString::from(path)),
                         )
@@ -1323,7 +1323,7 @@ impl Waku {
                     .child(
                         div()
                             .flex_none()
-                            .text_size(px(14.0))
+                            .text_size(sp(14.0))
                             .font_weight(FontWeight::MEDIUM)
                             .text_color(theme.text)
                             .child(SharedString::from(usage_value_label(
@@ -1336,7 +1336,7 @@ impl Waku {
             .child(
                 div()
                     .mt(px(2.0))
-                    .text_size(px(10.5))
+                    .text_size(sp(12.5))
                     .text_color(theme.text_tertiary)
                     .truncate()
                     .child(SharedString::from(caption_parts.join(" · "))),
@@ -1392,7 +1392,7 @@ impl Waku {
             .items_center()
             .gap(px(5.0))
             .cursor_default()
-            .text_size(px(9.5))
+            .text_size(sp(12.5))
             .text_color(theme.text_tertiary)
             .focus_visible(|style| style.border_1().border_color(theme.accent))
             .when(handle.is_open(), |element| element.bg(theme.overlay_strong))
@@ -1460,7 +1460,7 @@ fn usage_notices(history: &UsageHistory, theme: &Theme) -> Div {
         .flex()
         .flex_col()
         .gap(px(3.0))
-        .text_size(px(10.5))
+        .text_size(sp(12.5))
         .text_color(theme.text_tertiary);
     for error in &history.errors {
         notice = notice.child(SharedString::from(error.clone()));
@@ -1515,7 +1515,7 @@ fn usage_chart_readout(
         .flex()
         .flex_col()
         .gap(px(3.0))
-        .text_size(px(10.5))
+        .text_size(sp(12.5))
         .child(
             div()
                 .text_color(theme.text_tertiary)
@@ -1659,21 +1659,21 @@ fn usage_metric_strip(history: &UsageHistory, theme: &Theme) -> Div {
                 .gap(px(2.0))
                 .child(
                     div()
-                        .text_size(px(10.0))
+                        .text_size(sp(12.5))
                         .text_color(theme.text_tertiary)
                         .truncate()
                         .child(label),
                 )
                 .child(
                     div()
-                        .text_size(px(15.0))
+                        .text_size(sp(15.0))
                         .text_color(theme.text)
                         .truncate()
                         .child(SharedString::from(value)),
                 )
                 .child(
                     div()
-                        .text_size(px(9.5))
+                        .text_size(sp(12.5))
                         .text_color(theme.text_tertiary)
                         .truncate()
                         .child(SharedString::from(detail)),
@@ -1688,7 +1688,7 @@ fn usage_table_empty_row(theme: &Theme) -> Div {
         .py(px(24.0))
         .flex()
         .justify_center()
-        .text_size(px(11.5))
+        .text_size(sp(12.5))
         .text_color(theme.text_tertiary)
         .child(tr!("usage.no_activity_window"))
 }
@@ -1706,7 +1706,7 @@ fn usage_cell(width: f32, text: String, color: Hsla) -> Div {
 
 /// Per-model costs, largest first.
 fn usage_model_table(history: &UsageHistory, theme: &Theme) -> Div {
-    let mut table = div().flex().flex_col().text_size(px(11.5)).child(
+    let mut table = div().flex().flex_col().text_size(sp(12.5)).child(
         div()
             .pb(px(7.0))
             .border_b_1()
@@ -1714,7 +1714,7 @@ fn usage_model_table(history: &UsageHistory, theme: &Theme) -> Div {
             .flex()
             .items_center()
             .gap(px(12.0))
-            .text_size(px(10.5))
+            .text_size(sp(12.5))
             .text_color(theme.text_tertiary)
             .child(div().flex_1().min_w_0().child(tr!("usage.model")))
             .child(usage_cell(84.0, tr!("usage.cost"), theme.text_tertiary))
@@ -1775,7 +1775,7 @@ fn usage_day_table(history: &UsageHistory, theme: &Theme) -> Div {
         .flex()
         .items_center()
         .gap(px(12.0))
-        .text_size(px(10.5))
+        .text_size(sp(12.5))
         .text_color(theme.text_tertiary)
         .child(div().flex_1().min_w_0().child(tr!("usage.day")));
     for provider in UsageProvider::ALL {
@@ -1789,7 +1789,7 @@ fn usage_day_table(history: &UsageHistory, theme: &Theme) -> Div {
         .child(usage_cell(84.0, tr!("usage.total"), theme.text_tertiary))
         .child(usage_cell(84.0, tr!("usage.tokens"), theme.text_tertiary));
 
-    let mut table = div().flex().flex_col().text_size(px(11.5)).child(header);
+    let mut table = div().flex().flex_col().text_size(sp(12.5)).child(header);
     if history.daily.is_empty() {
         return table.child(usage_table_empty_row(theme));
     }
@@ -1838,7 +1838,7 @@ fn usage_quality_panel(history: &UsageHistory, theme: &Theme) -> Div {
             .flex()
             .items_center()
             .gap(px(12.0))
-            .text_size(px(11.5))
+            .text_size(sp(12.5))
             .child(div().flex_1().text_color(theme.text_secondary).child(label))
             .child(
                 div()
@@ -1854,7 +1854,7 @@ fn usage_quality_panel(history: &UsageHistory, theme: &Theme) -> Div {
         .gap(px(10.0))
         .child(
             div()
-                .text_size(px(12.5))
+                .text_size(sp(12.5))
                 .font_weight(FontWeight::MEDIUM)
                 .text_color(theme.text)
                 .child(tr!("usage.cost_quality")),
@@ -2102,7 +2102,7 @@ fn usage_list_header(theme: &Theme, title: String, caption: String, total: Strin
                 .min_w_0()
                 .child(
                     div()
-                        .text_size(px(13.5))
+                        .text_size(sp(13.5))
                         .font_weight(FontWeight::MEDIUM)
                         .text_color(theme.text)
                         .child(title),
@@ -2111,7 +2111,7 @@ fn usage_list_header(theme: &Theme, title: String, caption: String, total: Strin
                     div()
                         .mt(px(3.0))
                         .truncate()
-                        .text_size(px(10.5))
+                        .text_size(sp(12.5))
                         .text_color(theme.text_tertiary)
                         .child(SharedString::from(caption)),
                 ),
@@ -2119,7 +2119,7 @@ fn usage_list_header(theme: &Theme, title: String, caption: String, total: Strin
         .child(
             div()
                 .flex_none()
-                .text_size(px(15.0))
+                .text_size(sp(15.0))
                 .font_weight(FontWeight::MEDIUM)
                 .text_color(theme.text)
                 .child(SharedString::from(total)),
@@ -2131,7 +2131,7 @@ fn usage_list_empty_row(theme: &Theme, message: String) -> Div {
         .py(px(24.0))
         .flex()
         .justify_center()
-        .text_size(px(11.5))
+        .text_size(sp(12.5))
         .text_color(theme.text_tertiary)
         .child(message)
 }
@@ -2208,7 +2208,7 @@ fn usage_provider_values(theme: &Theme, by_provider: &[ProviderDay; 2], by_cost:
                 .child(icon(provider_icon(kind), 11.0, provider_color(theme, kind)))
                 .child(
                     div()
-                        .text_size(px(10.5))
+                        .text_size(sp(12.5))
                         .text_color(theme.text_secondary)
                         .child(SharedString::from(usage_value_label(
                             entry.cost_usd,
@@ -2275,7 +2275,7 @@ fn usage_models_menu_items(top_models: Rc<Vec<(String, f64)>>, total_cost: f64) 
                                 .flex_1()
                                 .min_w_0()
                                 .truncate()
-                                .text_size(px(11.0))
+                                .text_size(sp(12.5))
                                 .text_color(theme.text_secondary)
                                 .child(SharedString::from(name.clone())),
                         )
@@ -2288,13 +2288,13 @@ fn usage_models_menu_items(top_models: Rc<Vec<(String, f64)>>, total_cost: f64) 
                                     .items_end()
                                     .child(
                                         div()
-                                            .text_size(px(10.5))
+                                            .text_size(sp(12.5))
                                             .text_color(theme.text)
                                             .child(SharedString::from(format_usd(*cost_usd))),
                                     )
                                     .child(
                                         div()
-                                            .text_size(px(9.0))
+                                            .text_size(sp(12.5))
                                             .text_color(theme.text_ghost)
                                             .child(SharedString::from(format_percent(
                                                 *cost_usd / total_cost,
@@ -2523,7 +2523,7 @@ fn usage_month_row(
                 .gap(px(8.0))
                 .child(
                     div()
-                        .text_size(px(13.0))
+                        .text_size(sp(13.0))
                         .font_weight(FontWeight::MEDIUM)
                         .text_color(theme.text)
                         .child(SharedString::from(format_month(month.first_day))),
@@ -2531,7 +2531,7 @@ fn usage_month_row(
                 .when(current, |element| {
                     element.child(
                         div()
-                            .text_size(px(9.5))
+                            .text_size(sp(12.5))
                             .text_color(theme.text_ghost)
                             .child(tr!("usage.so_far")),
                     )
@@ -2540,7 +2540,7 @@ fn usage_month_row(
                 .child(
                     div()
                         .flex_none()
-                        .text_size(px(14.0))
+                        .text_size(sp(14.0))
                         .font_weight(FontWeight::MEDIUM)
                         .text_color(theme.text)
                         .child(SharedString::from(usage_value_label(
@@ -2561,7 +2561,7 @@ fn usage_month_row(
                         .flex_1()
                         .min_w_0()
                         .truncate()
-                        .text_size(px(10.5))
+                        .text_size(sp(12.5))
                         .text_color(theme.text_tertiary)
                         .child(SharedString::from(tr!(
                             "usage.month_caption",
@@ -2614,14 +2614,14 @@ fn usage_empty_month_row(theme: &Theme, first_day: NaiveDate, last: bool) -> Div
         .gap(px(8.0))
         .child(
             div()
-                .text_size(px(12.5))
+                .text_size(sp(12.5))
                 .text_color(theme.text_tertiary)
                 .child(SharedString::from(format_month(first_day))),
         )
         .child(div().flex_1())
         .child(
             div()
-                .text_size(px(10.0))
+                .text_size(sp(12.5))
                 .text_color(theme.text_ghost)
                 .child(tr!("usage.no_activity")),
         )

@@ -1435,6 +1435,32 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn dropping_an_idle_terminal_does_not_wait_for_output() {
+        let root = std::env::temp_dir().join(format!("waku-terminal-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let hub = Arc::new(Hub::default());
+        let terminal = crate::terminal::DaemonTerminal::open(
+            &root,
+            80,
+            24,
+            hub.event_sink(Uuid::new_v4(), Uuid::new_v4()),
+        )
+        .unwrap();
+        let (dropped, finished) = bounded(1);
+        std::thread::spawn(move || {
+            drop(terminal);
+            let _ = dropped.send(());
+        });
+
+        assert!(
+            finished.recv_timeout(Duration::from_secs(3)).is_ok(),
+            "dropping an idle daemon terminal blocked on its output reader"
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn websocket_terminal_round_trip_streams_input_and_output() {
         let root = std::env::temp_dir().join(format!("waku-terminal-{}", Uuid::new_v4()));
         std::fs::create_dir_all(&root).unwrap();

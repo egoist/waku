@@ -29,6 +29,7 @@ use gpui::{
     StyledText, TextLayout, TextRun, UnderlineStyle, Window, canvas, div, font, img, point,
     prelude::*, px, quad, relative, size,
 };
+use regex::Regex;
 
 use super::highlight::{self, Lang, TokenClass};
 use super::mend::PENDING_LINK_URL;
@@ -72,31 +73,69 @@ pub struct Metrics {
 impl Metrics {
     /// Assistant response scale, matching the transcript's body text.
     pub const BODY: Self = Self {
-        text_size: 13.5,
+        text_size: 14.0,
         line_height: 21.0,
-        code_text_size: 11.5,
-        code_line_height: 17.5,
+        code_text_size: 13.0,
+        code_line_height: 19.5,
         block_gap: 10.0,
     };
 
     /// User-message scale. Markdown blocks keep the bubble's established body
     /// geometry instead of making every existing plain prompt subtly reflow.
     pub const USER_MESSAGE: Self = Self {
-        text_size: 14.0,
-        line_height: 20.0,
-        code_text_size: 11.5,
-        code_line_height: 17.5,
+        text_size: 14.5,
+        line_height: 21.0,
+        code_text_size: 13.0,
+        code_line_height: 19.5,
         block_gap: 10.0,
     };
 
-    /// Compact scale for tool output and other secondary detail.
+    /// Compact scale for reasoning, tool detail, and other secondary content.
+    /// One notch under [`Metrics::BODY`], not a miniature: secondary reading
+    /// text stays close to prose size and leans on color for its hierarchy.
     pub const COMPACT: Self = Self {
-        text_size: 11.5,
-        line_height: 17.0,
-        code_text_size: 10.5,
-        code_line_height: 16.0,
-        block_gap: 6.0,
+        text_size: 13.5,
+        line_height: 19.5,
+        code_text_size: 13.0,
+        code_line_height: 19.5,
+        block_gap: 7.0,
     };
+
+    /// The UI and code font sizes the constants above were authored against.
+    /// [`Metrics::scaled`] is the identity at these values, so the settings'
+    /// defaults reproduce the authored transcript exactly.
+    const AUTHORED_UI_FONT_SIZE: f32 = 14.0;
+    const AUTHORED_CODE_FONT_SIZE: f32 = 13.0;
+
+    /// These metrics rescaled to the user's font settings: prose follows the
+    /// UI font size, code spans and blocks follow the code font size, and each
+    /// surface keeps its authored proportions. Values land on half pixels so
+    /// scaled text stays as crisp as the authored sizes.
+    pub fn scaled(self, ui_font_size: f32, code_font_size: f32) -> Self {
+        let ui = ui_font_size / Self::AUTHORED_UI_FONT_SIZE;
+        let code = code_font_size / Self::AUTHORED_CODE_FONT_SIZE;
+        let half = |value: f32| (value * 2.0).round() / 2.0;
+        Self {
+            text_size: half(self.text_size * ui),
+            line_height: half(self.line_height * ui),
+            code_text_size: half(self.code_text_size * code),
+            code_line_height: half(self.code_line_height * code),
+            block_gap: half(self.block_gap * ui),
+        }
+    }
+
+    /// Document scale for a full-page reading surface: prose at the user's UI
+    /// font size and code at the code font size, keeping [`Metrics::BODY`]'s
+    /// proportions.
+    pub fn document(text_size: f32, code_text_size: f32) -> Self {
+        Self {
+            text_size,
+            line_height: (text_size * 1.55).round(),
+            code_text_size,
+            code_line_height: (code_text_size * 1.5).round(),
+            block_gap: (text_size * 0.72).round(),
+        }
+    }
 }
 
 pub const SANS_FAMILY: &str = ".SystemUIFont";
@@ -139,6 +178,8 @@ pub struct Palette {
     pub code_text: Hsla,
     pub code_wash: Hsla,
     pub selection: Hsla,
+    pub search_match: Hsla,
+    pub active_search_match: Hsla,
     pub accent: Hsla,
     pub added: Hsla,
     pub removed: Hsla,
@@ -147,6 +188,18 @@ pub struct Palette {
 
 impl Palette {
     pub fn from_theme(theme: &Theme) -> Self {
+        let search_yellow = gpui::hsla(
+            48.0 / 360.0,
+            0.95,
+            if theme.is_dark { 0.48 } else { 0.55 },
+            1.0,
+        );
+        let active_search_orange = gpui::hsla(
+            30.0 / 360.0,
+            1.0,
+            if theme.is_dark { 0.50 } else { 0.54 },
+            1.0,
+        );
         Self {
             text: theme.text,
             secondary: theme.text_secondary,
@@ -158,6 +211,9 @@ impl Palette {
             code_text: theme.code_text,
             code_wash: theme.code_wash,
             selection: theme.selection,
+            search_match: search_yellow.opacity(if theme.is_dark { 0.18 } else { 0.20 }),
+            active_search_match: active_search_orange
+                .opacity(if theme.is_dark { 0.78 } else { 0.70 }),
             accent: theme.accent,
             added: theme.success,
             removed: theme.danger,
@@ -199,6 +255,26 @@ pub struct FlatText {
     pub runs: Vec<TextRun>,
     pub links: Vec<(Range<usize>, String)>,
     pub code_ranges: Vec<Range<usize>>,
+}
+
+/// One literal find-in-page hit inside a shaped markdown text element.
+///
+/// `ordinal` is the same stable per-row element ordinal used by [`TextKey`],
+/// so a search performed before an off-screen row is mounted can still point
+/// at the exact range the renderer will paint after navigation reveals it.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TextSearchMatch {
+    pub ordinal: usize,
+    pub range: Range<usize>,
+}
+
+/// Paint-only search state for one markdown row. The match list is prepared
+/// when the query changes; rendering only indexes the ranges for each visible
+/// text element and never scans the message again on a frame.
+#[derive(Clone)]
+pub struct SearchHighlights {
+    pub matches: Rc<Vec<TextSearchMatch>>,
+    pub active: Option<TextSearchMatch>,
 }
 
 /// Flatten inline runs for shaping. Pure given the palette and base weight.
@@ -473,6 +549,7 @@ pub struct Ctx<'a> {
     palette: &'a Palette,
     metrics: Metrics,
     selection: TranscriptSelection,
+    search: Option<SearchHighlights>,
     link_handler: Option<LinkHandler>,
     /// Cross-frame flatten cache, when this render has one to consult.
     cache: Option<&'a MarkdownView>,
@@ -495,6 +572,7 @@ impl<'a> Ctx<'a> {
             palette,
             metrics,
             selection,
+            search: None,
             link_handler: None,
             cache: None,
             next_ordinal: Cell::new(0),
@@ -513,6 +591,11 @@ impl<'a> Ctx<'a> {
         self
     }
 
+    pub fn with_search_highlights(mut self, highlights: SearchHighlights) -> Self {
+        self.search = Some(highlights);
+        self
+    }
+
     pub fn with_streaming_animation(mut self, animate: bool) -> Self {
         self.animate_streaming = animate;
         self
@@ -524,6 +607,7 @@ impl<'a> Ctx<'a> {
             palette: self.palette,
             metrics: self.metrics,
             selection: self.selection.clone(),
+            search: self.search.clone(),
             link_handler: self.link_handler.clone(),
             cache: Some(view),
             next_ordinal: Cell::new(self.next_ordinal.get()),
@@ -567,9 +651,12 @@ fn text_element_with_selection(
     runs: Vec<TextRun>,
     key: TextKey,
     selection: TranscriptSelection,
+    search: Option<SearchHighlights>,
     link_handler: Option<LinkHandler>,
     code_wash: Hsla,
     selection_wash: Hsla,
+    search_match_wash: Hsla,
+    active_search_match_wash: Hsla,
     block_break: bool,
 ) -> AnyElement {
     let styled = StyledText::new(flat.text.clone()).with_runs(runs);
@@ -609,6 +696,31 @@ fn text_element_with_selection(
                         gpui::transparent_black(),
                         BorderStyle::default(),
                     ));
+                }
+            }
+            if let Some(search) = &search {
+                let first = search
+                    .matches
+                    .partition_point(|found| found.ordinal < key.index);
+                for found in search.matches[first..]
+                    .iter()
+                    .take_while(|found| found.ordinal == key.index)
+                {
+                    let color = if search.active.as_ref() == Some(found) {
+                        active_search_match_wash
+                    } else {
+                        search_match_wash
+                    };
+                    for rect in range_rects(&layout, &found.range, 1.0, 1.0) {
+                        window.paint_quad(quad(
+                            rect,
+                            px(2.0),
+                            color,
+                            px(0.0),
+                            gpui::transparent_black(),
+                            BorderStyle::default(),
+                        ));
+                    }
                 }
             }
             if let Some(range) = selection.selection.borrow().wash_range(&key) {
@@ -665,9 +777,12 @@ fn text_element(flat: &FlatText, key: TextKey, ctx: &Ctx) -> AnyElement {
         runs,
         key,
         ctx.selection.clone(),
+        ctx.search.clone(),
         ctx.link_handler.clone(),
         ctx.palette.code_wash,
         ctx.palette.selection,
+        ctx.palette.search_match,
+        ctx.palette.active_search_match,
         ctx.take_block_break(),
     )
 }
@@ -692,8 +807,11 @@ pub fn selectable_flat_text(
         key,
         selection,
         None,
+        None,
         code_wash,
         selection_wash,
+        gpui::transparent_black(),
+        gpui::transparent_black(),
         block_break,
     )
 }
@@ -798,6 +916,13 @@ fn range_rects(
         }
     }
     rects
+}
+
+/// Painted glyph boxes for a byte range in a registered text element.
+/// Find-in-page uses this after a virtualized row mounts to reveal the exact
+/// wrapped line rather than stopping at the top of a long message.
+pub fn text_range_bounds(layout: &TextLayout, range: &Range<usize>) -> Vec<Bounds<Pixels>> {
+    range_rects(layout, range, 0.0, 0.0)
 }
 
 /// `TextLayout::bounds` panics before prepaint has run. A row that was spliced
@@ -953,6 +1078,105 @@ const BLOCK_ORDINAL_STRIDE_BITS: u32 = 16;
 
 fn block_ordinal_base(block_ix: usize) -> usize {
     block_ix << BLOCK_ORDINAL_STRIDE_BITS
+}
+
+/// Find every non-empty regex match in the text elements produced by the
+/// markdown renderer, in paint order. This deliberately walks the same block
+/// shapes and advances the same element ordinals as [`render_block`], keeping
+/// off-screen search results aligned with the exact glyph ranges that appear
+/// once their virtualized transcript row mounts.
+pub fn markdown_search_matches(
+    source: &str,
+    regex: &Regex,
+    cap: usize,
+) -> (Vec<TextSearchMatch>, bool) {
+    let tree = super::parser::parse(source);
+    let mut matches = Vec::new();
+    for (block_ix, top) in tree.blocks.iter().enumerate() {
+        let mut ordinal = block_ordinal_base(block_ix);
+        if search_block(&top.block, &mut ordinal, regex, cap, &mut matches) {
+            return (matches, true);
+        }
+    }
+    (matches, false)
+}
+
+/// Find matches in one non-markdown text element.
+pub fn plain_search_matches(
+    text: &str,
+    ordinal: usize,
+    regex: &Regex,
+    cap: usize,
+) -> (Vec<TextSearchMatch>, bool) {
+    let mut matches = Vec::new();
+    let limited = search_text(text, ordinal, regex, cap, &mut matches);
+    (matches, limited)
+}
+
+fn search_block(
+    block: &Block,
+    ordinal: &mut usize,
+    regex: &Regex,
+    cap: usize,
+    matches: &mut Vec<TextSearchMatch>,
+) -> bool {
+    match block {
+        Block::Paragraph { runs } | Block::Heading { runs, .. } => {
+            let text = runs.iter().map(|run| run.text.as_str()).collect::<String>();
+            let current = *ordinal;
+            *ordinal += 1;
+            search_text(&text, current, regex, cap, matches)
+        }
+        Block::CodeBlock { code, .. } => {
+            let current = *ordinal;
+            *ordinal += 1;
+            search_text(code, current, regex, cap, matches)
+        }
+        Block::Image { .. } => {
+            // The renderer consumes an ordinal for the image id, but its alt
+            // caption is not a selectable/shaped text element and therefore
+            // has no glyph geometry for a find highlight.
+            *ordinal += 1;
+            false
+        }
+        Block::BlockQuote { children } => children
+            .iter()
+            .any(|child| search_block(child, ordinal, regex, cap, matches)),
+        Block::List { items, .. } => items.iter().any(|item| {
+            item.blocks
+                .iter()
+                .any(|child| search_block(child, ordinal, regex, cap, matches))
+        }),
+        Block::Table { header, rows, .. } => header
+            .iter()
+            .chain(rows.iter().flat_map(|row| row.iter()))
+            .any(|cell| {
+                let text = cell.iter().map(|run| run.text.as_str()).collect::<String>();
+                let current = *ordinal;
+                *ordinal += 1;
+                search_text(&text, current, regex, cap, matches)
+            }),
+        Block::Rule => false,
+    }
+}
+
+fn search_text(
+    text: &str,
+    ordinal: usize,
+    regex: &Regex,
+    cap: usize,
+    matches: &mut Vec<TextSearchMatch>,
+) -> bool {
+    for found in regex.find_iter(text).filter(|found| !found.is_empty()) {
+        if matches.len() >= cap {
+            return true;
+        }
+        matches.push(TextSearchMatch {
+            ordinal,
+            range: found.range(),
+        });
+    }
+    false
 }
 
 /// Render a markdown body. Returns `None` when it has no content.
@@ -1232,7 +1456,7 @@ fn render_image(url: &str, alt: &str, ctx: &Ctx) -> AnyElement {
         .when(!alt.trim().is_empty(), |element| {
             element.child(
                 div()
-                    .text_size(px(ctx.metrics.text_size - 2.0))
+                    .text_size(px((ctx.metrics.text_size - 2.0).max(12.5)))
                     .line_height(px(ctx.metrics.line_height - 4.0))
                     .text_color(ctx.palette.ghost)
                     .child(SharedString::from(alt.to_owned())),
@@ -1394,7 +1618,7 @@ fn render_code_block(language: Option<&str>, code: &str, ctx: &Ctx) -> AnyElemen
                         .min_w_0()
                         .flex_1()
                         .truncate()
-                        .text_size(px(10.0))
+                        .text_size(px(12.5))
                         .line_height(px(14.0))
                         .font_weight(FontWeight::MEDIUM)
                         .text_color(ctx.palette.ghost)
@@ -1545,7 +1769,7 @@ fn table_row(
                 .min_w_0()
                 .px(px(9.0))
                 .py(px(6.0))
-                .text_size(px(ctx.metrics.text_size - 0.5))
+                .text_size(px((ctx.metrics.text_size - 0.5).max(12.5)))
                 .line_height(px(ctx.metrics.line_height - 2.0))
                 .map(|element| match alignment {
                     TableAlign::Left => element,

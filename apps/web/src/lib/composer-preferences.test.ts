@@ -53,6 +53,22 @@ describe('composer preferences', () => {
       service_tier: null,
     })).toBe(preferences)
   })
+
+  test('restores Fx as a valid remembered provider', () => {
+    const storage = memoryStorage()
+    const preferences = rememberComposerSession(
+      readComposerPreferences(storage, 'ws://first'),
+      {
+        provider: 'fx',
+        model: 'openai/gpt-5.6-sol',
+        reasoning_effort: null,
+        service_tier: null,
+      },
+    )
+    writeComposerPreferences(storage, 'ws://first', preferences)
+
+    expect(readComposerPreferences(storage, 'ws://first').lastProvider).toBe('fx')
+  })
 })
 
 function memoryStorage() {

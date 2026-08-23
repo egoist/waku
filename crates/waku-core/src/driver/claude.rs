@@ -14,9 +14,16 @@
 //! from `claude --help`.
 
 use std::collections::{HashMap, HashSet};
+#[cfg(unix)]
+use std::fs::File;
+#[cfg(unix)]
+use std::io::Read;
 use std::io::{BufRead, BufReader, Write};
+#[cfg(unix)]
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::Duration;
 
@@ -621,6 +628,8 @@ struct ClaudeStreamState {
     /// Tasks whose output pane already carries streamed transcript; the
     /// settle notification's summary would only duplicate it.
     streamed_task_output: HashSet<String>,
+    /// Stop handles for native Bash output files currently being tailed.
+    task_output_tails: ClaudeTaskOutputTails,
     pending_task_stops: Arc<Mutex<HashMap<String, BackgroundWorkKey>>>,
     pending_user_inputs: Arc<Mutex<HashMap<String, Value>>>,
     /// Model of the latest main-thread assistant message, so the settled
@@ -629,6 +638,193 @@ struct ClaudeStreamState {
     last_assistant_model: Option<String>,
     /// Last title copied from Claude's native transcript metadata.
     last_auto_title: Option<String>,
+}
+
+#[derive(Default)]
+struct ClaudeTaskOutputTails(HashMap<String, Arc<AtomicBool>>);
+
+impl Drop for ClaudeTaskOutputTails {
+    fn drop(&mut self) {
+        for stop in self.0.values() {
+            stop.store(true, Ordering::Release);
+        }
+    }
+}
+
+#[cfg(unix)]
+const CLAUDE_TASK_OUTPUT_POLL_INTERVAL: Duration = Duration::from_secs(1);
+
+/// Claude keeps live Bash output outside its JSON stream. The installed CLI
+/// writes it under `/tmp/claude-<uid>/<workspace>/<session>/tasks/<id>.output`;
+/// locate the workspace component instead of reproducing Claude's private cwd
+/// escaping rules.
+#[cfg(unix)]
+fn claude_task_output_path(session_id: &str, task_id: &str) -> Option<PathBuf> {
+    // SAFETY: `geteuid` has no preconditions and does not retain pointers.
+    let uid = unsafe { libc::geteuid() };
+    claude_task_output_path_in(
+        &Path::new("/tmp").join(format!("claude-{uid}")),
+        session_id,
+        task_id,
+    )
+}
+
+#[cfg(unix)]
+fn claude_task_output_path_in(root: &Path, session_id: &str, task_id: &str) -> Option<PathBuf> {
+    if task_id.is_empty()
+        || task_id.contains('/')
+        || task_id.contains('\\')
+        || session_id.is_empty()
+        || session_id.contains('/')
+        || session_id.contains('\\')
+    {
+        return None;
+    }
+    std::fs::read_dir(root)
+        .ok()?
+        .filter_map(Result::ok)
+        .map(|entry| {
+            entry
+                .path()
+                .join(session_id)
+                .join("tasks")
+                .join(format!("{task_id}.output"))
+        })
+        .find(|path| path.is_file())
+}
+
+#[cfg(unix)]
+fn drain_utf8_output(bytes: &mut Vec<u8>, final_read: bool) -> Option<String> {
+    if bytes.is_empty() {
+        return None;
+    }
+    match std::str::from_utf8(bytes) {
+        Ok(_) => String::from_utf8(std::mem::take(bytes)).ok(),
+        Err(error) => {
+            let valid = error.valid_up_to();
+            let invalid = error.error_len().is_some();
+            if invalid || final_read {
+                let text = String::from_utf8_lossy(bytes).into_owned();
+                bytes.clear();
+                return Some(text);
+            }
+            (valid > 0).then(|| {
+                String::from_utf8(bytes.drain(..valid).collect())
+                    .expect("the UTF-8 validator marked this prefix valid")
+            })
+        }
+    }
+}
+
+#[cfg(unix)]
+fn stream_claude_task_output(
+    path: PathBuf,
+    key: BackgroundWorkKey,
+    events: DriverEventSender,
+    stop: Arc<AtomicBool>,
+) {
+    let Ok(mut file) = File::open(path) else {
+        return;
+    };
+    let mut pending_utf8 = Vec::new();
+    let mut final_pass = false;
+    loop {
+        let mut chunk = Vec::new();
+        if file.read_to_end(&mut chunk).is_err() {
+            break;
+        }
+        pending_utf8.extend_from_slice(&chunk);
+        let stopping = stop.load(Ordering::Acquire);
+        if let Some(delta) = drain_utf8_output(&mut pending_utf8, stopping && final_pass)
+            && !delta.is_empty()
+        {
+            let _ = events.send(DriverEvent::BackgroundWork(
+                BackgroundWorkEvent::OutputDelta {
+                    key: key.clone(),
+                    delta,
+                },
+            ));
+        }
+        if stopping {
+            if final_pass {
+                break;
+            }
+            // The notification and the output-file close are adjacent but
+            // originate on different tasks. One final poll closes that race.
+            final_pass = true;
+        }
+        thread::sleep(CLAUDE_TASK_OUTPUT_POLL_INTERVAL);
+    }
+}
+
+#[cfg(unix)]
+fn stream_claude_task_output_when_ready(
+    session_id: String,
+    task_id: String,
+    key: BackgroundWorkKey,
+    events: DriverEventSender,
+    stop: Arc<AtomicBool>,
+) {
+    loop {
+        // Check for the file before honoring stop: if Claude creates and
+        // completes a short task between polls, the final pass still captures
+        // its output for the retained background-process entry.
+        if let Some(path) = claude_task_output_path(&session_id, &task_id) {
+            stream_claude_task_output(path, key, events, stop);
+            return;
+        }
+        if stop.load(Ordering::Acquire) {
+            return;
+        }
+        thread::sleep(CLAUDE_TASK_OUTPUT_POLL_INTERVAL);
+    }
+}
+
+#[cfg(unix)]
+fn start_claude_task_output_tail(
+    session_id: &str,
+    item: &BackgroundWorkItem,
+    events: &DriverEventSender,
+    state: &mut ClaudeStreamState,
+) {
+    if item.key.kind != BackgroundWorkKind::Process
+        || state
+            .task_output_tails
+            .0
+            .contains_key(&item.key.provider_id)
+    {
+        return;
+    }
+    let session_id = session_id.to_owned();
+    let task_id = item.key.provider_id.clone();
+    let key = item.key.clone();
+    let events = events.clone();
+    let stop = Arc::new(AtomicBool::new(false));
+    let thread_stop = stop.clone();
+    let thread_task_id = task_id.clone();
+    let spawned = thread::Builder::new()
+        .name("waku-claude-task-output".into())
+        .spawn(move || {
+            stream_claude_task_output_when_ready(
+                session_id,
+                thread_task_id,
+                key,
+                events,
+                thread_stop,
+            )
+        });
+    if spawned.is_ok() {
+        state.task_output_tails.0.insert(task_id, stop);
+    }
+}
+
+#[cfg(not(unix))]
+fn start_claude_task_output_tail(
+    _session_id: &str,
+    _item: &BackgroundWorkItem,
+    _events: &DriverEventSender,
+    _state: &mut ClaudeStreamState,
+) {
 }
 
 /// The context window of the model that served this turn, from the result
@@ -808,7 +1004,10 @@ fn claude_task_item(
     // The settle notification's summary is the subagent's final report and
     // belongs in the output pane — unless the live transcript already
     // streamed there.
-    if subtype == "task_notification" && !state.streamed_task_output.contains(&task_id) {
+    if subtype == "task_notification"
+        && kind == BackgroundWorkKind::Subagent
+        && !state.streamed_task_output.contains(&task_id)
+    {
         item.output = value
             .get("summary")
             .and_then(Value::as_str)
@@ -854,7 +1053,8 @@ fn claude_task_item(
 
 fn handle_claude_system(
     value: &Value,
-    events: &impl DriverEventSink,
+    session_id: &str,
+    events: &DriverEventSender,
     state: &mut ClaudeStreamState,
 ) {
     let subtype = value.get("subtype").and_then(Value::as_str);
@@ -916,6 +1116,10 @@ fn handle_claude_system(
         {
             state.subagent_tasks.insert(tool_use_id, task_id.clone());
         }
+        let output_tail_item = (subtype == "task_started"
+            && item.key.kind == BackgroundWorkKind::Process)
+            .then(|| item.clone());
+        let stop_output_tail = !item.status.is_live();
         // Remember what the task is called: `task_started` names it, and a
         // `task_updated` patch is an explicit rename. Later activity lines
         // that merely repeat this stay out of the detail row.
@@ -929,11 +1133,18 @@ fn handle_claude_system(
         {
             state
                 .task_descriptions
-                .insert(task_id, description.to_owned());
+                .insert(task_id.clone(), description.to_owned());
         }
         let _ = events.send(DriverEvent::BackgroundWork(BackgroundWorkEvent::Upsert(
             item,
         )));
+        // Establish the registry item before its tail thread can enqueue the
+        // first delta; an output-before-start race would otherwise discard it.
+        if let Some(item) = output_tail_item {
+            start_claude_task_output_tail(session_id, &item, events, state);
+        } else if stop_output_tail && let Some(stop) = state.task_output_tails.0.remove(&task_id) {
+            stop.store(true, Ordering::Release);
+        }
     }
 }
 
@@ -1013,7 +1224,7 @@ fn forward_subagent_transcript(
 fn handle_message(
     value: &Value,
     session_id: &str,
-    events: &impl DriverEventSink,
+    events: &DriverEventSender,
     commands: &Sender<CommandMessage>,
     turn_active: &Mutex<bool>,
     auto_approve: bool,
@@ -1038,7 +1249,7 @@ fn handle_message(
                     let _ = events.send(DriverEvent::AvailableCommands(commands));
                 }
             }
-            handle_claude_system(value, events, state);
+            handle_claude_system(value, session_id, events, state);
         }
         Some("control_request") => {
             if value.pointer("/request/subtype").and_then(Value::as_str) == Some("can_use_tool") {
@@ -1488,14 +1699,14 @@ mod tests {
     }
 
     fn harness() -> (
-        Sender<DriverEvent>,
+        DriverEventSender,
         crossbeam_channel::Receiver<DriverEvent>,
         Sender<CommandMessage>,
         crossbeam_channel::Receiver<CommandMessage>,
         Mutex<bool>,
         ClaudeStreamState,
     ) {
-        let (events, event_rx) = unbounded();
+        let (events, event_rx) = crate::driver::test_event_channel();
         let (commands, command_rx) = unbounded();
         (
             events,
@@ -1505,6 +1716,85 @@ mod tests {
             Mutex::new(true),
             ClaudeStreamState::default(),
         )
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn locates_claudes_native_task_output_across_workspace_slugs() {
+        let root = std::env::temp_dir().join(format!("waku-claude-output-test-{}", Uuid::new_v4()));
+        let output = root
+            .join("-Users-egoist-dev-waku")
+            .join("session-live")
+            .join("tasks")
+            .join("task-live.output");
+        std::fs::create_dir_all(output.parent().unwrap()).unwrap();
+        std::fs::write(&output, "first\n").unwrap();
+
+        assert_eq!(
+            claude_task_output_path_in(&root, "session-live", "task-live"),
+            Some(output)
+        );
+        assert_eq!(
+            claude_task_output_path_in(&root, "session-live", "../escape"),
+            None
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn live_task_output_preserves_split_utf8() {
+        let bytes = "first 界".as_bytes();
+        let split = bytes.len() - 1;
+        let mut pending = bytes[..split].to_vec();
+
+        assert_eq!(
+            drain_utf8_output(&mut pending, false).as_deref(),
+            Some("first ")
+        );
+        pending.extend_from_slice(&bytes[split..]);
+        assert_eq!(
+            drain_utf8_output(&mut pending, false).as_deref(),
+            Some("界")
+        );
+        assert!(pending.is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn native_task_output_streams_before_completion() {
+        let root = std::env::temp_dir().join(format!("waku-claude-tail-test-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let output = root.join("task.output");
+        std::fs::write(&output, "first\n").unwrap();
+        let (events, event_rx) = crate::driver::test_event_channel();
+        let stop = Arc::new(AtomicBool::new(false));
+        let key = BackgroundWorkKey::new(BackgroundWorkKind::Process, "task-live");
+        let tail_stop = stop.clone();
+        let tail = thread::spawn(move || {
+            stream_claude_task_output(output, key, events, tail_stop);
+        });
+
+        assert!(matches!(
+            event_rx.recv_timeout(Duration::from_secs(3)).unwrap(),
+            DriverEvent::BackgroundWork(BackgroundWorkEvent::OutputDelta { delta, .. })
+                if delta == "first\n"
+        ));
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(root.join("task.output"))
+            .unwrap();
+        file.write_all("second 界\n".as_bytes()).unwrap();
+        file.flush().unwrap();
+        assert!(matches!(
+            event_rx.recv_timeout(Duration::from_secs(3)).unwrap(),
+            DriverEvent::BackgroundWork(BackgroundWorkEvent::OutputDelta { delta, .. })
+                if delta == "second 界\n"
+        ));
+
+        stop.store(true, Ordering::Release);
+        tail.join().unwrap();
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     /// Drives the real CLI through the actual driver, including a second turn

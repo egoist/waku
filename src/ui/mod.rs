@@ -12,14 +12,16 @@ pub mod text_field;
 pub mod tooltip;
 
 use crate::model::{ActivityKind, ProviderKind, SessionStatus};
-use crate::theme::Theme;
+use crate::theme::{Theme, sp};
 
-/// A monochrome icon from the embedded set, tinted via text color.
+/// A monochrome icon from the embedded set, tinted via text color. Sized in
+/// `sp` so icons keep pace with the chrome text they sit beside when the UI
+/// font size setting moves.
 pub fn icon(path: &'static str, size: f32, color: Hsla) -> Svg {
     svg()
         .path(path)
-        .w(px(size))
-        .h(px(size))
+        .w(sp(size))
+        .h(sp(size))
         .flex_none()
         .text_color(color)
 }
@@ -28,7 +30,7 @@ pub fn icon(path: &'static str, size: f32, color: Hsla) -> Svg {
 /// are preserved. GPUI's `svg()` element intentionally renders an alpha mask
 /// tinted with one text color.
 pub fn file_icon(path: &'static str, size: f32) -> Img {
-    img(path).w(px(size)).h(px(size)).flex_none()
+    img(path).w(sp(size)).h(sp(size)).flex_none()
 }
 
 /// A compact ghost icon button: the only button shape outside the composer's
@@ -162,6 +164,7 @@ pub fn provider_color(theme: &Theme, provider: ProviderKind) -> Hsla {
         ProviderKind::DeepSeek => rgb(0x4D6BFE).into(),
         ProviderKind::Codex
         | ProviderKind::Cursor
+        | ProviderKind::Fx
         | ProviderKind::OpenCode
         | ProviderKind::Grok
         | ProviderKind::Kimi
@@ -184,6 +187,7 @@ pub fn provider_icon(provider: ProviderKind) -> &'static str {
         ProviderKind::Codex => "icons/provider-openai.svg",
         ProviderKind::Cursor => "icons/provider-cursor.svg",
         ProviderKind::DeepSeek => "icons/provider-deepseek.svg",
+        ProviderKind::Fx => "icons/provider-fx.svg",
         ProviderKind::OpenCode => "icons/provider-opencode.svg",
         ProviderKind::Grok => "icons/provider-grok.svg",
         ProviderKind::Kimi => "icons/provider-kimi.svg",
@@ -330,14 +334,14 @@ impl RenderOnce for MenuChip {
         self.base
             .h(self
                 .height
-                .unwrap_or(if self.outlined { px(30.0) } else { px(24.0) }))
+                .unwrap_or(if self.outlined { px(30.0) } else { px(26.0) }))
             .px(if self.outlined { px(10.0) } else { px(7.0) })
             .rounded(if self.outlined { px(7.0) } else { px(6.0) })
             .flex()
             .items_center()
             .gap(px(6.0))
-            .text_size(px(11.5))
-            .line_height(px(14.0))
+            .text_size(sp(13.0))
+            .line_height(sp(16.0))
             .cursor_default()
             .focus_visible(|style| style.border_1().border_color(theme.accent))
             .when(self.outlined, |element| {
@@ -352,7 +356,7 @@ impl RenderOnce for MenuChip {
             })
             .when(self.disabled, |element| element.opacity(0.7))
             .when_some(self.icon, |element, (path, color)| {
-                element.child(icon(path, 10.5, color))
+                element.child(icon(path, 12.0, color))
             })
             .child(
                 div()
@@ -362,7 +366,7 @@ impl RenderOnce for MenuChip {
                     .child(self.label),
             )
             .when(self.caret, |element| {
-                element.child(icon("icons/chevron-down.svg", 9.0, theme.text_ghost))
+                element.child(icon("icons/chevron-down.svg", 10.5, theme.text_ghost))
             })
     }
 }

@@ -53,6 +53,51 @@ pub enum Carry {
     BlockComment,
     /// Inside a multi-line string; the payload indexes the language's strings.
     String(u8),
+    /// Inside a markdown fenced code block.
+    Fence(FenceCarry),
+}
+
+/// Markdown fence state: which fence is open, plus the embedded language's own
+/// carried state so its block comments and strings survive line breaks too.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct FenceCarry {
+    /// Embedded language; `None` leaves the fence body unhighlighted.
+    lang: Option<Lang>,
+    /// Fence character — `~~~` cannot close a backtick fence.
+    tilde: bool,
+    /// Opening run length; a closer needs at least as many characters.
+    len: u8,
+    /// The embedded lexer's carry, minus the fence variant so this stays flat.
+    inner: EmbeddedCarry,
+}
+
+/// The subset of [`Carry`] an embedded fence language can produce. Markdown
+/// inside markdown lexes plain precisely so this cannot need to recurse.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum EmbeddedCarry {
+    None,
+    BlockComment,
+    String(u8),
+}
+
+impl From<EmbeddedCarry> for Carry {
+    fn from(carry: EmbeddedCarry) -> Self {
+        match carry {
+            EmbeddedCarry::None => Carry::None,
+            EmbeddedCarry::BlockComment => Carry::BlockComment,
+            EmbeddedCarry::String(slot) => Carry::String(slot),
+        }
+    }
+}
+
+impl From<Carry> for EmbeddedCarry {
+    fn from(carry: Carry) -> Self {
+        match carry {
+            Carry::None | Carry::Fence(_) => EmbeddedCarry::None,
+            Carry::BlockComment => EmbeddedCarry::BlockComment,
+            Carry::String(slot) => EmbeddedCarry::String(slot),
+        }
+    }
 }
 
 /// Languages with a dedicated spec. Anything else renders unhighlighted.
@@ -74,6 +119,8 @@ pub enum Lang {
     Css,
     Html,
     Sql,
+    /// Markdown structure, with fenced code lexed by its embedded language.
+    Markdown,
     Diff,
 }
 
@@ -98,6 +145,7 @@ pub fn lang_for_tag(tag: &str) -> Option<Lang> {
         "css" | "scss" | "sass" | "less" => Lang::Css,
         "html" | "htm" | "xml" | "svg" | "vue" | "svelte" => Lang::Html,
         "sql" | "postgres" | "postgresql" | "mysql" | "sqlite" => Lang::Sql,
+        "md" | "markdown" | "mdx" | "mdown" => Lang::Markdown,
         "diff" | "patch" => Lang::Diff,
         _ => return None,
     })
@@ -741,7 +789,8 @@ fn spec(lang: Lang) -> LangSpec {
             capitalized_types: false,
             ..DEFAULT_SPEC
         },
-        Lang::Diff => LangSpec {
+        // Structure-lexed in `markdown_line`; this spec is never consulted.
+        Lang::Markdown | Lang::Diff => LangSpec {
             line_comments: &[],
             block_comment: None,
             strings: &[],
@@ -758,6 +807,9 @@ fn spec(lang: Lang) -> LangSpec {
 
 /// Tokenize one line. Returns its spans plus the carry for the next line.
 pub fn tokenize_line(lang: Lang, line: &str, carry: Carry) -> (Vec<Token>, Carry) {
+    if lang == Lang::Markdown {
+        return markdown_line(line, carry);
+    }
     let spec = spec(lang);
     if lang == Lang::Diff {
         return (diff_line(line), Carry::None);
@@ -805,6 +857,9 @@ pub fn tokenize_line(lang: Lang, line: &str, carry: Carry) -> (Vec<Token>, Carry
             }
         }
         Carry::None => {}
+        // A fence carry can only have come from markdown, which never reaches
+        // this generic path; drop a stray one rather than panicking.
+        Carry::Fence(_) => carry = Carry::None,
     }
 
     // A `#`-prefixed line in C-family languages is a preprocessor directive,
@@ -1029,6 +1084,379 @@ fn next_non_space(rest: &str) -> Option<char> {
     rest.chars().find(|ch| !ch.is_whitespace())
 }
 
+// ── Markdown ───────────────────────────────────────────────────────────────
+
+/// Markdown is structure-lexed: headings, emphasis, code spans, links, and
+/// list or quote markers colour in place, and a fenced block hands its lines
+/// to the fence language's lexer, so embedded code colours exactly like a
+/// standalone block.
+fn markdown_line(line: &str, carry: Carry) -> (Vec<Token>, Carry) {
+    if let Carry::Fence(fence) = carry {
+        return markdown_fenced_line(line, fence);
+    }
+
+    let mut tokens = Vec::new();
+    if let Some(carry) = markdown_fence_open(line, &mut tokens) {
+        return (tokens, carry);
+    }
+
+    let index = markdown_container_markers(line, &mut tokens);
+    let rest = &line[index..];
+    let content_start = index + (rest.len() - rest.trim_start().len());
+    let content = &line[content_start..];
+
+    // ATX heading: the rest of the line in one colour, `#`s included.
+    let hashes = content.bytes().take_while(|byte| *byte == b'#').count();
+    if (1..=6).contains(&hashes)
+        && matches!(content.as_bytes().get(hashes), None | Some(b' ' | b'\t'))
+    {
+        push(&mut tokens, content_start..line.len(), TokenClass::Keyword);
+        return (tokens, Carry::None);
+    }
+
+    // Thematic breaks and setext underlines: `---`, `***`, `___`, `===`.
+    if markdown_rule(content) {
+        push(&mut tokens, content_start..line.len(), TokenClass::Meta);
+        return (tokens, Carry::None);
+    }
+
+    // Reference definition: `[label]: destination`, footnotes included.
+    if content.starts_with('[')
+        && let Some(close) = find_unescaped(line, content_start + 1, b']')
+        && line.as_bytes().get(close + 1) == Some(&b':')
+    {
+        push(&mut tokens, content_start..close + 1, TokenClass::Function);
+        push(&mut tokens, close + 1..line.len(), TokenClass::Comment);
+        return (tokens, Carry::None);
+    }
+
+    markdown_inline(line, content_start, &mut tokens);
+    (tokens, Carry::None)
+}
+
+/// Detects a ``` or ~~~ fence opening: the punctuation dims, the info string
+/// colours as a type so the language tag stands out.
+fn markdown_fence_open(line: &str, tokens: &mut Vec<Token>) -> Option<Carry> {
+    let trimmed = line.trim_start_matches(' ');
+    let indent = line.len() - trimmed.len();
+    if indent > 3 {
+        return None;
+    }
+    let delimiter = *trimmed.as_bytes().first()?;
+    if delimiter != b'`' && delimiter != b'~' {
+        return None;
+    }
+    let run = trimmed.bytes().take_while(|byte| *byte == delimiter).count();
+    if run < 3 {
+        return None;
+    }
+    let info = &trimmed[run..];
+    // A backtick fence's info string may not contain backticks — such a line
+    // is an inline code span, not a fence.
+    if delimiter == b'`' && info.contains('`') {
+        return None;
+    }
+    push(tokens, indent..indent + run, TokenClass::Meta);
+    let tag = info.trim();
+    if !tag.is_empty() {
+        let start = indent + run + (info.len() - info.trim_start().len());
+        push(tokens, start..start + tag.len(), TokenClass::Type);
+    }
+    // Info strings often trail flags (```rust,no_run); the first
+    // comma-separated word names the language. Markdown-in-markdown stays
+    // plain: the carry is deliberately too flat to nest fences.
+    let word = tag.split_whitespace().next().unwrap_or("");
+    let lang = lang_for_tag(word.split(',').next().unwrap_or(""))
+        .filter(|lang| *lang != Lang::Markdown);
+    Some(Carry::Fence(FenceCarry {
+        lang,
+        tilde: delimiter == b'~',
+        len: run.min(u8::MAX as usize) as u8,
+        inner: EmbeddedCarry::None,
+    }))
+}
+
+/// A line inside an open fence: either the closing fence, or one line of the
+/// embedded language.
+fn markdown_fenced_line(line: &str, fence: FenceCarry) -> (Vec<Token>, Carry) {
+    let trimmed = line.trim_start_matches(' ');
+    let indent = line.len() - trimmed.len();
+    let delimiter = if fence.tilde { b'~' } else { b'`' };
+    let run = trimmed.bytes().take_while(|byte| *byte == delimiter).count();
+    if indent <= 3 && run >= fence.len as usize && trimmed[run..].trim().is_empty() {
+        let mut tokens = Vec::new();
+        push(&mut tokens, indent..indent + run, TokenClass::Meta);
+        return (tokens, Carry::None);
+    }
+    let Some(lang) = fence.lang else {
+        return (Vec::new(), Carry::Fence(fence));
+    };
+    let (tokens, inner) = tokenize_line(lang, line, fence.inner.into());
+    (
+        tokens,
+        Carry::Fence(FenceCarry {
+            inner: inner.into(),
+            ..fence
+        }),
+    )
+}
+
+/// Colours leading blockquote `>`s and one list marker, returning the byte
+/// offset where inline content starts.
+fn markdown_container_markers(line: &str, tokens: &mut Vec<Token>) -> usize {
+    let bytes = line.as_bytes();
+    let mut index = 0;
+
+    // Leading indent, then any depth of `>` quoting.
+    loop {
+        while bytes.get(index) == Some(&b' ') {
+            index += 1;
+        }
+        if bytes.get(index) == Some(&b'>') {
+            push(tokens, index..index + 1, TokenClass::Meta);
+            index += 1;
+        } else {
+            break;
+        }
+    }
+
+    // One list marker: `- `, `* `, `+ `, `1. `, `1) `. Nested lists mark one
+    // level per line anyway — deeper levels are indentation.
+    let marker_end = match bytes.get(index) {
+        Some(b'-' | b'*' | b'+')
+            if matches!(bytes.get(index + 1), None | Some(b' ' | b'\t')) =>
+        {
+            Some(index + 1)
+        }
+        Some(b'0'..=b'9') => {
+            let digits = line[index..]
+                .bytes()
+                .take_while(u8::is_ascii_digit)
+                .count();
+            (digits <= 9
+                && matches!(bytes.get(index + digits), Some(b'.' | b')'))
+                && matches!(bytes.get(index + digits + 1), None | Some(b' ' | b'\t')))
+            .then_some(index + digits + 1)
+        }
+        _ => None,
+    };
+    if let Some(marker_end) = marker_end {
+        push(tokens, index..marker_end, TokenClass::Meta);
+        index = marker_end;
+        while bytes.get(index) == Some(&b' ') {
+            index += 1;
+        }
+        // A task checkbox directly after the marker.
+        let rest = &line[index..];
+        if (rest.starts_with("[ ]") || rest.starts_with("[x]") || rest.starts_with("[X]"))
+            && matches!(bytes.get(index + 3), None | Some(b' ' | b'\t'))
+        {
+            push(tokens, index..index + 3, TokenClass::Literal);
+            index += 3;
+        }
+    }
+    index
+}
+
+/// `---`/`***`/`___` thematic breaks and `===` setext underlines: three or
+/// more of one character, trailing whitespace only.
+fn markdown_rule(content: &str) -> bool {
+    let content = content.trim_end();
+    if content.len() < 3 {
+        return false;
+    }
+    let first = content.as_bytes()[0];
+    matches!(first, b'-' | b'*' | b'_' | b'=') && content.bytes().all(|byte| byte == first)
+}
+
+/// Inline colour within one markdown text line: code spans, emphasis, links,
+/// autolinks, and table pipes. Everything unmatched stays plain.
+fn markdown_inline(line: &str, mut index: usize, tokens: &mut Vec<Token>) {
+    let bytes = line.as_bytes();
+    while index < bytes.len() {
+        let rest = &line[index..];
+        match bytes[index] {
+            b'\\' => {
+                // Skip the escaped character too, so `\*` opens nothing.
+                index += 1;
+                if let Some(ch) = line[index..].chars().next() {
+                    index += ch.len_utf8();
+                }
+            }
+            b'`' => {
+                let run = rest.bytes().take_while(|byte| *byte == b'`').count();
+                match code_span_close(line, index + run, run) {
+                    Some(end) => {
+                        push(tokens, index..end, TokenClass::String);
+                        index = end;
+                    }
+                    None => index += run,
+                }
+            }
+            b'*' | b'_' => match emphasis_span(line, index) {
+                Some(end) => {
+                    push(tokens, index..end, TokenClass::Literal);
+                    index = end;
+                }
+                None => {
+                    index += rest
+                        .bytes()
+                        .take_while(|byte| *byte == bytes[index])
+                        .count();
+                }
+            },
+            b'[' | b'!' => match markdown_link(line, index, tokens) {
+                Some(end) => index = end,
+                None => index += 1,
+            },
+            b'<' => match autolink_length(rest) {
+                Some(length) => {
+                    push(tokens, index..index + length, TokenClass::Function);
+                    index += length;
+                }
+                None => index += 1,
+            },
+            b'|' => {
+                push(tokens, index..index + 1, TokenClass::Meta);
+                index += 1;
+            }
+            byte if byte < 0x80 => index += 1,
+            _ => {
+                let ch = rest.chars().next().expect("rest is non-empty");
+                index += ch.len_utf8();
+            }
+        }
+    }
+}
+
+/// Byte offset just past a closing run of exactly `run` backticks.
+fn code_span_close(line: &str, mut index: usize, run: usize) -> Option<usize> {
+    let bytes = line.as_bytes();
+    while index < bytes.len() {
+        if bytes[index] == b'`' {
+            let length = line[index..].bytes().take_while(|byte| *byte == b'`').count();
+            if length == run {
+                return Some(index + length);
+            }
+            index += length;
+        } else {
+            index += 1;
+        }
+    }
+    None
+}
+
+/// Byte offset just past a `*`/`_` emphasis closer, when the opener at
+/// `start` has one on this line. Underscores must sit on word boundaries, so
+/// `snake_case` never emphasises.
+fn emphasis_span(line: &str, start: usize) -> Option<usize> {
+    let bytes = line.as_bytes();
+    let marker = bytes[start];
+    let run = line[start..]
+        .bytes()
+        .take_while(|byte| *byte == marker)
+        .count();
+    if run > 3 {
+        return None;
+    }
+    let content_start = start + run;
+    // The opener must press against its content.
+    if line[content_start..]
+        .chars()
+        .next()
+        .is_none_or(char::is_whitespace)
+    {
+        return None;
+    }
+    if marker == b'_' && !word_boundary_before(line, start) {
+        return None;
+    }
+    let mut index = content_start;
+    while index < bytes.len() {
+        if bytes[index] == marker {
+            let length = line[index..]
+                .bytes()
+                .take_while(|byte| *byte == marker)
+                .count();
+            let closes = length >= run
+                && index > content_start
+                && line[..index]
+                    .chars()
+                    .next_back()
+                    .is_some_and(|ch| !ch.is_whitespace())
+                && (marker != b'_' || word_boundary_after(line, index + run));
+            if closes {
+                return Some(index + run);
+            }
+            index += length;
+        } else {
+            index += 1;
+        }
+    }
+    None
+}
+
+fn word_boundary_before(line: &str, index: usize) -> bool {
+    line[..index]
+        .chars()
+        .next_back()
+        .is_none_or(|ch| !ch.is_alphanumeric())
+}
+
+fn word_boundary_after(line: &str, index: usize) -> bool {
+    line[index..]
+        .chars()
+        .next()
+        .is_none_or(|ch| !ch.is_alphanumeric())
+}
+
+/// `[text](destination)` and `![alt](src)`: the bracketed text colours as a
+/// link, the destination dims. Returns the offset just past the span.
+fn markdown_link(line: &str, start: usize, tokens: &mut Vec<Token>) -> Option<usize> {
+    let bytes = line.as_bytes();
+    let bracket = if bytes[start] == b'!' {
+        if bytes.get(start + 1) != Some(&b'[') {
+            return None;
+        }
+        start + 1
+    } else {
+        start
+    };
+    let close = find_unescaped(line, bracket + 1, b']')?;
+    if bytes.get(close + 1) != Some(&b'(') {
+        return None;
+    }
+    let paren_close = find_unescaped(line, close + 2, b')')?;
+    push(tokens, start..close + 1, TokenClass::Function);
+    push(tokens, close + 1..paren_close + 1, TokenClass::Comment);
+    Some(paren_close + 1)
+}
+
+/// First unescaped `target` byte at or after `from`.
+fn find_unescaped(line: &str, from: usize, target: u8) -> Option<usize> {
+    let bytes = line.as_bytes();
+    let mut index = from;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'\\' => index += 2,
+            byte if byte == target => return Some(index),
+            _ => index += 1,
+        }
+    }
+    None
+}
+
+/// Length of an `<https://…>` or `<user@host>` autolink at the start of
+/// `rest`, delimiters included. HTML tags fail the shape and stay plain.
+fn autolink_length(rest: &str) -> Option<usize> {
+    let close = rest.find('>')?;
+    let content = &rest[1..close];
+    if content.is_empty() || content.contains(char::is_whitespace) {
+        return None;
+    }
+    (content.contains("://") || content.contains('@')).then_some(close + 1)
+}
+
 /// Diff hunks are line-classified, not lexed.
 fn diff_line(line: &str) -> Vec<Token> {
     let class = match line.as_bytes().first() {
@@ -1191,6 +1619,96 @@ mod tests {
     }
 
     #[test]
+    fn markdown_structure_colours_in_place() {
+        assert_eq!(
+            spans(Lang::Markdown, "## Title with `code`"),
+            vec![("## Title with `code`", TokenClass::Keyword)],
+        );
+        assert_eq!(
+            spans(Lang::Markdown, "- item `x` has **bold** and _em_"),
+            vec![
+                ("-", TokenClass::Meta),
+                ("`x`", TokenClass::String),
+                ("**bold**", TokenClass::Literal),
+                ("_em_", TokenClass::Literal),
+            ],
+        );
+        assert_eq!(
+            spans(Lang::Markdown, "> see [docs](https://a.b) or <https://c.d>"),
+            vec![
+                (">", TokenClass::Meta),
+                ("[docs]", TokenClass::Function),
+                ("(https://a.b)", TokenClass::Comment),
+                ("<https://c.d>", TokenClass::Function),
+            ],
+        );
+        assert_eq!(
+            spans(Lang::Markdown, "- [x] ship it"),
+            vec![("-", TokenClass::Meta), ("[x]", TokenClass::Literal)],
+        );
+        assert_eq!(
+            spans(Lang::Markdown, "---"),
+            vec![("---", TokenClass::Meta)],
+        );
+        // Identifier underscores and lone asterisks are not emphasis, and
+        // escapes disarm markers.
+        assert_eq!(spans(Lang::Markdown, "call snake_case_name here"), vec![]);
+        assert_eq!(spans(Lang::Markdown, "a * b times 2*3"), vec![]);
+        assert_eq!(spans(Lang::Markdown, r"literal \*stars\* stay"), vec![]);
+    }
+
+    #[test]
+    fn markdown_fences_lex_their_embedded_language() {
+        let doc = "# Doc\n```rust\nlet s = \"x\"; // note\n```\ntail `code`";
+        let lines = tokenize(Lang::Markdown, doc);
+        assert_eq!(
+            lines[1]
+                .iter()
+                .map(|token| token.class)
+                .collect::<Vec<_>>(),
+            vec![TokenClass::Meta, TokenClass::Type],
+        );
+        let rust = "let s = \"x\"; // note";
+        let classes = lines[2]
+            .iter()
+            .map(|token| (&rust[token.range.clone()], token.class))
+            .collect::<Vec<_>>();
+        assert!(classes.contains(&("let", TokenClass::Keyword)));
+        assert!(classes.contains(&("\"x\"", TokenClass::String)));
+        assert!(classes.contains(&("// note", TokenClass::Comment)));
+        // The closing fence ends the block; markdown resumes after it.
+        assert_eq!(
+            lines[4]
+                .iter()
+                .map(|token| token.class)
+                .collect::<Vec<_>>(),
+            vec![TokenClass::String],
+        );
+    }
+
+    #[test]
+    fn markdown_fences_carry_embedded_state_across_lines() {
+        let doc = "```c\n/* open\nstill */\n```";
+        let lines = tokenize(Lang::Markdown, doc);
+        assert_eq!(lines[1], vec![Token { range: 0..7, class: TokenClass::Comment }]);
+        assert_eq!(lines[2], vec![Token { range: 0..8, class: TokenClass::Comment }]);
+        assert_eq!(lines[3], vec![Token { range: 0..3, class: TokenClass::Meta }]);
+    }
+
+    #[test]
+    fn markdown_fence_closers_must_match_the_opener() {
+        // A tilde fence ignores backtick lines, and a shorter run cannot
+        // close a longer opener.
+        let doc = "~~~python\n```\nx = 1\n~~~\n````\ncode\n```\n````";
+        let lines = tokenize(Lang::Markdown, doc);
+        assert_eq!(lines[1], vec![]);
+        assert!(lines[2].iter().any(|token| token.class == TokenClass::Number));
+        assert_eq!(lines[3], vec![Token { range: 0..3, class: TokenClass::Meta }]);
+        assert_eq!(lines[6], vec![]);
+        assert_eq!(lines[7], vec![Token { range: 0..4, class: TokenClass::Meta }]);
+    }
+
+    #[test]
     fn spans_are_ordered_disjoint_and_within_the_line() {
         let sources = [
             (Lang::Rust, "pub fn main() { let x: Vec<u8> = vec![1, 2]; }"),
@@ -1235,19 +1753,29 @@ mod tests {
     /// prefix may panic or produce an out-of-range span.
     #[test]
     fn every_prefix_of_a_code_block_tokenizes() {
-        let code =
-            "fn main() {\n    let s = \"héllo 🎉\";\n    /* note */\n    println!(\"{s}\");\n}";
-        for end in 0..=code.len() {
-            if !code.is_char_boundary(end) {
-                continue;
-            }
-            let prefix = &code[..end];
-            let lines = tokenize(Lang::Rust, prefix);
-            for (line, tokens) in prefix.split('\n').zip(&lines) {
-                for token in tokens {
-                    assert!(token.range.end <= line.len());
-                    assert!(line.is_char_boundary(token.range.start));
-                    assert!(line.is_char_boundary(token.range.end));
+        let cases = [
+            (
+                Lang::Rust,
+                "fn main() {\n    let s = \"héllo 🎉\";\n    /* note */\n    println!(\"{s}\");\n}",
+            ),
+            (
+                Lang::Markdown,
+                "# Tîtle 🎉\n> *émphasis* and `cöde` and **gras**\n- [x] [lïnk](https://é.example) <a@é.c>\n```rust\nlet s = \"héllo\";\n```\n| é | 🎉 |\n\\*escapé\\* _fin_",
+            ),
+        ];
+        for (lang, code) in cases {
+            for end in 0..=code.len() {
+                if !code.is_char_boundary(end) {
+                    continue;
+                }
+                let prefix = &code[..end];
+                let lines = tokenize(lang, prefix);
+                for (line, tokens) in prefix.split('\n').zip(&lines) {
+                    for token in tokens {
+                        assert!(token.range.end <= line.len());
+                        assert!(line.is_char_boundary(token.range.start));
+                        assert!(line.is_char_boundary(token.range.end));
+                    }
                 }
             }
         }

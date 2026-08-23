@@ -219,8 +219,8 @@ fn render_message_footer(
         .px(px(4.0))
         .flex()
         .items_center()
-        .text_size(px(11.5))
-        .line_height(px(14.0))
+        .text_size(sp(12.5))
+        .line_height(sp(14.0))
         .text_color(footer_color)
         .child(format_message_time(footer_time));
     let copy_button = div()
@@ -494,7 +494,7 @@ fn render_sent_message_attachments(
                             .w_full()
                             .truncate()
                             .text_center()
-                            .text_size(px(9.5))
+                            .text_size(sp(12.5))
                             .text_color(theme.text_secondary)
                             .child(attachment.name.clone()),
                     ),
@@ -590,7 +590,7 @@ pub(super) fn render_message(params: MessageRender, cx: &mut App) -> AnyElement 
                 column = column.child(attachments);
             }
             if let Some(edit_input) = message_edit_input {
-                let can_submit = !edit_input.read(cx).content().trim().is_empty()
+                let can_submit = !edit_input.read(cx).content(cx).trim().is_empty()
                     || !message.attachments.is_empty();
                 let cancel_waku = waku.clone();
                 let submit_waku = waku.clone();
@@ -623,7 +623,7 @@ pub(super) fn render_message(params: MessageRender, cx: &mut App) -> AnyElement 
                                         .bg(theme.overlay)
                                         .flex()
                                         .items_center()
-                                        .text_size(px(11.5))
+                                        .text_size(sp(12.5))
                                         .text_color(theme.text_secondary)
                                         .cursor_default()
                                         .hover(|element| element.bg(theme.overlay_strong))
@@ -649,7 +649,7 @@ pub(super) fn render_message(params: MessageRender, cx: &mut App) -> AnyElement 
                                         })
                                         .flex()
                                         .items_center()
-                                        .text_size(px(11.5))
+                                        .text_size(sp(12.5))
                                         .font_weight(FontWeight::MEDIUM)
                                         .text_color(if can_submit {
                                             theme.on_inverse
@@ -683,8 +683,8 @@ pub(super) fn render_message(params: MessageRender, cx: &mut App) -> AnyElement 
                             .bg(theme.raised)
                             .px(px(12.0))
                             .py(px(8.0))
-                            .text_size(px(14.0))
-                            .line_height(px(20.0))
+                            .text_size(sp(14.0))
+                            .line_height(sp(20.0))
                             .child(body),
                     );
                 }
@@ -740,8 +740,8 @@ pub(super) fn render_message(params: MessageRender, cx: &mut App) -> AnyElement 
                 .py(px(4.0))
                 .rounded_full()
                 .bg(theme.overlay)
-                .text_size(px(11.0))
-                .line_height(px(16.0))
+                .text_size(sp(12.5))
+                .line_height(sp(16.0))
                 .child(md::render::plain_text(
                     content.clone(),
                     md::render::SANS_FAMILY,
@@ -909,12 +909,21 @@ pub(super) fn activity_summary(activities: &[ActivityItem]) -> String {
     }
 }
 
+pub(super) fn activity_group_is_live(
+    live_turn: bool,
+    latest_block: bool,
+    after_message: usize,
+    message_count: usize,
+) -> bool {
+    live_turn && latest_block && after_message == message_count
+}
+
 pub(super) fn activity_header_title(
     activities: &[ActivityItem],
-    live_turn: bool,
+    live_group: bool,
     live_reasoning_id: Option<Uuid>,
 ) -> String {
-    if live_turn && let Some(activity) = activities.last() {
+    if live_group && let Some(activity) = activities.last() {
         return activity.reasoning.as_ref().map_or_else(
             || activity_display_title(activity),
             |reasoning| reasoning_activity_title(reasoning, live_reasoning_id == Some(activity.id)),
@@ -1635,7 +1644,7 @@ mod message_time_tests {
     }
 
     #[test]
-    fn live_activity_header_tracks_the_latest_child_until_the_turn_settles() {
+    fn activity_header_summarizes_only_after_the_group_leaves_the_live_tail() {
         let reasoning = ActivityItem::from_reasoning(
             ReasoningBlock {
                 content: "Inspecting history".into(),
@@ -1660,15 +1669,19 @@ mod message_time_tests {
             activity_header_title(&activities, true, None),
             "Running git log --oneline -15"
         );
+        assert!(activity_group_is_live(true, true, 1, 1));
         activities[1].complete = true;
         assert_eq!(
             activity_header_title(&activities, true, None),
             "Ran git log --oneline -15"
         );
+        assert!(!activity_group_is_live(true, true, 1, 2));
         assert_eq!(
             activity_header_title(&activities, false, None),
             "Ran 1 thought · 1 command"
         );
+        assert!(!activity_group_is_live(true, false, 1, 1));
+        assert!(!activity_group_is_live(false, true, 1, 1));
         assert_eq!(activity_action_label(&activities[1]), "Run");
         assert_eq!(
             activity_row_detail(&activities[1], false),

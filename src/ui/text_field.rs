@@ -3,29 +3,29 @@ use gpui::{
     Stateful, StyleRefinement, Styled, Window, div, prelude::*, px,
 };
 
-use crate::input::ComposerInput;
-use crate::theme::Theme;
+use crate::input::TextInput;
+use crate::theme::{Theme, sp};
 
 use super::icon;
 
 /// The one-line text box shell: a fixed-height bordered field around a
-/// [`ComposerInput`], with an optional leading icon and an accent border
+/// [`TextInput`], with an optional leading icon and an accent border
 /// while focused.
 ///
-/// The embedded input must be in search mode (`ComposerInput::search_field`)
-/// — that is what keeps the text on a single line and slides overlong content
-/// under the clipped viewport instead of wrapping it out of the fixed-height
-/// shell. Construction stays at the call site because the entity needs the
-/// window; this component owns everything visual.
+/// The embedded input must stay single-line (the default mode) — that is
+/// what keeps the text from wrapping and slides overlong content under the
+/// clipped viewport instead of growing out of the fixed-height shell.
+/// Construction stays at the call site because the entity needs the window;
+/// this component owns everything visual.
 #[derive(IntoElement)]
 pub struct TextField {
     base: Stateful<Div>,
-    input: gpui::Entity<ComposerInput>,
+    input: gpui::Entity<TextInput>,
     icon: Option<(&'static str, f32)>,
 }
 
 impl TextField {
-    pub fn new(id: impl Into<ElementId>, input: gpui::Entity<ComposerInput>) -> Self {
+    pub fn new(id: impl Into<ElementId>, input: gpui::Entity<TextInput>) -> Self {
         Self {
             base: div().id(id),
             input,
@@ -76,8 +76,8 @@ impl RenderOnce for TextField {
             .flex()
             .items_center()
             .gap(px(6.0))
-            .text_size(px(11.5))
-            .line_height(px(16.0))
+            .text_size(sp(12.5))
+            .line_height(sp(16.0))
             .when_some(self.icon, |element, (path, size)| {
                 element.child(icon(path, size, theme.text_tertiary))
             })

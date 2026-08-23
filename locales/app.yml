@@ -80,6 +80,8 @@ command_palette.open_project:
   en: Open project…
 command_palette.choose_model:
   en: Choose model…
+command_palette.collapse_sidebar_groups:
+  en: Collapse all sidebar groups
 command_palette.show_sidebar:
   en: Show sidebar
 command_palette.hide_sidebar:
@@ -121,7 +123,7 @@ settings.computer_use:
 settings.general_keywords:
   en: general local projects conversations privacy analytics telemetry anonymous sharing updates automatic sparkle version
 settings.appearance_keywords:
-  en: appearance theme system light dark language english chinese simplified
+  en: appearance theme system light dark language english chinese simplified font size text editor
 settings.providers_keywords:
   en: providers agents models cli version install detect claude codex cursor opencode amp grok pi
 settings.skills:
@@ -272,6 +274,14 @@ settings.theme:
   en: Theme
 settings.theme_description:
   en: Choose between system, light, or dark themes
+settings.ui_font_size:
+  en: UI font size
+settings.ui_font_size_description:
+  en: Text size across the interface and messages
+settings.code_font_size:
+  en: Code font size
+settings.code_font_size_description:
+  en: Text size in the file editor, diffs, code blocks, and tool output
 settings.theme_system:
   en: System
 settings.theme_light:
@@ -418,6 +428,22 @@ sidebar.today:
   en: Today
 sidebar.search:
   en: Search
+sidebar.options:
+  en: Sidebar options
+sidebar.grouping:
+  en: Grouping
+sidebar.grouping_project:
+  en: Project
+sidebar.grouping_updated:
+  en: Updated
+sidebar.ordering:
+  en: Ordering
+sidebar.ordering_newest:
+  en: Newest first
+sidebar.ordering_oldest:
+  en: Oldest first
+sidebar.show_more:
+  en: Show more
 sidebar.yesterday:
   en: Yesterday
 sidebar.this_week:
@@ -781,6 +807,8 @@ mode.full_access_description:
   en: Allow commands and edits without prompts
 mode.switch_to:
   en: Switch to %{mode}
+mode.plan_not_supported:
+  en: This agent does not support Plan
 
 agent_preset.standard:
   en: Standard mode
@@ -1382,6 +1410,11 @@ right_panel.hide:
 right_panel.close_tab:
   en: Close %{title}
 
+open_in.open:
+  en: Open project in %{app}
+open_in.choose:
+  en: Open project in…
+
 environment.title:
   en: Environment
 environment.summary:
@@ -1519,6 +1552,10 @@ files.could_not_save_read_only:
   en: "Could not save %{path}: file is not editable"
 files.could_not_save:
   en: "Could not save %{path}: %{error}"
+files.preview_markdown:
+  en: Preview markdown
+files.edit_markdown_source:
+  en: Edit source
 files.resize_tree:
   en: Resize file tree
 files.refresh:

@@ -16,7 +16,45 @@ the original feature bullet instead of adding separate entries for them.
 
 ## [unreleased]
 
+## [0.1.14]
+
+- Group sidebar tasks by project or update date, order them newest or oldest first, and collapse sections
+- Find in page: Search the full transcript by keywords using cmd-f or ctrl-f
+- Switch between recent tasks with Ctrl+Tab and Ctrl+Shift+Tab
+- Carry the current access mode into new tasks and remember it between launches
+- Fix OpenCode access-mode permissions and restore pending permission prompts when resuming sessions
+- Show Codex file reads, listings, and searches as file activity instead of raw commands
+- Keep long panel and background-work titles on one truncated line
+- Increase the minimum UI text size for better legibility
+
+## [0.1.13]
+
+- Add Vercel Fx support
+- Support DeepSeek Harness 0.1.1 without opening its web UI
+- Collapse earlier activity groups when a running turn moves on to newer transcript output
+
+## [0.1.12]
+
+- Invoke Codex, Pi, and Oh My Pi skills with their native syntax
+- Stream live output from Claude background tasks
+- Steer the oldest queued follow-up with Command/Ctrl+Enter in an empty composer
+- Fix model and reasoning option selection for Cursor
+- Fix npm-installed provider detection on Windows
+- Fix daemon terminal sessions hanging during shutdown
+- Exclude copied history from forked Codex sessions from usage totals
+- Keep separate Codex reasoning sections on separate lines
+
+## [0.1.11]
+
+- Highlight Markdown in the file editor, and toggle between source and a rendered preview
+- Add UI and code font size settings
+- macOS: Add "Open in.." button to open project folder in selected application
+
+## [0.1.10]
+
 - Add Kimi Code support
+- Add Oh My Pi support
+- Fix markdown table rendering
 
 ## [0.1.8]
 

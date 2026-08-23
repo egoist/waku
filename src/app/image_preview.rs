@@ -215,7 +215,7 @@ impl Waku {
                             .flex_col()
                             .items_center()
                             .gap(px(8.0))
-                            .text_size(px(12.0))
+                            .text_size(sp(12.5))
                             .text_color(unavailable_color)
                             .child(icon("icons/alert.svg", 18.0, unavailable_color))
                             .child(tr_cow!("attachments.preview_unavailable"))
@@ -238,7 +238,7 @@ impl Waku {
                     .py(px(5.0))
                     .rounded_full()
                     .bg(gpui::hsla(0.0, 0.0, 0.0, 0.48))
-                    .text_size(px(11.5))
+                    .text_size(sp(12.5))
                     .text_color(gpui::white().opacity(0.9))
                     .truncate()
                     .child(name),

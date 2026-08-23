@@ -10,13 +10,13 @@ polled off disk, and the one Waku generates itself — is in
 
 Every provider is reached through the same driver abstraction in
 [driver/mod.rs](../crates/waku-core/src/driver/mod.rs). There are seven
-transport implementations behind ten providers, and **every one of them holds a
+transport implementations behind eleven providers, and **every one of them holds a
 session that spans the whole conversation**:
 
 | Transport | File | Providers |
 | --- | --- | --- |
 | Codex app-server (JSON-RPC over stdio) | [driver/codex.rs](../crates/waku-core/src/driver/codex.rs) | Codex CLI |
-| Agent Client Protocol (JSON-RPC over stdio) | [driver/acp.rs](../crates/waku-core/src/driver/acp.rs) | Cursor CLI, Grok Build, Kimi Code |
+| Agent Client Protocol (JSON-RPC over stdio) | [driver/acp.rs](../crates/waku-core/src/driver/acp.rs) | Cursor CLI, Fx, Grok Build, Kimi Code |
 | OpenCode server (HTTP + server-sent events) | [driver/opencode.rs](../crates/waku-core/src/driver/opencode.rs) | OpenCode |
 | Pi RPC mode (NDJSON request/response over stdio) | [driver/pi.rs](../crates/waku-core/src/driver/pi.rs) | Pi, Oh My Pi |
 | Claude streaming-input session (NDJSON over stdio) | [driver/claude.rs](../crates/waku-core/src/driver/claude.rs) | Claude Code |
@@ -93,7 +93,7 @@ the transport absorbed the change or wants to be restarted:
 
 | Change | Codex | Pi | ACP | OpenCode | Claude | Amp |
 | --- | --- | --- | --- | --- | --- | --- |
-| Model, reasoning effort, service tier | in session — they ride on every `turn/start` | in session — `set_model`, `set_thinking_level` | in session — `session/set_model` | in session — the model rides on each prompt | in session — a `set_model` control request | restart — all three are launch arguments |
+| Model, reasoning effort, service tier | in session — they ride on every `turn/start` | in session — `set_model`, `set_thinking_level` | in session — `session/set_model`, except Fx's advertised `model` config option | in session — the model rides on each prompt | in session — a `set_model` control request | restart — all three are launch arguments |
 | Access mode, interaction mode | restart | restart | restart | restart — the agent is chosen when the session opens | restart | restart |
 | Provider | restart | restart | restart | restart | restart | restart |
 
@@ -115,7 +115,7 @@ the idle sweep decides otherwise.
 
 Two shapes, depending on the transport.
 
-**The stdio drivers — Codex, Pi, Claude, Amp, and both ACP providers — are never
+**The stdio drivers — Codex, Pi, Claude, Amp, and the ACP agents — are never
 signalled** (except when Stop ends Amp outright).
 Termination is by **closing stdin**:
 
@@ -149,20 +149,20 @@ OpenCode server itself, whose driver kills it explicitly on drop.
 
 ## At a glance
 
-| | Codex CLI | Pi | Oh My Pi | Claude Code | Amp | Cursor CLI | OpenCode | Grok Build | Kimi Code |
-| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| Binary | `codex` | `pi` | `omp` | `claude` | `amp` | `cursor-agent` | `opencode` | `grok` | `kimi` |
-| Wire protocol | JSON-RPC over stdio | NDJSON RPC over stdio | NDJSON RPC over stdio | stream-json over stdio | stream-json over stdio | ACP over stdio | HTTP + SSE | ACP over stdio | ACP over stdio |
-| Process spans the whole session | yes | yes | yes | yes | yes | yes | yes | yes | yes |
-| Process spawned per turn | no | no | no | no | no | no | no | no | no |
-| Bidirectional | yes | yes | yes | yes | yes | yes | yes | yes | yes |
-| Reasoning stream | yes | yes | yes | yes | yes | yes | yes | yes | yes |
-| Interactive approvals | yes | no | no (has them; Waku runs `--yolo`) | yes | no | yes | yes | yes | yes |
-| Mid-turn steering | yes | yes | yes | yes | yes | yes | yes | yes | yes (transport) |
-| Model discovery | yes | yes | yes | no (fixed) | no (modes) | yes | yes | yes | yes |
-| Computer Use | yes | yes | no (ships its own) | no | no | no | yes | yes | no |
-| Restricted to Build + Full access | no | yes | yes | no | yes | no | no | no | no |
-| Rewind and branch at a turn | yes | yes | yes | yes | yes | yes | yes | yes | **no** |
+| | Codex CLI | Pi | Oh My Pi | Claude Code | Amp | Cursor CLI | Fx | OpenCode | Grok Build | Kimi Code |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| Binary | `codex` | `pi` | `omp` | `claude` | `amp` | `cursor-agent` | `fx` | `opencode` | `grok` | `kimi` |
+| Wire protocol | JSON-RPC over stdio | NDJSON RPC over stdio | NDJSON RPC over stdio | stream-json over stdio | stream-json over stdio | ACP over stdio | ACP over stdio | HTTP + SSE | ACP over stdio | ACP over stdio |
+| Process spans the whole session | yes | yes | yes | yes | yes | yes | yes | yes | yes | yes |
+| Process spawned per turn | no | no | no | no | no | no | no | no | no | no |
+| Bidirectional | yes | yes | yes | yes | yes | yes | yes | yes | yes | yes |
+| Reasoning stream | yes | yes | yes | yes | yes | yes | yes | yes | yes | yes |
+| Interactive approvals | yes | no | no (has them; Waku runs `--yolo`) | yes | no | yes | yes | yes | yes | yes |
+| Mid-turn steering | yes | yes | yes | yes | yes | yes | **no** | yes | yes | yes (transport) |
+| Model discovery | yes | yes | yes | no (fixed) | no (modes) | yes | yes | yes | yes | yes |
+| Computer Use | yes | yes | no (ships its own) | no | no | no | no | yes | yes | no |
+| Restricted to Build + Full access | no | yes | yes | no | yes | no | no | no | no | no |
+| Rewind and branch at a turn | yes | yes | yes | yes | yes | yes | **no** | yes | yes | **no** |
 
 Kimi Code's steering is the transport's, not a probed policy: the ACP driver
 sends the second `session/prompt` for every agent it drives, but Kimi's
@@ -572,7 +572,7 @@ received them.
 
 ## Agent Client Protocol
 
-**Launch** — `cursor-agent acp`, `grok agent stdio`, `kimi acp`
+**Launch** — `cursor-agent acp`, `fx acp`, `grok agent stdio`, `kimi acp`
 ([driver/acp.rs](../crates/waku-core/src/driver/acp.rs)).
 
 **Protocol** — newline-delimited JSON-RPC over stdio, bidirectional. One agent
@@ -582,11 +582,12 @@ to. Alongside Codex's app-server, this is the only transport where Waku's
 Supervised mode means what it says.
 
 **Lifetime** — long-lived, like Codex and Pi. Cursor and Grok previously spawned
-a process per turn; Kimi Code arrived on this transport directly.
+a process per turn; Fx and Kimi Code arrived on this transport directly.
 
 **Handshake** — `initialize` (advertising **no** `fs` or `terminal` client
 capability, since Waku does not proxy the agent's file or terminal access — an
-advertised capability the client cannot honor strands the agent mid-tool-call) →
+advertised capability the client cannot honor strands the agent mid-tool-call;
+Cursor alone receives its `_meta.parameterizedModelPicker` opt-in) →
 `session/resume` when resuming and the agent advertises it (so history is not
 replayed), otherwise a replay-suppressed `session/load` when it reports
 `loadSession`, else `session/new` → optional `session/set_mode`. A restore the
@@ -594,6 +595,21 @@ agent no longer recognizes falls back to a fresh session rather than stranding
 the task. Mode selection is applied after both new and restored sessions. Kimi
 Code advertises both, so it takes the first rung — `session/resume`, verified
 against a session left by an earlier process.
+
+Cursor's picker opt-in makes `session/new`, `session/load`, and
+`session/resume` return provider-owned `configOptions`. Waku resolves the CLI's
+flat model alias to the advertised `model` value, then applies any dynamic
+`thought_level`, `thinking`, and `fast` options returned by that selection. If
+an older Cursor agent advertises no model option, Waku retains the legacy
+`session/set_model` request.
+
+Fx also returns provider-owned config options, but its first model-category
+option selects an account provider while the option whose id is `model` selects
+the model. AI Gateway IDs such as `openai/gpt-5.6-luna-fast` are absent until
+Waku first selects Fx's `gateway` provider option and reads the refreshed model
+option from that response. Waku then targets the exact `model` id with
+`session/set_config_option`; falling back to the older `session/set_model`
+extension would not change Fx's model.
 
 **Per turn** — `session/prompt`, whose response stays open until the turn ends.
 It is tracked apart from the blocking request table precisely so the writer stays
@@ -644,6 +660,11 @@ Everything outside `session/update` on that channel is agent-private control
 traffic (Grok emits a stream of `_x.ai/*` notifications) and never reaches the
 transcript.
 
+Fx emits its context-limit and skill-discovery diagnostics as ordinary
+`agent_message_chunk` updates before the model starts. Their reserved
+`[context]` and `skill discovery warning:` prefixes are provider notices rather
+than assistant content, so Waku filters that prelude from the transcript.
+
 **Approvals** — `session/request_permission` becomes a `Permission` event whose
 options come straight from the agent, with `kind` (`allow_once`, `allow_always`,
 `reject_once`, `reject_always`) deciding which read as allow. The detail line is
@@ -676,7 +697,9 @@ is a deliberate future call, not an oversight.
 
 **Modes** — Plan maps to the agent's own `plan` mode via `session/set_mode` when
 it advertises one; Cursor offers `agent`, `plan` and `ask`, Kimi Code offers
-`default`, `plan`, `auto` and `yolo`. Every other access mode is Waku's to
+`default`, `plan`, `auto` and `yolo`. Fx offers only `ask` and `code`, so Waku
+disables Plan for Fx, maps Supervised to `ask`, and maps the auto modes to
+`code`. Every other access mode is Waku's to
 enforce: the agent stays in the mode that asks, and `auto_approve` decides
 whether Waku answers `session/request_permission` on the user's behalf. That is
 why Kimi is left in `default` rather than being switched to `auto` or `yolo` —
@@ -716,16 +739,21 @@ agents; T3 Code runs the same last-prompt-settles bookkeeping for both. Kimi
 Code takes the same path by virtue of the transport, but its superseded-prompt
 policy has not been probed against a live turn.
 
+Fx allows only one active prompt per connection, so its driver does not
+advertise steering. Follow-ups remain in Waku's queue and start after the
+current prompt settles.
+
 **Rewind and branch** — unchanged and still out of band: Grok forks through its
 own ACP server plus on-disk truncation
 ([grok_session.rs](../crates/waku-core/src/grok_session.rs)), Cursor re-seeds a
 fresh session ([cursor_session.rs](../crates/waku-core/src/cursor_session.rs)).
 
-**Kimi Code has neither, deliberately.** It advertises a `fork` session
+**Kimi Code and Fx have neither, deliberately.** Kimi advertises a `fork` session
 capability, but `session/fork` takes only `{sessionId, cwd}` and copies the
 whole conversation — there is no turn count, so "drop the last N turns" cannot
-be expressed. `ProviderKind::supports_conversation_fork` and
-`supports_conversation_rollback` are therefore false for Kimi, which hides the
+be expressed. Fx exposes no turn-aware fork or truncation method.
+`ProviderKind::supports_conversation_fork` and
+`supports_conversation_rollback` are therefore false for both, which hides the
 rewind and branch affordances rather than offering a control that would silently
 keep history the user asked to discard. The daemon and desktop match arms for it
 exist only to keep the matches exhaustive; reaching them means the UI gate was
@@ -747,13 +775,13 @@ Waku's `InteractionMode` (Build / Plan) and `RuntimeMode` (Supervised /
 Auto-accept edits / Auto / Full access) collapse into each CLI's own vocabulary.
 Plan always wins over the access mode.
 
-| Waku | Codex (`approvalPolicy` / `sandbox` / reviewer) | Claude `--permission-mode` | Cursor | OpenCode | Grok | Kimi Code |
-| --- | --- | --- | --- | --- | --- | --- |
-| Plan | `never` / `read-only` / `user` | `plan` | `session/set_mode` → `plan` | `agent: plan` | `session/set_mode` → `plan` | `session/set_mode` → `plan` |
-| Supervised | `untrusted` / `read-only` / `user` | `default` + `can_use_tool` reaches the user | `session/request_permission` reaches the user | permission requests reach the user | `session/request_permission` reaches the user | `session/request_permission` reaches the user |
-| Auto-accept edits | `on-request` / `workspace-write` / `user` | `acceptEdits` | auto-answered | auto-answered (`always`) | auto-answered | auto-answered |
-| Auto | `on-request` / `workspace-write` / `auto_review` | `auto` | auto-answered | auto-answered (`always`) | auto-answered | auto-answered |
-| Full access | `never` / `danger-full-access` / `user` | `bypassPermissions` + `--dangerously-skip-permissions` | auto-answered | auto-answered (`always`) | auto-answered | auto-answered |
+| Waku | Codex (`approvalPolicy` / `sandbox` / reviewer) | Claude `--permission-mode` | Cursor | Fx | OpenCode | Grok | Kimi Code |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| Plan | `never` / `read-only` / `user` | `plan` | `session/set_mode` → `plan` | unsupported; control disabled | `agent: plan` | `session/set_mode` → `plan` | `session/set_mode` → `plan` |
+| Supervised | `untrusted` / `read-only` / `user` | `default` + `can_use_tool` reaches the user | `session/request_permission` reaches the user | `session/set_mode` → `ask` | permission requests reach the user | `session/request_permission` reaches the user | `session/request_permission` reaches the user |
+| Auto-accept edits | `on-request` / `workspace-write` / `user` | `acceptEdits` | auto-answered | `session/set_mode` → `code` | auto-answered (`always`) | auto-answered | auto-answered |
+| Auto | `on-request` / `workspace-write` / `auto_review` | `auto` | auto-answered | `session/set_mode` → `code` | auto-answered (`always`) | auto-answered | auto-answered |
+| Full access | `never` / `danger-full-access` / `user` | `bypassPermissions` + `--dangerously-skip-permissions` | auto-answered | `session/set_mode` → `code` | auto-answered (`always`) | auto-answered | auto-answered |
 
 Amp, Pi, and Oh My Pi accept Build + Full access only and always run wide open
 (`--dangerously-allow-all`, `--approve`, `--yolo`).
@@ -779,6 +807,7 @@ persisted with the session and is what makes a Waku task outlive its process:
 | Claude | `session_id`, `resume_at` | `resume_at` is the transcript message uuid used for forking |
 | Amp | `thread_id`, `fork_context` | `fork_context` is the seeded history for a branch |
 | Cursor | `session_id`, `fork_context` | id is empty until a seeded branch streams one |
+| Fx | `session_id` | `session/resume`; no fork or rewind, see above |
 | OpenCode | `session_id` | `--session` / server fork |
 | Grok | `session_id` | `--resume` / ACP fork |
 | Kimi Code | `session_id` | `session/resume`; no fork, see above |

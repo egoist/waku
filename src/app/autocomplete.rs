@@ -31,7 +31,7 @@ use super::composer::next_picker_highlight;
 use super::*;
 
 /// Key context the composer card declares while the popup is open.
-const AUTOCOMPLETE_CONTEXT: &str = "ComposerAutocomplete > ComposerInput";
+const AUTOCOMPLETE_CONTEXT: &str = "ComposerAutocomplete > TextInput";
 
 /// Bind the popup's keys. Must run after [`crate::input::init`]: `enter` and
 /// the arrows tie with the field's own bindings at the `ComposerInput` depth,
@@ -247,7 +247,7 @@ impl Waku {
     fn composer_trigger(&self, window: &Window, cx: &App) -> Option<Trigger> {
         let input = self.composer.read(cx);
         let trigger = if input.focus().is_focused(window) {
-            composer_complete::detect_trigger(input.content(), input.cursor())
+            composer_complete::detect_trigger(input.content(cx), input.cursor(cx))
         } else {
             None
         };
@@ -353,11 +353,14 @@ impl Waku {
             return;
         };
         let insert = match row {
-            AutocompleteRow::Command(scored) => format!("/{} ", scored.item.name),
+            AutocompleteRow::Command(scored) => {
+                let composer_text = composer_complete::command_composer_text(&scored.item);
+                format!("{composer_text} ")
+            }
             AutocompleteRow::File(scored) => format!("@{} ", scored.item.path),
         };
         if matches!(row, AutocompleteRow::Command(_)) {
-            let mut submission = self.composer.read(cx).content().to_owned();
+            let mut submission = self.composer.read(cx).content(cx).to_owned();
             submission.replace_range(trigger.range.clone(), &insert);
             if self.execute_local_composer_command(&submission, cx) {
                 return;
@@ -470,12 +473,13 @@ impl Waku {
         match row {
             AutocompleteRow::Command(scored) => {
                 let command = &scored.item;
+                let composer_text = composer_complete::command_composer_text(command);
                 let icon_path = if command.scope == composer_complete::CommandScope::Skill {
                     "icons/sparkle.svg"
                 } else {
                     "icons/command.svg"
                 };
-                // Positions index the bare name; the drawn `/` shifts every
+                // Positions index the bare name; the drawn sigil shifts every
                 // byte range right by one.
                 let name_ranges = highlight_byte_ranges(&command.name, &scored.positions, 0)
                     .into_iter()
@@ -489,9 +493,9 @@ impl Waku {
                             .flex_none()
                             .max_w(px(260.0))
                             .truncate()
-                            .text_size(px(12.0))
+                            .text_size(sp(12.5))
                             .child(matched_text(
-                                format!("/{}", command.name),
+                                composer_text,
                                 name_ranges,
                                 theme.text,
                                 theme.accent,
@@ -502,7 +506,7 @@ impl Waku {
                         element.child(
                             div()
                                 .flex_none()
-                                .text_size(px(11.0))
+                                .text_size(sp(12.5))
                                 .text_color(theme.text_ghost)
                                 .child(hint),
                         )
@@ -512,13 +516,13 @@ impl Waku {
                             .flex_1()
                             .min_w_0()
                             .truncate()
-                            .text_size(px(11.0))
+                            .text_size(sp(12.5))
                             .text_color(theme.text_tertiary)
                             .child(SharedString::from(command.description.clone())),
                     )
                     .child(
                         div()
-                            .h(px(16.0))
+                            .h(px(18.0))
                             .px(px(5.0))
                             .flex_none()
                             .rounded(px(4.0))
@@ -526,7 +530,7 @@ impl Waku {
                             .border_color(theme.border)
                             .flex()
                             .items_center()
-                            .text_size(px(9.0))
+                            .text_size(sp(12.5))
                             .font_weight(FontWeight::SEMIBOLD)
                             .text_color(theme.text_tertiary)
                             .child(command.scope.label()),
@@ -557,7 +561,7 @@ impl Waku {
                             .flex_none()
                             .max_w(px(300.0))
                             .truncate()
-                            .text_size(px(12.0))
+                            .text_size(sp(12.5))
                             .child(matched_text(
                                 name.to_owned(),
                                 highlight_byte_ranges(name, &scored.positions, name_char_offset),
@@ -572,7 +576,7 @@ impl Waku {
                                 .flex_1()
                                 .min_w_0()
                                 .truncate()
-                                .text_size(px(11.0))
+                                .text_size(sp(12.5))
                                 .child(matched_text(
                                     parent.to_owned(),
                                     highlight_byte_ranges(parent, &scored.positions, 0),

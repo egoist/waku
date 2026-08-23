@@ -74,6 +74,7 @@ argument**; `NO_COLOR=1` and `CI=1` are set for all of them.
 | Codex CLI | `codex exec` | `--sandbox read-only --ephemeral --color never --skip-git-repo-check` | pinned `gpt-5.6-luna` | pinned `none`, via `-c` |
 | Cursor CLI | `cursor-agent` | `--print --output-format text --mode ask --sandbox enabled --trust` | `--model` | — |
 | DeepSeek Harness | `dsh` | `--profile headless` | — | — |
+| Fx | `fx ask` | `--no-save --no-color --` | — | — |
 | OpenCode | `opencode run` | `--pure --agent plan` | `--model` | `--variant` |
 | Grok Build | `grok` | `--single <prompt> --output-format plain --permission-mode plan --tools "" --no-memory --no-subagents --disable-web-search --verbatim` | `--model` | `--reasoning-effort` |
 | Pi | `pi` | `--print --no-session --no-tools --no-context-files --no-extensions --no-skills --no-prompt-templates --no-approve` | `--model` | `--thinking` |

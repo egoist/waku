@@ -31,13 +31,13 @@ use gpui::{
 use parking_lot::Mutex;
 
 use crate::persistence::DEFAULT_RIGHT_PANEL_WIDTH;
-use crate::theme::Theme;
+use crate::theme::{Theme, sp};
 use crate::ui::scrollbar::{self, ScrollbarState};
 
 /// Fallback advance width, used only until the font has been measured.
-const TERMINAL_CELL_WIDTH: f32 = 7.2;
-const TERMINAL_CELL_HEIGHT: f32 = 16.0;
-const TERMINAL_FONT_SIZE: f32 = 11.5;
+const TERMINAL_CELL_WIDTH: f32 = 7.8;
+const TERMINAL_CELL_HEIGHT: f32 = 18.0;
+const TERMINAL_FONT_SIZE: f32 = 12.5;
 
 #[inline]
 fn primary_modifier_pressed(modifiers: &Modifiers) -> bool {
@@ -1195,8 +1195,8 @@ impl Render for TerminalView {
             screen = screen.child(
                 div()
                     .p(px(12.0))
-                    .text_size(px(11.0))
-                    .line_height(px(17.0))
+                    .text_size(sp(12.5))
+                    .line_height(sp(17.0))
                     .text_color(if self.error.is_some() {
                         theme.danger
                     } else {
@@ -1323,14 +1323,14 @@ impl Render for TerminalView {
                             .min_w_0()
                             .flex_1()
                             .truncate()
-                            .text_size(px(10.5))
+                            .text_size(sp(12.5))
                             .text_color(theme.text_secondary)
                             .child(SharedString::from(title.to_owned())),
                     )
                     .child(
                         div()
                             .flex_none()
-                            .text_size(px(10.0))
+                            .text_size(sp(12.5))
                             .text_color(theme.text_tertiary)
                             .child(directory),
                     ),

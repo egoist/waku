@@ -236,6 +236,7 @@ impl Render for Waku {
             self.tick_fps(window);
         }
         let image_preview = self.render_image_preview(cx);
+        let task_switcher = self.render_task_switcher(window, cx);
         if self.settings_page.is_some() {
             let command_palette = self.render_command_palette(window, cx);
             let commit_dialog = self.render_commit_dialog(cx);
@@ -244,11 +245,19 @@ impl Render for Waku {
                 .relative()
                 .size_full()
                 .on_action(cx.listener(Self::toggle_command_palette_action))
+                .on_action(cx.listener(Self::switch_task_forward_action))
+                .on_action(cx.listener(Self::switch_task_backward_action))
+                .on_action(cx.listener(Self::select_first_task_action))
+                .on_action(cx.listener(Self::select_last_task_action))
+                .on_action(cx.listener(Self::confirm_task_switch_action))
+                .on_action(cx.listener(Self::cancel_task_switch_action))
+                .on_modifiers_changed(cx.listener(Self::task_switcher_modifiers_changed))
                 .child(self.render_settings(window, cx))
                 .children(toast)
                 .children(command_palette)
                 .children(commit_dialog)
                 .children(image_preview)
+                .children(task_switcher)
                 .into_any_element();
             return self.render_window_frame(content, window, cx);
         }
@@ -275,6 +284,12 @@ impl Render for Waku {
             .on_action(cx.listener(Self::toggle_fps_counter_action))
             .on_action(cx.listener(Self::navigate_back_action))
             .on_action(cx.listener(Self::navigate_forward_action))
+            .on_action(cx.listener(Self::switch_task_forward_action))
+            .on_action(cx.listener(Self::switch_task_backward_action))
+            .on_action(cx.listener(Self::select_first_task_action))
+            .on_action(cx.listener(Self::select_last_task_action))
+            .on_action(cx.listener(Self::confirm_task_switch_action))
+            .on_action(cx.listener(Self::cancel_task_switch_action))
             .on_action(cx.listener(Self::focus_composer_action))
             .on_action(cx.listener(Self::toggle_model_picker_action))
             .on_action(cx.listener(Self::toggle_usage_panel_action))
@@ -290,6 +305,7 @@ impl Render for Waku {
             .on_action(cx.listener(Self::toggle_find_whole_word_action))
             .on_action(cx.listener(Self::toggle_find_regex_action))
             .on_action(cx.listener(Self::replace_all_matches_action))
+            .on_modifiers_changed(cx.listener(Self::task_switcher_modifiers_changed))
             .capture_any_mouse_down(cx.listener(Self::navigation_mouse_down))
             .on_mouse_move(cx.listener(Self::resize_panel_mouse_move))
             .capture_any_mouse_up(cx.listener(Self::finish_panel_resize))
@@ -386,6 +402,7 @@ impl Render for Waku {
             .children(command_palette)
             .children(commit_dialog)
             .children(image_preview)
+            .children(task_switcher)
             .into_any_element();
 
         self.render_window_frame(content, window, cx)
@@ -442,7 +459,7 @@ impl Waku {
         let text_ctx = MarkdownCtx::new(
             format!("toast-{generation}"),
             &palette,
-            MarkdownMetrics::COMPACT,
+            self.scaled_markdown_metrics(MarkdownMetrics::COMPACT),
             self.toast_selection.clone(),
         );
         let message = md::render::plain_text(
@@ -505,8 +522,8 @@ impl Waku {
                     .flex()
                     .items_center()
                     .gap(px(8.0))
-                    .text_size(px(11.5))
-                    .line_height(px(16.0))
+                    .text_size(sp(12.5))
+                    .line_height(sp(16.0))
                     .text_color(theme.text)
                     .on_hover(cx.listener(|this, hovering: &bool, _, cx| {
                         this.set_toast_hovered(*hovering, cx);

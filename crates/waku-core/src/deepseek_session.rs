@@ -146,6 +146,7 @@ impl DeepSeekServer {
     }
 
     fn start_with_dsh_home(binary: &Path, dsh_home: Option<&Path>) -> anyhow::Result<Self> {
+        let supports_no_open = web_supports_no_open(binary, dsh_home);
         #[cfg(unix)]
         let mut command = {
             let mut command = crate::command_env::command("/bin/sh");
@@ -153,12 +154,18 @@ impl DeepSeekServer {
                 .args(["-c", DSH_GUARDIAN_SCRIPT, "waku-dsh-guardian"])
                 .arg(binary)
                 .args(["web", "--host", "127.0.0.1", "--port", "0"]);
+            if supports_no_open {
+                command.arg("--no-open");
+            }
             command
         };
         #[cfg(not(unix))]
         let mut command = {
             let mut command = crate::command_env::command(binary);
             command.args(["web", "--host", "127.0.0.1", "--port", "0"]);
+            if supports_no_open {
+                command.arg("--no-open");
+            }
             command
         };
         command
@@ -420,6 +427,23 @@ fn parse_ready_port(line: &str) -> Option<u16> {
     (url.scheme() == "http" && url.host_str() == Some("127.0.0.1"))
         .then(|| url.port())
         .flatten()
+}
+
+fn web_supports_no_open(binary: &Path, dsh_home: Option<&Path>) -> bool {
+    let mut command = crate::command_env::command(binary);
+    command.args(["web", "--help"]);
+    if let Some(dsh_home) = dsh_home {
+        command.env("DSH_HOME", dsh_home);
+    }
+    crate::command_env::output(&mut command)
+        .ok()
+        .is_some_and(|output| web_help_supports_no_open(&output.stdout))
+}
+
+fn web_help_supports_no_open(output: &[u8]) -> bool {
+    String::from_utf8_lossy(output)
+        .lines()
+        .any(|line| line.contains("--no-open"))
 }
 
 fn terminate_child(child: &mut Child, timeout: Duration) {
@@ -690,6 +714,16 @@ mod tests {
     }
 
     #[test]
+    fn web_no_open_flag_is_capability_gated() {
+        assert!(web_help_supports_no_open(
+            b"  --no-open  do not open the Web UI in the default browser\n"
+        ));
+        assert!(!web_help_supports_no_open(
+            b"  --port <port>  listen port\n"
+        ));
+    }
+
+    #[test]
     fn event_hub_routes_session_frames_and_broadcasts_stream_errors() {
         let hub = EventHub::default();
         let first = hub.subscribe("one");
@@ -793,7 +827,7 @@ mod tests {
                 let response = server
                     .rpc(
                         "commands/execute",
-                        json!({"args": {"agentId": session_id, "line": command}}),
+                        json!({"args": {"agentId": session_id, "line": command, "images": []}}),
                     )
                     .expect("native configuration command should succeed");
                 assert_eq!(

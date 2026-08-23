@@ -39,6 +39,7 @@ command_palette.settings: 设置
 command_palette.new_task: 新建任务
 command_palette.open_project: 打开项目…
 command_palette.choose_model: 选择模型…
+command_palette.collapse_sidebar_groups: 折叠所有侧边栏分组
 command_palette.show_sidebar: 显示侧边栏
 command_palette.hide_sidebar: 隐藏侧边栏
 command_palette.show_right_panel: 显示右侧面板
@@ -58,7 +59,7 @@ settings.usage: 用量
 settings.daemon: 守护进程
 settings.computer_use: 电脑操作
 settings.general_keywords: 通用 本地 项目 对话 隐私 匿名 使用数据 分析 分享 更新 自动 版本
-settings.appearance_keywords: 外观 主题 系统 浅色 深色 语言 英语 中文 简体
+settings.appearance_keywords: 外观 主题 系统 浅色 深色 语言 英语 中文 简体 字号 字体 大小 编辑器
 settings.providers_keywords: 服务商 智能体 模型 命令行 版本 安装 检测 claude codex cursor opencode amp grok pi
 settings.skills: 技能
 settings.skills_keywords: 技能 技能库 智能体 禁用 启用 删除 claude codex cursor opencode pi amp 共享
@@ -134,6 +135,10 @@ web.error_secure_websocket_required: 安全的 Waku Web 页面只能通过 wss:/
 web.error_daemon_token_required: 请输入守护进程令牌
 settings.theme: 主题
 settings.theme_description: 选择跟随系统、浅色或深色主题
+settings.ui_font_size: 界面字号
+settings.ui_font_size_description: 整个界面与消息的文字大小
+settings.code_font_size: 代码字号
+settings.code_font_size_description: 文件编辑器、差分视图、代码块与工具输出的文字大小
 settings.theme_system: 跟随系统
 settings.theme_light: 浅色
 settings.theme_dark: 深色
@@ -203,6 +208,14 @@ common.rename: 重命名
 session.new_task: 新任务
 sidebar.today: 今天
 sidebar.search: 搜索
+sidebar.options: 侧边栏选项
+sidebar.grouping: 分组
+sidebar.grouping_project: 项目
+sidebar.grouping_updated: 更新时间
+sidebar.ordering: 排序
+sidebar.ordering_newest: 最新优先
+sidebar.ordering_oldest: 最旧优先
+sidebar.show_more: 显示更多
 sidebar.yesterday: 昨天
 sidebar.this_week: 本周
 sidebar.this_month: 本月
@@ -672,6 +685,8 @@ right_panel.tabs: 右侧面板标签页
 right_panel.add_tab: 添加面板标签页
 right_panel.hide: 隐藏右侧面板
 right_panel.close_tab: 关闭%{title}
+open_in.open: 用%{app}打开项目
+open_in.choose: 选择打开项目的应用…
 environment.title: 环境
 environment.summary: 环境和后台工作
 environment.changes: 更改
@@ -739,6 +754,8 @@ files.unable_to_edit: "无法编辑此文件：%{error}"
 files.could_not_save_opening: "无法保存 %{path}：文件仍在打开"
 files.could_not_save_read_only: "无法保存 %{path}：文件不可编辑"
 files.could_not_save: "无法保存 %{path}：%{error}"
+files.preview_markdown: 预览 Markdown
+files.edit_markdown_source: 编辑源码
 files.resize_tree: 调整文件树宽度
 files.refresh: 刷新文件
 files.loading: 正在加载文件…

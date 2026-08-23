@@ -54,14 +54,47 @@ enum CommandMessage {
 
 /// The prompt body both turn starts and steers post; the model rides on every
 /// prompt because the server has no session-level model setting.
-fn prompt_body(text: &str, model: Option<&str>) -> Value {
+fn prompt_body(text: &str, model: Option<&str>, agent: &str) -> Value {
     let mut body = json!({
+        "agent": agent,
         "parts": [{"type": "text", "text": text}]
     });
     if let Some((provider_id, model_id)) = model.and_then(|model| model.split_once('/')) {
         body["model"] = json!({"providerID": provider_id, "modelID": model_id});
     }
     body
+}
+
+fn opencode_permission_rules(mode: RuntimeMode, interaction_mode: InteractionMode) -> Value {
+    let plan = interaction_mode == InteractionMode::Plan || mode == RuntimeMode::Plan;
+    let rule = |permission: &str, action: &str| {
+        json!({
+            "permission": permission,
+            "pattern": "*",
+            "action": action,
+        })
+    };
+
+    match mode {
+        RuntimeMode::Plan | RuntimeMode::Ask => {
+            let mut rules = vec![rule("bash", "ask")];
+            if !plan {
+                rules.push(rule("edit", "ask"));
+            }
+            Value::Array(rules)
+        }
+        RuntimeMode::AutoAcceptEdits => {
+            let mut rules = vec![rule("bash", "ask")];
+            if !plan {
+                rules.push(rule("edit", "allow"));
+            }
+            Value::Array(rules)
+        }
+        RuntimeMode::Auto | RuntimeMode::FullAccess if plan => {
+            Value::Array(vec![rule("bash", "allow")])
+        }
+        RuntimeMode::Auto | RuntimeMode::FullAccess => Value::Array(vec![rule("*", "allow")]),
+    }
 }
 
 pub struct OpenCodeDriver {
@@ -130,13 +163,19 @@ impl OpenCodeDriver {
             crate::opencode_pool::acquire(&binary, &cwd)?
         };
 
+        let agent = if interaction_mode == InteractionMode::Plan || mode == RuntimeMode::Plan {
+            "plan"
+        } else {
+            "build"
+        };
+
         // Reuse the native session when resuming so the conversation, and the
         // cursor already persisted for it, stay the same.
         let session_id = match resume_session_id {
             Some(session_id) => session_id,
             None => {
                 let created = server
-                    .request("POST", "/session", Some(&json!({})))
+                    .request("POST", "/session", Some(&json!({"agent": agent})))
                     .context("could not open an OpenCode session")?;
                 created
                     .get("id")
@@ -145,25 +184,26 @@ impl OpenCodeDriver {
                     .ok_or_else(|| anyhow!("OpenCode returned no session ID"))?
             }
         };
+
+        // OpenCode's build agent allows ordinary shell commands by default.
+        // Waku must therefore install the selected access policy on this
+        // native session; listening for permission events alone cannot make
+        // Supervised mode ask. Session-local rules are also safe on the shared
+        // per-workspace server and replace a previous mode when resuming.
+        server
+            .request(
+                "PATCH",
+                &format!("/session/{}", encode_path_segment(&session_id)),
+                Some(&json!({
+                    "permission": opencode_permission_rules(mode, interaction_mode)
+                })),
+            )
+            .context("could not configure OpenCode session permissions")?;
         let _ = events.send(DriverEvent::Connected {
             provider_cursor: Some(ProviderResumeCursor::OpenCode {
                 session_id: session_id.clone(),
             }),
         });
-
-        // The agent decides Plan versus Build, and it is per session: a
-        // resumed session gets the agent re-posted and OpenCode persists it
-        // with the session.
-        let agent = if interaction_mode == InteractionMode::Plan || mode == RuntimeMode::Plan {
-            "plan"
-        } else {
-            "build"
-        };
-        let _ = server.request(
-            "POST",
-            &format!("/session/{}/agent", encode_path_segment(&session_id)),
-            Some(&json!({"agent": agent})),
-        );
 
         let usage_metadata = Arc::new(OpenCodeUsageMetadata::default());
         let previous_usage_path = format!(
@@ -240,7 +280,7 @@ impl OpenCodeDriver {
                 }
             })?;
 
-        let auto_approve = mode != RuntimeMode::Ask;
+        let auto_approve = matches!(mode, RuntimeMode::Auto | RuntimeMode::FullAccess);
         let (commands, command_rx) = unbounded();
         let turn_active = Arc::new(Mutex::new(false));
         let permissions = Arc::new(Mutex::new(OpenCodePermissionState::default()));
@@ -270,6 +310,28 @@ impl OpenCodeDriver {
                 // may carry other sessions' traffic, so filter by session id.
                 match open_event_stream(stream_port, "/event", &stream_control) {
                     Ok(Some(stream)) => {
+                        // The stream is live before this snapshot is read, so
+                        // a request can neither fall between the two nor be
+                        // lost when Waku reconnects after it was asked. Events
+                        // that arrive during the snapshot wait in the socket;
+                        // request-level de-duplication handles the overlap.
+                        if let Ok(pending) = crate::opencode_session::request_json_on_port(
+                            stream_port,
+                            "GET",
+                            "/permission",
+                            None,
+                            Duration::from_secs(5),
+                        ) {
+                            rehydrate_pending_permissions(
+                                &pending,
+                                &stream_session,
+                                &stream_events,
+                                &stream_commands,
+                                &stream_turn,
+                                auto_approve,
+                                &state.permissions,
+                            );
+                        }
                         for line in BufReader::new(stream).lines().map_while(Result::ok) {
                             if stream_control.is_cancelled() {
                                 break;
@@ -337,7 +399,7 @@ impl OpenCodeDriver {
                                 "/session/{}/prompt_async",
                                 encode_path_segment(&worker_session)
                             );
-                            let body = prompt_body(&text, model.as_deref());
+                            let body = prompt_body(&text, model.as_deref(), agent);
                             if let Err(error) = worker_server.request("POST", &path, Some(&body)) {
                                 let _ = worker_events.send(DriverEvent::Error(tr!(
                                     "errors.provider_rejected_prompt_detail",
@@ -382,7 +444,7 @@ impl OpenCodeDriver {
                                 "/session/{}/prompt_async",
                                 encode_path_segment(&worker_session)
                             );
-                            let body = prompt_body(&text, model.as_deref());
+                            let body = prompt_body(&text, model.as_deref(), agent);
                             match worker_server.request("POST", &path, Some(&body)) {
                                 Ok(_) => {
                                     let _ = worker_events
@@ -415,11 +477,8 @@ impl OpenCodeDriver {
                             request_id,
                             option_id,
                         } => {
-                            let path = format!(
-                                "/session/{}/permission/{}/reply",
-                                encode_path_segment(&worker_session),
-                                encode_path_segment(&request_id)
-                            );
+                            let path =
+                                format!("/permission/{}/reply", encode_path_segment(&request_id));
                             if let Err(error) = worker_server.request(
                                 "POST",
                                 &path,
@@ -517,8 +576,8 @@ impl DriverControl for OpenCodeDriver {
     }
 
     fn apply_options(&self, options: SessionOptions) -> bool {
-        // The model rides on each prompt, but the agent is chosen per
-        // session, so a mode change needs a fresh driver (and session).
+        // The model rides on each prompt, but access and agent selection are
+        // installed when the driver starts, so changing either restarts it.
         options.mode == self.mode && options.interaction_mode == self.interaction_mode
     }
 
@@ -651,6 +710,7 @@ struct OpenCodePermissionRule {
 #[derive(Default)]
 struct OpenCodePermissionState {
     pending: HashMap<String, OpenCodePermissionRequest>,
+    responding: HashSet<String>,
     approved: HashSet<OpenCodePermissionRule>,
 }
 
@@ -868,7 +928,10 @@ fn handle_event(
         }
         "session.idle" => {
             state.reasoning_parts.clear();
-            state.permissions.lock().pending.clear();
+            let mut permissions = state.permissions.lock();
+            permissions.pending.clear();
+            permissions.responding.clear();
+            drop(permissions);
             if std::mem::take(&mut *turn_active.lock()) {
                 let _ = events.send(DriverEvent::TurnFinished {
                     success: true,
@@ -894,6 +957,17 @@ fn handle_event(
                 let _ = events.send(DriverEvent::AutoTitleUpdated(Some(title.to_owned())));
             }
         }
+        "permission.replied" => {
+            if let Some(request_id) = properties
+                .get("requestID")
+                .or_else(|| properties.get("id"))
+                .and_then(Value::as_str)
+            {
+                let mut permissions = state.permissions.lock();
+                permissions.pending.remove(request_id);
+                permissions.responding.remove(request_id);
+            }
+        }
         _ if kind.starts_with("permission.") => {
             request_permission(
                 properties,
@@ -908,6 +982,37 @@ fn handle_event(
         // `session.created`, `session.diff`, and the plugin/catalog/reference
         // chatter are not transcript content.
         _ => {}
+    }
+}
+
+fn rehydrate_pending_permissions(
+    response: &Value,
+    session_id: &str,
+    events: &impl DriverEventSink,
+    commands: &Sender<CommandMessage>,
+    turn_active: &Mutex<bool>,
+    auto_approve: bool,
+    permissions: &Mutex<OpenCodePermissionState>,
+) {
+    let requests = response
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|request| {
+            request.get("sessionID").and_then(Value::as_str) == Some(session_id)
+                && request.get("id").and_then(Value::as_str).is_some()
+        })
+        .collect::<Vec<_>>();
+    if requests.is_empty() {
+        return;
+    }
+
+    // A pending native permission proves that the resumed provider turn is
+    // still live. Restore this driver-local edge so the eventual
+    // `session.idle` settles Waku's persisted running turn exactly once.
+    *turn_active.lock() = true;
+    for request in requests {
+        request_permission(request, events, commands, auto_approve, permissions);
     }
 }
 
@@ -1032,7 +1137,15 @@ fn request_permission(
     // pooled Full Access task must never suppress prompts in a Supervised task,
     // so Waku sends only one-shot provider replies and retains durable choices
     // in this driver's session-local state.
-    if auto_approve || permissions.lock().is_approved(&permission_request) {
+    let mut permission_state = permissions.lock();
+    if permission_state.pending.contains_key(request_id)
+        || permission_state.responding.contains(request_id)
+    {
+        return;
+    }
+    if auto_approve || permission_state.is_approved(&permission_request) {
+        permission_state.responding.insert(request_id.to_owned());
+        drop(permission_state);
         let _ = commands.send(CommandMessage::Respond {
             request_id: request_id.to_owned(),
             option_id: "once".into(),
@@ -1040,10 +1153,10 @@ fn request_permission(
         return;
     }
 
-    permissions
-        .lock()
+    permission_state
         .pending
         .insert(request_id.to_owned(), permission_request.clone());
+    drop(permission_state);
 
     let permission = if permission_request.permission.is_empty() {
         tr!("permission.run_a_tool_lower")
@@ -1096,6 +1209,7 @@ fn permission_responses(
     let mut permissions = permissions.lock();
     let request = permissions.pending.remove(request_id);
     if option_id != "always" {
+        permissions.responding.insert(request_id.to_owned());
         return vec![(request_id.to_owned(), option_id.to_owned())];
     }
 
@@ -1116,13 +1230,17 @@ fn permission_responses(
         permissions.pending.remove(request_id);
     }
 
-    std::iter::once((request_id.to_owned(), "once".into()))
+    let responses = std::iter::once((request_id.to_owned(), "once".into()))
         .chain(
             additional
                 .into_iter()
                 .map(|request_id| (request_id, "once".into())),
         )
-        .collect()
+        .collect::<Vec<_>>();
+    permissions
+        .responding
+        .extend(responses.iter().map(|(request_id, _)| request_id.clone()));
+    responses
 }
 
 fn tool_activity(part: &Value, events: &impl DriverEventSink, state: &mut OpenCodeStreamState) {
@@ -1204,6 +1322,57 @@ mod tests {
             Mutex::new(true),
             OpenCodeStreamState::default(),
         )
+    }
+
+    #[test]
+    fn prompts_select_the_agent_and_model_for_the_turn() {
+        assert_eq!(
+            prompt_body(
+                "Inspect the failure",
+                Some("opencode-go/deepseek-v4-flash"),
+                "plan",
+            ),
+            json!({
+                "agent": "plan",
+                "model": {
+                    "providerID": "opencode-go",
+                    "modelID": "deepseek-v4-flash",
+                },
+                "parts": [{"type": "text", "text": "Inspect the failure"}],
+            })
+        );
+    }
+
+    #[test]
+    fn access_modes_install_session_local_opencode_permissions() {
+        let rule = |permission: &str, action: &str| {
+            json!({
+                "permission": permission,
+                "pattern": "*",
+                "action": action,
+            })
+        };
+
+        assert_eq!(
+            opencode_permission_rules(RuntimeMode::Ask, InteractionMode::Build),
+            json!([rule("bash", "ask"), rule("edit", "ask")])
+        );
+        assert_eq!(
+            opencode_permission_rules(RuntimeMode::AutoAcceptEdits, InteractionMode::Build),
+            json!([rule("bash", "ask"), rule("edit", "allow")])
+        );
+        assert_eq!(
+            opencode_permission_rules(RuntimeMode::Ask, InteractionMode::Plan),
+            json!([rule("bash", "ask")])
+        );
+        assert_eq!(
+            opencode_permission_rules(RuntimeMode::FullAccess, InteractionMode::Build),
+            json!([rule("*", "allow")])
+        );
+        assert_eq!(
+            opencode_permission_rules(RuntimeMode::FullAccess, InteractionMode::Plan),
+            json!([rule("bash", "allow")])
+        );
     }
 
     #[test]
@@ -1602,6 +1771,114 @@ mod tests {
             DriverEvent::AutoTitleUpdated(Some(title)) if title == "Generated provider title"
         ));
         assert!(event_rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn pending_permissions_rehydrate_only_their_session_without_duplicate_prompts() {
+        let (events, event_rx, commands, command_rx, turn, state) = harness();
+        *turn.lock() = false;
+        let response = json!([
+            {
+                "id": "per_current",
+                "sessionID": "ses_current",
+                "permission": "bash",
+                "patterns": ["ps aux", "sort -rk3", "head -25"],
+                "metadata": {},
+                "always": ["ps *", "sort *", "head *"]
+            },
+            {
+                "id": "per_other",
+                "sessionID": "ses_other",
+                "permission": "bash",
+                "patterns": ["cargo test"],
+                "metadata": {},
+                "always": ["cargo *"]
+            }
+        ]);
+
+        rehydrate_pending_permissions(
+            &response,
+            "ses_current",
+            &events,
+            &commands,
+            &turn,
+            false,
+            &state.permissions,
+        );
+        assert!(
+            *turn.lock(),
+            "a restored request proves the native turn is still active"
+        );
+        assert!(matches!(
+            event_rx.try_recv().unwrap(),
+            DriverEvent::Permission { request_id, .. } if request_id == "per_current"
+        ));
+        assert!(event_rx.try_recv().is_err());
+        assert!(command_rx.try_recv().is_err());
+
+        // The live SSE event can already be buffered while the snapshot is
+        // read. Replaying the same request must not replace the approval card
+        // or send a second provider response.
+        rehydrate_pending_permissions(
+            &response,
+            "ses_current",
+            &events,
+            &commands,
+            &turn,
+            false,
+            &state.permissions,
+        );
+        assert!(event_rx.try_recv().is_err());
+        assert!(command_rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn auto_approval_deduplicates_snapshot_and_stream_overlap() {
+        let (events, event_rx, commands, command_rx, turn, mut state) = harness();
+        let response = json!([{
+            "id": "per_auto",
+            "sessionID": "ses_current",
+            "permission": "bash",
+            "patterns": ["cargo test"],
+            "always": ["cargo *"]
+        }]);
+
+        for _ in 0..2 {
+            rehydrate_pending_permissions(
+                &response,
+                "ses_current",
+                &events,
+                &commands,
+                &turn,
+                true,
+                &state.permissions,
+            );
+        }
+
+        assert!(matches!(
+            command_rx.try_recv().unwrap(),
+            CommandMessage::Respond { request_id, option_id }
+                if request_id == "per_auto" && option_id == "once"
+        ));
+        assert!(command_rx.try_recv().is_err());
+        assert!(event_rx.try_recv().is_err());
+
+        handle_event(
+            &json!({
+                "type": "permission.replied",
+                "properties": {
+                    "sessionID": "ses_current",
+                    "requestID": "per_auto",
+                    "reply": "once"
+                }
+            }),
+            &events,
+            &commands,
+            &turn,
+            true,
+            &mut state,
+        );
+        assert!(state.permissions.lock().responding.is_empty());
     }
 
     #[test]

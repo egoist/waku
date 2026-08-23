@@ -16,6 +16,7 @@ pub enum ProviderKind {
     Codex,
     Cursor,
     DeepSeek,
+    Fx,
     OpenCode,
     Grok,
     Kimi,
@@ -24,12 +25,13 @@ pub enum ProviderKind {
 }
 
 impl ProviderKind {
-    pub const ALL: [Self; 10] = [
+    pub const ALL: [Self; 11] = [
         Self::Amp,
         Self::Claude,
         Self::Codex,
         Self::Cursor,
         Self::DeepSeek,
+        Self::Fx,
         Self::OpenCode,
         Self::Grok,
         Self::Kimi,
@@ -44,6 +46,7 @@ impl ProviderKind {
             Self::Codex => "codex",
             Self::Cursor => "cursor",
             Self::DeepSeek => "deepseek",
+            Self::Fx => "fx",
             Self::OpenCode => "opencode",
             Self::Grok => "grok",
             Self::Kimi => "kimi",
@@ -59,6 +62,7 @@ impl ProviderKind {
             Self::Codex => "Codex CLI",
             Self::Cursor => "Cursor CLI",
             Self::DeepSeek => "DeepSeek Harness",
+            Self::Fx => "Fx",
             Self::OpenCode => "OpenCode",
             Self::Grok => "Grok Build",
             Self::Kimi => "Kimi Code",
@@ -74,6 +78,7 @@ impl ProviderKind {
             Self::Codex => "Codex",
             Self::Cursor => "Cursor",
             Self::DeepSeek => "DeepSeek",
+            Self::Fx => "Fx",
             Self::OpenCode => "OpenCode",
             Self::Grok => "Grok",
             Self::Kimi => "Kimi",
@@ -91,6 +96,7 @@ impl ProviderKind {
             // shared by other CLIs. The backward-compatible alias is unambiguous.
             Self::Cursor => "cursor-agent",
             Self::DeepSeek => "dsh",
+            Self::Fx => "fx",
             Self::OpenCode => "opencode",
             Self::Grok => "grok",
             Self::Kimi => "kimi",
@@ -99,10 +105,11 @@ impl ProviderKind {
         }
     }
 
-    /// Kimi Code is deliberately absent from this list and from
-    /// [`Self::supports_conversation_fork`]: its ACP `session/fork` copies a
-    /// whole session and takes no turn count, so there is no way to reproduce
-    /// Waku's "drop the last N turns" semantics without corrupting history.
+    /// Kimi Code and Fx are deliberately absent from this list and from
+    /// [`Self::supports_conversation_fork`]. Kimi's ACP `session/fork` copies a
+    /// whole session and takes no turn count, while Fx exposes no turn-aware
+    /// fork or truncation method. Neither can reproduce Waku's "drop the last N
+    /// turns" semantics without corrupting history.
     pub fn supports_conversation_rollback(self) -> bool {
         matches!(
             self,
@@ -139,6 +146,7 @@ impl ProviderKind {
             Self::Codex
                 | Self::Cursor
                 | Self::DeepSeek
+                | Self::Fx
                 | Self::OpenCode
                 | Self::Grok
                 | Self::Kimi
@@ -179,6 +187,9 @@ pub enum ProviderResumeCursor {
     DeepSeek {
         session_id: String,
     },
+    Fx {
+        session_id: String,
+    },
     Grok {
         session_id: String,
     },
@@ -214,6 +225,7 @@ impl ProviderResumeCursor {
                 fork_context: None,
             },
             ProviderKind::DeepSeek => Self::DeepSeek { session_id: id },
+            ProviderKind::Fx => Self::Fx { session_id: id },
             ProviderKind::OpenCode => Self::OpenCode { session_id: id },
             ProviderKind::Grok => Self::Grok { session_id: id },
             ProviderKind::Kimi => Self::Kimi { session_id: id },
@@ -235,6 +247,7 @@ impl ProviderResumeCursor {
             Self::Codex { .. } => ProviderKind::Codex,
             Self::Cursor { .. } => ProviderKind::Cursor,
             Self::DeepSeek { .. } => ProviderKind::DeepSeek,
+            Self::Fx { .. } => ProviderKind::Fx,
             Self::OpenCode { .. } => ProviderKind::OpenCode,
             Self::Grok { .. } => ProviderKind::Grok,
             Self::Kimi { .. } => ProviderKind::Kimi,
@@ -249,6 +262,7 @@ impl ProviderResumeCursor {
             Self::Claude { session_id, .. }
             | Self::Cursor { session_id, .. }
             | Self::DeepSeek { session_id }
+            | Self::Fx { session_id }
             | Self::OpenCode { session_id }
             | Self::Grok { session_id }
             | Self::Kimi { session_id }
@@ -3808,6 +3822,7 @@ mod tests {
         assert_eq!(ProviderKind::Codex.command(), "codex");
         assert_eq!(ProviderKind::Cursor.command(), "cursor-agent");
         assert_eq!(ProviderKind::DeepSeek.command(), "dsh");
+        assert_eq!(ProviderKind::Fx.command(), "fx");
         assert_eq!(ProviderKind::OpenCode.command(), "opencode");
         assert_eq!(ProviderKind::Grok.command(), "grok");
         assert_eq!(ProviderKind::Pi.command(), "pi");
@@ -3828,6 +3843,10 @@ mod tests {
             assert!(provider.supports_conversation_fork());
             assert!(provider.supports_conversation_rollback());
         }
+        for provider in [ProviderKind::Fx, ProviderKind::Kimi] {
+            assert!(!provider.supports_conversation_fork());
+            assert!(!provider.supports_conversation_rollback());
+        }
     }
 
     #[test]
@@ -3837,6 +3856,7 @@ mod tests {
         assert!(ProviderKind::Codex.supports_model_discovery());
         assert!(ProviderKind::Cursor.supports_model_discovery());
         assert!(ProviderKind::DeepSeek.supports_model_discovery());
+        assert!(ProviderKind::Fx.supports_model_discovery());
         assert!(ProviderKind::OpenCode.supports_model_discovery());
         assert!(ProviderKind::Grok.supports_model_discovery());
         assert!(ProviderKind::Pi.supports_model_discovery());

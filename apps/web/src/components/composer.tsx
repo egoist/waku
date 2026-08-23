@@ -341,7 +341,11 @@ export function Composer({
     submittedPrompt: string,
     submittedAttachments: MessageAttachment[],
   ): string | undefined {
-    const expanded = expandedComposerSubmission(submittedPrompt.trim(), availableCommands)
+    const expanded = expandedComposerSubmission(
+      session.provider,
+      submittedPrompt.trim(),
+      availableCommands,
+    )
     if (expanded === null) return undefined
     return [
       expanded,
@@ -1384,7 +1388,8 @@ function InteractionModeControl({
   const { t } = useI18n()
   const plan = session.interaction_mode === 'plan'
   const minimal = session.provider === 'deepSeek' && session.agent_preset === 'minimal'
-  const interactive = plan || !minimal
+  const supportsPlan = session.provider !== 'fx' && !minimal
+  const interactive = plan || supportsPlan
   return (
     <button
       aria-label={t('mode.switch_to', { mode: t(plan ? 'mode.build' : 'mode.plan') })}
@@ -1394,7 +1399,11 @@ function InteractionModeControl({
         interactive ? 'hover:bg-accent' : 'opacity-50',
       )}
       disabled={!interactive}
-      title={minimal && !plan ? t('agent_preset.minimal_no_plan') : undefined}
+      title={
+        !interactive
+          ? t(session.provider === 'fx' ? 'mode.plan_not_supported' : 'agent_preset.minimal_no_plan')
+          : undefined
+      }
       type="button"
       onClick={() => onPatch({ interaction_mode: plan ? 'build' : 'plan' })}
     >

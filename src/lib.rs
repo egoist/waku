@@ -73,6 +73,12 @@ actions!(
         ToggleFpsCounter,
         NavigateBack,
         NavigateForward,
+        SwitchTaskForward,
+        SwitchTaskBackward,
+        SelectFirstTask,
+        SelectLastTask,
+        ConfirmTaskSwitch,
+        CancelTaskSwitch,
         FocusComposer,
         ToggleModelPicker,
         ToggleUsagePanel,
@@ -234,6 +240,18 @@ pub fn run() {
                 KeyBinding::new("secondary-alt-shift-f", ToggleFpsCounter, None),
                 KeyBinding::new("secondary-[", NavigateBack, Some("Waku")),
                 KeyBinding::new("secondary-]", NavigateForward, Some("Waku")),
+                KeyBinding::new("ctrl-tab", SwitchTaskForward, Some("Waku")),
+                KeyBinding::new("ctrl-shift-tab", SwitchTaskBackward, Some("Waku")),
+                KeyBinding::new("ctrl-escape", CancelTaskSwitch, Some("Waku")),
+                KeyBinding::new("ctrl-shift-escape", CancelTaskSwitch, Some("Waku")),
+                KeyBinding::new("down", SwitchTaskForward, Some("TaskSwitcher")),
+                KeyBinding::new("right", SwitchTaskForward, Some("TaskSwitcher")),
+                KeyBinding::new("up", SwitchTaskBackward, Some("TaskSwitcher")),
+                KeyBinding::new("left", SwitchTaskBackward, Some("TaskSwitcher")),
+                KeyBinding::new("home", SelectFirstTask, Some("TaskSwitcher")),
+                KeyBinding::new("end", SelectLastTask, Some("TaskSwitcher")),
+                KeyBinding::new("enter", ConfirmTaskSwitch, Some("TaskSwitcher")),
+                KeyBinding::new("escape", CancelTaskSwitch, Some("TaskSwitcher")),
                 KeyBinding::new("secondary-l", FocusComposer, None),
                 KeyBinding::new("secondary-/", ToggleModelPicker, None),
                 KeyBinding::new("secondary-u", ToggleUsagePanel, None),
@@ -244,12 +262,19 @@ pub fn run() {
                 // conventional VS Code bindings. The primary shortcut + G cycles matches from
                 // the editor without moving focus to the bar.
                 KeyBinding::new("secondary-f", OpenFind, Some("Waku")),
+                // The text input's macOS-style Ctrl-F caret binding is more
+                // specific than Waku's root context. Reassert the platform
+                // primary shortcut for inputs inside this window so Ctrl-F
+                // remains find-in-page on Linux/Windows while Cmd-F keeps the
+                // native behavior on macOS.
+                KeyBinding::new("secondary-f", OpenFind, Some("Waku > TextInput")),
                 KeyBinding::new("secondary-alt-f", OpenFindReplace, Some("Waku")),
                 KeyBinding::new("secondary-g", FindNext, Some("Waku")),
                 KeyBinding::new("secondary-shift-g", FindPrevious, Some("Waku")),
                 // Scoped to the editor pane: escape closes the bar there and
                 // falls through to CancelTurn anywhere else.
                 KeyBinding::new("escape", CloseFind, Some("FileEditorPane")),
+                KeyBinding::new("escape", CloseFind, Some("FindBar")),
                 KeyBinding::new(
                     "secondary-alt-c",
                     ToggleFindCaseSensitive,

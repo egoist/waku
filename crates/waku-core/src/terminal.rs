@@ -163,6 +163,16 @@ mod platform {
     impl Drop for DaemonTerminal {
         fn drop(&mut self) {
             self.stopped.store(true, Ordering::Release);
+            // The output reader may be blocked in `read` while the shell is
+            // idle. Alacritty hangs the child up when its PTY is dropped, but
+            // the reader owns another `Arc` to that PTY, so waiting for the
+            // reader first would keep both the child and its slave fd alive.
+            // Terminate the shell before joining so the master read wakes and
+            // the reader can observe `stopped`.
+            let child_pid = self.pty.lock().child().id() as libc::pid_t;
+            unsafe {
+                libc::kill(child_pid, libc::SIGHUP);
+            }
             if let Some(reader) = self.reader.take() {
                 let _ = reader.join();
             }

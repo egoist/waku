@@ -9,7 +9,7 @@ use gpui::{
     div, px,
 };
 
-use crate::theme::Theme;
+use crate::theme::{Theme, sp};
 
 /// A single-line hint.
 pub struct Tooltip {
@@ -55,8 +55,8 @@ impl Render for Tooltip {
                 .flex()
                 .items_center()
                 .gap(px(6.0))
-                .text_size(px(11.0))
-                .line_height(px(15.0))
+                .text_size(sp(12.5))
+                .line_height(sp(15.0))
                 .text_color(theme.text_secondary)
                 .child(self.label.clone()),
         )

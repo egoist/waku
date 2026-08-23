@@ -99,9 +99,17 @@ describe('slash command templates', () => {
 
   test('expands only a known command with a template', () => {
     const commands = [command('review', 'Project', '', 'Review $ARGUMENTS')]
-    expect(expandedComposerSubmission('/review src', commands)).toBe('Review src')
-    expect(expandedComposerSubmission('/unknown src', commands)).toBeNull()
-    expect(expandedComposerSubmission('please /review src', commands)).toBeNull()
+    expect(expandedComposerSubmission('openCode', '/review src', commands)).toBe('Review src')
+    expect(expandedComposerSubmission('openCode', '/unknown src', commands)).toBeNull()
+    expect(expandedComposerSubmission('openCode', 'please /review src', commands)).toBeNull()
+  })
+
+  test('uses each provider native skill invocation', () => {
+    const commands = [command('deploy', 'Skill', '', null)]
+    expect(expandedComposerSubmission('fx', '/deploy production', commands))
+      .toBe('$deploy production')
+    expect(expandedComposerSubmission('pi', '/deploy production', commands))
+      .toBe('/skill:deploy production')
   })
 })
 

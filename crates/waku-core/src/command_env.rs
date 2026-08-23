@@ -207,29 +207,34 @@ pub fn find_executable(name: &str) -> Option<PathBuf> {
         .find_map(|directory| resolve_executable_file(&directory.join(name)))
 }
 
-/// Accept `candidate` as it stands, then — on Windows — the same path with
-/// each `PATHEXT` suffix.
+/// On Windows, try the path with each `PATHEXT` suffix first, then accept
+/// `candidate` as it stands. Elsewhere the candidate is used directly.
 ///
-/// Nothing is executable by name alone there: an npm-installed provider CLI
-/// lands as `claude.cmd` beside `claude.ps1`, and Bun and Cargo install
+/// Nothing is executable by name alone on Windows: an npm-installed provider
+/// CLI lands as `claude.cmd` beside `claude.ps1`, and Bun and Cargo install
 /// `.exe`. Trying `PATHEXT` in its configured order picks the same file the
 /// shell would, and `std::process::Command` runs a `.cmd`/`.bat` through
 /// `cmd.exe` for us.
+///
+/// A global npm install also writes an extensionless POSIX shim next to those
+/// two, and `CreateProcess` cannot run it. Accepting the bare name before the
+/// suffixes would hand back that shim and every launch of the provider would
+/// fail, so the suffixed names have to win.
 fn resolve_executable_file(candidate: &Path) -> Option<PathBuf> {
-    if candidate.is_file() {
-        return Some(candidate.to_path_buf());
-    }
     #[cfg(windows)]
-    {
-        let stem = candidate.file_name()?.to_owned();
+    if let Some(stem) = candidate.file_name() {
+        let stem = stem.to_owned();
         for extension in executable_extensions() {
             let mut name = stem.clone();
             name.push(&extension);
-            let candidate = candidate.with_file_name(name);
-            if candidate.is_file() {
-                return Some(candidate);
+            let suffixed = candidate.with_file_name(name);
+            if suffixed.is_file() {
+                return Some(suffixed);
             }
         }
+    }
+    if candidate.is_file() {
+        return Some(candidate.to_path_buf());
     }
     None
 }
@@ -1118,7 +1123,9 @@ mod tests {
         let directory = std::env::temp_dir().join(format!("waku-pathext-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&directory);
         std::fs::create_dir_all(&directory).expect("create fixture directory");
-        // The npm shim layout: no extensionless file to find by name alone.
+        // Only a suffixed file exists here, so the bare name resolves through PATHEXT.
+        // A global npm install also drops an extensionless shim beside it; that layout is
+        // covered by a_bare_name_prefers_pathext_over_an_extensionless_shim.
         std::fs::write(directory.join("faux-provider.cmd"), "@echo off\n")
             .expect("write shim fixture");
 
@@ -1133,6 +1140,36 @@ mod tests {
                 .to_lowercase(),
         );
         assert_eq!(resolve_executable_file(&directory.join("absent")), None);
+
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_bare_name_prefers_pathext_over_an_extensionless_shim() {
+        // A global npm install writes all three of these side by side. Only the `.cmd`
+        // can be launched by `CreateProcess`; the extensionless one is a POSIX shim.
+        let directory =
+            std::env::temp_dir().join(format!("waku-pathext-shim-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&directory);
+        std::fs::create_dir_all(&directory).expect("create fixture directory");
+        std::fs::write(directory.join("faux-provider"), "#!/bin/sh\n")
+            .expect("write posix shim fixture");
+        std::fs::write(directory.join("faux-provider.ps1"), "#!/usr/bin/env pwsh\n")
+            .expect("write powershell shim fixture");
+        std::fs::write(directory.join("faux-provider.cmd"), "@echo off\n")
+            .expect("write cmd shim fixture");
+
+        assert_eq!(
+            resolve_executable_file(&directory.join("faux-provider"))
+                .expect("resolve through PATHEXT")
+                .to_string_lossy()
+                .to_lowercase(),
+            directory
+                .join("faux-provider.cmd")
+                .to_string_lossy()
+                .to_lowercase(),
+        );
 
         let _ = std::fs::remove_dir_all(&directory);
     }

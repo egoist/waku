@@ -160,6 +160,7 @@ export function expandCommandTemplate(template: string, args: string): string {
 }
 
 export function expandedComposerSubmission(
+  provider: ProviderKind,
   prompt: string,
   commands: SlashCommand[],
 ): string | null {
@@ -168,6 +169,11 @@ export function expandedComposerSubmission(
   const whitespace = invocation.search(/\s/u)
   const name = whitespace < 0 ? invocation : invocation.slice(0, whitespace)
   const args = whitespace < 0 ? '' : invocation.slice(whitespace).trim()
+  const skill = commands.find((item) => item.name === name && item.scope === 'Skill')
+  if (skill) {
+    if (provider === 'codex' || provider === 'fx') return `$${invocation}`
+    if (provider === 'pi' || provider === 'ohMyPi') return `/skill:${invocation}`
+  }
   const command = commands.find((item) => item.name === name && item.template !== null)
   return command?.template === null || command?.template === undefined
     ? null

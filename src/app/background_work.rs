@@ -4,6 +4,7 @@ const MAX_BACKGROUND_OUTPUT_BYTES: usize = 512 * 1024;
 const MAX_SETTLED_BACKGROUND_ITEMS: usize = 24;
 const OUTPUT_CACHE_REFRESH_INTERVAL: Duration = Duration::from_millis(100);
 const BACKGROUND_SUMMARY_MENU_ID: &str = "background-work-summary";
+const OPEN_IN_MENU_ID: &str = "open-in-app";
 
 #[derive(Default)]
 pub(super) struct BackgroundWorkRegistry {
@@ -760,7 +761,7 @@ impl Waku {
                 .items_center()
                 .gap(px(6.0))
                 .cursor_default()
-                .text_size(px(12.5))
+                .text_size(sp(12.5))
                 .font_weight(FontWeight::MEDIUM)
                 .focus_visible(|style| {
                     style
@@ -800,6 +801,7 @@ impl Waku {
                 }))
                 .into_any_element()
         });
+        let open_in = self.render_open_in_control(workspace_path, cx);
         let entries = Rc::new(entries);
         let weak = cx.entity().downgrade();
         let info = popover(
@@ -826,8 +828,184 @@ impl Waku {
             .items_center()
             .gap(px(8.0))
             .children(git_status)
+            .children(open_in)
             .child(info)
             .into_any_element()
+    }
+
+    /// Resolve the "open project in app" targets once, off-thread; the header
+    /// control and its menu render purely from the stored list.
+    pub(super) fn detect_open_in_apps(&self, cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| {
+            let apps = cx
+                .background_executor()
+                .spawn(async move { crate::platform::detect_open_in_apps() })
+                .await;
+            if apps.is_empty() {
+                return;
+            }
+            let _ = this.update(cx, |this, cx| {
+                this.open_in_apps = Rc::new(apps);
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// The app the primary "open in" button targets: the persisted choice
+    /// while it is still installed, otherwise the file manager.
+    fn preferred_open_in_app(&self) -> Option<&crate::platform::ExternalApp> {
+        self.state
+            .open_in_app
+            .as_deref()
+            .and_then(|id| self.open_in_apps.iter().find(|app| app.id == id))
+            .or_else(|| self.open_in_apps.iter().find(|app| app.id == "finder"))
+            .or_else(|| self.open_in_apps.first())
+    }
+
+    /// Open the workspace folder in the catalog app `app_id` and remember it
+    /// as the preferred target. Launch Services delivers the open
+    /// asynchronously, so this one-shot action never blocks a frame.
+    fn open_workspace_in_app(&mut self, path: &Path, app_id: &str, cx: &mut Context<Self>) {
+        let Some(bundle_id) = self
+            .open_in_apps
+            .iter()
+            .find(|app| app.id == app_id)
+            .map(|app| app.bundle_id)
+        else {
+            return;
+        };
+        crate::platform::open_path_in_app(path, bundle_id);
+        if self.state.open_in_app.as_deref() != Some(app_id) {
+            self.state.open_in_app = Some(app_id.to_owned());
+            self.save();
+            cx.notify();
+        }
+    }
+
+    /// The split "open project in app" control: an icon button launching the
+    /// preferred app, and a chevron opening the menu of every installed
+    /// target. Hidden while there is no local folder to open or app detection
+    /// has not landed yet.
+    fn render_open_in_control(
+        &self,
+        workspace_path: Option<&Path>,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        if self.daemon.is_remote() {
+            return None;
+        }
+        let path: Rc<Path> = Rc::from(workspace_path?);
+        let preferred = self.preferred_open_in_app()?;
+        let preferred_id = preferred.id;
+        let preferred_label = preferred.label;
+        let preferred_icon = preferred.icon.clone();
+        let apps = self.open_in_apps.clone();
+        let theme = Theme::current(cx);
+        let handle = self.menu_handle(OPEN_IN_MENU_ID, cx);
+        let focus = self.transcript_control_focus("header-open-in", cx);
+
+        let primary_path = path.clone();
+        let key_path = path.clone();
+        let primary = div()
+            .id("header-open-in")
+            .track_focus(&focus)
+            .tab_index(0)
+            .h_full()
+            .px(px(6.0))
+            .rounded_tl(px(6.0))
+            .rounded_bl(px(6.0))
+            .flex_none()
+            .flex()
+            .items_center()
+            .justify_center()
+            .cursor_default()
+            .focus_visible(|style| {
+                style
+                    .bg(theme.overlay)
+                    .border_1()
+                    .border_color(theme.accent)
+            })
+            .hover(|style| style.bg(theme.overlay))
+            .active(|style| style.bg(theme.overlay_strong))
+            .tooltip(Tooltip::text(tr!("open_in.open", app = preferred_label)))
+            .child(img(preferred_icon).size(px(16.0)).flex_none())
+            .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                cx.stop_propagation();
+            })
+            .on_click(cx.listener(move |this, _, _, cx| {
+                cx.stop_propagation();
+                this.open_workspace_in_app(&primary_path, preferred_id, cx);
+            }))
+            .on_key_down(cx.listener(move |this, event: &KeyDownEvent, _, cx| {
+                if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                    this.open_workspace_in_app(&key_path, preferred_id, cx);
+                    cx.stop_propagation();
+                }
+            }));
+
+        let caret = div()
+            .id("header-open-in-caret")
+            .h_full()
+            .w(px(18.0))
+            .rounded_tr(px(6.0))
+            .rounded_br(px(6.0))
+            .flex_none()
+            .flex()
+            .items_center()
+            .justify_center()
+            .cursor_default()
+            .focus_visible(|style| {
+                style
+                    .bg(theme.overlay)
+                    .border_1()
+                    .border_color(theme.accent)
+            })
+            .hover(|style| style.bg(theme.overlay))
+            .when(handle.is_open(), |style| style.bg(theme.overlay_strong))
+            .tooltip(Tooltip::text(tr!("open_in.choose")))
+            .child(icon("icons/chevron-down.svg", 11.0, theme.text_tertiary));
+
+        let weak = cx.entity().downgrade();
+        let menu = dropdown_menu(
+            caret,
+            "header-open-in-menu",
+            &handle,
+            MenuAlign::BelowRight,
+            move |_| {
+                apps.iter()
+                    .map(|app| {
+                        let weak = weak.clone();
+                        let path = path.clone();
+                        let app_id = app.id;
+                        MenuItem::new(app.label, move |_, cx| {
+                            let _ = weak.update(cx, |this, cx| {
+                                this.open_workspace_in_app(&path, app_id, cx);
+                            });
+                        })
+                        .image(app.icon.clone())
+                        .selected(app.id == preferred_id)
+                    })
+                    .collect()
+            },
+        );
+
+        // One outlined group, so the two segments read as a single split
+        // button even though only the hovered half fills.
+        Some(
+            div()
+                .h(px(28.0))
+                .rounded(px(7.0))
+                .border_1()
+                .border_color(theme.border_strong)
+                .flex_none()
+                .flex()
+                .items_center()
+                .child(primary)
+                .child(div().w(px(1.0)).h_full().flex_none().bg(theme.border))
+                .child(menu)
+                .into_any_element(),
+        )
     }
 
     pub(super) fn render_background_work_surface(
@@ -857,7 +1035,7 @@ impl Waku {
                         .child(icon(work_kind_icon(key.kind), 22.0, theme.text_ghost))
                         .child(
                             div()
-                                .text_size(px(12.0))
+                                .text_size(sp(12.5))
                                 .text_color(theme.text_secondary)
                                 .child(tr!("background.no_work")),
                         ),
@@ -904,7 +1082,7 @@ impl Waku {
                     .items_center()
                     .gap(px(5.0))
                     .cursor_default()
-                    .text_size(px(10.5))
+                    .text_size(sp(12.5))
                     .font_weight(FontWeight::MEDIUM)
                     .text_color(theme.text_secondary)
                     .hover(|style| style.bg(theme.danger.opacity(0.10)))
@@ -962,7 +1140,7 @@ impl Waku {
                             .child(
                                 div()
                                     .truncate()
-                                    .text_size(px(12.0))
+                                    .text_size(sp(12.5))
                                     .font_weight(FontWeight::MEDIUM)
                                     .text_color(theme.text)
                                     .child(item.title.clone()),
@@ -972,7 +1150,7 @@ impl Waku {
                                     .flex()
                                     .items_center()
                                     .gap(px(5.0))
-                                    .text_size(px(10.0))
+                                    .text_size(sp(12.5))
                                     .text_color(theme.text_tertiary)
                                     .child(rendered_work_status_icon(
                                         item.status,
@@ -1045,13 +1223,13 @@ impl Waku {
                     .gap(px(3.0))
                     .child(
                         div()
-                            .text_size(px(9.5))
+                            .text_size(sp(12.5))
                             .text_color(theme.text_tertiary)
                             .child(label),
                     )
                     .child(
                         div()
-                            .text_size(px(10.5))
+                            .text_size(sp(12.5))
                             .font_family(md::render::MONO_FAMILY)
                             .text_color(theme.text_secondary)
                             .child(value),
@@ -1093,7 +1271,7 @@ impl Waku {
                         .flex()
                         .items_center()
                         .justify_between()
-                        .text_size(px(9.5))
+                        .text_size(sp(12.5))
                         .text_color(theme.text_tertiary)
                         .child(tr!("background.output"))
                         .when(item.output_truncated, |header| {
@@ -1122,8 +1300,8 @@ impl Waku {
                                     move |_, _, cx| contain_scroll(&scroll, cx)
                                 })
                                 .p(px(8.0))
-                                .text_size(px(10.5))
-                                .line_height(px(15.0))
+                                .text_size(sp(12.5))
+                                .line_height(sp(15.0))
                                 .font_family(md::render::MONO_FAMILY)
                                 .text_color(theme.text_secondary)
                                 .child(output_text),
@@ -1301,7 +1479,7 @@ fn render_environment_summary_section(
                 .px(px(8.0))
                 .flex()
                 .items_center()
-                .text_size(px(13.5))
+                .text_size(sp(13.5))
                 .text_color(theme.text_tertiary)
                 .child(tr!("environment.title")),
         )
@@ -1361,7 +1539,7 @@ fn render_environment_action_row(
                 .min_w_0()
                 .flex_1()
                 .truncate()
-                .text_size(px(13.5))
+                .text_size(sp(13.5))
                 .text_color(foreground)
                 .child(label),
         )
@@ -1403,7 +1581,7 @@ fn render_background_summary_section(
         .child(
             div()
                 .px(px(8.0))
-                .text_size(px(13.0))
+                .text_size(sp(13.0))
                 .text_color(theme.text_tertiary)
                 .child(label),
         )
@@ -1527,9 +1705,8 @@ fn render_background_summary_row(
             div()
                 .min_w_0()
                 .flex_1()
-                .line_clamp(1)
-                .text_ellipsis()
-                .text_size(px(if is_process { 12.0 } else { 13.5 }))
+                .truncate()
+                .text_size(px(if is_process { 12.5 } else { 13.5 }))
                 .text_color(if is_process {
                     theme.text_secondary
                 } else {
@@ -1602,6 +1779,21 @@ mod tests {
             ),
             None
         );
+    }
+
+    #[test]
+    fn info_popover_background_titles_stay_on_one_line() {
+        let source = include_str!("background_work.rs");
+        let row = source
+            .split_once("\nfn render_background_summary_row(")
+            .expect("background summary row renderer")
+            .1
+            .split_once("\n#[cfg(test)]")
+            .expect("background summary row renderer end")
+            .0;
+
+        assert!(row.contains(".truncate()"));
+        assert!(!row.contains(".line_clamp(1)"));
     }
 
     #[test]

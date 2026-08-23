@@ -15,7 +15,7 @@ use gpui::{
 };
 use unicode_segmentation::UnicodeSegmentation;
 
-use crate::theme::Theme;
+use crate::theme::{Theme, sp};
 
 actions!(
     composer,
@@ -49,6 +49,7 @@ actions!(
         Enter,
         Newline,
         SubmitSteer,
+        Clear,
     ]
 );
 
@@ -57,63 +58,68 @@ const CURSOR_BLINK_PAUSE: Duration = Duration::from_millis(300);
 
 pub fn init(cx: &mut App) {
     cx.bind_keys([
-        KeyBinding::new("backspace", Backspace, Some("ComposerInput")),
-        KeyBinding::new("delete", Delete, Some("ComposerInput")),
-        KeyBinding::new("alt-backspace", DeleteToPreviousWord, Some("ComposerInput")),
-        KeyBinding::new("alt-delete", DeleteToNextWord, Some("ComposerInput")),
-        KeyBinding::new("left", Left, Some("ComposerInput")),
-        KeyBinding::new("right", Right, Some("ComposerInput")),
-        KeyBinding::new("up", Up, Some("ComposerInput")),
-        KeyBinding::new("down", Down, Some("ComposerInput")),
-        KeyBinding::new("shift-left", SelectLeft, Some("ComposerInput")),
-        KeyBinding::new("shift-right", SelectRight, Some("ComposerInput")),
-        KeyBinding::new("home", Home, Some("ComposerInput")),
-        KeyBinding::new("end", End, Some("ComposerInput")),
-        KeyBinding::new("shift-home", SelectToStart, Some("ComposerInput")),
-        KeyBinding::new("shift-end", SelectToEnd, Some("ComposerInput")),
-        KeyBinding::new("alt-left", MoveToPreviousWord, Some("ComposerInput")),
-        KeyBinding::new("alt-right", MoveToNextWord, Some("ComposerInput")),
+        KeyBinding::new("backspace", Backspace, Some("TextInput")),
+        KeyBinding::new("delete", Delete, Some("TextInput")),
+        KeyBinding::new("alt-backspace", DeleteToPreviousWord, Some("TextInput")),
+        KeyBinding::new("alt-delete", DeleteToNextWord, Some("TextInput")),
+        KeyBinding::new("left", Left, Some("TextInput")),
+        KeyBinding::new("right", Right, Some("TextInput")),
+        KeyBinding::new("up", Up, Some("TextInput")),
+        KeyBinding::new("down", Down, Some("TextInput")),
+        KeyBinding::new("shift-left", SelectLeft, Some("TextInput")),
+        KeyBinding::new("shift-right", SelectRight, Some("TextInput")),
+        KeyBinding::new("home", Home, Some("TextInput")),
+        KeyBinding::new("end", End, Some("TextInput")),
+        KeyBinding::new("shift-home", SelectToStart, Some("TextInput")),
+        KeyBinding::new("shift-end", SelectToEnd, Some("TextInput")),
+        KeyBinding::new("alt-left", MoveToPreviousWord, Some("TextInput")),
+        KeyBinding::new("alt-right", MoveToNextWord, Some("TextInput")),
         KeyBinding::new(
             "alt-shift-left",
             SelectToPreviousWord,
-            Some("ComposerInput"),
+            Some("TextInput"),
         ),
-        KeyBinding::new("alt-shift-right", SelectToNextWord, Some("ComposerInput")),
-        KeyBinding::new("secondary-a", SelectAll, Some("ComposerInput")),
-        KeyBinding::new("secondary-v", Paste, Some("ComposerInput")),
-        KeyBinding::new("secondary-c", Copy, Some("ComposerInput")),
-        KeyBinding::new("secondary-x", Cut, Some("ComposerInput")),
-        KeyBinding::new("secondary-z", Undo, Some("ComposerInput")),
-        KeyBinding::new("secondary-shift-z", Redo, Some("ComposerInput")),
-        KeyBinding::new("enter", Enter, Some("ComposerInput")),
-        KeyBinding::new("shift-enter", Newline, Some("ComposerInput")),
+        KeyBinding::new("alt-shift-right", SelectToNextWord, Some("TextInput")),
+        KeyBinding::new("secondary-a", SelectAll, Some("TextInput")),
+        KeyBinding::new("secondary-v", Paste, Some("TextInput")),
+        KeyBinding::new("secondary-c", Copy, Some("TextInput")),
+        KeyBinding::new("secondary-x", Cut, Some("TextInput")),
+        KeyBinding::new("secondary-z", Undo, Some("TextInput")),
+        KeyBinding::new("secondary-shift-z", Redo, Some("TextInput")),
+        KeyBinding::new("enter", Enter, Some("TextInput")),
+        KeyBinding::new("shift-enter", Newline, Some("TextInput")),
         // While a turn is running, Enter queues a follow-up; the platform's
         // primary modifier + Enter injects it when the provider supports it.
-        KeyBinding::new("secondary-enter", SubmitSteer, Some("ComposerInput")),
+        KeyBinding::new("secondary-enter", SubmitSteer, Some("TextInput")),
+        // Two-stage escape for fields that opt in via `clear_on_escape`:
+        // the handler propagates when the field is empty (or not opted in),
+        // and the keystroke falls through to the surface's own escape —
+        // dismiss a popover, close the palette, cancel the turn.
+        KeyBinding::new("escape", Clear, Some("TextInput")),
     ]);
 
     #[cfg(target_os = "macos")]
     cx.bind_keys([
-        KeyBinding::new("cmd-backspace", DeleteToStart, Some("ComposerInput")),
-        KeyBinding::new("cmd-delete", DeleteToEnd, Some("ComposerInput")),
-        KeyBinding::new("ctrl-h", Backspace, Some("ComposerInput")),
-        KeyBinding::new("ctrl-d", Delete, Some("ComposerInput")),
-        KeyBinding::new("ctrl-u", DeleteToStart, Some("ComposerInput")),
-        KeyBinding::new("ctrl-k", DeleteToEnd, Some("ComposerInput")),
-        KeyBinding::new("ctrl-b", Left, Some("ComposerInput")),
-        KeyBinding::new("ctrl-f", Right, Some("ComposerInput")),
-        KeyBinding::new("cmd-left", Home, Some("ComposerInput")),
-        KeyBinding::new("cmd-right", End, Some("ComposerInput")),
-        KeyBinding::new("cmd-up", Home, Some("ComposerInput")),
-        KeyBinding::new("cmd-down", End, Some("ComposerInput")),
-        KeyBinding::new("ctrl-a", Home, Some("ComposerInput")),
-        KeyBinding::new("ctrl-e", End, Some("ComposerInput")),
-        KeyBinding::new("shift-cmd-left", SelectToStart, Some("ComposerInput")),
-        KeyBinding::new("shift-cmd-right", SelectToEnd, Some("ComposerInput")),
-        KeyBinding::new("cmd-shift-up", SelectToStart, Some("ComposerInput")),
-        KeyBinding::new("cmd-shift-down", SelectToEnd, Some("ComposerInput")),
-        KeyBinding::new("ctrl-shift-a", SelectToStart, Some("ComposerInput")),
-        KeyBinding::new("ctrl-shift-e", SelectToEnd, Some("ComposerInput")),
+        KeyBinding::new("cmd-backspace", DeleteToStart, Some("TextInput")),
+        KeyBinding::new("cmd-delete", DeleteToEnd, Some("TextInput")),
+        KeyBinding::new("ctrl-h", Backspace, Some("TextInput")),
+        KeyBinding::new("ctrl-d", Delete, Some("TextInput")),
+        KeyBinding::new("ctrl-u", DeleteToStart, Some("TextInput")),
+        KeyBinding::new("ctrl-k", DeleteToEnd, Some("TextInput")),
+        KeyBinding::new("ctrl-b", Left, Some("TextInput")),
+        KeyBinding::new("ctrl-f", Right, Some("TextInput")),
+        KeyBinding::new("cmd-left", Home, Some("TextInput")),
+        KeyBinding::new("cmd-right", End, Some("TextInput")),
+        KeyBinding::new("cmd-up", Home, Some("TextInput")),
+        KeyBinding::new("cmd-down", End, Some("TextInput")),
+        KeyBinding::new("ctrl-a", Home, Some("TextInput")),
+        KeyBinding::new("ctrl-e", End, Some("TextInput")),
+        KeyBinding::new("shift-cmd-left", SelectToStart, Some("TextInput")),
+        KeyBinding::new("shift-cmd-right", SelectToEnd, Some("TextInput")),
+        KeyBinding::new("cmd-shift-up", SelectToStart, Some("TextInput")),
+        KeyBinding::new("cmd-shift-down", SelectToEnd, Some("TextInput")),
+        KeyBinding::new("ctrl-shift-a", SelectToStart, Some("TextInput")),
+        KeyBinding::new("ctrl-shift-e", SelectToEnd, Some("TextInput")),
     ]);
 
     // The word-motion chords Windows and the Linux desktops share.
@@ -122,17 +128,17 @@ pub fn init(cx: &mut App) {
         KeyBinding::new(
             "ctrl-backspace",
             DeleteToPreviousWord,
-            Some("ComposerInput"),
+            Some("TextInput"),
         ),
-        KeyBinding::new("ctrl-delete", DeleteToNextWord, Some("ComposerInput")),
-        KeyBinding::new("ctrl-left", MoveToPreviousWord, Some("ComposerInput")),
-        KeyBinding::new("ctrl-right", MoveToNextWord, Some("ComposerInput")),
+        KeyBinding::new("ctrl-delete", DeleteToNextWord, Some("TextInput")),
+        KeyBinding::new("ctrl-left", MoveToPreviousWord, Some("TextInput")),
+        KeyBinding::new("ctrl-right", MoveToNextWord, Some("TextInput")),
         KeyBinding::new(
             "ctrl-shift-left",
             SelectToPreviousWord,
-            Some("ComposerInput"),
+            Some("TextInput"),
         ),
-        KeyBinding::new("ctrl-shift-right", SelectToNextWord, Some("ComposerInput")),
+        KeyBinding::new("ctrl-shift-right", SelectToNextWord, Some("TextInput")),
     ]);
 }
 
@@ -458,12 +464,12 @@ fn common_suffix_len(a: &str, b: &str) -> usize {
 }
 
 #[derive(Clone)]
-pub enum ComposerEvent {
+pub enum InputEvent {
+    /// Enter — or, in a one-line field, the primary-modifier chord too. The
+    /// content is delivered as-is and survives the submission; an owner that
+    /// consumes what it submits (the composer) trims and clears itself.
     Submit(String),
-    /// Primary modifier + Enter: deliver the message into the running turn instead of queueing
-    /// it behind the turn. Only composer-mode fields emit this.
-    SubmitSteer(String),
-    /// The field took focus. A code editor uses this to re-read its file, so
+    /// The field took focus. A file editor uses this to re-read its file, so
     /// clicking back into it picks up changes made on disk meanwhile.
     Focus,
     /// The text content actually changed. Parents that derive UI from the
@@ -473,21 +479,23 @@ pub enum ComposerEvent {
     /// blinking caret is exactly the per-frame waste the field exists to
     /// contain.
     Edited,
-    /// Backspace in an already-empty composer. The chat idiom for "remove
-    /// the last staged attachment"; owners without attachments ignore it.
+    /// Backspace with nothing left to delete. Owners with something staged
+    /// behind the field — the composer's attachments — listen for this;
+    /// everyone else ignores it.
     BackspaceOnEmpty,
 }
 
-/// Clipboard payloads whose primary representation is an image or file list.
-/// The owning composer persists them and presents them as attachment chips;
-/// code/search fields continue using their ordinary text paste behavior.
+/// Clipboard payloads whose primary representation is an image or file list,
+/// emitted instead of a text splice by fields that opted in via
+/// [`TextInput::media_paste`]. The composer persists them and presents
+/// them as attachment chips.
 #[derive(Clone)]
-pub struct ComposerAttachmentPaste(pub Vec<ClipboardEntry>);
+pub struct MediaPaste(pub Vec<ClipboardEntry>);
 
 /// Respect the representation priority chosen by the source application.
 /// Finder puts paths first (and a text fallback second), while screenshots put
 /// an image first. Text-first clipboard content remains ordinary text paste.
-fn attachment_paste_entries(clipboard: &ClipboardItem) -> Option<Vec<ClipboardEntry>> {
+fn media_paste_entries(clipboard: &ClipboardItem) -> Option<Vec<ClipboardEntry>> {
     if !matches!(
         clipboard.entries().first(),
         Some(ClipboardEntry::Image(_) | ClipboardEntry::ExternalPaths(_))
@@ -508,25 +516,58 @@ fn attachment_paste_entries(clipboard: &ClipboardItem) -> Option<Vec<ClipboardEn
     (!entries.is_empty()).then_some(entries)
 }
 
-/// What the field is for. The difference is small but load-bearing: Enter
-/// submits a prompt, inserts a newline in code, and in a search field submits
-/// while keeping the query.
+/// The web's input/textarea split, because it is the load-bearing one: a
+/// single-line field never wraps — overlong text slides horizontally under a
+/// clipped viewport, pasted breaks collapse to spaces, and Enter always
+/// submits, keeping the content the way a find bar keeps its query — while a
+/// multi-line field wraps, keeps pasted breaks, and gives vertical arrows to
+/// the caret. Everything else a specialised field wants layers on through
+/// explicit options ([`multi_line`](TextInput::multi_line),
+/// [`submit_on_enter`](TextInput::submit_on_enter),
+/// [`auto_height`](TextInput::auto_height),
+/// [`media_paste`](TextInput::media_paste)) or a wrapper component.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum FieldMode {
     #[default]
-    Composer,
-    Code,
-    Search,
+    SingleLine,
+    MultiLine,
 }
 
-/// Tallest a composer-mode field grows before its text scrolls under an
-/// overlay scrollbar instead of growing the card.
-const COMPOSER_MAX_HEIGHT: Pixels = px(300.);
+/// Normalise clipboard text for the field it lands in: a single-line field
+/// collapses breaks to spaces, a multi-line field keeps them, with CRLF and
+/// lone CR folded to the `\n` the layout shapes its lines on.
+fn pasted_text_for_mode(mode: FieldMode, text: &str) -> String {
+    match mode {
+        FieldMode::SingleLine => text.replace(['\n', '\r'], " "),
+        FieldMode::MultiLine => text.replace("\r\n", "\n").replace('\r', "\n"),
+    }
+}
 
-pub struct ComposerInput {
+/// Tallest an [`auto_height`](TextInput::auto_height) field grows before
+/// its text scrolls under an overlay scrollbar instead of growing the card.
+const AUTO_HEIGHT_MAX: Pixels = px(300.);
+
+/// The shared text engine under every box that takes typing — search inputs,
+/// the address bar, file editors, and the composer wrapper: native macOS
+/// editing and IME composition, grouped undo history, mouse selection, and
+/// paint-only syntax colouring, specialised through config rather than forks.
+pub struct TextInput {
     focus_handle: FocusHandle,
     mode: FieldMode,
     read_only: bool,
+    /// Enter submits this multi-line field instead of inserting a newline;
+    /// Shift+Enter still breaks the line. (One-line fields always submit.)
+    submit_on_enter: bool,
+    /// The field owns its height and text metrics, growing with its content
+    /// up to [`AUTO_HEIGHT_MAX`] before it scrolls; otherwise a
+    /// multi-line field inherits the embedding view's metrics.
+    auto_height: bool,
+    /// Image and file pastes surface as [`MediaPaste`] instead of being
+    /// swallowed by the text path.
+    accepts_media_paste: bool,
+    /// Escape clears the field when it has content; an empty field lets the
+    /// keystroke fall through to the surface's own escape.
+    clear_on_escape: bool,
     /// The focusing click selects the whole content on release, the way a
     /// browser address bar arms its URL for retyping.
     select_all_on_focus_click: bool,
@@ -550,16 +591,16 @@ pub struct ComposerInput {
     selected_range: Range<usize>,
     selection_reversed: bool,
     marked_range: Option<Range<usize>>,
-    /// How far a single-line (search-mode) field's text is slid left of its
+    /// How far a single-line field's text is slid left of its
     /// clipped viewport, in pixels. Reconciled every prepaint to keep the
     /// caret in view; pinned to zero while the field is unfocused so the
     /// address bar's page echo shows the start of the URL.
     scroll_offset: Pixels,
-    /// Vertical scroll state for a composer-mode field, whose height is
-    /// capped at [`COMPOSER_MAX_HEIGHT`].
+    /// Vertical scroll state for an auto-height field, whose height is
+    /// capped at [`AUTO_HEIGHT_MAX`].
     scroll_handle: ScrollHandle,
     scrollbar_state: Rc<ScrollbarState>,
-    /// Horizontal inset a composer-mode embedder moves inside the field, so
+    /// Horizontal inset an auto-height embedder moves inside the field, so
     /// the scroll viewport — and the overlay scrollbar pinned to its edge —
     /// runs to the card's edge while the text keeps the inset.
     padding_x: Pixels,
@@ -597,7 +638,7 @@ struct VerticalNavigation {
     layout_width: Pixels,
 }
 
-impl ComposerInput {
+impl TextInput {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let focus_handle = cx.focus_handle();
         let blink_cursor = cx.new(|_| BlinkCursor::new());
@@ -618,8 +659,12 @@ impl ComposerInput {
         ];
         Self {
             focus_handle,
-            mode: FieldMode::Composer,
+            mode: FieldMode::SingleLine,
             read_only: false,
+            submit_on_enter: false,
+            auto_height: false,
+            accepts_media_paste: false,
+            clear_on_escape: false,
             select_all_on_focus_click: false,
             focus_click_select_all: false,
             language: None,
@@ -627,7 +672,7 @@ impl ComposerInput {
             search_matches: Vec::new(),
             active_search_match: None,
             content: "".into(),
-            placeholder: tr!("input.do_anything").into(),
+            placeholder: "".into(),
             selected_range: 0..0,
             selection_reversed: false,
             marked_range: None,
@@ -727,27 +772,56 @@ impl ComposerInput {
         }
     }
 
-    /// Horizontal inset kept inside the field's scroll viewport rather than
-    /// on the embedding card, so the overlay scrollbar sits at the card's
-    /// edge instead of floating next to the text.
-    pub fn padding_x(mut self, padding: Pixels) -> Self {
-        self.padding_x = padding;
+    /// Let the text wrap onto multiple lines: Enter inserts a newline unless
+    /// [`submit_on_enter`](Self::submit_on_enter) rebinds it, and pasted
+    /// breaks survive. The field inherits the caller's text metrics, so a
+    /// gutter beside an editor can rely on the same line height.
+    pub fn multi_line(mut self) -> Self {
+        self.mode = FieldMode::MultiLine;
         self
     }
 
-    /// Turn the field into a code editor: Enter inserts a newline instead of
-    /// submitting, and `language` (when recognised) colours the text.
-    pub fn code_editor(mut self, language: Option<&str>) -> Self {
-        self.mode = FieldMode::Code;
+    /// Paint-only syntax colouring for `language`, when recognised.
+    pub fn syntax(mut self, language: Option<&str>) -> Self {
         self.language = language.and_then(highlight::lang_for_tag);
         self
     }
 
-    /// Turn the field into a search box: Enter submits without clearing, so
-    /// "find next" keeps the query, and pasted line breaks become spaces.
-    pub fn search_field(mut self) -> Self {
-        self.mode = FieldMode::Search;
+    /// Make Enter submit this multi-line field instead of inserting a
+    /// newline; Shift+Enter still breaks the line.
+    pub fn submit_on_enter(mut self) -> Self {
+        self.submit_on_enter = true;
         self
+    }
+
+    /// Let the field own its height and text metrics: it grows with its
+    /// content up to [`AUTO_HEIGHT_MAX`], then scrolls under an overlay
+    /// scrollbar that follows the caret.
+    pub fn auto_height(mut self) -> Self {
+        self.auto_height = true;
+        self
+    }
+
+    /// Surface image and file pastes as a [`MediaPaste`] event instead of
+    /// swallowing them; text-first clipboards still paste as text.
+    pub fn media_paste(mut self) -> Self {
+        self.accepts_media_paste = true;
+        self
+    }
+
+    /// Make Escape clear the field first, the filter-field convention: only
+    /// a second press on the emptied field reaches the surface's own escape
+    /// (dismissing the popover or palette around it).
+    pub fn clear_on_escape(mut self) -> Self {
+        self.clear_on_escape = true;
+        self
+    }
+
+    /// Horizontal inset kept inside the field's scroll viewport rather than
+    /// on the embedding card, so the overlay scrollbar sits at the card's
+    /// edge instead of floating next to the text.
+    pub fn set_padding_x(&mut self, padding: Pixels) {
+        self.padding_x = padding;
     }
 
     /// Make the focusing click select the whole content on release, the way a
@@ -831,13 +905,13 @@ impl ComposerInput {
         self.history.seal();
         self.refresh_highlight();
         self.pause_blink_cursor(cx);
-        cx.emit(ComposerEvent::Edited);
+        cx.emit(InputEvent::Edited);
         cx.notify();
     }
 
     /// Replace the painted find-match washes. Ranges must be sorted and
     /// non-overlapping; `active` indexes into `matches`. Purely visual — the
-    /// content is untouched, so no [`ComposerEvent::Edited`] is emitted.
+    /// content is untouched, so no [`InputEvent::Edited`] is emitted.
     pub fn set_search_matches(
         &mut self,
         matches: Vec<Range<usize>>,
@@ -925,7 +999,7 @@ impl ComposerInput {
         }
         self.pause_blink_cursor(cx);
         if changed {
-            cx.emit(ComposerEvent::Edited);
+            cx.emit(InputEvent::Edited);
         }
         cx.notify();
     }
@@ -948,7 +1022,7 @@ impl ComposerInput {
         self.refresh_highlight();
         self.pause_blink_cursor(cx);
         if changed {
-            cx.emit(ComposerEvent::Edited);
+            cx.emit(InputEvent::Edited);
         }
         cx.notify();
     }
@@ -959,7 +1033,7 @@ impl ComposerInput {
         // into one undo step.
         self.history.seal();
         self.blink_cursor.update(cx, |cursor, cx| cursor.start(cx));
-        cx.emit(ComposerEvent::Focus);
+        cx.emit(InputEvent::Focus);
     }
 
     fn on_blur(&mut self, _: &mut Window, cx: &mut Context<Self>) {
@@ -1004,7 +1078,7 @@ impl ComposerInput {
     /// is the textarea convention: soft wraps count, and the original x goal
     /// survives a shorter row between two longer ones.
     fn move_vertically(&mut self, down: bool, cx: &mut Context<Self>) {
-        if self.mode == FieldMode::Search {
+        if self.mode == FieldMode::SingleLine {
             self.vertical_navigation = None;
             cx.propagate();
             return;
@@ -1163,8 +1237,10 @@ impl ComposerInput {
     }
 
     fn backspace(&mut self, _: &Backspace, window: &mut Window, cx: &mut Context<Self>) {
-        if matches!(self.mode, FieldMode::Composer) && self.content.is_empty() {
-            cx.emit(ComposerEvent::BackspaceOnEmpty);
+        if self.content.is_empty() {
+            // Nothing to delete; owners with something staged behind the
+            // field (the composer's attachments) listen for this instead.
+            cx.emit(InputEvent::BackspaceOnEmpty);
             return;
         }
         if self.selected_range.is_empty() {
@@ -1222,28 +1298,19 @@ impl ComposerInput {
     }
 
     fn enter(&mut self, _: &Enter, window: &mut Window, cx: &mut Context<Self>) {
-        match self.mode {
-            FieldMode::Code => {
-                self.replace_text_in_range(None, "\n", window, cx);
-            }
-            // A search query survives its own submission — Enter means "find
-            // next", not "send" — and stays untrimmed because leading or
-            // trailing spaces are part of what is searched for.
-            FieldMode::Search => {
-                cx.emit(ComposerEvent::Submit(self.content.to_string()));
-            }
-            FieldMode::Composer => {
-                let value = self.content.trim().to_owned();
-                if !value.is_empty() {
-                    cx.emit(ComposerEvent::Submit(value));
-                    self.clear(cx);
-                }
-            }
+        if self.mode == FieldMode::MultiLine && !self.submit_on_enter {
+            self.replace_text_in_range(None, "\n", window, cx);
+            return;
         }
+        // The content survives its own submission — a find bar's Enter means
+        // "find next", not "send" — and goes out untrimmed because leading or
+        // trailing spaces are part of what is searched for. An owner that
+        // consumes what it submits (the composer wrapper) trims and clears.
+        cx.emit(InputEvent::Submit(self.content.to_string()));
     }
 
     fn newline(&mut self, _: &Newline, window: &mut Window, cx: &mut Context<Self>) {
-        if self.mode == FieldMode::Search {
+        if self.mode == FieldMode::SingleLine {
             // Find bars and picker fields assign Shift+Enter their own meaning.
             cx.propagate();
             return;
@@ -1251,17 +1318,23 @@ impl ComposerInput {
         self.replace_text_in_range(None, "\n", window, cx);
     }
 
-    fn submit_steer(&mut self, _: &SubmitSteer, _: &mut Window, cx: &mut Context<Self>) {
-        if self.mode != FieldMode::Composer {
-            // Search and code fields have no running turn to steer; let an
-            // outer handler claim the primary-modifier Enter shortcut instead of swallowing it.
+    fn clear_field(&mut self, _: &Clear, _: &mut Window, cx: &mut Context<Self>) {
+        if !self.clear_on_escape || self.content.is_empty() {
             cx.propagate();
             return;
         }
-        let value = self.content.trim().to_owned();
-        if !value.is_empty() {
-            cx.emit(ComposerEvent::SubmitSteer(value));
-            self.clear(cx);
+        self.clear(cx);
+    }
+
+    fn submit_steer(&mut self, _: &SubmitSteer, _: &mut Window, cx: &mut Context<Self>) {
+        match self.mode {
+            // For a one-line field the forceful chord is just Enter.
+            FieldMode::SingleLine => {
+                cx.emit(InputEvent::Submit(self.content.to_string()));
+            }
+            // Steering is prompt vocabulary. The field only propagates the
+            // action; the composer wrapper claims it from an outer handler.
+            FieldMode::MultiLine => cx.propagate(),
         }
     }
 
@@ -1269,21 +1342,16 @@ impl ComposerInput {
         let Some(clipboard) = cx.read_from_clipboard() else {
             return;
         };
-        if self.mode == FieldMode::Composer
-            && let Some(entries) = attachment_paste_entries(&clipboard)
+        if self.accepts_media_paste
+            && let Some(entries) = media_paste_entries(&clipboard)
         {
-            cx.emit(ComposerAttachmentPaste(entries));
+            cx.emit(MediaPaste(entries));
             return;
         }
         let Some(text) = clipboard.text() else {
             return;
         };
-        let text = match self.mode {
-            // A composer is one prompt — and a search box one query — so
-            // pasted line breaks become spaces.
-            FieldMode::Composer | FieldMode::Search => text.replace(['\n', '\r'], " "),
-            FieldMode::Code => text.replace('\r', ""),
-        };
+        let text = pasted_text_for_mode(self.mode, &text);
         // A paste is its own undo step, never part of the typing around it —
         // the native NSTextView boundary, stricter than Zed's time grouping.
         self.history.seal();
@@ -1379,7 +1447,7 @@ impl ComposerInput {
         self.vertical_navigation = None;
         self.refresh_highlight();
         self.pause_blink_cursor(cx);
-        cx.emit(ComposerEvent::Edited);
+        cx.emit(InputEvent::Edited);
         cx.notify();
     }
 
@@ -1591,10 +1659,10 @@ fn word_range_at(content: &str, offset: usize) -> Range<usize> {
         .unwrap_or(offset..offset)
 }
 
-impl EventEmitter<ComposerEvent> for ComposerInput {}
-impl EventEmitter<ComposerAttachmentPaste> for ComposerInput {}
+impl EventEmitter<InputEvent> for TextInput {}
+impl EventEmitter<MediaPaste> for TextInput {}
 
-impl EntityInputHandler for ComposerInput {
+impl EntityInputHandler for TextInput {
     fn text_for_range(
         &mut self,
         range_utf16: Range<usize>,
@@ -1665,7 +1733,7 @@ impl EntityInputHandler for ComposerInput {
         self.refresh_highlight();
         self.pause_blink_cursor(cx);
         if previous != self.content {
-            cx.emit(ComposerEvent::Edited);
+            cx.emit(InputEvent::Edited);
         }
         cx.notify();
     }
@@ -1717,7 +1785,7 @@ impl EntityInputHandler for ComposerInput {
         self.vertical_navigation = None;
         self.pause_blink_cursor(cx);
         if previous != self.content {
-            cx.emit(ComposerEvent::Edited);
+            cx.emit(InputEvent::Edited);
         }
         cx.notify();
     }
@@ -1859,7 +1927,7 @@ fn single_line_scroll(
 }
 
 /// Vertical analogue of [`single_line_scroll`] for a composer-mode field
-/// capped at [`COMPOSER_MAX_HEIGHT`]: scroll the viewport the minimum needed
+/// capped at [`AUTO_HEIGHT_MAX`]: scroll the viewport the minimum needed
 /// to keep the caret inside it. `caret_top` is the caret's window position in
 /// this frame's already-scrolled layout, and the container consumed this
 /// frame's offset before prepainting children, so a correction lands on the
@@ -1890,12 +1958,12 @@ fn follow_caret(
 }
 
 struct InputElement {
-    input: Entity<ComposerInput>,
+    input: Entity<TextInput>,
 }
 
 impl InputElement {
-    /// For a single-line (search-mode) field, the bounds the text is actually
-    /// laid out at: the unwrapped line anchored `scroll_offset` left of the
+    /// For a single-line field, the bounds the text is actually laid out
+    /// at: the unwrapped line anchored `scroll_offset` left of the
     /// clipped viewport so the caret stays in view. `None` for wrapping
     /// fields, which lay out at their element bounds. Also reconciles the
     /// scroll for this frame, so the caller must prepaint at the returned
@@ -1909,7 +1977,7 @@ impl InputElement {
     ) -> Option<Bounds<Pixels>> {
         let (focused, selection, whole_content_selected, previous_scroll) = {
             let input = self.input.read(cx);
-            if input.mode != FieldMode::Search {
+            if input.mode != FieldMode::SingleLine {
                 return None;
             }
             (
@@ -2226,7 +2294,7 @@ impl Element for InputElement {
                         theme.accent,
                     )
                 });
-            let follow = (input.mode == FieldMode::Composer).then(|| {
+            let follow = input.auto_height.then(|| {
                 (
                     (cursor, input.content.len(), layout.bounds().size.width),
                     input.caret_reconciled,
@@ -2298,17 +2366,18 @@ impl Element for InputElement {
     }
 }
 
-impl Render for ComposerInput {
+impl Render for TextInput {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::current(cx);
         let input = cx.entity();
         let context_menu_input = input.clone();
         let scroll_handle = self.scroll_handle.clone();
         let padding_x = self.padding_x;
-        let scrollbar = (self.mode == FieldMode::Composer)
+        let scrollbar = self
+            .auto_height
             .then(|| scrollbar::vertical(&self.scroll_handle, &self.scrollbar_state));
         let field = div()
-            .key_context("ComposerInput")
+            .key_context("TextInput")
             .id("composer-field")
             .track_focus(&self.focus_handle(cx))
             .cursor(CursorStyle::IBeam)
@@ -2341,28 +2410,30 @@ impl Render for ComposerInput {
             .on_action(cx.listener(Self::enter))
             .on_action(cx.listener(Self::newline))
             .on_action(cx.listener(Self::submit_steer))
+            .on_action(cx.listener(Self::clear_field))
             .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
             .on_mouse_down(MouseButton::Right, cx.listener(Self::on_context_mouse_down))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .w_full()
             .text_color(theme.text)
-            // A composer owns its own metrics; a code editor inherits the
-            // caller's, so a gutter beside it can rely on the same line height.
-            .when(self.mode == FieldMode::Composer, |field| {
+            // An auto-height field owns its metrics; any other multi-line
+            // field inherits the caller's, so a gutter beside an editor can
+            // rely on the same line height.
+            .when(self.auto_height, |field| {
                 field
                     .min_h(px(24.0))
-                    .max_h(COMPOSER_MAX_HEIGHT)
+                    .max_h(AUTO_HEIGHT_MAX)
                     .overflow_y_scroll()
                     .track_scroll(&scroll_handle)
                     .px(padding_x)
-                    .line_height(px(22.0))
-                    .text_size(px(13.5))
+                    .line_height(sp(22.0))
+                    .text_size(sp(13.5))
             })
-            // A search-mode field is visually one line: the text never wraps,
-            // and the overlong remainder slides horizontally under this
-            // clipped viewport to follow the caret — no scrollbar.
-            .when(self.mode == FieldMode::Search, |field| {
+            // A single-line field never wraps: the overlong remainder slides
+            // horizontally under this clipped viewport to follow the caret —
+            // no scrollbar.
+            .when(self.mode == FieldMode::SingleLine, |field| {
                 field.whitespace_nowrap().overflow_hidden()
             })
             .child(InputElement { input });
@@ -2389,11 +2460,11 @@ impl Render for ComposerInput {
                 // Call the editing methods directly rather than dispatching the
                 // actions: by the time an item runs, focus is still unwinding
                 // from the menu card, so a dispatch would have nowhere to land.
-                let run = |input: &Entity<ComposerInput>,
+                let run = |input: &Entity<TextInput>,
                            action: fn(
-                    &mut ComposerInput,
+                    &mut TextInput,
                     &mut Window,
-                    &mut Context<ComposerInput>,
+                    &mut Context<TextInput>,
                 )| {
                     let input = input.clone();
                     move |window: &mut Window, cx: &mut App| {
@@ -2439,15 +2510,191 @@ impl Render for ComposerInput {
     }
 }
 
+impl Focusable for TextInput {
+    fn focus_handle(&self, _: &App) -> FocusHandle {
+        self.focus_handle.clone()
+    }
+}
+
+/// What the composer tells its owner. `Submit` and `SubmitSteer` carry the
+/// trimmed prompt; the remaining events report composer-level interactions
+/// or mirror [`InputEvent`] from the embedded field.
+#[derive(Clone)]
+pub enum ComposerEvent {
+    /// Enter: send the prompt, or queue it behind the running turn.
+    Submit(String),
+    /// Primary modifier + Enter: deliver the prompt into the running turn
+    /// instead of queueing it behind the turn.
+    SubmitSteer(String),
+    /// Primary modifier + Enter in an empty composer: activate the oldest
+    /// queued follow-up's Steer control.
+    SteerQueued,
+    Focus,
+    Edited,
+    /// Backspace in an already-empty composer — the chat idiom for "remove
+    /// the last staged attachment".
+    BackspaceOnEmpty,
+}
+
+/// An image or file paste, re-emitted from the embedded field's
+/// [`MediaPaste`]. The owning view persists the entries and presents them as
+/// attachment chips.
+#[derive(Clone)]
+pub struct ComposerAttachmentPaste(pub Vec<ClipboardEntry>);
+
+/// The prompt composer, built on [`TextInput`]: a self-sizing multi-line
+/// field where Enter submits the trimmed prompt and clears, the primary
+/// modifier + Enter steers it into the running turn instead, and image or
+/// file pastes surface as attachments rather than text. Everything textual —
+/// editing, IME, undo, selection — is the embedded field's; this component
+/// owns only the prompt policy on top.
+pub struct ComposerInput {
+    input: Entity<TextInput>,
+    /// Clone of the embedded field's handle, so `focus()` needs no `cx`.
+    focus_handle: FocusHandle,
+    _subscriptions: Vec<Subscription>,
+}
+
+impl ComposerInput {
+    pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let input = cx.new(|cx| {
+            TextInput::new(window, cx)
+                .multi_line()
+                .submit_on_enter()
+                .auto_height()
+                .media_paste()
+                .placeholder(tr!("input.do_anything"))
+        });
+        let focus_handle = input.read(cx).focus();
+        let _subscriptions = vec![
+            cx.subscribe(&input, |composer, _, event: &InputEvent, cx| match event {
+                InputEvent::Submit(raw) => {
+                    // The prompt is consumed by sending it, and whitespace
+                    // alone is nothing to send.
+                    let value = raw.trim().to_owned();
+                    if !value.is_empty() {
+                        composer.input.update(cx, |input, cx| input.clear(cx));
+                        cx.emit(ComposerEvent::Submit(value));
+                    }
+                }
+                InputEvent::Focus => cx.emit(ComposerEvent::Focus),
+                InputEvent::Edited => cx.emit(ComposerEvent::Edited),
+                InputEvent::BackspaceOnEmpty => cx.emit(ComposerEvent::BackspaceOnEmpty),
+            }),
+            cx.subscribe(&input, |_, _, event: &MediaPaste, cx| {
+                cx.emit(ComposerAttachmentPaste(event.0.clone()));
+            }),
+        ];
+        Self {
+            input,
+            focus_handle,
+            _subscriptions,
+        }
+    }
+
+    /// Forwarded [`TextInput::set_padding_x`], for the embedded field the
+    /// constructor already created.
+    pub fn padding_x(self, padding: Pixels, cx: &mut Context<Self>) -> Self {
+        self.input
+            .update(cx, |input, _| input.set_padding_x(padding));
+        self
+    }
+
+    pub fn focus(&self) -> FocusHandle {
+        self.focus_handle.clone()
+    }
+
+    pub fn content<'a>(&self, cx: &'a App) -> &'a str {
+        self.input.read(cx).content()
+    }
+
+    /// Caret byte offset, for the autocomplete's trigger detection.
+    pub fn cursor(&self, cx: &App) -> usize {
+        self.input.read(cx).cursor()
+    }
+
+    pub fn clear(&mut self, cx: &mut Context<Self>) {
+        self.input.update(cx, |input, cx| input.clear(cx));
+    }
+
+    pub fn set_content(&mut self, content: impl Into<SharedString>, cx: &mut Context<Self>) {
+        self.input.update(cx, |input, cx| input.set_content(content, cx));
+    }
+
+    pub fn set_placeholder(
+        &mut self,
+        placeholder: impl Into<SharedString>,
+        cx: &mut Context<Self>,
+    ) {
+        self.input
+            .update(cx, |input, cx| input.set_placeholder(placeholder, cx));
+    }
+
+    /// Splice `text` over `range`, as the `@`/`/` autocomplete accepts a row.
+    pub fn replace_range(&mut self, range: Range<usize>, text: &str, cx: &mut Context<Self>) {
+        self.input
+            .update(cx, |input, cx| input.replace_range(range, text, cx));
+    }
+
+    pub fn preserve_visual_focus_for_context_menu(
+        &mut self,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        self.input.update(cx, |input, cx| {
+            input.preserve_visual_focus_for_context_menu(window, cx)
+        })
+    }
+
+    pub fn release_visual_focus_for_context_menu(
+        &mut self,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.input.update(cx, |input, cx| {
+            input.release_visual_focus_for_context_menu(window, cx)
+        });
+    }
+
+    /// Whether the embedded field's right-click menu is open.
+    pub fn context_menu_open(&self, cx: &App) -> bool {
+        self.input.read(cx).context_menu_open()
+    }
+}
+
+impl Render for ComposerInput {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .w_full()
+            // The embedded field propagates SubmitSteer; this ancestor
+            // handler is where steering becomes a composer event.
+            .on_action(cx.listener(|composer, _: &SubmitSteer, _, cx| {
+                let value = composer.content(cx).trim().to_owned();
+                if value.is_empty() {
+                    cx.emit(ComposerEvent::SteerQueued);
+                    return;
+                }
+                composer.input.update(cx, |input, cx| input.clear(cx));
+                cx.emit(ComposerEvent::SubmitSteer(value));
+            }))
+            .child(self.input.clone())
+    }
+}
+
 impl Focusable for ComposerInput {
     fn focus_handle(&self, _: &App) -> FocusHandle {
         self.focus_handle.clone()
     }
 }
 
+impl EventEmitter<ComposerEvent> for ComposerInput {}
+impl EventEmitter<ComposerAttachmentPaste> for ComposerInput {}
+
 #[cfg(test)]
 mod tests {
+    use std::cell::RefCell;
     use std::path::PathBuf;
+    use std::rc::Rc;
     use std::time::{Duration, Instant};
 
     use gpui::{
@@ -2458,14 +2705,14 @@ mod tests {
 
     use super::TokenClass;
     use super::{
-        ComposerInput, EditHistory, SearchPaint, UNDO_GROUP_INTERVAL, UNDO_HISTORY_CAP,
-        attachment_paste_entries, cursor_should_be_visible, input_text_runs, next_word_boundary,
-        previous_word_boundary, single_line_scroll, trimmed_splice, visual_row_count,
-        word_range_at,
+        ComposerEvent, ComposerInput, EditHistory, FieldMode, SearchPaint, TextInput,
+        UNDO_GROUP_INTERVAL, UNDO_HISTORY_CAP, cursor_should_be_visible, input_text_runs,
+        media_paste_entries, next_word_boundary, pasted_text_for_mode, previous_word_boundary,
+        single_line_scroll, trimmed_splice, visual_row_count, word_range_at,
     };
 
     struct InputHarness {
-        input: Entity<ComposerInput>,
+        input: Entity<TextInput>,
         width: Pixels,
     }
 
@@ -2475,16 +2722,26 @@ mod tests {
         }
     }
 
+    struct ComposerHarness {
+        composer: Entity<ComposerInput>,
+    }
+
+    impl Render for ComposerHarness {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div().w(px(300.)).child(self.composer.clone())
+        }
+    }
+
     fn setup_input<'a>(
         cx: &'a mut TestAppContext,
         content: &str,
         width: Pixels,
-    ) -> (Entity<ComposerInput>, &'a mut gpui::VisualTestContext) {
+    ) -> (Entity<TextInput>, &'a mut gpui::VisualTestContext) {
         cx.update(super::init);
         let content = content.to_owned();
         let (harness, cx) = cx.add_window_view(move |window, cx| {
             let input = cx.new(|cx| {
-                let mut input = ComposerInput::new(window, cx);
+                let mut input = TextInput::new(window, cx).multi_line().auto_height();
                 input.set_content(content, cx);
                 input
             });
@@ -2494,6 +2751,51 @@ mod tests {
         cx.update(|window, cx| window.focus(&input.read(cx).focus(), cx));
         cx.run_until_parked();
         (input, cx)
+    }
+
+    fn setup_composer<'a>(
+        cx: &'a mut TestAppContext,
+    ) -> (Entity<ComposerInput>, &'a mut gpui::VisualTestContext) {
+        cx.update(super::init);
+        let (harness, cx) = cx.add_window_view(|window, cx| {
+            let composer = cx.new(|cx| ComposerInput::new(window, cx));
+            ComposerHarness { composer }
+        });
+        let composer = cx.read_entity(&harness, |harness, _| harness.composer.clone());
+        cx.update(|window, cx| window.focus(&composer.read(cx).focus(), cx));
+        cx.run_until_parked();
+        (composer, cx)
+    }
+
+    #[gpui::test]
+    fn secondary_enter_steers_text_or_activates_the_queue(cx: &mut TestAppContext) {
+        let (composer, cx) = setup_composer(cx);
+        let events: Rc<RefCell<Vec<ComposerEvent>>> = Rc::default();
+        let sink = events.clone();
+        cx.update(|_, cx| {
+            cx.subscribe(&composer, move |_, event: &ComposerEvent, _| {
+                sink.borrow_mut().push(event.clone());
+            })
+            .detach();
+        });
+
+        cx.simulate_keystrokes("secondary-enter");
+        assert!(matches!(
+            events.borrow().last(),
+            Some(ComposerEvent::SteerQueued)
+        ));
+
+        composer.update(cx, |composer, cx| composer.set_content("hold on", cx));
+        events.borrow_mut().clear();
+        cx.simulate_keystrokes("secondary-enter");
+        assert!(
+            events.borrow().iter().any(
+                |event| matches!(event, ComposerEvent::SubmitSteer(text) if text == "hold on")
+            )
+        );
+        cx.read_entity(&composer, |composer, cx| {
+            assert_eq!(composer.content(cx), "")
+        });
     }
 
     #[gpui::test]
@@ -2558,7 +2860,7 @@ mod tests {
         };
         let image_clipboard = ClipboardItem::new_image(&image);
         assert!(matches!(
-            attachment_paste_entries(&image_clipboard).as_deref(),
+            media_paste_entries(&image_clipboard).as_deref(),
             Some([ClipboardEntry::Image(found)]) if found == &image
         ));
 
@@ -2570,7 +2872,7 @@ mod tests {
             ],
         };
         assert!(matches!(
-            attachment_paste_entries(&file_clipboard).as_deref(),
+            media_paste_entries(&file_clipboard).as_deref(),
             Some([ClipboardEntry::ExternalPaths(found)]) if found == &paths
         ));
     }
@@ -2587,7 +2889,52 @@ mod tests {
                 }),
             ],
         };
-        assert!(attachment_paste_entries(&clipboard).is_none());
+        assert!(media_paste_entries(&clipboard).is_none());
+    }
+
+    #[test]
+    fn multi_line_paste_keeps_line_breaks() {
+        assert_eq!(
+            pasted_text_for_mode(FieldMode::MultiLine, "first\r\nsecond\rthird\nfourth"),
+            "first\nsecond\nthird\nfourth"
+        );
+        // A one-line field is still one line.
+        assert_eq!(
+            pasted_text_for_mode(FieldMode::SingleLine, "first\r\nsecond"),
+            "first  second"
+        );
+    }
+
+    #[gpui::test]
+    fn escape_clears_an_opted_in_field_first(cx: &mut TestAppContext) {
+        cx.update(super::init);
+        let (harness, cx) = cx.add_window_view(|window, cx| {
+            let input = cx.new(|cx| {
+                let mut input = TextInput::new(window, cx).clear_on_escape();
+                input.set_content("abc", cx);
+                input
+            });
+            InputHarness {
+                input,
+                width: px(300.),
+            }
+        });
+        let input = cx.read_entity(&harness, |harness, _| harness.input.clone());
+        cx.update(|window, cx| window.focus(&input.read(cx).focus(), cx));
+        cx.run_until_parked();
+
+        cx.simulate_keystrokes("escape");
+
+        cx.read_entity(&input, |input, _| assert_eq!(input.content(), ""));
+    }
+
+    #[gpui::test]
+    fn escape_leaves_a_field_that_did_not_opt_in(cx: &mut TestAppContext) {
+        let (input, cx) = setup_input(cx, "abc", px(300.));
+
+        cx.simulate_keystrokes("escape");
+
+        cx.read_entity(&input, |input, _| assert_eq!(input.content(), "abc"));
     }
 
     /// Type each string in sequence at `at`, advancing the caret, the way

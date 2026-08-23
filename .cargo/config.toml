@@ -30,3 +30,6 @@ rustflags = ["-C", "link-arg=-arm64hazardfree"]
 
 [build]
 jobs = 4
+
+[profile.dev]
+debug = "line-tables-only"

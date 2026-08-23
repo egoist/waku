@@ -24,6 +24,7 @@ jobs:
     outputs:
       version: ${{ steps.resolve.outputs.version }}
       tag: ${{ steps.resolve.outputs.tag }}
+      published: ${{ steps.published.outputs.published }}
     steps:
       - uses: actions/checkout@v6
 
@@ -48,9 +49,29 @@ jobs:
           echo "tag=v$version" >> "$GITHUB_OUTPUT"
           echo "Releasing $version as v$version"
 
+      # A published release for this version is already the finished product,
+      # so rebuilding it would burn 90 minutes and could replace artifacts
+      # people have downloaded. A leftover draft is this workflow's own
+      # output, so it does not count and gets overwritten as before.
+      - name: Look for an existing published release
+        id: published
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.resolve.outputs.tag }}
+        run: |
+          draft=$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" \
+            --json isDraft --jq .isDraft 2>/dev/null) || draft=missing
+          if [ "$draft" = false ]; then
+            echo "published=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::$TAG is already published; skipping this run"
+          else
+            echo "published=false" >> "$GITHUB_OUTPUT"
+          fi
+
   linux-x86_64:
     name: Linux x86_64
     needs: version
+    if: needs.version.outputs.published != 'true'
     runs-on: ubuntu-22.04
     timeout-minutes: 90
     steps:
@@ -106,6 +127,7 @@ jobs:
   linux-arm64:
     name: Linux arm64
     needs: version
+    if: needs.version.outputs.published != 'true'
     runs-on: ubuntu-22.04-arm
     timeout-minutes: 90
     steps:
@@ -158,6 +180,7 @@ jobs:
   windows-x86_64:
     name: Windows x86_64
     needs: version
+    if: needs.version.outputs.published != 'true'
     runs-on: windows-latest
     timeout-minutes: 90
     steps:
@@ -207,6 +230,7 @@ jobs:
   windows-arm64:
     name: Windows arm64
     needs: version
+    if: needs.version.outputs.published != 'true'
     runs-on: windows-11-arm
     timeout-minutes: 90
     steps:
@@ -256,6 +280,7 @@ jobs:
   macos:
     name: macOS
     needs: version
+    if: needs.version.outputs.published != 'true'
     runs-on: macos-latest
     timeout-minutes: 90
     steps:
@@ -337,6 +362,7 @@ jobs:
         windows-arm64,
         macos,
       ]
+    if: needs.version.outputs.published != 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
