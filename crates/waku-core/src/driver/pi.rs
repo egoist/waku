@@ -6,7 +6,7 @@
 //! once protocol v2 is negotiated. [`PiFlavor`] carries those differences so
 //! both providers share one transport instead of two near-copies.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -15,7 +15,7 @@ use std::thread;
 use std::time::Duration;
 
 use anyhow::{Context as _, anyhow};
-use crossbeam_channel::{Sender, bounded, unbounded};
+use crossbeam_channel::{RecvTimeoutError, Sender, bounded, unbounded};
 use parking_lot::Mutex;
 use serde_json::{Value, json};
 
@@ -23,7 +23,10 @@ use super::{activity, computer_use as computer_use_runtime};
 use crate::driver::{
     DriverControl, DriverEventSender, DriverEventSink, DriverStartOptions, SessionOptions,
 };
-use crate::model::{ActivityKind, DriverEvent, InteractionMode, ProviderResumeCursor, RuntimeMode};
+use crate::model::{
+    ActivityKind, DriverEvent, InteractionMode, ProviderResumeCursor, RuntimeMode, UserInputAnswer,
+    UserInputOption, UserInputQuestion,
+};
 
 const RPC_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -146,8 +149,6 @@ impl PiFlavor {
 enum CommandMessage {
     Prompt(String),
     Steer(String),
-    Cancel,
-    CancelExtensionRequest(String),
     Options(SessionOptions),
     Rollback {
         turns: usize,
@@ -162,9 +163,211 @@ enum CommandMessage {
 
 type PendingResponses = Arc<Mutex<HashMap<String, Sender<Result<Value, String>>>>>;
 
+/// Stdin is shared three ways. Prompts and their setters stay on the writer
+/// thread, while Stop (`abort`) and extension-dialog answers must reach Pi
+/// even while a prompt's preflight is blocked on exactly such a dialog — the
+/// user answering it is what unblocks the prompt. Every write is one line,
+/// so the mutex only serializes frames; it is never held while waiting.
+type SharedStdin = Arc<Mutex<Box<dyn Write + Send>>>;
+
+/// Pi's extension dialogs (`extension_ui_request`) map onto Waku's structured
+/// user questions. Both flavors resolve a timed-out or aborted dialog by
+/// themselves, so only three transitions matter here: expose, answer, forget.
+type PendingExtensionRequests = Arc<Mutex<ExtensionRequestQueue>>;
+
+#[derive(Default)]
+struct ExtensionRequestQueue {
+    /// Question ids in arrival order; the front entry is the one the UI shows.
+    order: VecDeque<String>,
+    requests: HashMap<String, PendingExtensionRequest>,
+}
+
+struct PendingExtensionRequest {
+    questions: Vec<UserInputQuestion>,
+    answer: ExtensionAnswer,
+}
+
+/// How an answered dialog resolves on Pi's RPC bridge.
+enum ExtensionAnswer {
+    /// `select`, `input`, and `editor` resolve to the text the user picked or
+    /// typed.
+    Value,
+    /// `confirm` resolves to a boolean, but is rendered as two options. Pi
+    /// only speaks the boolean, so the rendered "yes" label is remembered to
+    /// recognize it on the way back.
+    Confirmed { yes_label: String },
+}
+
+impl ExtensionRequestQueue {
+    /// Exposes the request to the UI when nothing else is waiting, returning
+    /// the event to emit in that case.
+    fn insert(&mut self, id: String, request: PendingExtensionRequest) -> Option<DriverEvent> {
+        self.requests.insert(id.clone(), request);
+        self.order.push_back(id);
+        if self.order.len() == 1 {
+            self.exposed()
+        } else {
+            None
+        }
+    }
+
+    /// Removes the answered request, returning it plus the event exposing the
+    /// dialog queued behind it, if any.
+    fn remove(&mut self, id: &str) -> Option<(PendingExtensionRequest, Option<DriverEvent>)> {
+        let removed = self.requests.remove(id)?;
+        self.order.retain(|queued| queued != id);
+        Some((removed, self.exposed()))
+    }
+
+    /// Forgets every outstanding request without answering — the turn that
+    /// issued them has settled and Pi has already resolved the dialogs.
+    fn clear(&mut self) -> Vec<String> {
+        let ids: Vec<String> = self.order.drain(..).collect();
+        self.requests.clear();
+        ids
+    }
+
+    fn exposed(&self) -> Option<DriverEvent> {
+        let id = self.order.front()?;
+        self.requests
+            .get(id)
+            .map(|request| DriverEvent::UserInputRequested {
+                request_id: id.clone(),
+                questions: request.questions.clone(),
+            })
+    }
+}
+
+/// Maps an `extension_ui_request` frame onto Waku's question model. The four
+/// dialog methods (`select`/`confirm`/`input`/`editor`) become one question
+/// each; `notify`, `setStatus`, `setWidget`, and friends are fire-and-forget
+/// and yield no request, and an unparseable dialog yields none either — the
+/// caller cancels those so the extension is never left hanging.
+fn extension_ui_request(value: &Value) -> Option<(String, PendingExtensionRequest)> {
+    let id = value.get("id").and_then(Value::as_str)?.to_owned();
+    let method = value.get("method").and_then(Value::as_str)?;
+    let field = |key: &str| {
+        value
+            .get(key)
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .trim()
+            .to_owned()
+    };
+    let title = field("title");
+    let (question, options, answer) = match method {
+        "select" => {
+            let options: Vec<UserInputOption> = value
+                .get("options")
+                .and_then(Value::as_array)?
+                .iter()
+                .filter_map(|option| option.as_str().map(str::trim))
+                .filter(|label| !label.is_empty())
+                .map(|label| UserInputOption {
+                    label: label.to_owned(),
+                    description: None,
+                })
+                .collect();
+            if options.is_empty() {
+                return None;
+            }
+            (title.clone(), options, ExtensionAnswer::Value)
+        }
+        "confirm" => {
+            let yes = tr!("user_input.yes");
+            let options = vec![
+                UserInputOption {
+                    label: yes.clone(),
+                    description: None,
+                },
+                UserInputOption {
+                    label: tr!("user_input.no"),
+                    description: None,
+                },
+            ];
+            let message = field("message");
+            (
+                if message.is_empty() {
+                    title.clone()
+                } else {
+                    message
+                },
+                options,
+                ExtensionAnswer::Confirmed { yes_label: yes },
+            )
+        }
+        // A placeholder describes the expected answer better than the title.
+        // The editor's `prefill` can be an entire file, so it stays out of
+        // the question text.
+        "input" => {
+            let placeholder = field("placeholder");
+            (
+                if placeholder.is_empty() {
+                    title.clone()
+                } else {
+                    placeholder
+                },
+                Vec::new(),
+                ExtensionAnswer::Value,
+            )
+        }
+        "editor" => (title.clone(), Vec::new(), ExtensionAnswer::Value),
+        _ => return None,
+    };
+    let header = if title.is_empty() {
+        tr!("activity.ask_questions")
+    } else {
+        title
+    };
+    let question = if question.is_empty() {
+        header.clone()
+    } else {
+        question
+    };
+    Some((
+        id.clone(),
+        PendingExtensionRequest {
+            questions: vec![UserInputQuestion {
+                id,
+                header,
+                question,
+                options,
+                multi_select: false,
+            }],
+            answer,
+        },
+    ))
+}
+
+/// Builds the `extension_ui_response` frame answering one dialog, following
+/// Pi's RPC bridge: `value` carries text answers, `confirmed` the boolean,
+/// and an empty answer means the user never decided, which reads as cancelled.
+fn extension_ui_response_frame(
+    request_id: &str,
+    request: &PendingExtensionRequest,
+    answers: &[UserInputAnswer],
+) -> Value {
+    let answer = answers
+        .first()
+        .and_then(|answer| answer.answers.first())
+        .filter(|text| !text.trim().is_empty());
+    match (&request.answer, answer) {
+        (ExtensionAnswer::Value, Some(text)) => {
+            json!({"type": "extension_ui_response", "id": request_id, "value": text})
+        }
+        (ExtensionAnswer::Confirmed { yes_label }, Some(text)) => {
+            json!({"type": "extension_ui_response", "id": request_id, "confirmed": text == yes_label})
+        }
+        _ => json!({"type": "extension_ui_response", "id": request_id, "cancelled": true}),
+    }
+}
+
 pub struct PiDriver {
     flavor: PiFlavor,
     commands: Sender<CommandMessage>,
+    stdin: SharedStdin,
+    events: DriverEventSender,
+    extension_requests: PendingExtensionRequests,
     computer_use: Option<computer_use_runtime::ComputerUseRuntime>,
 }
 
@@ -265,6 +468,9 @@ impl PiDriver {
             .stdin
             .take()
             .ok_or_else(|| anyhow!("{} stdin unavailable", flavor.display_name()))?;
+        let stdin: SharedStdin = Arc::new(Mutex::new(Box::new(stdin)));
+        let reader_stdin = stdin.clone();
+        let writer_stdin = stdin.clone();
         let stdout = child
             .stdout
             .take()
@@ -276,8 +482,9 @@ impl PiDriver {
 
         let (commands, command_rx) = unbounded();
         let pending = Arc::new(Mutex::new(HashMap::new()));
+        let extension_requests = PendingExtensionRequests::default();
         let reader_pending = pending.clone();
-        let reader_commands = commands.clone();
+        let reader_extension_requests = extension_requests.clone();
         let reader_events = events.clone();
         let reader_thread =
             thread::Builder::new()
@@ -299,7 +506,8 @@ impl PiDriver {
                                                 flavor,
                                                 value,
                                                 &reader_pending,
-                                                &reader_commands,
+                                                &reader_extension_requests,
+                                                &reader_stdin,
                                                 &reader_events,
                                                 &mut stream_state,
                                             ),
@@ -348,28 +556,28 @@ impl PiDriver {
         thread::Builder::new()
             .name("waku-pi-writer".into())
             .spawn(move || {
-                let mut stdin = stdin;
+                let stdin = writer_stdin;
                 let mut next_request_id = 0_u64;
                 let initialize = (|| -> Result<Value, String> {
                     // Negotiate before anything else so a large first response
                     // arrives chunked rather than shrunk to an error frame.
                     if flavor.negotiates_protocol_v2() {
                         send_request(
-                            &mut stdin,
+                            &stdin,
                             &writer_pending,
                             &mut next_request_id,
                             json!({"type": "negotiate_protocol", "protocolVersion": 2}),
                         )?;
                     }
                     let _ = send_request(
-                        &mut stdin,
+                        &stdin,
                         &writer_pending,
                         &mut next_request_id,
                         json!({"type": "get_state"}),
                     )?;
                     if let Some(session_file) = resume_session_file {
                         let response = send_request(
-                            &mut stdin,
+                            &stdin,
                             &writer_pending,
                             &mut next_request_id,
                             json!({
@@ -390,7 +598,7 @@ impl PiDriver {
                         let (provider, model_id) =
                             parse_model_slug(model).map_err(|error| error.to_string())?;
                         let _ = send_request(
-                            &mut stdin,
+                            &stdin,
                             &writer_pending,
                             &mut next_request_id,
                             json!({
@@ -402,14 +610,14 @@ impl PiDriver {
                     }
                     if let Some(level) = reasoning_effort.as_deref() {
                         let _ = send_request(
-                            &mut stdin,
+                            &stdin,
                             &writer_pending,
                             &mut next_request_id,
                             json!({"type": "set_thinking_level", "level": level}),
                         )?;
                     }
                     send_request(
-                        &mut stdin,
+                        &stdin,
                         &writer_pending,
                         &mut next_request_id,
                         json!({"type": "get_state"}),
@@ -449,7 +657,7 @@ impl PiDriver {
                     return;
                 };
                 let initial_usage = send_request(
-                    &mut stdin,
+                    &stdin,
                     &writer_pending,
                     &mut next_request_id,
                     json!({"type": "get_session_stats"}),
@@ -482,11 +690,16 @@ impl PiDriver {
                 while let Ok(message) = command_rx.recv() {
                     match message {
                         CommandMessage::Prompt(prompt) => {
-                            let result = send_request(
-                                &mut stdin,
+                            // A dialog raised during preflight makes the ack
+                            // exactly as slow as the user's answer, so this
+                            // one RPC has no deadline; events still report
+                            // the turn's outcome.
+                            let result = send_request_with_deadline(
+                                &stdin,
                                 &writer_pending,
                                 &mut next_request_id,
                                 json!({"type": "prompt", "message": prompt}),
+                                None,
                             );
                             if let Err(error) = result {
                                 let _ = writer_events.send(DriverEvent::Error(tr!(
@@ -505,7 +718,7 @@ impl PiDriver {
                         }
                         CommandMessage::Steer(prompt) => {
                             let result = send_request(
-                                &mut stdin,
+                                &stdin,
                                 &writer_pending,
                                 &mut next_request_id,
                                 json!({"type": "steer", "message": prompt}),
@@ -523,26 +736,12 @@ impl PiDriver {
                                 }
                             }
                         }
-                        CommandMessage::Cancel => {
-                            if let Err(error) = send_request(
-                                &mut stdin,
-                                &writer_pending,
-                                &mut next_request_id,
-                                json!({"type": "abort"}),
-                            ) {
-                                let _ = writer_events.send(DriverEvent::Error(tr!(
-                                    "errors.stop_provider",
-                                    provider = flavor.display_name(),
-                                    error = error
-                                )));
-                            }
-                        }
                         CommandMessage::Options(options) => {
                             if options.model != current_model {
                                 match options.model.as_deref().map(parse_model_slug).transpose() {
                                     Ok(Some((provider, model_id))) => {
                                         match send_request(
-                                            &mut stdin,
+                                            &stdin,
                                             &writer_pending,
                                             &mut next_request_id,
                                             json!({
@@ -586,7 +785,7 @@ impl PiDriver {
                             if options.reasoning_effort != current_effort {
                                 if let Some(level) = options.reasoning_effort.as_deref()
                                     && let Err(error) = send_request(
-                                        &mut stdin,
+                                        &stdin,
                                         &writer_pending,
                                         &mut next_request_id,
                                         json!({"type": "set_thinking_level", "level": level}),
@@ -601,24 +800,10 @@ impl PiDriver {
                                 current_effort = options.reasoning_effort;
                             }
                         }
-                        CommandMessage::CancelExtensionRequest(id) => {
-                            if write_json_line(
-                                &mut stdin,
-                                &json!({
-                                    "type": "extension_ui_response",
-                                    "id": id,
-                                    "cancelled": true
-                                }),
-                            )
-                            .is_err()
-                            {
-                                break;
-                            }
-                        }
                         CommandMessage::Rollback { turns, response } => {
                             let result = fork_pi_session(
                                 flavor,
-                                &mut stdin,
+                                &stdin,
                                 &writer_pending,
                                 &mut next_request_id,
                                 &binary,
@@ -638,7 +823,7 @@ impl PiDriver {
                         } => {
                             let result = fork_pi_session(
                                 flavor,
-                                &mut stdin,
+                                &stdin,
                                 &writer_pending,
                                 &mut next_request_id,
                                 &binary,
@@ -673,6 +858,7 @@ impl PiDriver {
         // Nothing signals or kills the agent process: it exits when the writer
         // thread drops its stdin. Something still has to reap it, or every
         // session that ever ran leaves a zombie behind for the life of the app.
+        let process_events = events.clone();
         thread::Builder::new()
             .name("waku-pi-process".into())
             .spawn(move || {
@@ -681,14 +867,14 @@ impl PiDriver {
                 let _ = stderr_thread.join();
                 match status {
                     Ok(status) if !status.success() && last_visible_stderr.lock().is_none() => {
-                        let _ = events.send(DriverEvent::Error(tr!(
+                        let _ = process_events.send(DriverEvent::Error(tr!(
                             "errors.provider_rpc_exited",
                             provider = flavor.display_name(),
                             status = status
                         )));
                     }
                     Err(error) => {
-                        let _ = events.send(DriverEvent::Error(tr!(
+                        let _ = process_events.send(DriverEvent::Error(tr!(
                             "errors.read_provider_exit_status",
                             provider = format!("{} RPC", flavor.display_name()),
                             error = error
@@ -696,12 +882,15 @@ impl PiDriver {
                     }
                     _ => {}
                 }
-                let _ = events.send(DriverEvent::ProcessExited);
+                let _ = process_events.send(DriverEvent::ProcessExited);
             })?;
 
         Ok(Self {
             flavor,
             commands,
+            stdin,
+            events,
+            extension_requests,
             computer_use,
         })
     }
@@ -721,7 +910,9 @@ impl DriverControl for PiDriver {
     }
 
     fn cancel(&self) {
-        let _ = self.commands.send(CommandMessage::Cancel);
+        // The writer thread may be parked on a prompt whose preflight is
+        // waiting on a user dialog; Stop cannot queue behind that wait.
+        let _ = write_json_line(&mut *self.stdin.lock(), &json!({"type": "abort"}));
     }
 
     fn cancel_computer_use(&self) {
@@ -731,6 +922,23 @@ impl DriverControl for PiDriver {
     }
 
     fn respond(&self, _request_id: String, _option_id: String) {}
+
+    fn respond_user_input(&self, request_id: String, answers: Vec<UserInputAnswer>) {
+        // Pi already resolved the dialog itself (timeout or abort): a late
+        // answer is simply dropped.
+        let Some((request, next)) = self.extension_requests.lock().remove(&request_id) else {
+            return;
+        };
+        if write_json_line(
+            &mut *self.stdin.lock(),
+            &extension_ui_response_frame(&request_id, &request, &answers),
+        )
+        .is_ok()
+            && let Some(next) = next
+        {
+            let _ = self.events.send(next);
+        }
+    }
 
     fn apply_options(&self, options: SessionOptions) -> bool {
         // Both flavors have setters for the model and thinking level, so those
@@ -801,33 +1009,68 @@ impl DriverControl for PiDriver {
 impl Drop for PiDriver {
     fn drop(&mut self) {
         self.cancel_computer_use();
+        // Extensions still waiting on a dialog answer would hang until their
+        // process dies; cancel them before the writer thread winds down.
+        let ids = self.extension_requests.lock().clear();
+        let mut stdin = self.stdin.lock();
+        for id in ids {
+            let _ = write_json_line(
+                &mut *stdin,
+                &json!({"type": "extension_ui_response", "id": id, "cancelled": true}),
+            );
+        }
+        drop(stdin);
         let _ = self.commands.send(CommandMessage::Shutdown);
     }
 }
 
 fn send_request(
-    stdin: &mut impl Write,
+    stdin: &SharedStdin,
+    pending: &PendingResponses,
+    next_request_id: &mut u64,
+    request: Value,
+) -> Result<Value, String> {
+    send_request_with_deadline(stdin, pending, next_request_id, request, Some(RPC_TIMEOUT))
+}
+
+/// Prompts pass `None` for the deadline: preflight runs extension handlers,
+/// and a handler waiting on a user dialog makes the ack exactly as slow as
+/// the user's answer. Process exit still breaks the wait through
+/// `fail_pending` dropping the response sender.
+fn send_request_with_deadline(
+    stdin: &SharedStdin,
     pending: &PendingResponses,
     next_request_id: &mut u64,
     mut request: Value,
+    deadline: Option<Duration>,
 ) -> Result<Value, String> {
     *next_request_id += 1;
     let id = format!("waku-{}", next_request_id);
     request["id"] = Value::String(id.clone());
     let (response_tx, response_rx) = bounded(1);
     pending.lock().insert(id.clone(), response_tx);
-    if let Err(error) = write_json_line(stdin, &request) {
+    if let Err(error) = write_json_line(&mut *stdin.lock(), &request) {
         pending.lock().remove(&id);
         return Err(format!("transport write failed: {error}"));
     }
-    match response_rx.recv_timeout(RPC_TIMEOUT) {
-        Ok(response) => response,
-        Err(_) => {
-            pending.lock().remove(&id);
-            Err(format!(
-                "{} timed out",
-                request["type"].as_str().unwrap_or("request")
-            ))
+    loop {
+        match response_rx.recv_timeout(deadline.unwrap_or(RPC_TIMEOUT)) {
+            Ok(response) => return response,
+            Err(error) if deadline.is_some() => {
+                pending.lock().remove(&id);
+                return Err(match error {
+                    RecvTimeoutError::Timeout => format!(
+                        "{} timed out",
+                        request["type"].as_str().unwrap_or("request")
+                    ),
+                    RecvTimeoutError::Disconnected => "RPC transport closed".to_owned(),
+                });
+            }
+            Err(RecvTimeoutError::Timeout) => {}
+            Err(RecvTimeoutError::Disconnected) => {
+                pending.lock().remove(&id);
+                return Err("RPC transport closed".to_owned());
+            }
         }
     }
 }
@@ -1003,7 +1246,7 @@ fn pi_message_context_tokens(message: &Value) -> Option<u64> {
 #[allow(clippy::too_many_arguments)]
 fn fork_pi_session(
     flavor: PiFlavor,
-    stdin: &mut impl Write,
+    stdin: &SharedStdin,
     pending: &PendingResponses,
     next_request_id: &mut u64,
     binary: &Path,
@@ -1194,7 +1437,8 @@ fn handle_pi_message(
     flavor: PiFlavor,
     value: Value,
     pending: &PendingResponses,
-    commands: &Sender<CommandMessage>,
+    extension_requests: &PendingExtensionRequests,
+    stdin: &SharedStdin,
     events: &impl DriverEventSink,
     state: &mut PiStreamState,
 ) {
@@ -1252,6 +1496,9 @@ fn handle_pi_message(
                 }),
             });
         }
+        // Pi resolves aborted or timed-out dialogs itself; the turn that
+        // issued them is over, so forget them rather than answering late.
+        extension_requests.lock().clear();
         *state = PiStreamState::default();
         return;
     }
@@ -1379,12 +1626,29 @@ fn handle_pi_message(
             }
         }
         "extension_ui_request" => {
-            let method = value.get("method").and_then(Value::as_str);
-            let id = value.get("id").and_then(Value::as_str);
-            if matches!(method, Some("select" | "confirm" | "input" | "editor"))
-                && let Some(id) = id
-            {
-                let _ = commands.send(CommandMessage::CancelExtensionRequest(id.to_owned()));
+            match extension_ui_request(&value) {
+                Some((id, request)) => {
+                    let event = extension_requests.lock().insert(id, request);
+                    if let Some(event) = event {
+                        let _ = events.send(event);
+                    }
+                }
+                // A dialog Waku cannot represent is still answered, or the
+                // extension that raised it hangs until the turn dies. Written
+                // directly: the writer thread may be parked on the prompt
+                // this dialog is blocking.
+                None => {
+                    if matches!(
+                        value.get("method").and_then(Value::as_str),
+                        Some("select" | "confirm" | "input" | "editor")
+                    ) && let Some(id) = value.get("id").and_then(Value::as_str)
+                    {
+                        let _ = write_json_line(
+                            &mut *stdin.lock(),
+                            &json!({"type": "extension_ui_response", "id": id, "cancelled": true}),
+                        );
+                    }
+                }
             }
         }
         "extension_error" => {
@@ -1469,17 +1733,35 @@ mod tests {
     use super::*;
     use crossbeam_channel::TryRecvError;
 
+    struct CapturedWrite(Arc<Mutex<Vec<u8>>>);
+
+    impl Write for CapturedWrite {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// Everything Pi is told goes through the shared stdin, so tests capture
+    /// those bytes instead of watching a command channel.
     fn harness() -> (
         PendingResponses,
-        Sender<CommandMessage>,
-        crossbeam_channel::Receiver<CommandMessage>,
+        PendingExtensionRequests,
+        SharedStdin,
+        Arc<Mutex<Vec<u8>>>,
         PiStreamState,
     ) {
-        let (commands, receiver) = unbounded();
+        let written = Arc::new(Mutex::new(Vec::new()));
+        let stdin: SharedStdin = Arc::new(Mutex::new(Box::new(CapturedWrite(written.clone()))));
         (
             Arc::new(Mutex::new(HashMap::new())),
-            commands,
-            receiver,
+            PendingExtensionRequests::default(),
+            stdin,
+            written,
             PiStreamState::default(),
         )
     }
@@ -1554,9 +1836,13 @@ mod tests {
     #[test]
     fn model_and_thinking_changes_reach_the_running_session_but_mode_changes_do_not() {
         let (commands, command_rx) = unbounded();
+        let (events, _event_rx) = crate::driver::test_event_channel();
         let driver = PiDriver {
             flavor: PiFlavor::Pi,
             commands,
+            stdin: harness().2,
+            events,
+            extension_requests: PendingExtensionRequests::default(),
             computer_use: None,
         };
         let options = |mode, interaction_mode| SessionOptions {
@@ -1656,7 +1942,7 @@ mod tests {
 
     #[test]
     fn streams_pi_text_reasoning_tools_and_settles_once() {
-        let (pending, commands, _command_rx, mut state) = harness();
+        let (pending, extension_requests, stdin, _written, mut state) = harness();
         let (events, event_rx) = unbounded();
         for value in [
             json!({"type": "agent_start"}),
@@ -1689,7 +1975,8 @@ mod tests {
                 PiFlavor::Pi,
                 value,
                 &pending,
-                &commands,
+                &extension_requests,
+                &stdin,
                 &events,
                 &mut state,
             );
@@ -1828,7 +2115,7 @@ mod tests {
     /// terminal one may end the turn.
     #[test]
     fn ohmypi_settles_on_the_terminal_agent_end_only() {
-        let (pending, commands, _command_rx, mut state) = harness();
+        let (pending, extension_requests, stdin, _written, mut state) = harness();
         let (events, event_rx) = unbounded();
         for value in [
             json!({"type": "agent_start"}),
@@ -1843,7 +2130,8 @@ mod tests {
                 PiFlavor::OhMyPi,
                 value,
                 &pending,
-                &commands,
+                &extension_requests,
+                &stdin,
                 &events,
                 &mut state,
             );
@@ -1864,7 +2152,7 @@ mod tests {
     /// Pi's own settle event carries no meaning for Oh My Pi, and vice versa.
     #[test]
     fn each_flavor_ignores_the_other_settle_and_title_events() {
-        let (pending, commands, _command_rx, mut state) = harness();
+        let (pending, extension_requests, stdin, _written, mut state) = harness();
         let (events, event_rx) = unbounded();
         for (flavor, value) in [
             (PiFlavor::OhMyPi, json!({"type": "agent_start"})),
@@ -1879,7 +2167,15 @@ mod tests {
                 json!({"type": "session_info_update", "title": "Oh My Pi's spelling"}),
             ),
         ] {
-            handle_pi_message(flavor, value, &pending, &commands, &events, &mut state);
+            handle_pi_message(
+                flavor,
+                value,
+                &pending,
+                &extension_requests,
+                &stdin,
+                &events,
+                &mut state,
+            );
         }
 
         assert!(matches!(event_rx.recv().unwrap(), DriverEvent::TurnStarted));
@@ -1888,13 +2184,14 @@ mod tests {
 
     #[test]
     fn ohmypi_session_titles_arrive_on_its_own_event() {
-        let (pending, commands, _command_rx, mut state) = harness();
+        let (pending, extension_requests, stdin, _written, mut state) = harness();
         let (events, event_rx) = unbounded();
         handle_pi_message(
             PiFlavor::OhMyPi,
             json!({"type": "session_info_update", "title": "Named by Oh My Pi"}),
             &pending,
-            &commands,
+            &extension_requests,
+            &stdin,
             &events,
             &mut state,
         );
@@ -1945,14 +2242,15 @@ mod tests {
 
     #[test]
     fn session_name_changes_are_forwarded_as_automatic_titles() {
-        let (pending, commands, _command_rx, mut state) = harness();
+        let (pending, extension_requests, stdin, _written, mut state) = harness();
         let (events, event_rx) = unbounded();
 
         handle_pi_message(
             PiFlavor::Pi,
             json!({"type": "session_info_changed", "name": "Named by Pi"}),
             &pending,
-            &commands,
+            &extension_requests,
+            &stdin,
             &events,
             &mut state,
         );
@@ -1965,7 +2263,8 @@ mod tests {
             PiFlavor::Pi,
             json!({"type": "session_info_changed", "name": null}),
             &pending,
-            &commands,
+            &extension_requests,
+            &stdin,
             &events,
             &mut state,
         );
@@ -1977,7 +2276,7 @@ mod tests {
 
     #[test]
     fn tool_only_intermediate_message_does_not_emit_empty_text() {
-        let (pending, commands, _command_rx, mut state) = harness();
+        let (pending, extension_requests, stdin, _written, mut state) = harness();
         let (events, event_rx) = unbounded();
         handle_pi_message(
             PiFlavor::Pi,
@@ -1989,7 +2288,8 @@ mod tests {
                 }
             }),
             &pending,
-            &commands,
+            &extension_requests,
+            &stdin,
             &events,
             &mut state,
         );
@@ -1999,7 +2299,7 @@ mod tests {
 
     #[test]
     fn completed_message_is_used_when_deltas_were_not_streamed() {
-        let (pending, commands, _command_rx, mut state) = harness();
+        let (pending, extension_requests, stdin, _written, mut state) = harness();
         let (events, event_rx) = unbounded();
         handle_pi_message(
             PiFlavor::Pi,
@@ -2014,7 +2314,8 @@ mod tests {
                 }
             }),
             &pending,
-            &commands,
+            &extension_requests,
+            &stdin,
             &events,
             &mut state,
         );
@@ -2031,7 +2332,7 @@ mod tests {
 
     #[test]
     fn context_usage_uses_pi_components_when_total_is_zero() {
-        let (pending, commands, _command_rx, mut state) = harness();
+        let (pending, extension_requests, stdin, _written, mut state) = harness();
         let (events, event_rx) = unbounded();
         handle_pi_message(
             PiFlavor::Pi,
@@ -2050,7 +2351,8 @@ mod tests {
                 }
             }),
             &pending,
-            &commands,
+            &extension_requests,
+            &stdin,
             &events,
             &mut state,
         );
@@ -2087,7 +2389,7 @@ mod tests {
 
     #[test]
     fn recoverable_tool_error_does_not_fail_the_turn() {
-        let (pending, commands, _command_rx, mut state) = harness();
+        let (pending, extension_requests, stdin, _written, mut state) = harness();
         let (events, event_rx) = unbounded();
         for value in [
             json!({"type": "agent_start"}),
@@ -2104,7 +2406,8 @@ mod tests {
                 PiFlavor::Pi,
                 value,
                 &pending,
-                &commands,
+                &extension_requests,
+                &stdin,
                 &events,
                 &mut state,
             );
@@ -2129,7 +2432,7 @@ mod tests {
 
     #[test]
     fn successful_auto_retry_recovers_the_turn() {
-        let (pending, commands, _command_rx, mut state) = harness();
+        let (pending, extension_requests, stdin, _written, mut state) = harness();
         let (events, event_rx) = unbounded();
         for value in [
             json!({"type": "agent_start"}),
@@ -2144,7 +2447,8 @@ mod tests {
                 PiFlavor::Pi,
                 value,
                 &pending,
-                &commands,
+                &extension_requests,
+                &stdin,
                 &events,
                 &mut state,
             );
@@ -2156,5 +2460,362 @@ mod tests {
             event_rx.recv().unwrap(),
             DriverEvent::TurnFinished { success: true, .. }
         ));
+    }
+
+    #[test]
+    fn select_dialog_surfaces_as_a_structured_question() {
+        let (pending, extension_requests, stdin, written, mut state) = harness();
+        let (events, event_rx) = unbounded();
+        handle_pi_message(
+            PiFlavor::Pi,
+            json!({
+                "type": "extension_ui_request",
+                "id": "ask-1",
+                "method": "select",
+                "title": "Pick a framework",
+                "options": ["Dioxus", " GPUI ", ""]
+            }),
+            &pending,
+            &extension_requests,
+            &stdin,
+            &events,
+            &mut state,
+        );
+
+        let DriverEvent::UserInputRequested {
+            request_id,
+            questions,
+        } = event_rx.recv().unwrap()
+        else {
+            panic!("a select dialog must surface the structured question UI");
+        };
+        assert_eq!(request_id, "ask-1");
+        let [question] = questions.as_slice() else {
+            panic!("one dialog is exactly one question");
+        };
+        assert_eq!(question.header, "Pick a framework");
+        assert_eq!(question.question, "Pick a framework");
+        assert!(!question.multi_select);
+        let labels: Vec<&str> = question
+            .options
+            .iter()
+            .map(|option| option.label.as_str())
+            .collect();
+        assert_eq!(labels, ["Dioxus", "GPUI"]);
+        // The old behavior cancelled every dialog; a surfaced question must not.
+        assert!(written.lock().is_empty());
+    }
+
+    #[test]
+    fn a_second_dialog_waits_for_the_first_answer() {
+        let (pending, extension_requests, stdin, _written, mut state) = harness();
+        let (events, event_rx) = unbounded();
+        for value in [
+            json!({"type": "extension_ui_request", "id": "ask-1", "method": "select", "title": "One", "options": ["A"]}),
+            json!({"type": "extension_ui_request", "id": "ask-2", "method": "input", "title": "Two"}),
+        ] {
+            handle_pi_message(
+                PiFlavor::Pi,
+                value,
+                &pending,
+                &extension_requests,
+                &stdin,
+                &events,
+                &mut state,
+            );
+        }
+
+        assert!(matches!(
+            event_rx.recv().unwrap(),
+            DriverEvent::UserInputRequested { .. }
+        ));
+        assert!(
+            event_rx.try_recv().is_err(),
+            "the second dialog stays queued"
+        );
+
+        let (removed, next) = extension_requests.lock().remove("ask-1").unwrap();
+        assert!(matches!(removed.answer, ExtensionAnswer::Value));
+        let Some(DriverEvent::UserInputRequested { request_id, .. }) = next else {
+            panic!("the queued dialog must be exposed right after the answer");
+        };
+        assert_eq!(request_id, "ask-2");
+    }
+
+    #[test]
+    fn confirm_dialog_answers_resolve_to_pis_boolean() {
+        let (pending, extension_requests, stdin, _written, mut state) = harness();
+        let (events, event_rx) = unbounded();
+        handle_pi_message(
+            PiFlavor::Pi,
+            json!({
+                "type": "extension_ui_request",
+                "id": "ask-9",
+                "method": "confirm",
+                "title": "Deploy?",
+                "message": "Ship to production?"
+            }),
+            &pending,
+            &extension_requests,
+            &stdin,
+            &events,
+            &mut state,
+        );
+
+        let DriverEvent::UserInputRequested { questions, .. } = event_rx.recv().unwrap() else {
+            panic!("a confirm dialog must surface the structured question UI");
+        };
+        let [question] = questions.as_slice() else {
+            panic!("one dialog is exactly one question");
+        };
+        assert_eq!(question.header, "Deploy?");
+        assert_eq!(question.question, "Ship to production?");
+        assert_eq!(question.options[0].label, tr!("user_input.yes"));
+        assert_eq!(question.options[1].label, tr!("user_input.no"));
+
+        let (request, _) = extension_requests.lock().remove("ask-9").unwrap();
+        let answer = |label: &str| {
+            vec![UserInputAnswer {
+                question_id: "ask-9".into(),
+                answers: vec![label.to_owned()],
+            }]
+        };
+        assert_eq!(
+            extension_ui_response_frame("ask-9", &request, &answer(&tr!("user_input.yes"))),
+            json!({"type": "extension_ui_response", "id": "ask-9", "confirmed": true})
+        );
+        assert_eq!(
+            extension_ui_response_frame("ask-9", &request, &answer(&tr!("user_input.no"))),
+            json!({"type": "extension_ui_response", "id": "ask-9", "confirmed": false})
+        );
+    }
+
+    #[test]
+    fn empty_answers_read_as_cancelled_and_text_answers_as_value() {
+        let request = |answer: ExtensionAnswer| PendingExtensionRequest {
+            questions: Vec::new(),
+            answer,
+        };
+        let answers = |text: &str| {
+            vec![UserInputAnswer {
+                question_id: "ask-1".into(),
+                answers: vec![text.to_owned()],
+            }]
+        };
+        let select = request(ExtensionAnswer::Value);
+        assert_eq!(
+            extension_ui_response_frame("ask-1", &select, &answers("typed text")),
+            json!({"type": "extension_ui_response", "id": "ask-1", "value": "typed text"})
+        );
+        assert_eq!(
+            extension_ui_response_frame("ask-1", &select, &answers("  ")),
+            json!({"type": "extension_ui_response", "id": "ask-1", "cancelled": true})
+        );
+        assert_eq!(
+            extension_ui_response_frame("ask-1", &select, &[]),
+            json!({"type": "extension_ui_response", "id": "ask-1", "cancelled": true})
+        );
+    }
+
+    #[test]
+    fn unrepresentable_dialogs_are_cancelled_and_notifications_ignored() {
+        let (pending, extension_requests, stdin, written, mut state) = harness();
+        let (events, event_rx) = unbounded();
+        for value in [
+            json!({"type": "extension_ui_request", "id": "ask-1", "method": "select", "title": "Empty", "options": []}),
+            json!({"type": "extension_ui_request", "id": "note-1", "method": "notify", "message": "hi"}),
+        ] {
+            handle_pi_message(
+                PiFlavor::Pi,
+                value,
+                &pending,
+                &extension_requests,
+                &stdin,
+                &events,
+                &mut state,
+            );
+        }
+
+        let frames = String::from_utf8(written.lock().clone()).unwrap();
+        assert_eq!(
+            frames, "{\"type\":\"extension_ui_response\",\"id\":\"ask-1\",\"cancelled\":true}\n",
+            "an unrepresentable dialog must be cancelled",
+        );
+        assert!(event_rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn settling_the_turn_forgets_unanswered_dialogs() {
+        let (pending, extension_requests, stdin, _written, mut state) = harness();
+        let (events, event_rx) = unbounded();
+        for value in [
+            json!({"type": "agent_start"}),
+            json!({"type": "extension_ui_request", "id": "ask-1", "method": "input", "title": "Notes"}),
+            json!({"type": "agent_settled"}),
+        ] {
+            handle_pi_message(
+                PiFlavor::Pi,
+                value,
+                &pending,
+                &extension_requests,
+                &stdin,
+                &events,
+                &mut state,
+            );
+        }
+
+        assert!(matches!(event_rx.recv().unwrap(), DriverEvent::TurnStarted));
+        assert!(matches!(
+            event_rx.recv().unwrap(),
+            DriverEvent::UserInputRequested { .. }
+        ));
+        assert!(matches!(
+            event_rx.recv().unwrap(),
+            DriverEvent::TurnFinished { success: true, .. }
+        ));
+        assert!(
+            extension_requests.lock().clear().is_empty(),
+            "a settled turn forgets the dialogs it left unanswered"
+        );
+    }
+
+    #[test]
+    fn user_input_answers_write_the_response_and_expose_the_next_dialog() {
+        let written = Arc::new(Mutex::new(Vec::new()));
+        let stdin: SharedStdin = Arc::new(Mutex::new(Box::new(CapturedWrite(written.clone()))));
+        let (events, event_rx) = crate::driver::test_event_channel();
+        let (commands, _command_rx) = unbounded();
+        let driver = PiDriver {
+            flavor: PiFlavor::Pi,
+            commands,
+            stdin,
+            events,
+            extension_requests: PendingExtensionRequests::default(),
+            computer_use: None,
+        };
+        {
+            let mut queue = driver.extension_requests.lock();
+            for value in [
+                json!({"id": "ask-1", "method": "select", "title": "Pick", "options": ["GPUI"]}),
+                json!({"id": "ask-2", "method": "input", "title": "Why"}),
+            ] {
+                let (id, request) = extension_ui_request(&value).unwrap();
+                queue.insert(id, request);
+            }
+        }
+
+        driver.respond_user_input(
+            "ask-1".into(),
+            vec![UserInputAnswer {
+                question_id: "ask-1".into(),
+                answers: vec!["GPUI".into()],
+            }],
+        );
+
+        let frames = String::from_utf8(written.lock().clone()).unwrap();
+        assert_eq!(
+            frames,
+            "{\"type\":\"extension_ui_response\",\"id\":\"ask-1\",\"value\":\"GPUI\"}\n"
+        );
+        let DriverEvent::UserInputRequested { request_id, .. } = event_rx.recv().unwrap() else {
+            panic!("the dialog queued behind the answer must surface next");
+        };
+        assert_eq!(request_id, "ask-2");
+    }
+
+    /// Drives an installed Pi through a full extension-dialog round trip: the
+    /// `select` raised by a project extension must surface as a structured
+    /// question, and the answer travels back as an `extension_ui_response` —
+    /// a malformed frame would poison the NDJSON stream and fail the turn.
+    /// Ignored by default: needs the CLI, credentials, and network access.
+    #[test]
+    #[ignore = "requires an installed, authenticated pi"]
+    fn extension_dialog_round_trips_against_the_real_rpc() {
+        let binary = crate::command_env::find_executable("pi").expect("pi is not installed");
+        let cwd = std::env::temp_dir().join(format!("waku-pi-dialog-smoke-{}", std::process::id()));
+        let extensions = cwd.join(".pi").join("extensions");
+        std::fs::create_dir_all(&extensions).unwrap();
+        // `before_agent_start` is awaited by the agent loop, so the dialog is
+        // guaranteed to block the turn until it is answered.
+        std::fs::write(
+            extensions.join("ask.ts"),
+            "export default function (pi: any) {\n\
+            \x20 pi.on(\"before_agent_start\", async (_event: any, ctx: any) => {\n\
+            \x20   await ctx.ui.select(\"Pick a letter\", [\"Alpha\", \"Beta\"]);\n\
+            \x20 });\n\
+            }\n",
+        )
+        .unwrap();
+
+        let (events, event_rx) = crate::driver::test_event_channel();
+        let driver = PiDriver::start(
+            PiFlavor::Pi,
+            DriverStartOptions {
+                binary,
+                cwd: cwd.clone(),
+                mode: RuntimeMode::FullAccess,
+                interaction_mode: InteractionMode::Build,
+                model: None,
+                reasoning_effort: None,
+                service_tier: None,
+                context_window: None,
+                agent_preset: None,
+                computer_use_enabled: false,
+                provider_cursor: None,
+            },
+            events,
+        )
+        .expect("the Pi RPC session should start");
+
+        let mut connected = false;
+        while let Ok(event) = event_rx.recv_timeout(Duration::from_secs(30)) {
+            match event {
+                DriverEvent::Connected { .. } => {
+                    connected = true;
+                    break;
+                }
+                DriverEvent::Error(error) => panic!("Pi failed to initialize: {error}"),
+                _ => {}
+            }
+        }
+        assert!(connected, "Pi never reported its native session");
+
+        driver.prompt("Reply with exactly: OK.".into());
+        let mut question: Option<String> = None;
+        let mut finished = false;
+        while let Ok(event) = event_rx.recv_timeout(Duration::from_secs(180)) {
+            match event {
+                DriverEvent::UserInputRequested {
+                    request_id,
+                    questions,
+                } if question.is_none() => {
+                    let options: Vec<&str> = questions[0]
+                        .options
+                        .iter()
+                        .map(|option| option.label.as_str())
+                        .collect();
+                    assert_eq!(options, ["Alpha", "Beta"]);
+                    driver.respond_user_input(
+                        request_id.clone(),
+                        vec![UserInputAnswer {
+                            question_id: request_id.clone(),
+                            answers: vec!["Beta".into()],
+                        }],
+                    );
+                    question = Some(request_id);
+                }
+                DriverEvent::TurnFinished { success, .. } => {
+                    assert!(success, "Pi should finish the answered turn");
+                    finished = true;
+                    break;
+                }
+                DriverEvent::Error(error) => panic!("Pi reported: {error}"),
+                _ => {}
+            }
+        }
+
+        assert!(question.is_some(), "Pi never raised the extension dialog");
+        assert!(finished, "Pi never settled the answered turn");
+        let _ = std::fs::remove_dir_all(&cwd);
     }
 }

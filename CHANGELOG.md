@@ -16,6 +16,8 @@ the original feature bullet instead of adding separate entries for them.
 
 ## [unreleased]
 
+- Answer Pi and Oh My Pi extension questions (select, confirm, input) in the question panel instead of silently cancelling them
+
 ## [0.1.13]
 
 - Add Vercel Fx support

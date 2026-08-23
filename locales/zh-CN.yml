@@ -532,6 +532,8 @@ user_input.back: 上一步
 user_input.next: 下一步
 user_input.submit: 提交
 user_input.progress: "%{current} / %{total}"
+user_input.yes: "是"
+user_input.no: "否"
 composer.preparing_task: 正在准备任务…
 composer.queue_followup: 排队为后续消息（⏎）
 composer.message: 消息
