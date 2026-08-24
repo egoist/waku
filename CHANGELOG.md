@@ -17,8 +17,7 @@ the original feature bullet instead of adding separate entries for them.
 ## [unreleased]
 
 - Codex thread goals: type /goal to set a persistent objective the task keeps pursuing — before or after the first message — with its autonomous pursuit streaming into the transcript, a status chip showing live budget or elapsed time, and a dialog to edit, pause, resume, or clear the goal (also in Waku Web)
-- Add reasoning effort selection for Grok, offered on the built-in grok-4.5 and grok-4.6 models; custom models from the Grok CLI config are listed without an effort menu
-- Stop offering the stale Grok Build fallback model when the Grok CLI's model discovery is unavailable; the current CLI rejects that model id
+- Add reasoning effort selection for Grok
 
 ## [0.1.14]
 
