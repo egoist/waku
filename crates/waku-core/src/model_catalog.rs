@@ -80,11 +80,10 @@ pub fn fallback_models(provider: ProviderKind) -> Vec<ProviderModel> {
         // route, so discovery is authoritative.
         ProviderKind::Fx => Vec::new(),
         ProviderKind::OpenCode => Vec::new(),
-        ProviderKind::Grok => {
-            vec![grok_reasoning_model(
-                ProviderModel::new("grok-build", "Grok Build").default(),
-            )]
-        }
+        // Grok's catalog comes from `grok models`, which includes any custom
+        // model the user configured. An invented fallback would offer a model
+        // the CLI rejects, so discovery is authoritative.
+        ProviderKind::Grok => Vec::new(),
         // Pi, Oh My Pi, and Kimi Code all take their catalog from the user's
         // configured LLM providers. A fabricated fallback would make
         // unavailable models look selectable.
@@ -993,16 +992,19 @@ fn reasoning_options<const N: usize>(efforts: [&str; N]) -> Vec<ProviderModelOpt
         .collect()
 }
 
-/// Grok 4.6 and the `grok-build` alias advertise low/medium/high/xhigh.
-/// Grok 4.5's live catalog stops at high; offering xhigh would be ignored.
+/// The hardcoded reasoning menu is limited to the exact built-in models it
+/// was verified against. `grok models` also lists user-defined custom models,
+/// whose effort support is not knowable from the ID, so they get no menu.
 fn grok_reasoning_model(model: ProviderModel) -> ProviderModel {
-    if waku_protocol::model_catalog::grok_model_supports_xhigh(&model.id) {
-        model.reasoning(
-            reasoning_options(["low", "medium", "high", "xhigh"]),
+    match waku_protocol::model_catalog::grok_model_reasoning_efforts(&model.id) {
+        Some(efforts) => model.reasoning(
+            efforts
+                .iter()
+                .copied()
+                .map(|effort| ProviderModelOption::new(effort, reasoning_effort_label(effort))),
             "high",
-        )
-    } else {
-        model.reasoning(reasoning_options(["low", "medium", "high"]), "high")
+        ),
+        None => model,
     }
 }
 
@@ -1407,9 +1409,9 @@ mod tests {
     #[test]
     fn parses_grok_default_and_available_models() {
         let models = parse_grok_models(
-            "You are logged in with grok.com.\n\nDefault model: grok-4.6\n\nAvailable models:\n  * grok-4.6 (default)\n  - grok-4.5\n",
+            "You are logged in with grok.com.\n\nDefault model: grok-4.6\n\nAvailable models:\n  * grok-4.6 (default)\n  - grok-4.5\n  - my-custom-test\n",
         );
-        assert_eq!(models.len(), 2);
+        assert_eq!(models.len(), 3);
         assert_eq!(models[0].id, "grok-4.6");
         assert!(models[0].is_default);
         assert_eq!(
@@ -1432,22 +1434,19 @@ mod tests {
             ["low", "medium", "high"]
         );
         assert_eq!(models[1].default_reasoning_effort.as_deref(), Some("high"));
+        // A user-defined custom model keeps the picker entry but gets no
+        // hardcoded reasoning menu; its effort support is not knowable from
+        // the listing.
+        assert_eq!(models[2].id, "my-custom-test");
+        assert!(models[2].reasoning_efforts.is_empty());
+        assert_eq!(models[2].default_reasoning_effort, None);
     }
 
     #[test]
-    fn grok_fallback_offers_xhigh_on_the_build_alias() {
-        let models = fallback_models(ProviderKind::Grok);
-        assert_eq!(models.len(), 1);
-        assert_eq!(models[0].id, "grok-build");
-        assert_eq!(
-            models[0]
-                .reasoning_efforts
-                .iter()
-                .map(|option| option.id.as_str())
-                .collect::<Vec<_>>(),
-            ["low", "medium", "high", "xhigh"]
-        );
-        assert_eq!(models[0].default_reasoning_effort.as_deref(), Some("high"));
+    fn grok_fallback_catalog_is_empty() {
+        // A fabricated fallback would offer a model the CLI rejects, so
+        // discovery is authoritative and the pre-discovery picker is empty.
+        assert!(fallback_models(ProviderKind::Grok).is_empty());
     }
 
     #[test]

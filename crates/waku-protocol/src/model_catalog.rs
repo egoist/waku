@@ -60,13 +60,11 @@ pub fn fallback_models(provider: ProviderKind) -> Vec<ProviderModel> {
         }
         ProviderKind::DeepSeek
         | ProviderKind::Fx
+        | ProviderKind::Grok
         | ProviderKind::Kimi
         | ProviderKind::OpenCode
         | ProviderKind::OhMyPi
         | ProviderKind::Pi => Vec::new(),
-        ProviderKind::Grok => vec![grok_reasoning_model(
-            ProviderModel::new("grok-build", "Grok Build").default(),
-        )],
     }
 }
 
@@ -109,23 +107,14 @@ fn reasoning_options<const N: usize>(efforts: [&str; N]) -> Vec<ProviderModelOpt
         .collect()
 }
 
-/// Grok 4.6 and the `grok-build` alias advertise xhigh.
-/// Grok 4.5's live catalog stops at high; offering xhigh would be ignored.
-pub fn grok_model_supports_xhigh(id: &str) -> bool {
-    let slug = id.to_ascii_lowercase();
-    !slug.contains("4.5") && !slug.contains("4-5")
-}
-
-/// Mirrors the daemon catalog: Grok 4.5 stops at high; later models
-/// and the `grok-build` alias advertise xhigh.
-fn grok_reasoning_model(model: ProviderModel) -> ProviderModel {
-    if grok_model_supports_xhigh(&model.id) {
-        model.reasoning(
-            reasoning_options(["low", "medium", "high", "xhigh"]),
-            "high",
-        )
-    } else {
-        model.reasoning(reasoning_options(["low", "medium", "high"]), "high")
+/// The exact Grok models the hardcoded reasoning menu is known to cover.
+/// `grok models` also lists user-defined custom models, whose effort support
+/// is not knowable from the ID, so they get no menu.
+pub fn grok_model_reasoning_efforts(id: &str) -> Option<&'static [&'static str]> {
+    match id.to_ascii_lowercase().as_str() {
+        "grok-4.5" => Some(&["low", "medium", "high"]),
+        "grok-4.6" => Some(&["low", "medium", "high", "xhigh"]),
+        _ => None,
     }
 }
 
@@ -163,26 +152,25 @@ mod tests {
     use super::*;
 
     #[test]
-    fn grok_xhigh_gate_matches_live_catalog() {
-        assert!(grok_model_supports_xhigh("grok-4.6"));
-        assert!(grok_model_supports_xhigh("grok-build"));
-        assert!(!grok_model_supports_xhigh("grok-4.5"));
-        assert!(!grok_model_supports_xhigh("grok-4-5"));
+    fn grok_reasoning_menu_covers_only_exact_builtins() {
+        assert_eq!(
+            grok_model_reasoning_efforts("grok-4.5"),
+            Some(&["low", "medium", "high"][..])
+        );
+        assert_eq!(
+            grok_model_reasoning_efforts("grok-4.6"),
+            Some(&["low", "medium", "high", "xhigh"][..])
+        );
+        // Custom models and unknown spellings get no menu.
+        assert_eq!(grok_model_reasoning_efforts("grok-build"), None);
+        assert_eq!(grok_model_reasoning_efforts("my-custom-test"), None);
+        assert_eq!(grok_model_reasoning_efforts("grok-4-6"), None);
     }
 
     #[test]
-    fn grok_fallback_offers_xhigh_on_the_build_alias() {
-        let models = fallback_models(ProviderKind::Grok);
-        assert_eq!(models.len(), 1);
-        assert_eq!(models[0].id, "grok-build");
-        assert_eq!(
-            models[0]
-                .reasoning_efforts
-                .iter()
-                .map(|option| option.id.as_str())
-                .collect::<Vec<_>>(),
-            ["low", "medium", "high", "xhigh"]
-        );
-        assert_eq!(models[0].default_reasoning_effort.as_deref(), Some("high"));
+    fn grok_fallback_catalog_is_empty() {
+        // A fabricated fallback would offer a model the CLI rejects, so
+        // discovery is authoritative and the pre-discovery picker is empty.
+        assert!(fallback_models(ProviderKind::Grok).is_empty());
     }
 }

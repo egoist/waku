@@ -720,6 +720,13 @@ all. Grok is the exception: effort rides on `session/set_model` as
 `_meta.reasoningEffort` (and as `--reasoning-effort` at launch), not as a
 session config option.
 
+Grok's catalog comes from the plain-text `grok models` listing, which reports
+ids but no effort metadata. The hardcoded menu therefore covers only the exact
+built-ins (`grok-4.5` stops at high, `grok-4.6` offers xhigh): the listing also
+includes custom models from the user's config, whose effort support the id
+alone cannot establish, so they are offered without an effort menu. Discovery
+is authoritative — a stale fallback would name a model the CLI rejects.
+
 Kimi's catalog comes from `kimi provider list --json`, which covers both the
 managed plan and any registry the user imported with `kimi provider add`. Only
 the K3 family reports `supportEfforts`; the rest expose a single always-on
