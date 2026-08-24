@@ -19,6 +19,7 @@ parking_lot = "0.12"
 rust-i18n = "4"
 rusqlite = { version = "0.37", features = ["bundled"] }
 serde = { version = "1.0", features = ["derive"] }
+serde-saphyr = { version = "0.0.29", default-features = false, features = ["deserialize"] }
 serde_json = "1.0"
 smol = "2"
 subtle = "2"

@@ -1032,6 +1032,14 @@ mod tests {
         );
         assert_eq!(folded.argument_hint.as_deref(), Some("[pr-number]"));
 
+        let indented = parse_frontmatter(
+            "---\ndescription: >-\n  Run:\n    cargo test\n  before merging.\n---\nBody",
+        );
+        assert_eq!(
+            indented.description.as_deref(),
+            Some("Run:\n  cargo test\nbefore merging.")
+        );
+
         let plain = parse_frontmatter("Just a prompt body.");
         assert!(plain.description.is_none());
         assert_eq!(plain.body, "Just a prompt body.");

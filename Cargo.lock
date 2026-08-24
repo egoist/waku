@@ -8376,6 +8376,7 @@ dependencies = [
  "rusqlite",
  "rust-i18n",
  "serde",
+ "serde-saphyr",
  "serde_json",
  "smol",
  "subtle",
