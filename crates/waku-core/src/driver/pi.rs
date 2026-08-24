@@ -1277,7 +1277,7 @@ fn handle_pi_message(
                     if let Some(delta) = update
                         .get("delta")
                         .and_then(Value::as_str)
-                        .filter(|delta| !delta.is_empty())
+                        .filter(|delta| !delta.trim().is_empty())
                     {
                         state.message_saw_text = true;
                         let _ = events.send(DriverEvent::TextDelta(delta.to_owned()));
@@ -1411,7 +1411,7 @@ fn emit_completed_message_fallback(
                 if let Some(text) = block
                     .get("text")
                     .and_then(Value::as_str)
-                    .filter(|text| !text.is_empty())
+                    .filter(|text| !text.trim().is_empty())
                 {
                     state.message_saw_text = true;
                     let _ = events.send(DriverEvent::TextDelta(text.to_owned()));
@@ -1730,6 +1730,59 @@ mod tests {
         assert!(matches!(
             event_rx.recv().unwrap(),
             DriverEvent::TurnFinished { success: true, .. }
+        ));
+        assert!(matches!(event_rx.try_recv(), Err(TryRecvError::Empty)));
+    }
+
+    /// Whitespace-only streamed and completed text must not become separate
+    /// assistant messages in the transcript. Pi emits a bare `"\n\n"` text
+    /// block at the start of many assistant messages; without filtering both
+    /// event paths every tool step produced an empty markdown row, which
+    /// rendered as the large vertical gaps between activity summaries.
+    #[test]
+    fn filters_whitespace_only_streamed_and_completed_text() {
+        let (pending, commands, _command_rx, mut state) = harness();
+        let (events, event_rx) = unbounded();
+        for value in [
+            json!({"type": "agent_start"}),
+            json!({
+                "type": "message_start",
+                "message": {"role": "assistant"}
+            }),
+            json!({
+                "type": "message_update",
+                "assistantMessageEvent": {"type": "text_delta", "delta": "\n\n"}
+            }),
+            json!({
+                "type": "message_end",
+                "message": {
+                    "role": "assistant",
+                    "content": [{"type": "text", "text": "\n\n"}]
+                }
+            }),
+            json!({
+                "type": "message_start",
+                "message": {"role": "assistant"}
+            }),
+            json!({
+                "type": "message_update",
+                "assistantMessageEvent": {"type": "text_delta", "delta": "\n real text \n"}
+            }),
+        ] {
+            handle_pi_message(
+                PiFlavor::Pi,
+                value,
+                &pending,
+                &commands,
+                &events,
+                &mut state,
+            );
+        }
+
+        assert!(matches!(event_rx.recv().unwrap(), DriverEvent::TurnStarted));
+        assert!(matches!(
+            event_rx.recv().unwrap(),
+            DriverEvent::TextDelta(value) if value == "\n real text \n"
         ));
         assert!(matches!(event_rx.try_recv(), Err(TryRecvError::Empty)));
     }
