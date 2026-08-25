@@ -453,33 +453,43 @@ fn reveal_offset(
     container_y: Pixels,
     center: bool,
 ) -> Option<Pixels> {
-    let item_y = *tops.get(&index)? - container_y + offset_now;
-    // Item height from its next sibling's recorded top; the last item (or a
-    // gap in the map) falls back to a typical row height.
+    // GPUI scroll convention: offset is negative (0 = top, -N = scrolled down).
+    // Convert recorded absolute tops to content-space coordinates.
+    let item_y = *tops.get(&index)? - container_y;
     let item_height = tops
         .get(&(index + 1))
         .map(|next| (*next - tops[&index]).max(px(1.0)))
         .unwrap_or_else(|| px(28.0));
+    // Content height: bottom of the lowest recorded item.
     let content_bottom = tops
         .iter()
         .map(|(i, top)| {
             let height = tops.get(&(i + 1)).map(|next| *next - *top).unwrap_or(item_height);
-            (*top - container_y + offset_now) + height
+            (*top - container_y) + height
         })
         .fold(px(0.0), Pixels::max);
-    let max_offset = (content_bottom - viewport).max(px(0.0));
+    let max_scroll = (content_bottom - viewport).max(px(0.0));
 
     const MARGIN: f32 = 4.0;
+    // offset_now is negative; visible range is [-offset_now, -offset_now + viewport].
+    let visible_top = -offset_now;
+    let visible_bottom = visible_top + viewport;
+
     let target = if center {
+        // Center the item in the viewport.
         item_y - (viewport - item_height) / 2.0
-    } else if item_y < offset_now + px(MARGIN) {
+    } else if item_y < visible_top + px(MARGIN) {
+        // Item above viewport; scroll up to reveal it with margin.
         item_y - px(MARGIN)
-    } else if item_y + item_height > offset_now + viewport - px(MARGIN) {
+    } else if item_y + item_height > visible_bottom - px(MARGIN) {
+        // Item below viewport; scroll down to reveal it with margin.
         item_y + item_height - viewport + px(MARGIN)
     } else {
+        // Already visible; no adjustment needed.
         return None;
     };
-    Some(target.clamp(px(0.0), max_offset))
+    // Clamp to valid scroll range and negate for GPUI convention.
+    Some(-target.clamp(px(0.0), max_scroll))
 }
 
 /// Where a dropdown's card sits relative to its trigger.
@@ -1144,9 +1154,9 @@ impl RenderOnce for MenuCard {
                         }
                     },
                     move |_, (), window, _| {
-                        if let Some(target) = applied_target.take() {
-                            let current = paint_scroll.offset().y;
-                            paint_scroll.set_offset(point(current, target));
+                        if let Some(target_y) = applied_target.take() {
+                            let current_x = paint_scroll.offset().x;
+                            paint_scroll.set_offset(point(current_x, target_y));
                             // Consume the request so a later hover re-render
                             // cannot yank the list back after manual scrolling.
                             paint_handle.state.borrow_mut().pending_reveal = None;
