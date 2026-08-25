@@ -29,9 +29,10 @@ use std::rc::Rc;
 use gpui::{
     AnyElement, App, Bounds, Display, Element, ElementId, FocusHandle, FontWeight, GlobalElementId,
     InspectorElementId, InteractiveElement, IntoElement, KeyDownEvent, LayoutId, MouseButton,
-    MouseDownEvent, ParentElement, Pixels, Point, Position, RenderOnce, SharedString, Size, Style,
+    MouseDownEvent, ParentElement, Pixels, Point, Position, RenderOnce, ScrollHandle,
+    SharedString, Size, Style,
     StatefulInteractiveElement, Styled, Window, actions, anchored, canvas, deferred, div, img,
-    prelude::FluentBuilder, px,
+    prelude::FluentBuilder, point, px,
 };
 
 actions!(
@@ -224,6 +225,9 @@ struct MenuState {
     submenu_highlighted: Option<usize>,
     /// Whether arrow-key navigation currently belongs to the flyout.
     submenu_focused: bool,
+    /// Scroll position of the card's item list, kept on the handle so the
+    /// list survives hover-highlight re-renders and resets when reopened.
+    card_scroll: ScrollHandle,
     /// A dropdown/popover trigger toggles its own surface on left click. The
     /// outside-click capture must leave that click alone so the later trigger
     /// handler can close it; a context-menu row has no such handler.
@@ -351,6 +355,7 @@ impl ContextMenuHandle {
             state.submenu_highlighted = None;
             state.submenu_focused = false;
             state.trigger_click_toggles = trigger_click_toggles;
+            state.card_scroll.set_offset(point(Pixels::ZERO, Pixels::ZERO));
             was_open
         };
         if !was_open {
@@ -954,6 +959,7 @@ impl RenderOnce for MenuCard {
                 state.submenu_highlighted,
             )
         };
+        let scroll = self.handle.state.borrow().card_scroll.clone();
         let submenu = active_submenu.and_then(|index| {
             let MenuItem::Submenu { items, .. } = items.get(index)? else {
                 return None;
@@ -961,6 +967,7 @@ impl RenderOnce for MenuCard {
             Some((index, items(cx)))
         });
 
+        let items_id = SharedString::from(format!("{}-items", self.id));
         let mut root_card = div()
             .id(self.id)
             .min_w(px(176.0))
@@ -974,8 +981,21 @@ impl RenderOnce for MenuCard {
             .flex()
             .flex_col();
 
+        // A menu can hold hundreds of entries (e.g. a system font picker).
+        // Cap the list to the viewport so the card never outgrows the
+        // window, and let it scroll; the handle lives on the shared state so
+        // the offset survives hover-highlight re-renders of this card.
+        let max_list_height = (window.viewport_size().height - px(48.0)).max(px(120.0));
+        let mut items_card = div()
+            .id(items_id)
+            .max_h(max_list_height)
+            .overflow_y_scroll()
+            .track_scroll(&scroll)
+            .flex()
+            .flex_col();
+
         for (index, item) in items.into_iter().enumerate() {
-            root_card = root_card.child(render_menu_item(
+            items_card = items_card.child(render_menu_item(
                 item,
                 index,
                 highlighted == Some(index) || active_submenu == Some(index),
@@ -986,6 +1006,8 @@ impl RenderOnce for MenuCard {
                 cx,
             ));
         }
+
+        root_card = root_card.child(items_card);
 
         let mut surface = div()
             .occlude()
