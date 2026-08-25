@@ -2190,14 +2190,16 @@ impl Waku {
     fn execute_goal_composer_command(&mut self, prompt: &str, cx: &mut Context<Self>) -> bool {
         use crate::composer_complete::GoalCommand;
         use crate::model::{GoalOperation, ThreadGoalStatus};
-        let Some((session_id, command, current_goal)) = self.selected_session().and_then(|session| {
-            let command = crate::composer_complete::parse_goal_submission(
-                session.provider,
-                prompt,
-                &self.slash_command_index,
-            )?;
-            Some((session.id, command, session.thread_goal.clone()))
-        }) else {
+        let Some((session_id, command, current_goal)) =
+            self.selected_session().and_then(|session| {
+                let command = crate::composer_complete::parse_goal_submission(
+                    session.provider,
+                    prompt,
+                    &self.slash_command_index,
+                )?;
+                Some((session.id, command, session.thread_goal.clone()))
+            })
+        else {
             return false;
         };
         match command {
@@ -2776,72 +2778,51 @@ impl Waku {
                         .mt(px(8.0))
                         .px(px(10.0))
                         .flex()
-                        .items_center()
+                        .items_end()
                         .gap(px(4.0))
                         .text_size(sp(12.5))
                         .line_height(sp(14.0))
-                        .child(self.render_provider_model_control(cx))
-                        .children(self.render_model_traits_control(cx))
-                        .children(self.render_agent_preset_control(cx))
-                        .child(self.render_access_control(cx))
-                        .child(self.render_interaction_mode_control(cx))
-                        .children(self.render_goal_control(cx))
-                        .child(div().flex_1())
-                        .child(match submit_action {
-                            ComposerSubmitAction::Preparing => div()
-                                .id("send-or-stop")
-                                .w(px(26.0))
-                                .h(px(26.0))
-                                .rounded_full()
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
                                 .flex()
                                 .items_center()
-                                .justify_center()
-                                .cursor_default()
-                                .bg(theme.overlay_strong)
-                                .child(motion::spin(icon(
-                                    "icons/loader-circle.svg",
-                                    15.0,
-                                    theme.text_secondary,
-                                )))
-                                .tooltip(Tooltip::text(tr!("composer.preparing_task"))),
-                            ComposerSubmitAction::Stop => div()
-                                .id("working-actions")
-                                .flex()
-                                .items_center()
-                                .gap(px(6.0))
-                                .child(
-                                    div()
-                                        .id("send-or-stop")
-                                        .w(px(26.0))
-                                        .h(px(26.0))
-                                        .rounded_full()
-                                        .flex()
-                                        .items_center()
-                                        .justify_center()
-                                        .cursor_default()
-                                        .bg(theme.overlay_strong)
-                                        .hover(|element| element.bg(theme.danger_soft))
-                                        .active(|element| element.opacity(0.8))
-                                        .when(escape_stop_armed, |element| {
-                                            element.child(
-                                                div()
-                                                    .text_size(sp(12.5))
-                                                    .font_weight(FontWeight::SEMIBOLD)
-                                                    .text_color(theme.text)
-                                                    .child("Esc"),
-                                            )
-                                        })
-                                        .when(!escape_stop_armed, |element| {
-                                            element.child(icon("icons/stop.svg", 18.0, theme.text))
-                                        })
-                                        .on_click(cx.listener(|this, _, _, cx| {
-                                            this.cancel_turn(cx);
-                                        })),
-                                )
-                                .when(can_send, |element| {
-                                    element.child(
+                                .flex_wrap()
+                                .gap(px(4.0))
+                                .child(self.render_provider_model_control(cx))
+                                .children(self.render_model_traits_control(cx))
+                                .children(self.render_agent_preset_control(cx))
+                                .child(self.render_access_control(cx))
+                                .child(self.render_interaction_mode_control(cx))
+                                .children(self.render_goal_control(cx)),
+                        )
+                        .child(
+                            div().flex_none().child(match submit_action {
+                                ComposerSubmitAction::Preparing => div()
+                                    .id("send-or-stop")
+                                    .w(px(26.0))
+                                    .h(px(26.0))
+                                    .rounded_full()
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .cursor_default()
+                                    .bg(theme.overlay_strong)
+                                    .child(motion::spin(icon(
+                                        "icons/loader-circle.svg",
+                                        15.0,
+                                        theme.text_secondary,
+                                    )))
+                                    .tooltip(Tooltip::text(tr!("composer.preparing_task"))),
+                                ComposerSubmitAction::Stop => div()
+                                    .id("working-actions")
+                                    .flex()
+                                    .items_center()
+                                    .gap(px(6.0))
+                                    .child(
                                         div()
-                                            .id("queue-follow-up")
+                                            .id("send-or-stop")
                                             .w(px(26.0))
                                             .h(px(26.0))
                                             .rounded_full()
@@ -2849,71 +2830,114 @@ impl Waku {
                                             .items_center()
                                             .justify_center()
                                             .cursor_default()
-                                            .bg(theme.inverse)
-                                            .hover(|element| element.opacity(0.9))
+                                            .bg(theme.overlay_strong)
+                                            .hover(|element| element.bg(theme.danger_soft))
                                             .active(|element| element.opacity(0.8))
-                                            .child(icon(
-                                                "icons/arrow-up.svg",
-                                                16.0,
-                                                theme.on_inverse,
-                                            ))
-                                            .tooltip(Tooltip::text(tr!("composer.queue_followup")))
+                                            .when(escape_stop_armed, |element| {
+                                                element.child(
+                                                    div()
+                                                        .text_size(sp(12.5))
+                                                        .font_weight(FontWeight::SEMIBOLD)
+                                                        .text_color(theme.text)
+                                                        .child("Esc"),
+                                                )
+                                            })
+                                            .when(!escape_stop_armed, |element| {
+                                                element.child(icon(
+                                                    "icons/stop.svg",
+                                                    18.0,
+                                                    theme.text,
+                                                ))
+                                            })
                                             .on_click(cx.listener(|this, _, _, cx| {
-                                                let prompt =
-                                                    this.composer.read(cx).content(cx).to_owned();
-                                                if let Some(submission) =
-                                                    this.submission_with_attachments(&prompt, cx)
-                                                {
-                                                    this.composer
-                                                        .update(cx, |input, cx| input.clear(cx));
-                                                    this.submit_composer_submission(submission, cx);
-                                                }
+                                                this.cancel_turn(cx);
                                             })),
                                     )
-                                }),
-                            ComposerSubmitAction::Send => div()
-                                .id("send-or-stop")
-                                .w(px(26.0))
-                                .h(px(26.0))
-                                .rounded_full()
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .bg(if can_send {
-                                    theme.inverse
-                                } else {
-                                    theme.overlay_strong
-                                })
-                                .when(can_send, |element| {
-                                    element
-                                        .cursor_default()
-                                        .hover(|element| element.opacity(0.9))
-                                        .active(|element| element.opacity(0.8))
-                                })
-                                .child(icon(
-                                    "icons/arrow-up.svg",
-                                    16.0,
-                                    if can_send {
-                                        theme.on_inverse
+                                    .when(can_send, |element| {
+                                        element.child(
+                                            div()
+                                                .id("queue-follow-up")
+                                                .w(px(26.0))
+                                                .h(px(26.0))
+                                                .rounded_full()
+                                                .flex()
+                                                .items_center()
+                                                .justify_center()
+                                                .cursor_default()
+                                                .bg(theme.inverse)
+                                                .hover(|element| element.opacity(0.9))
+                                                .active(|element| element.opacity(0.8))
+                                                .child(icon(
+                                                    "icons/arrow-up.svg",
+                                                    16.0,
+                                                    theme.on_inverse,
+                                                ))
+                                                .tooltip(Tooltip::text(tr!(
+                                                    "composer.queue_followup"
+                                                )))
+                                                .on_click(cx.listener(|this, _, _, cx| {
+                                                    let prompt = this
+                                                        .composer
+                                                        .read(cx)
+                                                        .content(cx)
+                                                        .to_owned();
+                                                    if let Some(submission) = this
+                                                        .submission_with_attachments(&prompt, cx)
+                                                    {
+                                                        this.composer.update(cx, |input, cx| {
+                                                            input.clear(cx)
+                                                        });
+                                                        this.submit_composer_submission(
+                                                            submission, cx,
+                                                        );
+                                                    }
+                                                })),
+                                        )
+                                    }),
+                                ComposerSubmitAction::Send => div()
+                                    .id("send-or-stop")
+                                    .w(px(26.0))
+                                    .h(px(26.0))
+                                    .rounded_full()
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .bg(if can_send {
+                                        theme.inverse
                                     } else {
-                                        theme.text_ghost
-                                    },
-                                ))
-                                // Says why the button is dead, for the case
-                                // the draft is ready and the machine is not.
-                                .when(no_providers, |element| {
-                                    element.tooltip(Tooltip::text(tr!("composer.no_providers")))
-                                })
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    let prompt = this.composer.read(cx).content(cx).to_owned();
-                                    if let Some(submission) =
-                                        this.submission_with_attachments(&prompt, cx)
-                                    {
-                                        this.composer.update(cx, |input, cx| input.clear(cx));
-                                        this.submit_composer_submission(submission, cx);
-                                    }
-                                })),
-                        }),
+                                        theme.overlay_strong
+                                    })
+                                    .when(can_send, |element| {
+                                        element
+                                            .cursor_default()
+                                            .hover(|element| element.opacity(0.9))
+                                            .active(|element| element.opacity(0.8))
+                                    })
+                                    .child(icon(
+                                        "icons/arrow-up.svg",
+                                        16.0,
+                                        if can_send {
+                                            theme.on_inverse
+                                        } else {
+                                            theme.text_ghost
+                                        },
+                                    ))
+                                    // Says why the button is dead, for the case
+                                    // the draft is ready and the machine is not.
+                                    .when(no_providers, |element| {
+                                        element.tooltip(Tooltip::text(tr!("composer.no_providers")))
+                                    })
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        let prompt = this.composer.read(cx).content(cx).to_owned();
+                                        if let Some(submission) =
+                                            this.submission_with_attachments(&prompt, cx)
+                                        {
+                                            this.composer.update(cx, |input, cx| input.clear(cx));
+                                            this.submit_composer_submission(submission, cx);
+                                        }
+                                    })),
+                            }),
+                        ),
                 ),
         )
     }
