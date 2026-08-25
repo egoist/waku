@@ -1,7 +1,7 @@
 //! Resolved font families.
 //!
 //! Every render path reads [`sans`] / [`mono`], which return a plain
-//! `&'static str` from a lock-protected static — no `cx`, no allocation.
+//! `&'static str` from a lock-free atomic static — no `cx`, no allocation.
 //! Values are installed once at window startup and again whenever the
 //! setting changes; each install leaks at most two short strings, which is
 //! bounded by how often a user changes their font in a session.
@@ -117,10 +117,11 @@ mod tests {
     }
 
     #[test]
-    fn concurrent_reads_do_not_block() {
-        // Regression test for P1: verify sans() and mono() can be called
-        // from multiple threads without blocking. The implementation must
-        // not use locks in the read path.
+    fn concurrent_reads_are_safe() {
+        // Verify that sans() and mono() can be called safely from multiple
+        // threads concurrently. This exercises the atomic read path under
+        // concurrent load to catch data races or undefined behavior, but
+        // does not verify lock-free semantics (RwLock would also pass).
         let _guard = TEST_LOCK.lock().unwrap();
         install(Some("Test Sans"), Some("Test Mono"));
 
