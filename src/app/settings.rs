@@ -112,7 +112,7 @@ impl Waku {
             .flex()
             .bg(theme.canvas)
             .text_color(theme.text)
-            .font_family(".SystemUIFont")
+            .font_family(crate::fonts::sans())
             .child(self.render_settings_sidebar(window, cx))
             .child(self.render_settings_content(window, cx))
             .into_any_element()
@@ -1331,6 +1331,60 @@ impl Waku {
             },
         );
 
+        let selected_ui_font_family = self.state.ui_font_family.clone();
+        let selected_mono_font_family = self.state.mono_font_family.clone();
+        let weak = cx.entity().downgrade();
+        let ui_font_family_handle = self.menu_handle("ui-font-family-selector", cx);
+        let ui_font_family_selector = dropdown_menu(
+            MenuChip::new("ui-font-family-selector")
+                .label(font_family_label(selected_ui_font_family.as_deref()))
+                .outlined()
+                .selected(ui_font_family_handle.is_open())
+                .w(px(200.0))
+                .justify_between(),
+            "ui-font-family-selector-menu",
+            &ui_font_family_handle,
+            MenuAlign::BelowRight,
+            move |cx| {
+                let weak = weak.clone();
+                font_family_menu_items(
+                    cx,
+                    selected_ui_font_family.as_deref(),
+                    Rc::new(move |family, window, cx| {
+                        let _ = weak.update(cx, |this, cx| {
+                            this.set_ui_font_family(family, window, cx);
+                        });
+                    }),
+                )
+            },
+        );
+
+        let weak = cx.entity().downgrade();
+        let mono_font_family_handle = self.menu_handle("mono-font-family-selector", cx);
+        let mono_font_family_selector = dropdown_menu(
+            MenuChip::new("mono-font-family-selector")
+                .label(font_family_label(selected_mono_font_family.as_deref()))
+                .outlined()
+                .selected(mono_font_family_handle.is_open())
+                .w(px(200.0))
+                .justify_between(),
+            "mono-font-family-selector-menu",
+            &mono_font_family_handle,
+            MenuAlign::BelowRight,
+            move |cx| {
+                let weak = weak.clone();
+                font_family_menu_items(
+                    cx,
+                    selected_mono_font_family.as_deref(),
+                    Rc::new(move |family, window, cx| {
+                        let _ = weak.update(cx, |this, cx| {
+                            this.set_mono_font_family(family, window, cx);
+                        });
+                    }),
+                )
+            },
+        );
+
         let weak = cx.entity().downgrade();
         let language_handle = self.menu_handle("language-selector", cx);
         let language_selector = dropdown_menu(
@@ -1494,6 +1548,70 @@ impl Waku {
                     )
                     .child(code_font_size_selector),
             )
+            .child(div().mx(px(20.0)).h(px(1.0)).bg(theme.border))
+            .child(
+                div()
+                    .w_full()
+                    .min_h(px(60.0))
+                    .px(px(20.0))
+                    .py(px(12.0))
+                    .flex()
+                    .items_center()
+                    .gap(px(24.0))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .child(
+                                div()
+                                    .text_size(sp(13.5))
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .text_color(theme.text)
+                                    .child(tr!("settings.ui_font")),
+                            )
+                            .child(
+                                div()
+                                    .mt(px(5.0))
+                                    .text_size(sp(12.5))
+                                    .line_height(sp(18.0))
+                                    .text_color(theme.text_secondary)
+                                    .child(tr!("settings.ui_font_description")),
+                            ),
+                    )
+                    .child(ui_font_family_selector),
+            )
+            .child(div().mx(px(20.0)).h(px(1.0)).bg(theme.border))
+            .child(
+                div()
+                    .w_full()
+                    .min_h(px(60.0))
+                    .px(px(20.0))
+                    .py(px(12.0))
+                    .flex()
+                    .items_center()
+                    .gap(px(24.0))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .child(
+                                div()
+                                    .text_size(sp(13.5))
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .text_color(theme.text)
+                                    .child(tr!("settings.mono_font")),
+                            )
+                            .child(
+                                div()
+                                    .mt(px(5.0))
+                                    .text_size(sp(12.5))
+                                    .line_height(sp(18.0))
+                                    .text_color(theme.text_secondary)
+                                    .child(tr!("settings.mono_font_description")),
+                            ),
+                    )
+                    .child(mono_font_family_selector),
+            )
             .into_any_element()
     }
 
@@ -1519,6 +1637,40 @@ impl Waku {
         self.state.code_font_size = size;
         self.remeasure_font_sized_surfaces();
         self.save();
+        cx.notify();
+    }
+
+    fn set_ui_font_family(&mut self, family: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
+        let family = waku_client::persistence::sanitized_font_family(family);
+        if self.state.ui_font_family == family {
+            return;
+        }
+        self.state.ui_font_family = family.clone();
+        crate::fonts::install(
+            family.as_deref(),
+            self.state.mono_font_family.as_deref(),
+        );
+        // Chrome text is measured against the sans face; cached row heights
+        // would misplace scroll anchors under the new metrics.
+        self.remeasure_font_sized_surfaces();
+        self.save();
+        window.refresh();
+        cx.notify();
+    }
+
+    fn set_mono_font_family(&mut self, family: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
+        let family = waku_client::persistence::sanitized_font_family(family);
+        if self.state.mono_font_family == family {
+            return;
+        }
+        self.state.mono_font_family = family.clone();
+        crate::fonts::install(
+            self.state.ui_font_family.as_deref(),
+            family.as_deref(),
+        );
+        self.remeasure_font_sized_surfaces();
+        self.save();
+        window.refresh();
         cx.notify();
     }
 
@@ -1710,7 +1862,7 @@ impl Waku {
                                 .when_some(version, |element, version| {
                                     element.child(
                                         div()
-                                            .font_family(crate::md::render::MONO_FAMILY)
+                                            .font_family(crate::fonts::mono())
                                             .text_size(sp(12.5))
                                             .text_color(theme.text_tertiary)
                                             .child(SharedString::from(format!("v{version}"))),
@@ -2435,6 +2587,40 @@ fn font_size_label(size: f32) -> String {
     } else {
         format!("{size} px")
     }
+}
+
+/// Chip label for a font-family dropdown. `None` reads as the default.
+fn font_family_label(family: Option<&str>) -> String {
+    family
+        .map(str::to_string)
+        .unwrap_or_else(|| tr!("settings.font_default").to_string())
+}
+
+/// Menu items for a font-family dropdown: the default first, then every
+/// installed system font. The enumeration runs once per process on first
+/// menu open (a one-shot user action), then is cached in [`crate::fonts`].
+fn font_family_menu_items(
+    cx: &App,
+    selected: Option<&str>,
+    on_select: Rc<dyn Fn(Option<String>, &mut Window, &mut App)>,
+) -> Vec<MenuItem> {
+    let mut items = vec![{
+        let on_select = on_select.clone();
+        MenuItem::new(tr!("settings.font_default"), move |window, cx| {
+            on_select(None, window, cx);
+        })
+        .selected(selected.is_none())
+    }];
+    items.extend(crate::fonts::available_font_names(cx).iter().map(|name| {
+        let name = name.clone();
+        let on_select = on_select.clone();
+        let matches = selected.is_some_and(|selected| selected.eq_ignore_ascii_case(&name));
+        MenuItem::new(name.clone(), move |window, cx| {
+            on_select(Some(name.clone()), window, cx);
+        })
+        .selected(matches)
+    }));
+    items
 }
 
 /// "Checked …" caption for the Providers page. Recomputed whenever the page

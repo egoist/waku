@@ -1927,6 +1927,12 @@ impl Waku {
         window.set_rem_size(px(waku_client::persistence::sanitized_ui_font_size(
             state.ui_font_size,
         )));
+        // Resolve the custom font families before any markdown or chrome
+        // renders; render paths read the static, never the settings file.
+        crate::fonts::install(
+            state.ui_font_family.as_deref(),
+            state.mono_font_family.as_deref(),
+        );
         let analytics = crate::analytics::Analytics::new(
             state.language.locale(),
             state.analytics_id,

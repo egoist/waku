@@ -123,7 +123,7 @@ settings.computer_use:
 settings.general_keywords:
   en: general local projects conversations privacy analytics telemetry anonymous sharing updates automatic sparkle version
 settings.appearance_keywords:
-  en: appearance theme system light dark language english chinese simplified font size text editor
+  en: appearance theme system light dark language english chinese simplified font family ui mono code editor
 settings.providers_keywords:
   en: providers agents models cli version install detect claude codex cursor opencode amp grok pi
 settings.skills:
@@ -282,6 +282,16 @@ settings.code_font_size:
   en: Code font size
 settings.code_font_size_description:
   en: Text size in the file editor, diffs, code blocks, and tool output
+settings.ui_font:
+  en: UI font
+settings.ui_font_description:
+  en: Font family for the interface and messages
+settings.mono_font:
+  en: Code font
+settings.mono_font_description:
+  en: Monospace font for the file editor, diffs, code blocks, and tool output
+settings.font_default:
+  en: System default
 settings.theme_system:
   en: System
 settings.theme_light:

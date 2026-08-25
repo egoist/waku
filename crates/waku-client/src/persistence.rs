@@ -249,6 +249,11 @@ pub struct AppSettings {
     /// and tool output — in pixels. Hand-edited values are clamped when
     /// applied.
     pub code_font_size: f32,
+    /// Custom UI sans font family. `None` uses the platform system font.
+    pub ui_font_family: Option<String>,
+    /// Custom monospace family for code surfaces. `None` uses the bundled
+    /// JetBrains Mono.
+    pub mono_font_family: Option<String>,
     pub daemon_exposure: DaemonExposureSettings,
     /// Preferred target of the header's "open project in app" control, by
     /// catalog id. `None` — and an id no longer installed — fall back to the
@@ -265,6 +270,8 @@ impl Default for AppSettings {
             language: AppLanguage::default(),
             ui_font_size: DEFAULT_UI_FONT_SIZE,
             code_font_size: DEFAULT_CODE_FONT_SIZE,
+            ui_font_family: None,
+            mono_font_family: None,
             daemon_exposure: DaemonExposureSettings::default(),
             open_in_app: None,
         }
@@ -289,6 +296,18 @@ pub fn sanitized_ui_font_size(size: f32) -> f32 {
 
 pub fn sanitized_code_font_size(size: f32) -> f32 {
     sanitized_font_size(size, DEFAULT_CODE_FONT_SIZE)
+}
+
+pub const DEFAULT_SANS_FAMILY: &str = ".SystemUIFont";
+pub const DEFAULT_MONO_FAMILY: &str = "JetBrains Mono";
+
+/// Normalizes a hand-edited font family: trim whitespace, collapse empties
+/// to `None`. Existence is validated by the app layer when the setting is
+/// chosen, so persistence accepts the stored value as-is.
+pub fn sanitized_font_family(family: Option<String>) -> Option<String> {
+    family
+        .map(|family| family.trim().to_string())
+        .filter(|family| !family.is_empty())
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -368,6 +387,10 @@ pub struct PersistedState {
     pub ui_font_size: f32,
     #[serde(default = "default_code_font_size")]
     pub code_font_size: f32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ui_font_family: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mono_font_family: Option<String>,
     #[serde(default)]
     pub daemon_exposure: DaemonExposureSettings,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -441,6 +464,8 @@ impl PersistedState {
             language: AppLanguage::default(),
             ui_font_size: DEFAULT_UI_FONT_SIZE,
             code_font_size: DEFAULT_CODE_FONT_SIZE,
+            ui_font_family: None,
+            mono_font_family: None,
             daemon_exposure: DaemonExposureSettings::default(),
             open_in_app: None,
             sidebar_visible: true,
@@ -564,6 +589,8 @@ impl PersistedState {
             language: self.language,
             ui_font_size: self.ui_font_size,
             code_font_size: self.code_font_size,
+            ui_font_family: self.ui_font_family.clone(),
+            mono_font_family: self.mono_font_family.clone(),
             daemon_exposure: self.daemon_exposure.clone(),
             open_in_app: self.open_in_app.clone(),
         }
@@ -600,6 +627,8 @@ impl PersistedState {
         self.language = settings.language;
         self.ui_font_size = sanitized_ui_font_size(settings.ui_font_size);
         self.code_font_size = sanitized_code_font_size(settings.code_font_size);
+        self.ui_font_family = sanitized_font_family(settings.ui_font_family);
+        self.mono_font_family = sanitized_font_family(settings.mono_font_family);
         self.daemon_exposure = settings.daemon_exposure;
         self.open_in_app = settings.open_in_app;
     }

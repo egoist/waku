@@ -322,7 +322,7 @@ impl Render for Waku {
             .relative()
             .flex()
             .text_color(theme.text)
-            .font_family(".SystemUIFont")
+            .font_family(crate::fonts::sans())
             // Both panels slide through a container that narrows while their
             // content keeps its full width and is clipped: the sidebar list
             // and the right panel's surfaces never reflow on the way in or
@@ -474,7 +474,7 @@ impl Waku {
         );
         let message = md::render::plain_text(
             message,
-            md::render::SANS_FAMILY,
+            crate::fonts::sans(),
             FontWeight::NORMAL,
             theme.text,
             &text_ctx,

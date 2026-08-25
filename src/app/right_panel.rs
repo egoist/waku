@@ -451,7 +451,7 @@ pub(super) fn render_diff_code_row(
         .flex_none()
         .flex()
         .items_stretch()
-        .font_family(md::render::MONO_FAMILY)
+        .font_family(crate::fonts::mono())
         .text_size(px(style.text_size))
         .line_height(px(style.row_height))
         .when_some(edge, |row, edge| row.border_l_2().border_color(edge))
@@ -463,7 +463,7 @@ pub(super) fn render_diff_code_row(
 fn review_diff_flat_text(line: &crate::review_diff::Line, theme: &Theme) -> md::render::FlatText {
     let text = line.content.clone();
     let palette = MarkdownPalette::from_theme(theme);
-    let code_font = font(md::render::MONO_FAMILY);
+    let code_font = font(crate::fonts::mono());
     let mut runs = Vec::with_capacity(line.tokens.len() * 2 + 1);
     let mut offset = 0;
     let mut push = |len: usize, color: Hsla| {
@@ -3175,7 +3175,7 @@ impl Waku {
                         let text = SharedString::from(number.to_string());
                         let run = gpui::TextRun {
                             len: text.len(),
-                            font: gpui::font(md::render::MONO_FAMILY),
+                            font: gpui::font(crate::fonts::mono()),
                             color: number_color,
                             ..Default::default()
                         };
@@ -3211,7 +3211,7 @@ impl Waku {
             .flex()
             .flex_col()
             .bg(theme.surface)
-            .font_family(md::render::MONO_FAMILY)
+            .font_family(crate::fonts::mono())
             .text_size(px(text_size))
             .line_height(px(line_height))
             .children(find_bar)
@@ -3853,7 +3853,7 @@ impl Waku {
                 .min_w_0()
                 .flex()
                 .items_stretch()
-                .font_family(md::render::MONO_FAMILY)
+                .font_family(crate::fonts::mono())
                 .text_size(px(12.5))
                 .line_height(px(16.0))
                 .text_color(theme.text_tertiary)
@@ -3888,7 +3888,7 @@ impl Waku {
                 .min_w_0()
                 .flex()
                 .items_stretch()
-                .font_family(md::render::MONO_FAMILY)
+                .font_family(crate::fonts::mono())
                 .text_size(px(12.5))
                 .line_height(px(16.0))
                 .text_color(theme.text_tertiary)
