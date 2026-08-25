@@ -589,7 +589,7 @@ function isAskUserQuestion(activity: ActivityItem) {
 
 function humanizeToolName(name: string) {
   const trimmed = name.trim()
-  if (/\s/.test(trimmed)) return trimmed
+  if (/\s/.test(trimmed)) return trimmed.replace(/\s+/g, ' ')
   const display = toolNameLeaf(trimmed)
     .replace(/[_-]+/g, ' ')
     .replace(/([a-z\d])([A-Z])/g, '$1 $2')

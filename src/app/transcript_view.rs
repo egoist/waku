@@ -1905,6 +1905,8 @@ impl Waku {
                     .w_full()
                     .min_w_0()
                     .h(px(26.0))
+                    .flex_none()
+                    .overflow_hidden()
                     .flex()
                     .items_center()
                     .gap(px(6.0))
@@ -2062,6 +2064,8 @@ impl Waku {
                         // The parent owns a 1px border on each edge, so a
                         // 28px row makes the visible activity header 30px.
                         .h(px(28.0))
+                        .flex_none()
+                        .overflow_hidden()
                         .px(px(8.0))
                         .flex()
                         .items_center()
