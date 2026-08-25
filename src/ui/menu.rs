@@ -24,6 +24,7 @@
 //!   menu at all.
 
 use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
 use std::rc::Rc;
 
 use gpui::{
@@ -199,6 +200,13 @@ impl MenuItem {
         }
     }
 
+    /// Whether this entry presents itself as the current choice. The first
+    /// such entry seeds the keyboard cursor when the menu opens, so a long
+    /// list can be revealed centered on where the choice actually lives.
+    fn is_selected(&self) -> bool {
+        matches!(self, Self::Entry { selected: true, .. })
+    }
+
     fn click_handler(self) -> Option<Rc<dyn Fn(&mut Window, &mut App)>> {
         match self {
             Self::Entry {
@@ -228,6 +236,16 @@ struct MenuState {
     /// Scroll position of the card's item list, kept on the handle so the
     /// list survives hover-highlight re-renders and resets when reopened.
     card_scroll: ScrollHandle,
+    /// Paint-frame record of every item's absolute top edge, so a target
+    /// index can be converted into a content-space scroll offset.
+    item_tops: Rc<RefCell<HashMap<usize, Pixels>>>,
+    /// Absolute bounds of the scrolling list box in the current frame.
+    container_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
+    /// Item to bring into view on the next frame. The flag centers it
+    /// (opening onto the current selection) or nudges minimally (arrow keys).
+    pending_reveal: Option<(usize, bool)>,
+    /// Whether the open-with-selection reveal already ran for this cycle.
+    did_initial_reveal: bool,
     /// A dropdown/popover trigger toggles its own surface on left click. The
     /// outside-click capture must leave that click alone so the later trigger
     /// handler can close it; a context-menu row has no such handler.
@@ -356,6 +374,7 @@ impl ContextMenuHandle {
             state.submenu_focused = false;
             state.trigger_click_toggles = trigger_click_toggles;
             state.card_scroll.set_offset(point(Pixels::ZERO, Pixels::ZERO));
+            state.did_initial_reveal = false;
             was_open
         };
         if !was_open {
@@ -415,6 +434,52 @@ fn trigger_bounds_probe(handle: &ContextMenuHandle) -> impl IntoElement {
     )
     .absolute()
     .inset_0()
+}
+
+/// The content-space scroll offset that brings `index` into view.
+///
+/// `tops` holds each item's absolute frame-space top edge as recorded by the
+/// layout probes; `container_y` is the list box's own absolute top, so an
+/// item's content-space position is `tops[index] - container_y + offset_now`.
+/// With `center`, the item lands mid-viewport (used when opening onto the
+/// current selection); otherwise the view only moves far enough to pull the
+/// item inside a small margin, preserving the reader's position for small
+/// arrow-key steps. Returns `None` when no movement is needed.
+fn reveal_offset(
+    tops: &HashMap<usize, Pixels>,
+    index: usize,
+    offset_now: Pixels,
+    viewport: Pixels,
+    container_y: Pixels,
+    center: bool,
+) -> Option<Pixels> {
+    let item_y = *tops.get(&index)? - container_y + offset_now;
+    // Item height from its next sibling's recorded top; the last item (or a
+    // gap in the map) falls back to a typical row height.
+    let item_height = tops
+        .get(&(index + 1))
+        .map(|next| (*next - tops[&index]).max(px(1.0)))
+        .unwrap_or_else(|| px(28.0));
+    let content_bottom = tops
+        .iter()
+        .map(|(i, top)| {
+            let height = tops.get(&(i + 1)).map(|next| *next - *top).unwrap_or(item_height);
+            (*top - container_y + offset_now) + height
+        })
+        .fold(px(0.0), Pixels::max);
+    let max_offset = (content_bottom - viewport).max(px(0.0));
+
+    const MARGIN: f32 = 4.0;
+    let target = if center {
+        item_y - (viewport - item_height) / 2.0
+    } else if item_y < offset_now + px(MARGIN) {
+        item_y - px(MARGIN)
+    } else if item_y + item_height > offset_now + viewport - px(MARGIN) {
+        item_y + item_height - viewport + px(MARGIN)
+    } else {
+        return None;
+    };
+    Some(target.clamp(px(0.0), max_offset))
 }
 
 /// Where a dropdown's card sits relative to its trigger.
@@ -960,6 +1025,20 @@ impl RenderOnce for MenuCard {
             )
         };
         let scroll = self.handle.state.borrow().card_scroll.clone();
+
+        // Opening onto a menu whose entries carry a current selection: start
+        // the keyboard cursor there and center the list on it, so a font
+        // picker with hundreds of entries opens where the choice lives.
+        {
+            let mut state = self.handle.state.borrow_mut();
+            if !state.did_initial_reveal {
+                if let Some(index) = items.iter().position(|item| item.is_selected()) {
+                    state.highlighted = Some(index);
+                    state.pending_reveal = Some((index, true));
+                }
+                state.did_initial_reveal = true;
+            }
+        }
         let submenu = active_submenu.and_then(|index| {
             let MenuItem::Submenu { items, .. } = items.get(index)? else {
                 return None;
@@ -986,8 +1065,17 @@ impl RenderOnce for MenuCard {
         // window, and let it scroll; the handle lives on the shared state so
         // the offset survives hover-highlight re-renders of this card.
         let max_list_height = (window.viewport_size().height - px(48.0)).max(px(120.0));
+        let (item_tops, container_bounds, pending_reveal) = {
+            let state = self.handle.state.borrow();
+            (
+                state.item_tops.clone(),
+                state.container_bounds.clone(),
+                state.pending_reveal,
+            )
+        };
         let mut items_card = div()
             .id(items_id)
+            .relative()
             .max_h(max_list_height)
             .overflow_y_scroll()
             .track_scroll(&scroll)
@@ -995,16 +1083,80 @@ impl RenderOnce for MenuCard {
             .flex_col();
 
         for (index, item) in items.into_iter().enumerate() {
-            items_card = items_card.child(render_menu_item(
-                item,
-                index,
-                highlighted == Some(index) || active_submenu == Some(index),
-                false,
-                &theme,
-                self.handle.clone(),
-                window,
-                cx,
-            ));
+            let tops = item_tops.clone();
+            items_card = items_card.child(
+                div()
+                    .relative()
+                    // Zero-cost probe: record this item's absolute top edge
+                    // during layout so scroll-to-reveal can map index → y.
+                    .child(
+                        canvas(
+                            move |bounds: Bounds<Pixels>, _, _| {
+                                tops.borrow_mut().insert(index, bounds.origin.y);
+                            },
+                            |_, _, _, _| (),
+                        )
+                        .absolute()
+                        .inset_0(),
+                    )
+                    .child(render_menu_item(
+                        item,
+                        index,
+                        highlighted == Some(index) || active_submenu == Some(index),
+                        false,
+                        &theme,
+                        self.handle.clone(),
+                        window,
+                        cx,
+                    )),
+            );
+        }
+
+        // Runs its layout callback after every sibling above has laid out,
+        // so all probes have recorded. Computes the reveal target from the
+        // recorded geometry; the paint callback applies the offset and asks
+        // for one more frame when it moved.
+        let applied_target: Rc<Cell<Option<Pixels>>> = Rc::new(Cell::new(None));
+        {
+            let prepaint_scroll = scroll.clone();
+            let paint_scroll = scroll.clone();
+            let container_bounds = container_bounds.clone();
+            let prepaint_applied = applied_target.clone();
+            let paint_handle = self.handle.clone();
+            items_card = items_card.child(
+                canvas(
+                    move |bounds: Bounds<Pixels>, _, _| {
+                        container_bounds.set(Some(bounds));
+                        let Some((index, center)) = pending_reveal else {
+                            return;
+                        };
+                        let offset_now = prepaint_scroll.offset().y;
+                        if let Some(target) = reveal_offset(
+                            &item_tops.borrow(),
+                            index,
+                            offset_now,
+                            bounds.size.height,
+                            bounds.origin.y,
+                            center,
+                        ) && (target - offset_now).abs() > px(0.5)
+                        {
+                            prepaint_applied.set(Some(target));
+                        }
+                    },
+                    move |_, (), window, _| {
+                        if let Some(target) = applied_target.take() {
+                            let current = paint_scroll.offset().y;
+                            paint_scroll.set_offset(point(current, target));
+                            // Consume the request so a later hover re-render
+                            // cannot yank the list back after manual scrolling.
+                            paint_handle.state.borrow_mut().pending_reveal = None;
+                            window.refresh();
+                        }
+                    },
+                )
+                .absolute()
+                .inset_0(),
+            );
         }
 
         root_card = root_card.child(items_card);
@@ -1390,6 +1542,8 @@ fn on_menu_key(
         state.active_submenu = None;
         state.submenu_highlighted = None;
         state.submenu_focused = false;
+        state.pending_reveal = Some((next, false));
+        drop(state);
         window.refresh();
         cx.stop_propagation();
         return;
