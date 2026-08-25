@@ -14,12 +14,12 @@
 //! from `claude --help`.
 
 use std::collections::{HashMap, HashSet};
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 use std::fs::File;
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 use std::io::Read;
 use std::io::{BufRead, BufReader, Write};
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::Arc;
@@ -651,13 +651,17 @@ impl Drop for ClaudeTaskOutputTails {
     }
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 const CLAUDE_TASK_OUTPUT_POLL_INTERVAL: Duration = Duration::from_secs(1);
 
 /// Claude keeps live Bash output outside its JSON stream. The installed CLI
-/// writes it under `/tmp/claude-<uid>/<workspace>/<session>/tasks/<id>.output`;
-/// locate the workspace component instead of reproducing Claude's private cwd
-/// escaping rules.
+/// writes it under `<root>/<workspace>/<session>/tasks/<id>.output`; locate the
+/// workspace component instead of reproducing Claude's private cwd escaping
+/// rules. Only the root differs by platform.
+///
+/// The Unix root stays the literal `/tmp`: on macOS `std::env::temp_dir()`
+/// resolves to a per-user `/var/folders/…` path, which is not where the CLI
+/// writes.
 #[cfg(unix)]
 fn claude_task_output_path(session_id: &str, task_id: &str) -> Option<PathBuf> {
     // SAFETY: `geteuid` has no preconditions and does not retain pointers.
@@ -669,7 +673,13 @@ fn claude_task_output_path(session_id: &str, task_id: &str) -> Option<PathBuf> {
     )
 }
 
-#[cfg(unix)]
+/// Windows has no per-uid suffix; the CLI writes under `%TEMP%\claude`.
+#[cfg(windows)]
+fn claude_task_output_path(session_id: &str, task_id: &str) -> Option<PathBuf> {
+    claude_task_output_path_in(&std::env::temp_dir().join("claude"), session_id, task_id)
+}
+
+#[cfg(any(unix, windows))]
 fn claude_task_output_path_in(root: &Path, session_id: &str, task_id: &str) -> Option<PathBuf> {
     if task_id.is_empty()
         || task_id.contains('/')
@@ -693,7 +703,7 @@ fn claude_task_output_path_in(root: &Path, session_id: &str, task_id: &str) -> O
         .find(|path| path.is_file())
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 fn drain_utf8_output(bytes: &mut Vec<u8>, final_read: bool) -> Option<String> {
     if bytes.is_empty() {
         return None;
@@ -716,7 +726,7 @@ fn drain_utf8_output(bytes: &mut Vec<u8>, final_read: bool) -> Option<String> {
     }
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 fn stream_claude_task_output(
     path: PathBuf,
     key: BackgroundWorkKey,
@@ -757,7 +767,7 @@ fn stream_claude_task_output(
     }
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 fn stream_claude_task_output_when_ready(
     session_id: String,
     task_id: String,
@@ -780,7 +790,7 @@ fn stream_claude_task_output_when_ready(
     }
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 fn start_claude_task_output_tail(
     session_id: &str,
     item: &BackgroundWorkItem,
@@ -818,7 +828,7 @@ fn start_claude_task_output_tail(
     }
 }
 
-#[cfg(not(unix))]
+#[cfg(not(any(unix, windows)))]
 fn start_claude_task_output_tail(
     _session_id: &str,
     _item: &BackgroundWorkItem,
@@ -1718,7 +1728,7 @@ mod tests {
         )
     }
 
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     #[test]
     fn locates_claudes_native_task_output_across_workspace_slugs() {
         let root = std::env::temp_dir().join(format!("waku-claude-output-test-{}", Uuid::new_v4()));
@@ -1741,7 +1751,7 @@ mod tests {
         std::fs::remove_dir_all(root).unwrap();
     }
 
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     #[test]
     fn live_task_output_preserves_split_utf8() {
         let bytes = "first 界".as_bytes();
@@ -1760,7 +1770,7 @@ mod tests {
         assert!(pending.is_empty());
     }
 
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     #[test]
     fn native_task_output_streams_before_completion() {
         let root = std::env::temp_dir().join(format!("waku-claude-tail-test-{}", Uuid::new_v4()));
