@@ -1340,7 +1340,7 @@ impl Waku {
                 .label(font_family_label(selected_ui_font_family.as_deref()))
                 .outlined()
                 .selected(ui_font_family_handle.is_open())
-                .w(px(200.0))
+                .w(px(116.0))
                 .justify_between(),
             "ui-font-family-selector-menu",
             &ui_font_family_handle,
@@ -1366,7 +1366,7 @@ impl Waku {
                 .label(font_family_label(selected_mono_font_family.as_deref()))
                 .outlined()
                 .selected(mono_font_family_handle.is_open())
-                .w(px(200.0))
+                .w(px(116.0))
                 .justify_between(),
             "mono-font-family-selector-menu",
             &mono_font_family_handle,
