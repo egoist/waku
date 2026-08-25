@@ -436,6 +436,80 @@ fn trigger_bounds_probe(handle: &ContextMenuHandle) -> impl IntoElement {
     .inset_0()
 }
 
+#[cfg(test)]
+mod reveal_offset_tests {
+    use super::*;
+
+    /// A five-row list, each row exactly 30px tall, recorded in frame space
+    /// with the container top at 100px.
+    fn five_rows() -> HashMap<usize, Pixels> {
+        (0..5)
+            .map(|i| (i, px(100.0 + 30.0 * i as f32)))
+            .collect()
+    }
+
+    #[test]
+    fn reveal_returns_none_when_item_is_visible() {
+        // Viewport 90px, offset 0 (GPUI negative convention): rows 0-2 visible.
+        assert_eq!(
+            reveal_offset(&five_rows(), 1, px(0.0), px(90.0), px(100.0), false),
+            None
+        );
+    }
+
+    #[test]
+    fn reveal_scrolls_down_with_negative_offset_when_item_is_below() {
+        // Row 4 (content y 120, height falls back to 28 since no row 5 is
+        // recorded) is below a 90px viewport at offset 0. Raw nudge target
+        // is 120+28-90+4 = 62, clamped to max_scroll = 148-90 = 58.
+        assert_eq!(
+            reveal_offset(&five_rows(), 4, px(0.0), px(90.0), px(100.0), false),
+            Some(px(-58.0))
+        );
+    }
+
+    #[test]
+    fn reveal_scrolls_up_when_item_is_above_the_viewport() {
+        // Scrolled to the bottom (offset -60, visible 60-150): row 0 (y 0-30)
+        // is above. Nudge up to y - margin → -4, clamped to 0.
+        assert_eq!(
+            reveal_offset(&five_rows(), 0, px(-60.0), px(90.0), px(100.0), false),
+            Some(px(0.0))
+        );
+    }
+
+    #[test]
+    fn reveal_centers_the_item_when_asked() {
+        // Viewport 90px, row 2 (y 60-90): centered target = 60 - (90-30)/2 = 30.
+        assert_eq!(
+            reveal_offset(&five_rows(), 2, px(0.0), px(90.0), px(100.0), true),
+            Some(px(-30.0))
+        );
+    }
+
+    #[test]
+    fn reveal_clamps_centering_to_the_scrollable_range() {
+        // Centering row 0 would want a negative scroll; clamps to 0 (offset 0).
+        assert_eq!(
+            reveal_offset(&five_rows(), 0, px(0.0), px(90.0), px(100.0), true),
+            Some(px(0.0))
+        );
+        // Centering row 4 wants 120-(90-28)/2 = 89 > max_scroll 58; clamps.
+        assert_eq!(
+            reveal_offset(&five_rows(), 4, px(0.0), px(90.0), px(100.0), true),
+            Some(px(-58.0))
+        );
+    }
+
+    #[test]
+    fn reveal_returns_none_for_an_unrecorded_index() {
+        assert_eq!(
+            reveal_offset(&five_rows(), 99, px(0.0), px(90.0), px(100.0), true),
+            None
+        );
+    }
+}
+
 /// The content-space scroll offset that brings `index` into view.
 ///
 /// `tops` holds each item's absolute frame-space top edge as recorded by the

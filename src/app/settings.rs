@@ -2602,6 +2602,7 @@ fn font_family_label(family: Option<&str>) -> String {
 fn font_family_menu_items(
     cx: &App,
     selected: Option<&str>,
+    #[allow(clippy::type_complexity)] // matches MenuItem's own callback shape
     on_select: Rc<dyn Fn(Option<String>, &mut Window, &mut App)>,
 ) -> Vec<MenuItem> {
     let mut items = vec![{
