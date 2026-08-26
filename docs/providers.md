@@ -449,6 +449,12 @@ found after the fork code was written.
 **Models** — no discovery command; the catalog is a curated fixed list
 ([model_catalog.rs:52](../crates/waku-core/src/model_catalog.rs#L52)).
 
+Waku appends model IDs from the user's Claude Code configuration to that
+catalog. It reads the `model` field, `ANTHROPIC_MODEL`,
+`ANTHROPIC_CUSTOM_MODEL_OPTION`, and the `ANTHROPIC_DEFAULT_*_MODEL` entries.
+The picker labels these models and keeps the configured default for new Waku
+sessions.
+
 ---
 
 ## Amp
