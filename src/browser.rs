@@ -1,8 +1,9 @@
 //! Native browser surface for the right panel: a WKWebView on macOS, a
-//! composition-hosted WebView2 on Windows.
+//! composition-hosted WebView2 on Windows, and an offscreen WebKitGTK blit
+//! on Linux.
 //!
-//! Both are real native content the GPUI renderer does not own, so three
-//! invariants keep them honest:
+//! macOS and Windows are real native content the GPUI renderer does not own,
+//! so three invariants keep them honest:
 //!
 //! - Geometry: the surface's content area syncs the native frame from element
 //!   layout every frame, deduplicated so an unchanged frame costs nothing.
@@ -16,11 +17,13 @@
 //!   records intent and schedules the entity update on the foreground
 //!   executor.
 //!
-//! The two platforms differ in how much of the window they take over. AppKit
+//! The platforms differ in how much of the window they take over. AppKit
 //! puts the WKWebView in the view hierarchy and routes input to it; Windows
 //! renders WebView2 into one of GPUI's own composition visuals and receives
 //! nothing, so this module forwards mouse input, cursor and focus by hand.
-//! [`host`] carries the detail.
+//! Linux cannot parent WebKitGTK into GPUI's xcb/Wayland window, so it keeps
+//! the view off screen and paints the pixbuf — input is forwarded the same
+//! way as on Windows. [`host`] carries the detail.
 //!
 //! [`Waku`]: crate::app::Waku
 
@@ -30,7 +33,7 @@ use gpui::{
     App, Context, Div, Entity, FocusHandle, Focusable, HitboxBehavior, IntoElement, ObjectFit,
     Render, SharedString, Stateful, Subscription, Window, canvas, div, img, prelude::*, px,
 };
-#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
 use gpui::{AsyncApp, ForegroundExecutor, WeakEntity};
 
 use crate::input::{InputEvent, TextInput};
@@ -1106,23 +1109,9 @@ fn window_hwnd(window: &Window) -> isize {
     }
 }
 
-#[cfg(not(any(target_os = "macos", target_os = "windows")))]
-mod host {
-    use gpui::{Bounds, Pixels};
-
-    /// Linux has no embedding path: wry's WebKitGTK backend accepts an Xlib
-    /// parent only and needs a GTK main loop, and GPUI's Linux backend is
-    /// neither GTK nor guaranteed to be X11.
-    pub(super) struct WebviewHost;
-
-    impl WebviewHost {
-        pub fn sync_bounds(&self, _bounds: Bounds<Pixels>, _scale: f32) {}
-        pub fn set_visible(&self, _visible: bool) {}
-        pub fn native_focus_within(&self) -> bool {
-            false
-        }
-    }
-}
+#[cfg(target_os = "linux")]
+#[path = "browser_linux.rs"]
+mod host;
 
 use host::WebviewHost;
 
@@ -1130,14 +1119,14 @@ use host::WebviewHost;
 /// on the main thread but can fire while GPUI holds the app borrow, so the
 /// update always takes the next executor turn instead of re-entering.
 #[derive(Clone)]
-#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
 struct Deferred {
     executor: ForegroundExecutor,
     cx: AsyncApp,
     view: WeakEntity<BrowserView>,
 }
 
-#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
 impl Deferred {
     fn update(&self, f: impl FnOnce(&mut BrowserView, &mut Context<BrowserView>) + 'static) {
         let mut cx = self.cx.clone();
@@ -1177,6 +1166,9 @@ pub struct BrowserView {
     was_natively_focused: bool,
     /// GPUI-focus edge detection: the window's focused handle last frame.
     last_window_focus: Option<FocusHandle>,
+    /// Address-bar submit armed the page keyboard. `reconcile_focus` must
+    /// move GPUI focus onto the surface instead of reclaiming the omnibox.
+    page_wants_keyboard: bool,
     occluded: bool,
     /// Frozen page pixels drawn while a GPUI overlay is open above the panel.
     /// A `RenderImage` rather than an encoded `Image`: encoded images decode
@@ -1280,6 +1272,7 @@ impl BrowserView {
             address_dirty: false,
             was_natively_focused: false,
             last_window_focus: None,
+            page_wants_keyboard: false,
             occluded: false,
             snapshot: None,
             snapshot_pending: false,
@@ -1287,6 +1280,8 @@ impl BrowserView {
             _subscriptions: vec![submit_subscription, focus_in_address, focus_out_surface],
         };
         this.build_webview(window, cx);
+        #[cfg(target_os = "linux")]
+        this.start_gtk_pump(cx);
         this
     }
 
@@ -1295,6 +1290,27 @@ impl BrowserView {
             address.set_placeholder(tr!("input.search_or_enter_address"), cx)
         });
         cx.notify();
+    }
+
+    #[cfg(target_os = "linux")]
+    fn start_gtk_pump(&self, cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(16))
+                    .await;
+                match this.update(cx, |this, cx| {
+                    host::pump_gtk();
+                    if this.host.as_ref().is_some_and(|host| host.present()) {
+                        cx.notify();
+                    }
+                }) {
+                    Ok(()) => {}
+                    Err(_) => break,
+                }
+            }
+        })
+        .detach();
     }
 
     /// The label the right panel tab shows for this surface.
@@ -1519,12 +1535,25 @@ impl BrowserView {
         cx.notify();
     }
 
-    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    #[cfg(target_os = "linux")]
+    fn build_webview(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        let deferred = Deferred {
+            executor: cx.foreground_executor().clone(),
+            cx: cx.to_async(),
+            view: cx.entity().downgrade(),
+        };
+        match host::build_host(deferred) {
+            Ok(host) => self.host = Some(Rc::new(host)),
+            Err(error) => self.host_error = Some(error),
+        }
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
     fn build_webview(&mut self, _window: &mut Window, _cx: &mut Context<Self>) {
         self.host_error = Some(tr!("browser.unavailable_on_platform"));
     }
 
-    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
     fn page_load_changed(&mut self, event: PageLoad, url: String, cx: &mut Context<Self>) {
         match event {
             PageLoad::Started => {
@@ -1545,7 +1574,7 @@ impl BrowserView {
         cx.notify();
     }
 
-    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
     fn title_changed(&mut self, title: String, cx: &mut Context<Self>) {
         let title = (!title.trim().is_empty()).then_some(title);
         if self.page_title != title {
@@ -1554,7 +1583,7 @@ impl BrowserView {
         }
     }
 
-    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
     fn refresh_navigation_state(&mut self) {
         if let Some(host) = &self.host {
             self.can_go_back = host.webview.can_go_back().unwrap_or(false);
@@ -1591,7 +1620,7 @@ impl BrowserView {
         self.navigate_to_url(url, cx);
     }
 
-    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
     pub fn navigate_to_url(&mut self, url: String, cx: &mut Context<Self>) {
         let Some(host) = &self.host else {
             #[cfg(target_os = "windows")]
@@ -1608,11 +1637,12 @@ impl BrowserView {
         self.current_url = Some(url);
         self.address_dirty = false;
         self.echo_page_url(cx);
+        self.page_wants_keyboard = true;
         self.focus_page(cx);
         cx.notify();
     }
 
-    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
     pub fn navigate_to_url(&mut self, _url: String, _cx: &mut Context<Self>) {}
 
     /// Hand the keyboard to the page. `makeFirstResponder` runs responder
@@ -1629,7 +1659,7 @@ impl BrowserView {
         }
         // `MoveFocus` is the only way in: a visual-hosted page has no window
         // of ours for a click to land on, so focus is always explicit.
-        #[cfg(target_os = "windows")]
+        #[cfg(any(target_os = "linux", target_os = "windows"))]
         if let Some(host) = self.host.clone() {
             _cx.foreground_executor()
                 .spawn(async move {
@@ -1780,9 +1810,17 @@ impl BrowserView {
             .is_some_and(|focus| *focus != self.focus_handle);
 
         if natively_focused && window_focus_changed && focus_on_gpui_control {
-            self.reclaim_native_keyboard(cx);
+            if self.page_wants_keyboard && self.address.read(cx).focus().is_focused(window) {
+                self.page_wants_keyboard = false;
+                window.focus(&self.focus_handle, cx);
+            } else {
+                self.reclaim_native_keyboard(cx);
+            }
         } else if native_became_focused && !window_focus_changed {
-            if self.address.read(cx).focus().is_focused(window) {
+            if self.page_wants_keyboard {
+                self.page_wants_keyboard = false;
+                window.focus(&self.focus_handle, cx);
+            } else if self.address.read(cx).focus().is_focused(window) {
                 // A stale native edge must never rip GPUI focus out of the
                 // address bar mid-typing — the keyboard comes back instead.
                 self.reclaim_native_keyboard(cx);
@@ -1798,13 +1836,15 @@ impl BrowserView {
     /// Return the native first responder to GPUI's view — deferred, since
     /// `makeFirstResponder` runs responder callbacks that may re-enter GPUI.
     fn reclaim_native_keyboard(&mut self, _cx: &mut Context<Self>) {
-        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
         if let Some(host) = self.host.clone() {
             _cx.foreground_executor()
                 .spawn(async move {
                     #[cfg(target_os = "macos")]
                     let _ = host.webview.focus_parent();
                     #[cfg(target_os = "windows")]
+                    host.focus_parent();
+                    #[cfg(target_os = "linux")]
                     host.focus_parent();
                 })
                 .detach();
@@ -1819,13 +1859,21 @@ impl BrowserView {
             .unwrap_or(0.0)
     }
 
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "linux")]
+    fn estimated_progress(&self) -> f64 {
+        self.host
+            .as_ref()
+            .map(|host| host.estimated_progress())
+            .unwrap_or(0.0)
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     fn estimated_progress(&self) -> f64 {
         0.0
     }
 
     fn go_back(&mut self, _cx: &mut Context<Self>) {
-        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
         if let Some(host) = &self.host {
             let _ = host.webview.go_back();
             self.refresh_navigation_state();
@@ -1834,7 +1882,7 @@ impl BrowserView {
     }
 
     fn go_forward(&mut self, _cx: &mut Context<Self>) {
-        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
         if let Some(host) = &self.host {
             let _ = host.webview.go_forward();
             self.refresh_navigation_state();
@@ -1843,7 +1891,7 @@ impl BrowserView {
     }
 
     fn reload(&mut self, _cx: &mut Context<Self>) {
-        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
         if let Some(host) = &self.host
             && self.navigation_requested
         {
@@ -1864,10 +1912,19 @@ impl BrowserView {
         }
         // WebView2 exposes no cache-bypassing reload; the scripted form is the
         // closest equivalent the page itself can perform.
+        #[cfg(target_os = "linux")]
+        if let Some(host) = &self.host
+            && self.navigation_requested
+        {
+            host.reload_from_origin();
+            self.loading = true;
+            _cx.notify();
+        }
         #[cfg(target_os = "windows")]
         if let Some(host) = &self.host
             && self.navigation_requested
         {
+            let _ = host.webview.reload();
             let _ = host.webview.evaluate_script("location.reload(true)");
             self.loading = true;
             _cx.notify();
@@ -1882,6 +1939,13 @@ impl BrowserView {
             self.refresh_navigation_state();
             _cx.notify();
         }
+        #[cfg(target_os = "linux")]
+        if let Some(host) = &self.host {
+            host.stop_loading();
+            self.loading = false;
+            self.refresh_navigation_state();
+            _cx.notify();
+        }
         #[cfg(target_os = "windows")]
         if let Some(host) = &self.host {
             let _ = host.webview.stop();
@@ -1892,7 +1956,7 @@ impl BrowserView {
     }
 
     fn toggle_devtools(&mut self) {
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
         if let Some(host) = &self.host {
             if host.webview.is_devtools_open() {
                 host.webview.close_devtools();
@@ -1938,7 +2002,7 @@ impl BrowserView {
     /// WebView2 handles the standard chords itself when the page holds the
     /// keyboard; this covers the case where Waku's own Browser-scoped
     /// bindings claimed the keystroke first.
-    #[cfg(target_os = "windows")]
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
     fn perform_editing_command(&self, command: &str) {
         if let Some(host) = &self.host {
             let _ = host
@@ -1950,28 +2014,28 @@ impl BrowserView {
     fn webview_copy(&self) {
         #[cfg(target_os = "macos")]
         self.perform_editing_selector(objc2::sel!(copy:));
-        #[cfg(target_os = "windows")]
+        #[cfg(any(target_os = "windows", target_os = "linux"))]
         self.perform_editing_command("copy");
     }
 
     fn webview_cut(&self) {
         #[cfg(target_os = "macos")]
         self.perform_editing_selector(objc2::sel!(cut:));
-        #[cfg(target_os = "windows")]
+        #[cfg(any(target_os = "windows", target_os = "linux"))]
         self.perform_editing_command("cut");
     }
 
     fn webview_paste(&self) {
         #[cfg(target_os = "macos")]
         self.perform_editing_selector(objc2::sel!(paste:));
-        #[cfg(target_os = "windows")]
+        #[cfg(any(target_os = "windows", target_os = "linux"))]
         self.perform_editing_command("paste");
     }
 
     fn webview_select_all(&self) {
         #[cfg(target_os = "macos")]
         self.perform_editing_selector(objc2::sel!(selectAll:));
-        #[cfg(target_os = "windows")]
+        #[cfg(any(target_os = "windows", target_os = "linux"))]
         self.perform_editing_command("selectAll");
     }
 
@@ -2190,7 +2254,15 @@ impl BrowserView {
     /// now that the page no longer hides itself for one, and so they can use
     /// GPUI's pointer capture, which keeps a text selection alive after the
     /// pointer leaves the panel.
-    #[cfg(target_os = "windows")]
+    /// `Hitbox::is_hovered` is false after a keypress (keyboard modality).
+    /// The page still has the pointer, so clicks must use the scroll hit-test
+    /// or a captured drag, or inputs never receive the first click.
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
+    fn page_pointer_hits(hitbox: &gpui::Hitbox, window: &Window) -> bool {
+        hitbox.is_hovered(window) || hitbox.should_handle_scroll(window)
+    }
+
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
     fn forward_page_input(
         host: Rc<WebviewHost>,
         focus: FocusHandle,
@@ -2199,15 +2271,15 @@ impl BrowserView {
     ) {
         use gpui::{DispatchPhase, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ScrollWheelEvent};
 
-        // The page's own cursor, applied the way every other GPUI element
-        // applies one, so it survives GPUI reasserting its cursor per frame.
+        #[cfg(target_os = "windows")]
         window.set_cursor_style(host.cursor_style(), &hitbox);
 
         window.on_mouse_event({
             let host = host.clone();
             let hitbox = hitbox.clone();
+            let focus = focus.clone();
             move |event: &MouseDownEvent, phase, window, cx| {
-                if phase != DispatchPhase::Bubble || !hitbox.is_hovered(window) {
+                if phase != DispatchPhase::Bubble || !Self::page_pointer_hits(&hitbox, window) {
                     return;
                 }
                 // Both focus systems move together: clicking the page is
@@ -2218,9 +2290,7 @@ impl BrowserView {
                 // page stealing the keyboard from a control the user is
                 // still using.
                 window.focus(&focus, cx);
-                if !host.native_focus_within() {
-                    host.focus_page();
-                }
+                host.focus_page();
                 // Released automatically on the matching mouse up.
                 window.capture_pointer(hitbox.id);
                 host.mouse_down(
@@ -2229,6 +2299,7 @@ impl BrowserView {
                     event.modifiers,
                     event.click_count,
                 );
+                cx.stop_propagation();
             }
         });
 
@@ -2236,7 +2307,7 @@ impl BrowserView {
             let host = host.clone();
             let hitbox = hitbox.clone();
             move |event: &MouseUpEvent, phase, window, _| {
-                if phase == DispatchPhase::Bubble && hitbox.is_hovered(window) {
+                if phase == DispatchPhase::Bubble && Self::page_pointer_hits(&hitbox, window) {
                     host.mouse_up(event.button, event.position, event.modifiers);
                 }
             }
@@ -2249,7 +2320,7 @@ impl BrowserView {
                 if phase != DispatchPhase::Bubble {
                     return;
                 }
-                if hitbox.is_hovered(window) {
+                if Self::page_pointer_hits(&hitbox, window) {
                     host.mouse_move(event.position, event.modifiers);
                 } else {
                     // Otherwise whatever the pointer left keeps its hover
@@ -2259,9 +2330,13 @@ impl BrowserView {
             }
         });
 
-        window.on_mouse_event(move |event: &ScrollWheelEvent, phase, window, _| {
-            if phase == DispatchPhase::Bubble && hitbox.should_handle_scroll(window) {
-                host.scroll(event.position, event.delta, event.modifiers);
+        window.on_mouse_event({
+            let host = host.clone();
+            let hitbox = hitbox.clone();
+            move |event: &ScrollWheelEvent, phase, window, _| {
+                if phase == DispatchPhase::Bubble && hitbox.should_handle_scroll(window) {
+                    host.scroll(event.position, event.delta, event.modifiers);
+                }
             }
         });
     }
@@ -2275,10 +2350,12 @@ impl BrowserView {
     /// the full width.
     fn render_page_area(&self, theme: Theme) -> Div {
         let host = self.host.clone();
-        #[cfg(target_os = "windows")]
+        #[cfg(any(target_os = "windows", target_os = "linux"))]
         let input = self.host.clone();
-        #[cfg(target_os = "windows")]
+        #[cfg(any(target_os = "windows", target_os = "linux"))]
         let focus = self.focus_handle.clone();
+        #[cfg(target_os = "linux")]
+        let live_frame = self.host.as_ref().and_then(|host| host.live_frame());
         div()
             .flex_1()
             .min_h_0()
@@ -2296,10 +2373,23 @@ impl BrowserView {
                         // page no longer hides itself for one.
                         window.insert_hitbox(bounds, HitboxBehavior::Normal)
                     },
-                    move |_, _hitbox, _window, _| {
-                        #[cfg(target_os = "windows")]
+                    move |bounds, hitbox, window, _| {
+                        // Paint the blit inside this hitbox. A sibling `img`
+                        // inserts its own hitbox and steals the first click.
+                        #[cfg(target_os = "linux")]
+                        if let Some(frame) = live_frame {
+                            let _ = window.paint_image(
+                                bounds,
+                                bounds,
+                                gpui::Corners::default(),
+                                frame,
+                                0,
+                                false,
+                            );
+                        }
+                        #[cfg(any(target_os = "windows", target_os = "linux"))]
                         if let Some(host) = input {
-                            Self::forward_page_input(host, focus, _hitbox, _window);
+                            Self::forward_page_input(host, focus, hitbox, window);
                         }
                     },
                 )
@@ -2322,7 +2412,7 @@ impl BrowserView {
 
 /// Distilled page-load event, so handler closures stay free of wry types.
 #[derive(Clone, Copy)]
-#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
 enum PageLoad {
     Started,
     Finished,
@@ -2430,7 +2520,7 @@ fn bgra_from_bitmap(
     Some(out)
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 fn download_destination(url: &str, suggested: std::path::PathBuf) -> Option<std::path::PathBuf> {
     let downloads = dirs::download_dir()?;
     let name = suggested
@@ -2458,6 +2548,16 @@ fn download_destination(url: &str, suggested: std::path::PathBuf) -> Option<std:
     (2..1000)
         .map(|counter| downloads.join(format!("{stem} ({counter}){extension}")))
         .find(|candidate| !candidate.exists())
+}
+
+#[cfg(target_os = "linux")]
+fn reveal_in_finder(path: &std::path::Path) {
+    let target = if path.is_dir() {
+        path
+    } else {
+        path.parent().unwrap_or(path)
+    };
+    let _ = std::process::Command::new("xdg-open").arg(target).spawn();
 }
 
 #[cfg(target_os = "macos")]
@@ -2495,7 +2595,7 @@ impl Render for BrowserView {
             self.render_start_page(theme).into_any_element()
         };
 
-        div()
+        let surface = div()
             .id("browser-surface")
             .track_focus(&self.focus_handle)
             .key_context("Browser")
@@ -2511,7 +2611,50 @@ impl Render for BrowserView {
             .on_action(cx.listener(|this, _: &WebviewCopy, _, _| this.webview_copy()))
             .on_action(cx.listener(|this, _: &WebviewCut, _, _| this.webview_cut()))
             .on_action(cx.listener(|this, _: &WebviewPaste, _, _| this.webview_paste()))
-            .on_action(cx.listener(|this, _: &WebviewSelectAll, _, _| this.webview_select_all()))
+            .on_action(cx.listener(|this, _: &WebviewSelectAll, _, _| this.webview_select_all()));
+
+        #[cfg(target_os = "linux")]
+        let surface = {
+            let host_down = self.host.clone();
+            let host_up = self.host.clone();
+            let focus_down = self.focus_handle.clone();
+            let focus_up = self.focus_handle.clone();
+            let address_down = self.address.read(cx).focus();
+            let address_up = self.address.read(cx).focus();
+            surface
+                .capture_key_down(move |event, window, cx| {
+                    let Some(host) = &host_down else {
+                        return;
+                    };
+                    if address_down.is_focused(window)
+                        || !focus_down.is_focused(window)
+                        || !host.native_focus_within()
+                    {
+                        return;
+                    }
+                    host.key_event(&event.keystroke, true, event.is_held);
+                    if !event.keystroke.modifiers.control
+                        && !event.keystroke.modifiers.alt
+                        && !event.keystroke.modifiers.platform
+                    {
+                        cx.stop_propagation();
+                    }
+                })
+                .capture_key_up(move |event, window, _| {
+                    let Some(host) = &host_up else {
+                        return;
+                    };
+                    if address_up.is_focused(window)
+                        || !focus_up.is_focused(window)
+                        || !host.native_focus_within()
+                    {
+                        return;
+                    }
+                    host.key_event(&event.keystroke, false, false);
+                })
+        };
+
+        surface
             .size_full()
             .min_h_0()
             .flex()

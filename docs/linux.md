@@ -22,6 +22,8 @@ Waku expects:
   are accepted, so it can run in a VM, but see the note below.
 - **x86_64 or aarch64.** Other architectures build from source.
 - `xdg-desktop-portal` for native file dialogs.
+- **WebKitGTK 4.1** (`webkit2gtk-4.1` on Arch, `libwebkit2gtk-4.1-0` on
+  Debian/Ubuntu) for the in-app browser, plus GTK 3.
 
 Set `WAKU_VERSION` to install a specific version rather than the latest.
 
