@@ -144,6 +144,9 @@ raw-window-handle = "0.6"
 [target.'cfg(target_os = "linux")'.dependencies]
 # Matches the version GPUI exposes through `WindowOptions::icon`.
 image = { version = "0.25", default-features = false, features = ["png"] }
+wry = { version = "0.56", features = ["devtools"] }
+gtk = "0.18"
+webkit2gtk = { version = "2.0.2", features = ["v2_38"] }
 
 [target.'cfg(target_os = "windows")'.build-dependencies]
 embed-resource = "3.0"

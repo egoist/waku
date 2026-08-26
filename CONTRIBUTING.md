@@ -18,6 +18,7 @@ prerequisites with:
 ```sh
 sudo apt install build-essential clang cmake pkg-config libfontconfig-dev \
   libwayland-dev libx11-xcb-dev libxkbcommon-x11-dev libvulkan1 \
+  libgtk-3-dev libwebkit2gtk-4.1-dev \
   xdg-desktop-portal
 ```
 
@@ -40,9 +41,8 @@ and relaunch the app normally. Keep that watcher running while you work. Do
 not start a second watcher or manually relaunch the debug app. Press `Ctrl-C`,
 or quit the app, to stop it.
 
-The embedded browser and experimental computer-use integration are currently
-macOS-only. On Linux and Windows the browser reports that it is unavailable,
-while the computer-use UI and runtime stay disabled.
+The embedded browser uses WebKitGTK on Linux (install `webkit2gtk-4.1` /
+`gtk3`) and WebView2 on Windows. Computer-use stays macOS-only in this tree.
 
 Windows needs the MSVC toolchain (Visual Studio Build Tools with the C++
 workload and the Windows SDK) so Cargo can link and so the resource compiler
