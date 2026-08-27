@@ -1,3 +1,4 @@
+use super::runtime::session_has_unsettled_turn;
 use super::*;
 
 use anyhow::Context as _;
@@ -13,10 +14,11 @@ pub(super) enum ComposerSubmitAction {
 pub(super) fn composer_submit_action(
     status: Option<SessionStatus>,
     preparing: bool,
+    has_unsettled_turn: bool,
 ) -> ComposerSubmitAction {
     if preparing {
         ComposerSubmitAction::Preparing
-    } else if status.is_some_and(SessionStatus::is_busy) {
+    } else if status.is_some_and(SessionStatus::is_busy) && has_unsettled_turn {
         ComposerSubmitAction::Stop
     } else {
         ComposerSubmitAction::Send
@@ -2190,14 +2192,16 @@ impl Waku {
     fn execute_goal_composer_command(&mut self, prompt: &str, cx: &mut Context<Self>) -> bool {
         use crate::composer_complete::GoalCommand;
         use crate::model::{GoalOperation, ThreadGoalStatus};
-        let Some((session_id, command, current_goal)) = self.selected_session().and_then(|session| {
-            let command = crate::composer_complete::parse_goal_submission(
-                session.provider,
-                prompt,
-                &self.slash_command_index,
-            )?;
-            Some((session.id, command, session.thread_goal.clone()))
-        }) else {
+        let Some((session_id, command, current_goal)) =
+            self.selected_session().and_then(|session| {
+                let command = crate::composer_complete::parse_goal_submission(
+                    session.provider,
+                    prompt,
+                    &self.slash_command_index,
+                )?;
+                Some((session.id, command, session.thread_goal.clone()))
+            })
+        else {
             return false;
         };
         match command {
@@ -2692,8 +2696,11 @@ impl Waku {
             self.submission_preparations.contains(&session.id)
                 || self.response_fork_preparations.contains_key(&session.id)
         });
-        let submit_action =
-            composer_submit_action(session.map(|session| session.status), preparing);
+        let submit_action = composer_submit_action(
+            session.map(|session| session.status),
+            preparing,
+            session.is_some_and(session_has_unsettled_turn),
+        );
         let escape_stop_armed = session.is_some_and(|session| {
             self.escape_stop_confirmation
                 .is_armed_for(EscapeStopTarget::for_session(session), Instant::now())

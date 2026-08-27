@@ -3106,7 +3106,7 @@ impl Waku {
         else {
             return;
         };
-        if session.is_busy()
+        if session_has_unsettled_turn(session)
             || session.queued_messages.is_empty()
             || self.ending_checkpoint_pending(session_id)
             // Messages parked behind a goal-initiated provider start stay

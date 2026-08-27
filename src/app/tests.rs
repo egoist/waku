@@ -132,23 +132,27 @@ fn remote_task_catalog_adds_web_tasks_without_replacing_hydrated_detail() {
 #[test]
 fn composer_only_offers_stop_after_submission_preparation() {
     assert_eq!(
-        composer_submit_action(Some(SessionStatus::Idle), false),
+        composer_submit_action(Some(SessionStatus::Idle), false, false),
         ComposerSubmitAction::Send
     );
     assert_eq!(
-        composer_submit_action(Some(SessionStatus::Connecting), true),
+        composer_submit_action(Some(SessionStatus::Connecting), true, false),
         ComposerSubmitAction::Preparing
     );
     assert_eq!(
-        composer_submit_action(Some(SessionStatus::Connecting), false),
+        composer_submit_action(Some(SessionStatus::Connecting), false, true),
         ComposerSubmitAction::Stop
     );
     assert_eq!(
-        composer_submit_action(Some(SessionStatus::Working), false),
+        composer_submit_action(Some(SessionStatus::Working), false, true),
         ComposerSubmitAction::Stop
     );
     assert_eq!(
-        composer_submit_action(Some(SessionStatus::Failed), false),
+        composer_submit_action(Some(SessionStatus::Failed), false, false),
+        ComposerSubmitAction::Send
+    );
+    assert_eq!(
+        composer_submit_action(Some(SessionStatus::Working), false, false),
         ComposerSubmitAction::Send
     );
 }
