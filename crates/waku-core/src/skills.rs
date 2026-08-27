@@ -26,6 +26,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use crate::model::ProviderKind;
+use crate::settings::ProviderInstance;
 
 pub use waku_protocol::skills::{
     DISABLED_SKILL_FILE, SKILL_FILE, SkillEntry, SkillInstall, SkillLocation, SkillScope,
@@ -136,6 +137,48 @@ pub fn skill_locations(projects: &[(String, PathBuf)]) -> Vec<SkillLocation> {
     for (name, path) in projects {
         locations.extend(project_skill_locations(path, name));
     }
+    locations
+}
+
+/// Include user-scope roots selected by provider-instance environments.
+/// Project roots are shared by every instance and are added only once.
+pub fn skill_locations_with_provider_instances(
+    projects: &[(String, PathBuf)],
+    instances: &[ProviderInstance],
+) -> Vec<SkillLocation> {
+    let mut locations = skill_locations(projects);
+    for instance in instances {
+        let root = match instance.provider {
+            ProviderKind::Codex => instance
+                .environment
+                .get("CODEX_HOME")
+                .filter(|value| !value.is_empty())
+                .map(|value| PathBuf::from(value).join("skills")),
+            ProviderKind::Claude => instance
+                .environment
+                .get("CLAUDE_CONFIG_DIR")
+                .filter(|value| !value.is_empty())
+                .map(|value| PathBuf::from(value).join("skills")),
+            _ => None,
+        };
+        if let Some(root) = root {
+            locations.push(SkillLocation {
+                source: SkillSource::Provider(instance.provider),
+                scope: SkillScope::User,
+                root,
+                project: None,
+            });
+        }
+    }
+    let mut seen = std::collections::HashSet::new();
+    locations.retain(|location| {
+        seen.insert((
+            location.source,
+            location.scope,
+            location.root.clone(),
+            location.project.clone(),
+        ))
+    });
     locations
 }
 

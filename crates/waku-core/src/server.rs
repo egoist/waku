@@ -1290,6 +1290,7 @@ mod tests {
                 Command::Start {
                     options: WireDriverStartOptions {
                         provider: "codex".into(),
+                        provider_instance_id: None,
                         binary: PathBuf::from("codex"),
                         cwd: PathBuf::from("."),
                         mode: "fullAccess".into(),
@@ -1358,6 +1359,7 @@ mod tests {
                 Command::Start {
                     options: WireDriverStartOptions {
                         provider: "codex".into(),
+                        provider_instance_id: None,
                         binary: PathBuf::from("codex"),
                         cwd: PathBuf::from("."),
                         mode: "fullAccess".into(),
@@ -1470,6 +1472,7 @@ mod tests {
                 Command::Start {
                     options: WireDriverStartOptions {
                         provider: "codex".into(),
+                        provider_instance_id: None,
                         binary: PathBuf::from("codex"),
                         cwd: PathBuf::from("."),
                         mode: "fullAccess".into(),
@@ -1795,6 +1798,7 @@ mod tests {
                 runtime_id: Uuid::nil(),
                 command: Command::ProbeProvider {
                     provider: crate::model::ProviderKind::Codex,
+                    provider_instance_id: None,
                     binary_override: None,
                     discover_models: false,
                     probe_version: false,
@@ -1996,6 +2000,7 @@ mod tests {
     fn test_start_options() -> WireDriverStartOptions {
         WireDriverStartOptions {
             provider: "codex".into(),
+            provider_instance_id: None,
             binary: PathBuf::from("codex"),
             cwd: PathBuf::from("."),
             mode: "fullAccess".into(),

@@ -197,37 +197,77 @@ impl Backend for WakuBackend {
                 settings: self.settings.get(),
             }),
             Command::UpdateSettings { settings } => {
+                if let Some(session) = self.task_state.lock().sessions.iter().find(|session| {
+                    session.has_started()
+                        && settings
+                            .provider_instance(
+                                session.provider,
+                                session.provider_instance_id.as_deref(),
+                            )
+                            .is_none()
+                }) {
+                    bail!(
+                        "provider instance {} is still used by task {}",
+                        session.provider_instance_id(),
+                        session.display_title()
+                    );
+                }
                 self.settings.replace(settings)?;
                 Ok(ResponsePayload::Ack)
             }
             Command::ProbeProvider {
                 provider,
+                provider_instance_id,
                 binary_override,
                 discover_models,
                 probe_version,
             } => {
                 ensure_shell_environment();
-                let mut probe = match binary_override.as_deref() {
+                let instance = self
+                    .settings
+                    .get()
+                    .provider_instance(provider, provider_instance_id.as_deref())
+                    .ok_or_else(|| anyhow!("provider instance is no longer configured"))?;
+                let binary_override = if provider_instance_id.is_some() {
+                    instance.binary_override.as_deref()
+                } else {
+                    binary_override.as_deref()
+                };
+                let mut probe = match binary_override {
                     override_value if discover_models || probe_version => {
-                        crate::model::provider_probe(provider, override_value)
+                        crate::model::provider_probe_for_instance(
+                            provider,
+                            Some(&instance.id),
+                            override_value,
+                        )
                     }
-                    override_value => crate::model::cached_provider_probe(provider, override_value),
+                    override_value => crate::model::cached_provider_probe_for_instance(
+                        provider,
+                        Some(&instance.id),
+                        override_value,
+                    ),
                 };
                 let version = probe_version
                     .then(|| {
-                        probe
-                            .path
-                            .as_deref()
-                            .and_then(crate::model::probe_provider_version)
+                        probe.path.as_deref().and_then(|path| {
+                            crate::model::probe_provider_version_with_environment(
+                                path,
+                                &instance.environment,
+                            )
+                        })
                     })
                     .flatten();
                 if discover_models {
-                    probe = crate::model::discover_provider_models(probe);
+                    probe = crate::model::discover_provider_models_with_environment(
+                        probe,
+                        &instance.environment,
+                    );
                 }
                 Ok(ResponsePayload::ProviderProbe { probe, version })
             }
             Command::FetchPlanUsage {
                 provider,
+                provider_instance_id,
                 binary_override,
                 cli_version,
             } => {
@@ -236,7 +276,13 @@ impl Backend for WakuBackend {
                         crate::usage::fetch_claude_plan_usage(cli_version.as_deref())?,
                     ),
                     crate::model::ProviderKind::Codex => {
-                        Some(crate::usage::fetch_codex_plan_usage()?)
+                        Some(crate::usage::fetch_codex_plan_usage_for_instance(
+                            self.settings
+                                .get()
+                                .provider_instance(provider, provider_instance_id.as_deref())
+                                .as_ref()
+                                .map(|instance| &instance.environment),
+                        )?)
                     }
                     crate::model::ProviderKind::OpenCode => {
                         crate::usage::fetch_opencode_go_plan_usage()?
@@ -265,16 +311,49 @@ impl Backend for WakuBackend {
                 project_roots,
             } => {
                 let rates = crate::usage_history::load_rate_table(&self.usage_rates_dir);
-                let history = crate::usage_history::scan(
+                let additional_roots = self
+                    .settings
+                    .get()
+                    .provider_instances()
+                    .into_iter()
+                    .filter_map(|instance| match instance.provider {
+                        ProviderKind::Codex => instance
+                            .environment
+                            .get("CODEX_HOME")
+                            .filter(|value| !value.is_empty())
+                            .map(|value| {
+                                (
+                                    crate::usage_history::UsageProvider::Codex,
+                                    PathBuf::from(value).join("sessions"),
+                                )
+                            }),
+                        ProviderKind::Claude => instance
+                            .environment
+                            .get("CLAUDE_CONFIG_DIR")
+                            .filter(|value| !value.is_empty())
+                            .map(|value| {
+                                (
+                                    crate::usage_history::UsageProvider::Claude,
+                                    PathBuf::from(value).join("projects"),
+                                )
+                            }),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>();
+                let history = crate::usage_history::scan_with_provider_roots(
                     &mut self.usage_scan_cache.lock(),
                     &rates,
                     window,
                     &project_roots,
+                    &additional_roots,
                 );
                 Ok(ResponsePayload::UsageHistory { history })
             }
             Command::LoadSkills { projects } => {
-                let locations = crate::skills::skill_locations(&projects);
+                let locations = crate::skills::skill_locations_with_provider_instances(
+                    &projects,
+                    &self.settings.get().provider_instances(),
+                );
                 Ok(ResponsePayload::SkillsCatalog {
                     catalog: crate::skills::scan_skills(&locations),
                 })
@@ -508,7 +587,7 @@ impl Backend for WakuBackend {
                 },
             }),
             Command::Workspace { operation } => Ok(ResponsePayload::Workspace {
-                result: crate::workspace::execute(operation)?,
+                result: crate::workspace::execute_with_settings(operation, &self.settings.get())?,
             }),
             Command::OpenTerminal { cwd, cols, rows } => {
                 ensure_shell_environment();
@@ -565,8 +644,18 @@ impl Backend for WakuBackend {
                 let previous = self.sessions.lock().remove(&session_id);
                 drop(previous);
                 let provider = decode_enum(&options.provider)?;
+                let instance = self
+                    .settings
+                    .get()
+                    .provider_instance(provider, options.provider_instance_id.as_deref())
+                    .ok_or_else(|| anyhow!("provider instance is no longer configured"))?;
+                if !instance.enabled {
+                    bail!("provider instance {} is disabled", instance.name);
+                }
                 let options = DriverStartOptions {
                     binary: options.binary,
+                    provider_instance_id: (instance.id != provider.id()).then_some(instance.id),
+                    environment: instance.environment,
                     cwd: options.cwd,
                     mode: decode_enum(&options.mode)?,
                     interaction_mode: decode_enum(&options.interaction_mode)?,
@@ -846,7 +935,8 @@ impl WakuBackend {
         // transcript operations are immediately followed by a replacement
         // prompt, so accepting a rewind that cannot resume would strand the
         // user at a provider state the UI cannot continue.
-        let binary = self.provider_binary(source.provider)?;
+        let binary =
+            self.provider_binary(source.provider, source.provider_instance_id.as_deref())?;
         let retained_turn_count = turn_count.saturating_sub(1);
         let previous_turn_count = source.turns.len();
         let rollback_turns = source.provider_turns_after(retained_turn_count);
@@ -1007,7 +1097,10 @@ impl WakuBackend {
                     bail!("Amp's native thread is unavailable");
                 };
                 let fork = fork_provider_session(ProviderSessionForkRequest::Amp {
-                    binary: self.provider_binary(ProviderKind::Amp)?,
+                    binary: self.provider_binary(
+                        ProviderKind::Amp,
+                        source.provider_instance_id.as_deref(),
+                    )?,
                     cwd: cwd.to_owned(),
                     thread_id: thread_id.clone(),
                     fork_context: fork_context.clone(),
@@ -1022,7 +1115,10 @@ impl WakuBackend {
                     bail!("OpenCode's native session is unavailable");
                 };
                 let fork = fork_provider_session(ProviderSessionForkRequest::OpenCode {
-                    binary: self.provider_binary(ProviderKind::OpenCode)?,
+                    binary: self.provider_binary(
+                        ProviderKind::OpenCode,
+                        source.provider_instance_id.as_deref(),
+                    )?,
                     cwd: cwd.to_owned(),
                     session_id: session_id.clone(),
                     turn_count: provider_turn_count,
@@ -1036,7 +1132,10 @@ impl WakuBackend {
                     bail!("Grok Build's native session is unavailable");
                 };
                 let fork = fork_provider_session(ProviderSessionForkRequest::Grok {
-                    binary: self.provider_binary(ProviderKind::Grok)?,
+                    binary: self.provider_binary(
+                        ProviderKind::Grok,
+                        source.provider_instance_id.as_deref(),
+                    )?,
                     cwd: cwd.to_owned(),
                     session_id: session_id.clone(),
                     turn_count: provider_turn_count,
@@ -1113,10 +1212,14 @@ impl WakuBackend {
 
         let (wake, _wake_events) = smol::channel::bounded(1);
         let (event_sender, _event_receiver) = driver::event_channel(wake);
+        let instance = self.provider_instance(source)?;
         let driver = driver::start_local(
             source.provider,
             DriverStartOptions {
-                binary: self.provider_binary(source.provider)?,
+                binary: self
+                    .provider_binary(source.provider, source.provider_instance_id.as_deref())?,
+                provider_instance_id: source.provider_instance_id.clone(),
+                environment: instance.environment,
                 cwd: cwd.to_owned(),
                 mode: source.runtime_mode,
                 interaction_mode: source.interaction_mode,
@@ -1275,10 +1378,13 @@ impl WakuBackend {
 
         let (wake, _wake_events) = smol::channel::bounded(1);
         let (event_sender, _event_receiver) = driver::event_channel(wake);
+        let instance = self.provider_instance(source)?;
         let driver = driver::start_local(
             source.provider,
             DriverStartOptions {
                 binary: binary.to_owned(),
+                provider_instance_id: source.provider_instance_id.clone(),
+                environment: instance.environment,
                 cwd: cwd.to_owned(),
                 mode: source.runtime_mode,
                 interaction_mode: source.interaction_mode,
@@ -1295,16 +1401,33 @@ impl WakuBackend {
         driver.rollback(rollback_turns)
     }
 
-    fn provider_binary(&self, provider: ProviderKind) -> anyhow::Result<PathBuf> {
+    fn provider_instance(
+        &self,
+        session: &AgentSession,
+    ) -> anyhow::Result<crate::settings::ProviderInstance> {
+        self.settings
+            .get()
+            .provider_instance(session.provider, session.provider_instance_id.as_deref())
+            .ok_or_else(|| anyhow!("provider instance is no longer configured"))
+    }
+
+    fn provider_binary(
+        &self,
+        provider: ProviderKind,
+        provider_instance_id: Option<&str>,
+    ) -> anyhow::Result<PathBuf> {
         ensure_shell_environment();
         let settings = self.settings.get();
-        let binary_override = settings
-            .provider_binary_overrides
-            .get(&provider)
-            .map(String::as_str);
-        crate::model::provider_probe(provider, binary_override)
-            .path
-            .ok_or_else(|| anyhow!("{} is not installed on the daemon", provider.display_name()))
+        let instance = settings
+            .provider_instance(provider, provider_instance_id)
+            .ok_or_else(|| anyhow!("provider instance is no longer configured"))?;
+        crate::model::provider_probe_for_instance(
+            provider,
+            Some(&instance.id),
+            instance.binary_override.as_deref(),
+        )
+        .path
+        .ok_or_else(|| anyhow!("{} is not installed on the daemon", provider.display_name()))
     }
 }
 

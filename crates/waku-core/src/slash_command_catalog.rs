@@ -5,6 +5,7 @@
 //! is session-scoped publish it through their live driver instead. Every probe
 //! runs in the daemon's background workspace operation, never on a render path.
 
+use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
@@ -31,14 +32,15 @@ pub(crate) fn discover(
     provider: ProviderKind,
     binary: &Path,
     project_root: &Path,
+    environment: &BTreeMap<String, String>,
 ) -> Option<Vec<SlashCommand>> {
     match provider {
-        ProviderKind::Amp => discover_amp(binary, project_root),
-        ProviderKind::Claude => discover_claude(binary, project_root),
-        ProviderKind::Codex => discover_codex(binary, project_root),
-        ProviderKind::OpenCode => discover_opencode(binary, project_root),
-        ProviderKind::OhMyPi => discover_oh_my_pi(binary, project_root),
-        ProviderKind::Pi => discover_pi(binary, project_root),
+        ProviderKind::Amp => discover_amp(binary, project_root, environment),
+        ProviderKind::Claude => discover_claude(binary, project_root, environment),
+        ProviderKind::Codex => discover_codex(binary, project_root, environment),
+        ProviderKind::OpenCode => discover_opencode(binary, project_root, environment),
+        ProviderKind::OhMyPi => discover_oh_my_pi(binary, project_root, environment),
+        ProviderKind::Pi => discover_pi(binary, project_root, environment),
         // ACP advertises commands only after session/new. Harness likewise
         // requires an agent id for commands/list. Creating throwaway sessions
         // merely to seed autocomplete would pollute provider history, so their
@@ -51,12 +53,25 @@ pub(crate) fn discover(
     }
 }
 
-fn discover_amp(binary: &Path, project_root: &Path) -> Option<Vec<SlashCommand>> {
-    let value = capture_json(binary, &["skill", "list", "--json"], project_root)?;
+fn discover_amp(
+    binary: &Path,
+    project_root: &Path,
+    environment: &BTreeMap<String, String>,
+) -> Option<Vec<SlashCommand>> {
+    let value = capture_json(
+        binary,
+        &["skill", "list", "--json"],
+        project_root,
+        environment,
+    )?;
     Some(parse_amp_skills(&value))
 }
 
-fn discover_claude(binary: &Path, project_root: &Path) -> Option<Vec<SlashCommand>> {
+fn discover_claude(
+    binary: &Path,
+    project_root: &Path,
+    environment: &BTreeMap<String, String>,
+) -> Option<Vec<SlashCommand>> {
     // This is the initialization request used by the Claude Agent SDK. No user
     // message follows it, so the CLI loads local commands without making a
     // model request or persisting a conversation.
@@ -90,13 +105,18 @@ fn discover_claude(binary: &Path, project_root: &Path) -> Option<Vec<SlashComman
                     .and_then(Value::as_str)
                     == Some("waku-command-catalog")
         },
+        environment,
         &[("ENABLE_CLAUDEAI_MCP_SERVERS", "false")],
     )?;
     Some(parse_claude_commands(&value))
 }
 
-fn discover_codex(binary: &Path, project_root: &Path) -> Option<Vec<SlashCommand>> {
-    let mut command = crate::command_env::command(binary);
+fn discover_codex(
+    binary: &Path,
+    project_root: &Path,
+    environment: &BTreeMap<String, String>,
+) -> Option<Vec<SlashCommand>> {
+    let mut command = crate::command_env::command_with_environment(binary, environment);
     command
         .args(["app-server", "--stdio"])
         .current_dir(project_root)
@@ -169,15 +189,23 @@ fn discover_codex(binary: &Path, project_root: &Path) -> Option<Vec<SlashCommand
     commands
 }
 
-fn discover_opencode(binary: &Path, project_root: &Path) -> Option<Vec<SlashCommand>> {
+fn discover_opencode(
+    binary: &Path,
+    project_root: &Path,
+    environment: &BTreeMap<String, String>,
+) -> Option<Vec<SlashCommand>> {
     // `debug config` is the effective, plugin-mutated configuration. Unlike a
     // directory walk, it sees plural command roots, inline config, and commands
     // registered by plugins exactly as the installed CLI resolves them.
-    let value = capture_json(binary, &["debug", "config"], project_root)?;
+    let value = capture_json(binary, &["debug", "config"], project_root, environment)?;
     Some(parse_opencode_commands(&value))
 }
 
-fn discover_pi(binary: &Path, project_root: &Path) -> Option<Vec<SlashCommand>> {
+fn discover_pi(
+    binary: &Path,
+    project_root: &Path,
+    environment: &BTreeMap<String, String>,
+) -> Option<Vec<SlashCommand>> {
     // Catalog reads neither run an agent turn nor need the runtime driver's
     // full-access flag.
     let request = json!({"id": "waku-command-catalog", "type": "get_commands"});
@@ -192,12 +220,17 @@ fn discover_pi(binary: &Path, project_root: &Path) -> Option<Vec<SlashCommand>> 
             value.get("id").and_then(Value::as_str) == Some("waku-command-catalog")
                 && value.get("success").and_then(Value::as_bool) == Some(true)
         },
+        environment,
         &[("PI_SKIP_VERSION_CHECK", "1")],
     )?;
     Some(parse_pi_commands(&value))
 }
 
-fn discover_oh_my_pi(binary: &Path, project_root: &Path) -> Option<Vec<SlashCommand>> {
+fn discover_oh_my_pi(
+    binary: &Path,
+    project_root: &Path,
+    environment: &BTreeMap<String, String>,
+) -> Option<Vec<SlashCommand>> {
     // OMP publishes its full registry at RPC startup; no request or provider
     // session is needed. A blank frame lets stdin close cleanly on older builds.
     let value = probe_json_lines(
@@ -207,6 +240,7 @@ fn discover_oh_my_pi(binary: &Path, project_root: &Path) -> Option<Vec<SlashComm
         b"\n",
         CLI_PROBE_TIMEOUT,
         |value| value.get("type").and_then(Value::as_str) == Some("available_commands_update"),
+        environment,
         &[],
     )?;
     Some(parse_oh_my_pi_commands(&value))
@@ -435,8 +469,13 @@ fn command(
     })
 }
 
-fn capture_json(binary: &Path, args: &[&str], cwd: &Path) -> Option<Value> {
-    let mut command = crate::command_env::command(binary);
+fn capture_json(
+    binary: &Path,
+    args: &[&str],
+    cwd: &Path,
+    environment: &BTreeMap<String, String>,
+) -> Option<Value> {
+    let mut command = crate::command_env::command_with_environment(binary, environment);
     command
         .args(args)
         .current_dir(cwd)
@@ -465,9 +504,10 @@ fn probe_json_lines(
     input: &[u8],
     timeout: Duration,
     matches: impl Fn(&Value) -> bool,
+    environment: &BTreeMap<String, String>,
     env: &[(&str, &str)],
 ) -> Option<Value> {
-    let mut command = crate::command_env::command(binary);
+    let mut command = crate::command_env::command_with_environment(binary, environment);
     command
         .args(args)
         .current_dir(cwd)

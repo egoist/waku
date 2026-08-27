@@ -82,7 +82,7 @@ impl PooledServer {
     }
 }
 
-type PoolKey = (PathBuf, PathBuf); // (binary, workspace directory)
+type PoolKey = (PathBuf, PathBuf, Vec<(String, String)>);
 
 enum PoolState {
     Vacant,
@@ -115,15 +115,33 @@ fn pool() -> &'static Mutex<HashMap<PoolKey, Arc<PoolSlot>>> {
 /// Blocking (process start plus health probe), so callers must already be off
 /// the UI thread — driver start on the background executor is.
 pub(crate) fn acquire(binary: &Path, cwd: &Path) -> anyhow::Result<PooledServer> {
-    acquire_with_start(binary, cwd, || OpenCodeServer::start(binary, cwd))
+    acquire_with_environment(binary, cwd, &[])
+}
+
+/// Returns a resident server isolated by both workspace and provider-instance
+/// environment. Environment values are part of the in-memory key so changing a
+/// configuration cannot accidentally reuse a process launched with stale values.
+pub(crate) fn acquire_with_environment(
+    binary: &Path,
+    cwd: &Path,
+    environment: &[(String, String)],
+) -> anyhow::Result<PooledServer> {
+    acquire_with_start(binary, cwd, environment, || {
+        OpenCodeServer::start_with_env(binary, cwd, environment)
+    })
 }
 
 fn acquire_with_start(
     binary: &Path,
     cwd: &Path,
+    environment: &[(String, String)],
     start: impl FnOnce() -> anyhow::Result<OpenCodeServer>,
 ) -> anyhow::Result<PooledServer> {
-    let key = (binary.to_path_buf(), cwd.to_path_buf());
+    let key = (
+        binary.to_path_buf(),
+        cwd.to_path_buf(),
+        environment.to_vec(),
+    );
     let slot = {
         let mut pool = pool().lock().unwrap();
         Arc::clone(pool.entry(key).or_default())
@@ -291,7 +309,7 @@ mod tests {
             let cwd = cwd.clone();
             thread::spawn(move || {
                 barrier.wait();
-                acquire_with_start(&binary, &cwd, || {
+                acquire_with_start(&binary, &cwd, &[], || {
                     starts.fetch_add(1, Ordering::Relaxed);
                     OpenCodeServer::start(&binary, &cwd)
                 })

@@ -27,6 +27,7 @@ pub(crate) fn start_remote(
     let command = waku_client::Command::Start {
         options: waku_client::WireDriverStartOptions {
             provider: waku_client::encode_enum(provider)?,
+            provider_instance_id: options.provider_instance_id,
             binary: options.binary,
             cwd: options.cwd,
             mode: waku_client::encode_enum(options.mode)?,

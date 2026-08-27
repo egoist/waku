@@ -195,6 +195,8 @@ impl PiDriver {
     ) -> anyhow::Result<Self> {
         let DriverStartOptions {
             binary,
+            provider_instance_id: _,
+            environment,
             cwd,
             mode,
             interaction_mode,
@@ -242,7 +244,7 @@ impl PiDriver {
             .as_ref()
             .map(|_| crate::computer_use::pi_extension_path())
             .transpose()?;
-        let mut command = crate::command_env::command(&binary);
+        let mut command = crate::command_env::command_with_environment(&binary, &environment);
         command.args(["--mode", "rpc", flavor.full_access_arg()]);
         if flavor.skips_version_check_by_env() {
             command.env("PI_SKIP_VERSION_CHECK", "1");
@@ -1495,6 +1497,8 @@ mod tests {
             PiFlavor::Pi,
             DriverStartOptions {
                 binary,
+                provider_instance_id: None,
+                environment: Default::default(),
                 cwd: std::env::temp_dir(),
                 mode: RuntimeMode::FullAccess,
                 interaction_mode: InteractionMode::Build,
@@ -1745,6 +1749,8 @@ mod tests {
             PiFlavor::OhMyPi,
             DriverStartOptions {
                 binary,
+                provider_instance_id: None,
+                environment: Default::default(),
                 cwd: std::env::temp_dir(),
                 mode: RuntimeMode::FullAccess,
                 interaction_mode: InteractionMode::Build,

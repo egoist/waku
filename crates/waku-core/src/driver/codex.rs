@@ -207,6 +207,8 @@ impl CodexDriver {
     pub fn start(options: DriverStartOptions, events: DriverEventSender) -> anyhow::Result<Self> {
         let DriverStartOptions {
             binary,
+            provider_instance_id: _,
+            environment,
             cwd,
             mode,
             interaction_mode,
@@ -242,7 +244,8 @@ impl CodexDriver {
             .map(|config| config.server_path.clone());
         let title_binary = binary.clone();
         let title_cwd = cwd.clone();
-        let mut command = crate::command_env::command(&binary);
+        let title_environment = environment.clone();
+        let mut command = crate::command_env::command_with_environment(&binary, &environment);
         command.args(["app-server", "--stdio"]);
         configure_computer_use_command(&mut command, computer_use.as_ref());
         let command = command
@@ -799,6 +802,7 @@ impl CodexDriver {
                                         if let Some(request) = request {
                                             let binary = title_binary.clone();
                                             let cwd = title_cwd.clone();
+                                            let environment = title_environment.clone();
                                             let commands = reader_commands.clone();
                                             let _ = thread::Builder::new()
                                                 .name("waku-codex-title".into())
@@ -806,6 +810,7 @@ impl CodexDriver {
                                                     if let Ok(title) = generate_codex_title(
                                                         &binary,
                                                         &cwd,
+                                                        &environment,
                                                         &request.prompt,
                                                     ) {
                                                         let _ = commands.send(
@@ -1178,8 +1183,13 @@ fn codex_title_turn_params(thread_id: &str, user_message: &str) -> Value {
 /// Codex app-server can persist a thread name but does not generate one. Match
 /// Codex Desktop's client-owned behavior with an isolated ephemeral turn, then
 /// hand the result back to the main writer for `thread/name/set`.
-fn generate_codex_title(binary: &Path, cwd: &Path, prompt: &str) -> anyhow::Result<String> {
-    let mut command = crate::command_env::command(binary);
+fn generate_codex_title(
+    binary: &Path,
+    cwd: &Path,
+    environment: &std::collections::BTreeMap<String, String>,
+    prompt: &str,
+) -> anyhow::Result<String> {
+    let mut command = crate::command_env::command_with_environment(binary, environment);
     let command = command
         .args(["app-server", "--stdio"])
         .current_dir(cwd)
@@ -2787,6 +2797,7 @@ mod tests {
         let title = generate_codex_title(
             &binary,
             &std::env::temp_dir(),
+            &Default::default(),
             "Find why provider-generated task titles never replace the first prompt and fix it.",
         )
         .expect("Codex should generate a task title");

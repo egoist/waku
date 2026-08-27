@@ -394,7 +394,17 @@ pub struct ProviderModel {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
 pub struct FavoriteModel {
     pub provider: ProviderKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_instance_id: Option<String>,
     pub model: String,
+}
+
+impl FavoriteModel {
+    pub fn provider_instance_id(&self) -> &str {
+        self.provider_instance_id
+            .as_deref()
+            .unwrap_or_else(|| self.provider.id())
+    }
 }
 
 /// One provider-owned agent composition available when a task starts.
@@ -528,6 +538,8 @@ impl ProviderModel {
 #[derive(Clone, Debug, Deserialize, Serialize, TS)]
 pub struct ProviderProbe {
     pub provider: ProviderKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_instance_id: Option<String>,
     pub installed: bool,
     pub path: Option<PathBuf>,
     #[serde(default)]
@@ -537,6 +549,12 @@ pub struct ProviderProbe {
 }
 
 impl ProviderProbe {
+    pub fn provider_instance_id(&self) -> &str {
+        self.provider_instance_id
+            .as_deref()
+            .unwrap_or_else(|| self.provider.id())
+    }
+
     pub fn preferred_model(&self) -> Option<&ProviderModel> {
         self.models
             .iter()
@@ -840,7 +858,11 @@ pub struct ThreadGoal {
 /// come back asynchronously as [`DriverEvent::GoalUpdated`]; failures surface
 /// through [`DriverEvent::Error`].
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize, TS)]
-#[serde(tag = "kind", rename_all = "camelCase", rename_all_fields = "camelCase")]
+#[serde(
+    tag = "kind",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
 pub enum GoalOperation {
     /// Re-read the provider's current goal without changing it.
     Refresh,
@@ -883,6 +905,10 @@ pub struct AgentSession {
     #[serde(default, skip_serializing_if = "SessionWorkspace::is_local")]
     pub workspace: SessionWorkspace,
     pub provider: ProviderKind,
+    /// Concrete provider configuration used by this task. `None` preserves the
+    /// built-in instance identity used by state written before provider instances.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_instance_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
     pub runtime_mode: RuntimeMode,
@@ -968,6 +994,7 @@ impl AgentSession {
             project_id,
             workspace: SessionWorkspace::Local,
             provider,
+            provider_instance_id: None,
             model: None,
             runtime_mode: RuntimeMode::FullAccess,
             interaction_mode: InteractionMode::Build,
@@ -1006,6 +1033,7 @@ impl AgentSession {
             project_id: self.project_id,
             workspace: SessionWorkspace::Local,
             provider: self.provider,
+            provider_instance_id: self.provider_instance_id.clone(),
             model: self.model.clone(),
             runtime_mode: RuntimeMode::default(),
             interaction_mode: InteractionMode::default(),
@@ -1029,6 +1057,12 @@ impl AgentSession {
             queued_messages: Vec::new(),
             detail_loaded: false,
         }
+    }
+
+    pub fn provider_instance_id(&self) -> &str {
+        self.provider_instance_id
+            .as_deref()
+            .unwrap_or_else(|| self.provider.id())
     }
 
     pub fn is_busy(&self) -> bool {
@@ -1117,6 +1151,18 @@ impl AgentSession {
 
     pub fn can_choose_model(&self, provider: ProviderKind) -> bool {
         !self.status.is_busy() && (self.messages.is_empty() || self.provider == provider)
+    }
+
+    pub fn can_choose_provider_instance(
+        &self,
+        provider: ProviderKind,
+        provider_instance_id: Option<&str>,
+    ) -> bool {
+        !self.status.is_busy()
+            && (self.messages.is_empty()
+                || (self.provider == provider
+                    && self.provider_instance_id()
+                        == provider_instance_id.unwrap_or_else(|| provider.id())))
     }
 
     pub fn migrate_legacy_state(&mut self) {

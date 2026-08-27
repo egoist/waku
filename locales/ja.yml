@@ -192,6 +192,14 @@ providers.detected_as: "%{command} として検出されました"
 providers.searches_path: Waku は PATH で %{command} を検出できませんでした
 providers.binary_path: 実行ファイルのパス
 providers.binary_path_description: Waku が %{provider} の起動に使用する実行ファイルです。Return キーで適用します。空欄にすると PATH から自動検出します
+providers.environment: 環境変数
+providers.environment_description: Waku がこのプロバイダーインスタンスを起動するときだけ適用する JSON オブジェクトです
+providers.environment_hint: "例：{\"CODEX_HOME\":\"/path/to/codex-home\"}。値はデーモン設定に平文で保存されるため、シークレットは入力しないでください"
+providers.environment_invalid: "環境変数は文字列からなる JSON オブジェクトである必要があります：%{error}"
+providers.instance_in_use: 既存のタスクで使用中のプロバイダーインスタンスは削除できません
+providers.add_instance: "%{provider} インスタンスを追加"
+providers.remove_instance: "%{provider} を削除"
+providers.instance_name: インスタンス名
 providers.checked_just_now: たった今確認済み
 providers.checked_minutes_ago: "%{count} 分前に確認済み"
 providers.checked_hours_ago: "%{count} 時間前に確認済み"

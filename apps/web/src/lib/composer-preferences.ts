@@ -12,6 +12,7 @@ export interface RememberedModelTraits {
 
 export interface ComposerPreferences {
   lastProvider: ProviderKind
+  lastProviderInstanceId: string | null
   lastModel: string | null
   lastReasoningEffort: string | null
   lastServiceTier: string | null
@@ -21,6 +22,7 @@ export interface ComposerPreferences {
 
 const DEFAULT_PREFERENCES: ComposerPreferences = {
   lastProvider: 'codex',
+  lastProviderInstanceId: null,
   lastModel: null,
   lastReasoningEffort: null,
   lastServiceTier: null,
@@ -90,7 +92,7 @@ export function rememberComposerSession(
   session: Pick<
     AgentSession,
     'provider' | 'model' | 'reasoning_effort' | 'service_tier' | 'context_window'
-  >,
+  > & { provider_instance_id?: string | null },
 ): ComposerPreferences {
   if (!session.model) return preferences
   const reasoningEffort = session.reasoning_effort ?? null
@@ -99,13 +101,14 @@ export function rememberComposerSession(
   return {
     ...preferences,
     lastProvider: session.provider,
+    lastProviderInstanceId: session.provider_instance_id ?? null,
     lastModel: session.model,
     lastReasoningEffort: reasoningEffort,
     lastServiceTier: serviceTier,
     lastContextWindow: contextWindow,
     modelTraits: {
       ...preferences.modelTraits,
-      [modelKey(session.provider, session.model)]: {
+      [modelKey(session.provider, session.model, session.provider_instance_id)]: {
         reasoningEffort,
         serviceTier,
         contextWindow,
@@ -118,8 +121,9 @@ export function rememberedModelTraits(
   preferences: ComposerPreferences,
   provider: ProviderKind,
   model: string,
+  providerInstanceId?: string | null,
 ): RememberedModelTraits | undefined {
-  return preferences.modelTraits[modelKey(provider, model)]
+  return preferences.modelTraits[modelKey(provider, model, providerInstanceId)]
 }
 
 function parsePreferences(value: unknown): ComposerPreferences {
@@ -142,6 +146,7 @@ function parsePreferences(value: unknown): ComposerPreferences {
   }
   return {
     lastProvider: value.lastProvider as ProviderKind,
+    lastProviderInstanceId: nullableString(value.lastProviderInstanceId) ?? null,
     lastModel: nullableString(value.lastModel) ?? null,
     lastReasoningEffort: nullableString(value.lastReasoningEffort) ?? null,
     lastServiceTier: nullableString(value.lastServiceTier) ?? null,
@@ -154,8 +159,8 @@ function nullableString(value: unknown): string | null | undefined {
   return value === null || typeof value === 'string' ? value : undefined
 }
 
-function modelKey(provider: ProviderKind, model: string): string {
-  return `${provider}\u0000${model}`
+function modelKey(provider: ProviderKind, model: string, providerInstanceId?: string | null): string {
+  return `${providerInstanceId ?? provider}\u0000${model}`
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

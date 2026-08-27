@@ -1925,6 +1925,7 @@ fn switched_off_providers_leave_the_picker_except_for_their_locked_session() {
 
     let probe = |provider: ProviderKind, model: &str| ProviderProbe {
         provider,
+        provider_instance_id: None,
         installed: true,
         path: Some(std::path::PathBuf::from(format!("/bin/{}", provider.id()))),
         models: vec![ProviderModel::new(model, model)],
@@ -1936,15 +1937,19 @@ fn switched_off_providers_leave_the_picker_except_for_their_locked_session() {
     ];
     let favorites = [FavoriteModel {
         provider: ProviderKind::Claude,
+        provider_instance_id: None,
         model: "claude-sonnet-5".into(),
     }];
-    let disabled = [ProviderKind::Claude];
+    let instances = [
+        waku_client::settings::ProviderInstance::builtin(ProviderKind::Claude, false, None),
+        waku_client::settings::ProviderInstance::builtin(ProviderKind::Codex, true, None),
+    ];
 
     // Provider tab and favorites both stop offering the switched-off provider.
     let models = visible_picker_models(
         &probes,
         &favorites,
-        &disabled,
+        &instances,
         None,
         ModelPickerTab::Provider(ProviderKind::Claude),
         "",
@@ -1953,7 +1958,7 @@ fn switched_off_providers_leave_the_picker_except_for_their_locked_session() {
     let models = visible_picker_models(
         &probes,
         &favorites,
-        &disabled,
+        &instances,
         None,
         ModelPickerTab::Favorites,
         "",
@@ -1962,7 +1967,7 @@ fn switched_off_providers_leave_the_picker_except_for_their_locked_session() {
     let models = visible_picker_models(
         &probes,
         &favorites,
-        &disabled,
+        &instances,
         None,
         ModelPickerTab::Provider(ProviderKind::Codex),
         "",
@@ -1973,7 +1978,7 @@ fn switched_off_providers_leave_the_picker_except_for_their_locked_session() {
     let models = visible_picker_models(
         &probes,
         &favorites,
-        &disabled,
+        &instances,
         None,
         ModelPickerTab::Provider(ProviderKind::Codex),
         "claude",
@@ -1981,11 +1986,12 @@ fn switched_off_providers_leave_the_picker_except_for_their_locked_session() {
     assert!(models.is_empty());
 
     // A session already locked to the provider keeps its models.
+    let locked = (ProviderKind::Claude, ProviderKind::Claude.id().to_owned());
     let models = visible_picker_models(
         &probes,
         &favorites,
-        &disabled,
-        Some(ProviderKind::Claude),
+        &instances,
+        Some(&locked),
         ModelPickerTab::Provider(ProviderKind::Claude),
         "",
     );
@@ -2014,6 +2020,7 @@ fn tab_cycle_walks_favorites_then_usable_providers_in_rail_order() {
 
     let probe = |provider: ProviderKind, installed: bool| ProviderProbe {
         provider,
+        provider_instance_id: None,
         installed,
         path: installed.then(|| std::path::PathBuf::from(format!("/bin/{}", provider.id()))),
         models: vec![ProviderModel::new("model", "model")],
@@ -2024,10 +2031,15 @@ fn tab_cycle_walks_favorites_then_usable_providers_in_rail_order() {
         probe(ProviderKind::Codex, true),
         probe(ProviderKind::Cursor, false),
     ];
+    let instances = [
+        waku_client::settings::ProviderInstance::builtin(ProviderKind::Claude, true, None),
+        waku_client::settings::ProviderInstance::builtin(ProviderKind::Codex, true, None),
+        waku_client::settings::ProviderInstance::builtin(ProviderKind::Cursor, true, None),
+    ];
 
     // Uninstalled providers never join the cycle; favorites leads.
     assert_eq!(
-        visible_picker_tabs(&probes, &[], None),
+        visible_picker_tabs(&probes, &instances, None),
         vec![
             ModelPickerTab::Favorites,
             ModelPickerTab::Provider(ProviderKind::Claude),
@@ -2036,8 +2048,13 @@ fn tab_cycle_walks_favorites_then_usable_providers_in_rail_order() {
     );
 
     // Switched-off providers leave the cycle like they leave the rail.
+    let disabled_instances = [
+        waku_client::settings::ProviderInstance::builtin(ProviderKind::Claude, false, None),
+        waku_client::settings::ProviderInstance::builtin(ProviderKind::Codex, true, None),
+        waku_client::settings::ProviderInstance::builtin(ProviderKind::Cursor, true, None),
+    ];
     assert_eq!(
-        visible_picker_tabs(&probes, &[ProviderKind::Claude], None),
+        visible_picker_tabs(&probes, &disabled_instances, None),
         vec![
             ModelPickerTab::Favorites,
             ModelPickerTab::Provider(ProviderKind::Codex),
@@ -2046,8 +2063,9 @@ fn tab_cycle_walks_favorites_then_usable_providers_in_rail_order() {
 
     // A locked session cycles between favorites and its own provider only,
     // even when that provider was switched off after the session started.
+    let locked = (ProviderKind::Claude, ProviderKind::Claude.id().to_owned());
     assert_eq!(
-        visible_picker_tabs(&probes, &[ProviderKind::Claude], Some(ProviderKind::Claude)),
+        visible_picker_tabs(&probes, &disabled_instances, Some(&locked)),
         vec![
             ModelPickerTab::Favorites,
             ModelPickerTab::Provider(ProviderKind::Claude),
@@ -2062,6 +2080,7 @@ fn the_picker_is_empty_only_once_detection_has_answered() {
 
     let probe = |provider: ProviderKind, installed: bool| ProviderProbe {
         provider,
+        provider_instance_id: None,
         installed,
         path: installed.then(|| std::path::PathBuf::from(format!("/bin/{}", provider.id()))),
         models: vec![ProviderModel::new("model", "model")],
@@ -2077,27 +2096,41 @@ fn the_picker_is_empty_only_once_detection_has_answered() {
         probe(ProviderKind::Claude, true),
         probe(ProviderKind::Codex, false),
     ];
+    let instances = [
+        waku_client::settings::ProviderInstance::builtin(ProviderKind::Claude, true, None),
+        waku_client::settings::ProviderInstance::builtin(ProviderKind::Codex, true, None),
+    ];
 
     // An unsettled first pass reads as "not known yet", so the composer keeps
     // showing the remembered model instead of flashing an empty state.
-    assert!(!picker_has_no_providers(&undetected, &[], None, false));
+    assert!(!picker_has_no_providers(
+        &undetected,
+        &instances,
+        None,
+        false
+    ));
     // Once it settles, the same probes really do mean nothing is installed.
-    assert!(picker_has_no_providers(&undetected, &[], None, true));
+    assert!(picker_has_no_providers(&undetected, &instances, None, true));
     // One detected CLI is enough to keep the picker populated...
-    assert!(!picker_has_no_providers(&detected, &[], None, true));
+    assert!(!picker_has_no_providers(&detected, &instances, None, true));
     // ...until it is switched off, which empties the picker just as surely as
     // never having been installed.
+    let disabled_instances = [
+        waku_client::settings::ProviderInstance::builtin(ProviderKind::Claude, false, None),
+        waku_client::settings::ProviderInstance::builtin(ProviderKind::Codex, true, None),
+    ];
     assert!(picker_has_no_providers(
         &detected,
-        &[ProviderKind::Claude],
+        &disabled_instances,
         None,
         true
     ));
     // A session already locked to that provider keeps it, switched off or not.
+    let locked = (ProviderKind::Claude, ProviderKind::Claude.id().to_owned());
     assert!(!picker_has_no_providers(
         &detected,
-        &[ProviderKind::Claude],
-        Some(ProviderKind::Claude),
+        &disabled_instances,
+        Some(&locked),
         true
     ));
 }
@@ -2109,6 +2142,7 @@ fn the_rail_draws_only_installed_providers_the_settings_left_on() {
 
     let probe = |provider: ProviderKind, installed: bool| ProviderProbe {
         provider,
+        provider_instance_id: None,
         installed,
         path: installed.then(|| std::path::PathBuf::from(format!("/bin/{}", provider.id()))),
         models: vec![ProviderModel::new("model", "model")],
@@ -2119,37 +2153,49 @@ fn the_rail_draws_only_installed_providers_the_settings_left_on() {
         probe(ProviderKind::Codex, true),
         probe(ProviderKind::Cursor, false),
     ];
+    let instances = [
+        waku_client::settings::ProviderInstance::builtin(ProviderKind::Claude, true, None),
+        waku_client::settings::ProviderInstance::builtin(ProviderKind::Codex, true, None),
+        waku_client::settings::ProviderInstance::builtin(ProviderKind::Cursor, true, None),
+    ];
 
     // An undetected CLI and a switched-off provider both leave the rail
     // outright, rather than sitting in it dimmed.
     assert!(!picker_rail_shows_provider(
         &probes,
-        &[],
+        &instances,
         None,
         ProviderKind::Cursor
     ));
+    let disabled_instances = [
+        waku_client::settings::ProviderInstance::builtin(ProviderKind::Claude, false, None),
+        waku_client::settings::ProviderInstance::builtin(ProviderKind::Codex, true, None),
+        waku_client::settings::ProviderInstance::builtin(ProviderKind::Cursor, true, None),
+    ];
     assert!(!picker_rail_shows_provider(
         &probes,
-        &[ProviderKind::Claude],
+        &disabled_instances,
         None,
         ProviderKind::Claude
     ));
 
     // A provider only the *current* session locks out stays drawn: that is a
     // fact about this session, not about what the user configured.
+    let locked_codex = (ProviderKind::Codex, ProviderKind::Codex.id().to_owned());
     assert!(picker_rail_shows_provider(
         &probes,
-        &[],
-        Some(ProviderKind::Codex),
+        &instances,
+        Some(&locked_codex),
         ProviderKind::Claude
     ));
 
     // ...and the locked session keeps its own tab even once it is switched
     // off, since the picker is its only route to another model.
+    let locked_claude = (ProviderKind::Claude, ProviderKind::Claude.id().to_owned());
     assert!(picker_rail_shows_provider(
         &probes,
-        &[ProviderKind::Claude],
-        Some(ProviderKind::Claude),
+        &disabled_instances,
+        Some(&locked_claude),
         ProviderKind::Claude
     ));
 }

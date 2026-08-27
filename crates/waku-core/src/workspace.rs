@@ -18,6 +18,13 @@ pub use waku_protocol::workspace::{
 };
 
 pub fn execute(operation: WorkspaceOperation) -> anyhow::Result<WorkspaceResult> {
+    execute_with_settings(operation, &crate::settings::DaemonSettings::default())
+}
+
+pub fn execute_with_settings(
+    operation: WorkspaceOperation,
+    settings: &crate::settings::DaemonSettings,
+) -> anyhow::Result<WorkspaceResult> {
     Ok(match operation {
         WorkspaceOperation::ListTree {
             root,
@@ -68,15 +75,29 @@ pub fn execute(operation: WorkspaceOperation) -> anyhow::Result<WorkspaceResult>
         },
         WorkspaceOperation::DiscoverSlashCommands {
             provider,
+            provider_instance_id,
             project_root,
             binary_override,
-        } => WorkspaceResult::SlashCommands {
-            commands: crate::composer_complete::discover_slash_commands(
-                provider,
-                &project_root,
-                binary_override.as_deref(),
-            ),
-        },
+        } => {
+            let instance = settings.provider_instance(provider, provider_instance_id.as_deref());
+            let effective_binary = instance
+                .as_ref()
+                .and_then(|instance| instance.binary_override.as_deref())
+                .or(binary_override.as_deref());
+            let environment = instance
+                .as_ref()
+                .map(|instance| &instance.environment)
+                .cloned()
+                .unwrap_or_default();
+            WorkspaceResult::SlashCommands {
+                commands: crate::composer_complete::discover_slash_commands_with_environment(
+                    provider,
+                    &project_root,
+                    effective_binary,
+                    &environment,
+                ),
+            }
+        }
         WorkspaceOperation::CreateProjectlessWorkspace { prompt } => {
             WorkspaceResult::ProjectlessWorkspace {
                 cwd: crate::projectless::create_workspace(prompt.as_deref())?.cwd,

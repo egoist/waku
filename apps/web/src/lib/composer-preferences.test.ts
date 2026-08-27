@@ -69,6 +69,24 @@ describe('composer preferences', () => {
 
     expect(readComposerPreferences(storage, 'ws://first').lastProvider).toBe('fx')
   })
+
+  test('keeps model traits separate for two instances of the same provider', () => {
+    let preferences = rememberComposerSession(
+      readComposerPreferences(null, 'ws://first'),
+      {
+        provider: 'codex',
+        provider_instance_id: 'codex-work',
+        model: 'gpt-5.6-sol',
+        reasoning_effort: 'high',
+        service_tier: null,
+      },
+    )
+
+    expect(rememberedModelTraits(preferences, 'codex', 'gpt-5.6-sol', 'codex-work'))
+      .toMatchObject({ reasoningEffort: 'high' })
+    expect(rememberedModelTraits(preferences, 'codex', 'gpt-5.6-sol')).toBeUndefined()
+    expect(preferences.lastProviderInstanceId).toBe('codex-work')
+  })
 })
 
 function memoryStorage() {

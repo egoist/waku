@@ -176,6 +176,7 @@ impl Waku {
         if let Some((
             project_id,
             provider,
+            provider_instance_id,
             runtime_mode,
             model,
             reasoning_effort,
@@ -185,6 +186,7 @@ impl Waku {
             (
                 session.project_id,
                 session.provider,
+                session.provider_instance_id.clone(),
                 session.runtime_mode,
                 session.model.clone(),
                 session.reasoning_effort.clone(),
@@ -194,6 +196,7 @@ impl Waku {
         }) {
             self.state.selected_project = Some(project_id);
             self.state.last_provider = provider;
+            self.state.last_provider_instance_id = provider_instance_id;
             self.state.last_runtime_mode = runtime_mode;
             self.state.last_model = model;
             self.state.last_reasoning_effort = reasoning_effort;
@@ -274,7 +277,12 @@ impl Waku {
         // a selected source task.
         let runtime_mode =
             new_task_runtime_mode(self.selected_session(), self.state.last_runtime_mode);
-        let mut session = self.state.new_session(project_id, provider);
+        let provider_instance_id = (provider == self.state.last_provider)
+            .then(|| self.state.last_provider_instance_id.clone())
+            .flatten();
+        let mut session =
+            self.state
+                .new_session_for_instance(project_id, provider, provider_instance_id);
         session.runtime_mode = runtime_mode;
         let id = session.id;
         self.state.push_session(session);
@@ -886,21 +894,29 @@ impl Waku {
     }
 
     fn remember_selected_model_traits(&mut self) {
-        let Some((provider, model, reasoning_effort, service_tier, context_window)) =
-            self.selected_session().and_then(|session| {
-                Some((
-                    session.provider,
-                    self.model_for_session(session)?.to_owned(),
-                    session.reasoning_effort.clone(),
-                    session.service_tier.clone(),
-                    session.context_window.clone(),
-                ))
-            })
+        let Some((
+            provider,
+            provider_instance_id,
+            model,
+            reasoning_effort,
+            service_tier,
+            context_window,
+        )) = self.selected_session().and_then(|session| {
+            Some((
+                session.provider,
+                session.provider_instance_id.clone(),
+                self.model_for_session(session)?.to_owned(),
+                session.reasoning_effort.clone(),
+                session.service_tier.clone(),
+                session.context_window.clone(),
+            ))
+        })
         else {
             return;
         };
-        self.state.remember_model_traits(
+        self.state.remember_model_traits_for_instance(
             provider,
+            provider_instance_id,
             &model,
             reasoning_effort,
             service_tier,
@@ -908,29 +924,43 @@ impl Waku {
         );
     }
 
-    pub(super) fn choose_model(
+    pub(super) fn choose_provider_instance_model(
         &mut self,
         provider: ProviderKind,
+        provider_instance_id: Option<String>,
         model: String,
         cx: &mut Context<Self>,
     ) {
+        let identity = provider_instance_id
+            .as_deref()
+            .unwrap_or_else(|| provider.id());
         let Some((session_id, provider_changed)) = self
             .selected_session()
             .filter(|session| {
-                session.can_choose_model(provider)
+                session.can_choose_provider_instance(provider, provider_instance_id.as_deref())
                     && (session.provider != provider
+                        || session.provider_instance_id() != identity
                         || session.model.as_deref() != Some(model.as_str()))
             })
-            .map(|session| (session.id, session.provider != provider))
+            .map(|session| {
+                (
+                    session.id,
+                    session.provider != provider || session.provider_instance_id() != identity,
+                )
+            })
         else {
             return;
         };
 
         self.remember_selected_model_traits();
-        let (reasoning_effort, service_tier, context_window) =
-            self.state.model_traits_for(provider, &model);
+        let (reasoning_effort, service_tier, context_window) = self
+            .state
+            .model_traits_for_instance(provider, provider_instance_id.as_deref(), &model);
         if let Some(session) = self.selected_session_mut() {
             session.provider = provider;
+            session
+                .provider_instance_id
+                .clone_from(&provider_instance_id);
             session.model = Some(model.clone());
             if provider_changed {
                 session.agent_preset = None;
@@ -939,6 +969,9 @@ impl Waku {
             session.service_tier.clone_from(&service_tier);
             session.context_window.clone_from(&context_window);
             self.state.last_provider = provider;
+            self.state
+                .last_provider_instance_id
+                .clone_from(&provider_instance_id);
             self.state.last_model = Some(model);
             self.state.last_reasoning_effort = reasoning_effort;
             self.state.last_service_tier = service_tier;
@@ -1015,23 +1048,28 @@ impl Waku {
         }
     }
 
-    pub(super) fn toggle_favorite_model(
+    pub(super) fn toggle_favorite_provider_instance_model(
         &mut self,
         provider: ProviderKind,
+        provider_instance_id: Option<String>,
         model: String,
         cx: &mut Context<Self>,
     ) {
-        if let Some(index) = self
-            .state
-            .favorite_models
-            .iter()
-            .position(|favorite| favorite.provider == provider && favorite.model == model)
-        {
+        let identity = provider_instance_id
+            .as_deref()
+            .unwrap_or_else(|| provider.id());
+        if let Some(index) = self.state.favorite_models.iter().position(|favorite| {
+            favorite.provider == provider
+                && favorite.provider_instance_id() == identity
+                && favorite.model == model
+        }) {
             self.state.favorite_models.remove(index);
         } else {
-            self.state
-                .favorite_models
-                .push(FavoriteModel { provider, model });
+            self.state.favorite_models.push(FavoriteModel {
+                provider,
+                provider_instance_id,
+                model,
+            });
         }
         self.save();
         cx.notify();

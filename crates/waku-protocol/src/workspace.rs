@@ -77,6 +77,8 @@ pub enum WorkspaceOperation {
     },
     DiscoverSlashCommands {
         provider: ProviderKind,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        provider_instance_id: Option<String>,
         #[ts(type = "string")]
         project_root: PathBuf,
         #[serde(default, skip_serializing_if = "Option::is_none")]

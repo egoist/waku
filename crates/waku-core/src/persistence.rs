@@ -33,6 +33,7 @@ use crate::model::{
     AgentSession, FavoriteModel, InteractionMode, Message, MessageAttachment, MessageRole, Project,
     ProviderKind, RuntimeMode, SessionWorkspace,
 };
+use crate::settings::ProviderInstance;
 use crate::theme::ThemePreference;
 pub use waku_protocol::persistence::{
     ComposerDraft, ComposerDraftAttachment, ComposerDraftChange, ComposerDraftKey,
@@ -87,6 +88,8 @@ fn default_right_panel_width() -> f32 {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct RememberedModelTraits {
     provider: ProviderKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    provider_instance_id: Option<String>,
     model: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     reasoning_effort: Option<String>,
@@ -219,6 +222,8 @@ struct AppState {
     #[serde(default = "default_provider")]
     last_provider: ProviderKind,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    last_provider_instance_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     last_model: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     last_reasoning_effort: Option<String>,
@@ -252,6 +257,8 @@ pub struct PersistedState {
     pub selected_project: Option<Uuid>,
     pub selected_session: Option<Uuid>,
     pub last_provider: ProviderKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_provider_instance_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_model: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -287,6 +294,8 @@ pub struct PersistedState {
     /// detect from PATH.
     #[serde(default)]
     pub provider_binary_overrides: HashMap<ProviderKind, String>,
+    #[serde(default)]
+    pub custom_provider_instances: Vec<ProviderInstance>,
     /// Unknown daemon settings survive edits made by this desktop version.
     #[serde(skip)]
     daemon_settings_extra: BTreeMap<String, serde_json::Value>,
@@ -330,6 +339,7 @@ impl PersistedState {
             selected_project: None,
             selected_session: None,
             last_provider: ProviderKind::Codex,
+            last_provider_instance_id: None,
             last_model: None,
             last_reasoning_effort: None,
             last_service_tier: None,
@@ -346,6 +356,7 @@ impl PersistedState {
             computer_use_allowed_apps: Vec::new(),
             disabled_providers: Vec::new(),
             provider_binary_overrides: HashMap::new(),
+            custom_provider_instances: Vec::new(),
             daemon_settings_extra: BTreeMap::new(),
             dirty_sessions: HashSet::new(),
         }
@@ -364,8 +375,20 @@ impl PersistedState {
     }
 
     pub fn new_session(&self, project_id: Uuid, provider: ProviderKind) -> AgentSession {
+        self.new_session_for_instance(project_id, provider, None)
+    }
+
+    pub fn new_session_for_instance(
+        &self,
+        project_id: Uuid,
+        provider: ProviderKind,
+        provider_instance_id: Option<String>,
+    ) -> AgentSession {
         let mut session = AgentSession::new(project_id, provider);
-        if provider == self.last_provider {
+        session.provider_instance_id = provider_instance_id;
+        if provider == self.last_provider
+            && session.provider_instance_id() == self.last_provider_instance_id()
+        {
             session.model.clone_from(&self.last_model);
             session
                 .reasoning_effort
@@ -376,6 +399,12 @@ impl PersistedState {
         session
     }
 
+    pub fn last_provider_instance_id(&self) -> &str {
+        self.last_provider_instance_id
+            .as_deref()
+            .unwrap_or_else(|| self.last_provider.id())
+    }
+
     pub fn remember_model_traits(
         &mut self,
         provider: ProviderKind,
@@ -384,10 +413,37 @@ impl PersistedState {
         service_tier: Option<String>,
         context_window: Option<String>,
     ) {
-        let existing = self
-            .remembered_model_traits
-            .iter()
-            .position(|traits| traits.provider == provider && traits.model == model);
+        self.remember_model_traits_for_instance(
+            provider,
+            None,
+            model,
+            reasoning_effort,
+            service_tier,
+            context_window,
+        );
+    }
+
+    pub fn remember_model_traits_for_instance(
+        &mut self,
+        provider: ProviderKind,
+        provider_instance_id: Option<String>,
+        model: &str,
+        reasoning_effort: Option<String>,
+        service_tier: Option<String>,
+        context_window: Option<String>,
+    ) {
+        let identity = provider_instance_id
+            .as_deref()
+            .unwrap_or_else(|| provider.id());
+        let existing = self.remembered_model_traits.iter().position(|traits| {
+            traits.provider == provider
+                && traits
+                    .provider_instance_id
+                    .as_deref()
+                    .unwrap_or_else(|| traits.provider.id())
+                    == identity
+                && traits.model == model
+        });
         if reasoning_effort.is_none() && service_tier.is_none() && context_window.is_none() {
             if let Some(index) = existing {
                 self.remembered_model_traits.remove(index);
@@ -402,6 +458,7 @@ impl PersistedState {
         } else {
             self.remembered_model_traits.push(RememberedModelTraits {
                 provider,
+                provider_instance_id,
                 model: model.to_owned(),
                 reasoning_effort,
                 service_tier,
@@ -415,9 +472,27 @@ impl PersistedState {
         provider: ProviderKind,
         model: &str,
     ) -> (Option<String>, Option<String>, Option<String>) {
+        self.model_traits_for_instance(provider, None, model)
+    }
+
+    pub fn model_traits_for_instance(
+        &self,
+        provider: ProviderKind,
+        provider_instance_id: Option<&str>,
+        model: &str,
+    ) -> (Option<String>, Option<String>, Option<String>) {
+        let identity = provider_instance_id.unwrap_or_else(|| provider.id());
         self.remembered_model_traits
             .iter()
-            .find(|traits| traits.provider == provider && traits.model == model)
+            .find(|traits| {
+                traits.provider == provider
+                    && traits
+                        .provider_instance_id
+                        .as_deref()
+                        .unwrap_or_else(|| traits.provider.id())
+                        == identity
+                    && traits.model == model
+            })
             .map(|traits| {
                 (
                     traits.reasoning_effort.clone(),
@@ -443,8 +518,13 @@ impl PersistedState {
             computer_use_allowed_apps: self.computer_use_allowed_apps.clone(),
             disabled_providers: self.disabled_providers.clone(),
             provider_binary_overrides: self.provider_binary_overrides.clone(),
+            custom_provider_instances: self.custom_provider_instances.clone(),
             extra: self.daemon_settings_extra.clone(),
         }
+    }
+
+    pub fn provider_instances(&self) -> Vec<ProviderInstance> {
+        self.daemon_settings().provider_instances()
     }
 
     fn app_state(&self) -> AppState {
@@ -454,6 +534,7 @@ impl PersistedState {
             selected_project: self.selected_project,
             selected_session: self.persistable_selected_session(),
             last_provider: self.last_provider,
+            last_provider_instance_id: self.last_provider_instance_id.clone(),
             last_model: self.last_model.clone(),
             last_reasoning_effort: self.last_reasoning_effort.clone(),
             last_service_tier: self.last_service_tier.clone(),
@@ -478,6 +559,7 @@ impl PersistedState {
         self.computer_use_allowed_apps = settings.computer_use_allowed_apps;
         self.disabled_providers = settings.disabled_providers;
         self.provider_binary_overrides = settings.provider_binary_overrides;
+        self.custom_provider_instances = settings.custom_provider_instances;
         self.daemon_settings_extra = settings.extra;
     }
 
@@ -486,6 +568,7 @@ impl PersistedState {
         self.selected_project = app_state.selected_project;
         self.selected_session = app_state.selected_session;
         self.last_provider = app_state.last_provider;
+        self.last_provider_instance_id = app_state.last_provider_instance_id;
         self.last_model = app_state.last_model;
         self.last_reasoning_effort = app_state.last_reasoning_effort;
         self.last_service_tier = app_state.last_service_tier;
@@ -1494,6 +1577,8 @@ fn session_skeleton(row: SessionColumns) -> Option<AgentSession> {
         project_id: Uuid::parse_str(&project_id).ok()?,
         workspace: SessionWorkspace::Local,
         provider: serde_json::from_value(serde_json::Value::String(provider)).ok()?,
+        // The full serialized session supplies the instance id on hydration.
+        provider_instance_id: None,
         model,
         // Hydration replaces these; the list never reads them.
         runtime_mode: RuntimeMode::default(),
@@ -2456,6 +2541,7 @@ mod tests {
         state.sessions[0].runtime_mode = crate::model::RuntimeMode::Auto;
         state.favorite_models.push(FavoriteModel {
             provider: ProviderKind::Codex,
+            provider_instance_id: None,
             model: "gpt-5.6-luna".into(),
         });
         state.theme = ThemePreference::Light;
@@ -3455,6 +3541,29 @@ mod tests {
             state.model_traits_for(ProviderKind::Codex, "gpt-5.6-sol"),
             (Some("max".into()), Some("fast".into()), None),
             "switching back restores both explicit choices"
+        );
+    }
+
+    #[test]
+    fn model_traits_are_isolated_between_provider_instances() {
+        let mut state = PersistedState::fresh(PathBuf::from("/tmp/project"));
+        state.remember_model_traits_for_instance(
+            ProviderKind::Codex,
+            Some("codex-work".into()),
+            "gpt-5.6-sol",
+            Some("high".into()),
+            None,
+            None,
+        );
+
+        assert_eq!(
+            state.model_traits_for_instance(ProviderKind::Codex, Some("codex-work"), "gpt-5.6-sol"),
+            (Some("high".into()), None, None)
+        );
+        assert_eq!(
+            state.model_traits_for_instance(ProviderKind::Codex, None, "gpt-5.6-sol"),
+            (None, None, None),
+            "the built-in Codex profile must not inherit another CODEX_HOME's choices"
         );
     }
 

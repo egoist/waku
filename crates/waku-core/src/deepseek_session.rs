@@ -5,7 +5,7 @@
 //! share it through `deepseek_pool`, while this module owns startup, typed RPC
 //! envelopes, stream fan-out, and process-tree teardown.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{Shutdown, TcpStream};
 use std::path::Path;
@@ -141,12 +141,24 @@ pub(crate) struct DeepSeekServer {
 }
 
 impl DeepSeekServer {
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn start(binary: &Path) -> anyhow::Result<Self> {
-        Self::start_with_dsh_home(binary, None)
+        Self::start_with_environment(binary, &BTreeMap::new())
     }
 
-    fn start_with_dsh_home(binary: &Path, dsh_home: Option<&Path>) -> anyhow::Result<Self> {
-        let supports_no_open = web_supports_no_open(binary, dsh_home);
+    pub(crate) fn start_with_environment(
+        binary: &Path,
+        environment: &BTreeMap<String, String>,
+    ) -> anyhow::Result<Self> {
+        Self::start_with_dsh_home(binary, None, environment)
+    }
+
+    fn start_with_dsh_home(
+        binary: &Path,
+        dsh_home: Option<&Path>,
+        environment: &BTreeMap<String, String>,
+    ) -> anyhow::Result<Self> {
+        let supports_no_open = web_supports_no_open(binary, dsh_home, environment);
         #[cfg(unix)]
         let mut command = {
             let mut command = crate::command_env::command("/bin/sh");
@@ -169,6 +181,7 @@ impl DeepSeekServer {
             command
         };
         command
+            .envs(environment)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
@@ -429,8 +442,12 @@ fn parse_ready_port(line: &str) -> Option<u16> {
         .flatten()
 }
 
-fn web_supports_no_open(binary: &Path, dsh_home: Option<&Path>) -> bool {
-    let mut command = crate::command_env::command(binary);
+fn web_supports_no_open(
+    binary: &Path,
+    dsh_home: Option<&Path>,
+    environment: &BTreeMap<String, String>,
+) -> bool {
+    let mut command = crate::command_env::command_with_environment(binary, environment);
     command.args(["web", "--help"]);
     if let Some(dsh_home) = dsh_home {
         command.env("DSH_HOME", dsh_home);
@@ -787,8 +804,9 @@ mod tests {
             TempHarnessHome(std::env::temp_dir().join(format!("waku-dsh-test-{}", Uuid::new_v4())));
         std::fs::create_dir_all(&root.0).unwrap();
         {
-            let server = DeepSeekServer::start_with_dsh_home(&binary, Some(&root.0))
-                .expect("Harness Host should start");
+            let server =
+                DeepSeekServer::start_with_dsh_home(&binary, Some(&root.0), &BTreeMap::new())
+                    .expect("Harness Host should start");
             let session_id = format!("waku-test-{}", Uuid::new_v4());
             let events = server.subscribe(&session_id);
             let created = server

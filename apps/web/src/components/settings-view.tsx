@@ -2,6 +2,7 @@ import { useQueryClient } from '@tanstack/react-query'
 import type {
   DaemonSettings,
   Project,
+  ProviderInstance,
   ProviderKind,
 } from '@waku/client'
 import { useEffect, useState, type ReactNode } from 'react'
@@ -245,8 +246,9 @@ function ProvidersSettings() {
   const queryClient = useQueryClient()
   const settings = useDaemonSettings()
   const probes = useProviderProbes()
-  const [expanded, setExpanded] = useState<ProviderKind | null>(null)
-  const [paths, setPaths] = useState<Partial<Record<ProviderKind, string>>>({})
+  const [expanded, setExpanded] = useState<string | null>(null)
+  const [paths, setPaths] = useState<Record<string, string>>({})
+  const [environmentInputs, setEnvironmentInputs] = useState<Record<string, string>>({})
   const checkedAt = Math.max(
     0,
     ...Object.values(probes.states).map((state) => state.dataUpdatedAt),
@@ -273,21 +275,86 @@ function ProvidersSettings() {
     void apply({ ...settings.data, provider_binary_overrides: overrides })
   }
 
-  function toggleExpandedProvider(provider: ProviderKind) {
-    if (expanded) {
+  function toggleExpandedProvider(provider: string) {
+    if (expanded && PROVIDERS.some((candidate) => candidate.id === expanded)) {
       const pending = paths[expanded]
-      const applied = settings.data?.provider_binary_overrides?.[expanded] ?? ''
+      const applied = settings.data?.provider_binary_overrides?.[expanded as ProviderKind] ?? ''
       if (pending !== undefined && pending.trim() !== applied) {
-        applyProviderPath(expanded, pending)
+        applyProviderPath(expanded as ProviderKind, pending)
       }
     }
     if (expanded !== provider) {
+      const builtin = PROVIDERS.find((candidate) => candidate.id === provider)
+      const custom = settings.data?.custom_provider_instances?.find(
+        (instance) => instance.id === provider,
+      )
       setPaths((current) => ({
         ...current,
-        [provider]: settings.data?.provider_binary_overrides?.[provider] ?? '',
+        [provider]: builtin
+          ? settings.data?.provider_binary_overrides?.[builtin.id] ?? ''
+          : custom?.binaryOverride ?? '',
       }))
     }
     setExpanded(expanded === provider ? null : provider)
+  }
+
+  function addProviderInstance(provider: ProviderKind) {
+    if (!settings.data) return
+    const meta = PROVIDERS.find((candidate) => candidate.id === provider)!
+    const existing = (settings.data.custom_provider_instances ?? []).filter(
+      (instance) => instance.provider === provider,
+    )
+    const instance: ProviderInstance = {
+      id: typeof crypto.randomUUID === 'function'
+        ? `${provider}-${crypto.randomUUID()}`
+        : `${provider}-${Date.now()}`,
+      provider,
+      name: `${meta.name} ${existing.length + 2}`,
+      enabled: false,
+      binaryOverride: settings.data.provider_binary_overrides?.[provider] ?? null,
+      environment: {},
+    }
+    setPaths((current) => ({ ...current, [instance.id]: instance.binaryOverride ?? '' }))
+    setEnvironmentInputs((current) => ({ ...current, [instance.id]: '{}' }))
+    setExpanded(instance.id)
+    void apply({
+      ...settings.data,
+      custom_provider_instances: [...(settings.data.custom_provider_instances ?? []), instance],
+    })
+  }
+
+  function updateProviderInstance(id: string, patch: Partial<ProviderInstance>) {
+    if (!settings.data) return
+    void apply({
+      ...settings.data,
+      custom_provider_instances: (settings.data.custom_provider_instances ?? []).map((instance) =>
+        instance.id === id ? { ...instance, ...patch } : instance,
+      ),
+    })
+  }
+
+  function applyProviderEnvironment(instance: ProviderInstance, value: string) {
+    try {
+      const parsed: unknown = JSON.parse(value || '{}')
+      if (!parsed || Array.isArray(parsed) || typeof parsed !== 'object'
+        || Object.values(parsed).some((entry) => typeof entry !== 'string')) {
+        throw new Error('expected an object whose values are strings')
+      }
+      updateProviderInstance(instance.id, { environment: parsed as Record<string, string> })
+    } catch (error) {
+      toast.error(t('providers.environment_invalid', { error: errorMessage(error) }))
+    }
+  }
+
+  function removeProviderInstance(instance: ProviderInstance) {
+    if (!settings.data) return
+    setExpanded((current) => current === instance.id ? null : current)
+    void apply({
+      ...settings.data,
+      custom_provider_instances: (settings.data.custom_provider_instances ?? []).filter(
+        (candidate) => candidate.id !== instance.id,
+      ),
+    })
   }
 
   return (
@@ -349,6 +416,14 @@ function ProvidersSettings() {
                   <span className="mt-[3px] block truncate text-[10.5px] text-[var(--text-tertiary)]" title={detail}>{detail}</span>
                 </span>
                 <button
+                  aria-label={t('providers.add_instance', { provider: provider.name })}
+                  className="grid size-7 shrink-0 place-items-center rounded-[7px] text-[var(--text-tertiary)] outline-none hover:bg-accent focus-visible:ring-1 focus-visible:ring-ring"
+                  type="button"
+                  onClick={() => addProviderInstance(provider.id)}
+                >
+                  <WakuIcon className="size-3" name="plus" />
+                </button>
+                <button
                   aria-expanded={open}
                   aria-label={t(open ? 'providers.hide_settings' : 'providers.show_settings', { provider: provider.name })}
                   className="grid size-7 shrink-0 place-items-center rounded-[7px] text-[var(--text-tertiary)] outline-none hover:bg-accent focus-visible:ring-1 focus-visible:ring-ring"
@@ -402,6 +477,103 @@ function ProvidersSettings() {
                   <p className="truncate text-[10px] text-[var(--text-ghost)]" title={providerProbeCaption(provider.command, probe, Boolean(settings.data.provider_binary_overrides?.[provider.id]), t)}>
                     {providerProbeCaption(provider.command, probe, Boolean(settings.data.provider_binary_overrides?.[provider.id]), t)}
                   </p>
+                </div>
+              )}
+            </div>
+          )
+        })}
+        {(settings.data?.custom_provider_instances ?? []).map((instance) => {
+          const provider = PROVIDERS.find((candidate) => candidate.id === instance.provider)!
+          const probe = probes.data[instance.id]
+          const probeState = probes.states[instance.id]
+          const installed = probe?.installed ?? false
+          const open = expanded === instance.id
+          const detail = providerProbeDetail(provider.command, probe, probeState, !instance.enabled, t)
+          const dotColor = probeState?.error
+            ? 'bg-[var(--warning)]'
+            : !installed
+              ? 'bg-[var(--text-ghost)]'
+              : !instance.enabled
+                ? 'bg-[var(--warning)]'
+                : 'bg-[var(--success)]'
+          return (
+            <div className="border-b last:border-0" key={instance.id}>
+              <div className="flex items-center gap-3 py-[11px]">
+                <span className="relative grid size-[30px] shrink-0 place-items-center rounded-[7px] bg-accent">
+                  <ProviderIcon className={cn('size-4', !installed && 'opacity-50')} provider={instance.provider} />
+                  <span className={cn('absolute -bottom-0.5 -right-0.5 size-2.5 rounded-full border-2 border-[var(--raised)]', dotColor)} />
+                </span>
+                <span className="min-w-0 flex-1">
+                  <span className="flex items-baseline gap-[7px]">
+                    <span className={cn('truncate text-[12.5px] font-medium', !installed && 'text-[var(--text-secondary)]')}>{instance.name}</span>
+                    <span className="shrink-0 text-[10px] text-[var(--text-tertiary)]">{provider.name}</span>
+                    {probe?.version && <span className="shrink-0 font-mono text-[10px] text-[var(--text-tertiary)]">v{probe.version}</span>}
+                  </span>
+                  <span className="mt-[3px] block truncate text-[10.5px] text-[var(--text-tertiary)]" title={detail}>{detail}</span>
+                </span>
+                <button
+                  aria-label={t('providers.remove_instance', { provider: instance.name })}
+                  className="grid size-7 shrink-0 place-items-center rounded-[7px] text-[var(--text-tertiary)] outline-none hover:bg-accent focus-visible:ring-1 focus-visible:ring-ring"
+                  type="button"
+                  onClick={() => removeProviderInstance(instance)}
+                >
+                  <WakuIcon className="size-3" name="trash" />
+                </button>
+                <button
+                  aria-expanded={open}
+                  aria-label={t(open ? 'providers.hide_settings' : 'providers.show_settings', { provider: instance.name })}
+                  className="grid size-7 shrink-0 place-items-center rounded-[7px] text-[var(--text-tertiary)] outline-none hover:bg-accent focus-visible:ring-1 focus-visible:ring-ring"
+                  type="button"
+                  onClick={() => toggleExpandedProvider(instance.id)}
+                >
+                  <WakuIcon className="size-2.5" name={open ? 'chevronDown' : 'chevronRight'} />
+                </button>
+                {installed && (
+                  <Toggle
+                    checked={instance.enabled}
+                    label={t(instance.enabled ? 'providers.disable' : 'providers.enable', { provider: instance.name })}
+                    onChange={(enabled) => updateProviderInstance(instance.id, { enabled })}
+                  />
+                )}
+              </div>
+              {open && (
+                <div className="mb-[11px] ml-[42px] flex max-w-[560px] flex-col gap-[5px]">
+                  <label className="text-[11.5px] font-medium">{t('providers.instance_name')}</label>
+                  <Input
+                    className="h-[29px] bg-[var(--inset)] text-[11px]"
+                    value={instance.name}
+                    onChange={(event) => updateProviderInstance(instance.id, { name: event.target.value })}
+                  />
+                  <label className="mt-2 text-[11.5px] font-medium">{t('providers.binary_path')}</label>
+                  <Input
+                    className="h-[29px] bg-[var(--inset)] font-mono text-[11px]"
+                    placeholder={t('input.detected_automatically')}
+                    value={paths[instance.id] ?? instance.binaryOverride ?? ''}
+                    onChange={(event) => setPaths((current) => ({ ...current, [instance.id]: event.target.value }))}
+                    onBlur={(event) => updateProviderInstance(instance.id, {
+                      binaryOverride: event.currentTarget.value.trim() || null,
+                    })}
+                    onKeyDown={(event) => {
+                      if (event.key !== 'Enter') return
+                      updateProviderInstance(instance.id, {
+                        binaryOverride: event.currentTarget.value.trim() || null,
+                      })
+                    }}
+                  />
+                  <label className="mt-2 text-[11.5px] font-medium">{t('providers.environment')}</label>
+                  <p className="text-[10.5px] leading-[15px] text-[var(--text-tertiary)]">{t('providers.environment_description')}</p>
+                  <textarea
+                    className="min-h-[72px] rounded-[7px] border bg-[var(--inset)] p-2 font-mono text-[11px] outline-none focus:border-ring"
+                    spellCheck={false}
+                    value={environmentInputs[instance.id] ?? JSON.stringify(instance.environment ?? {}, null, 2)}
+                    onChange={(event) => setEnvironmentInputs((current) => ({ ...current, [instance.id]: event.target.value }))}
+                    onBlur={(event) => applyProviderEnvironment(instance, event.currentTarget.value)}
+                    onKeyDown={(event) => {
+                      if (!(event.ctrlKey || event.metaKey) || event.key !== 'Enter') return
+                      applyProviderEnvironment(instance, event.currentTarget.value)
+                    }}
+                  />
+                  <p className="text-[10px] leading-[14px] text-[var(--text-ghost)]">{t('providers.environment_hint')}</p>
                 </div>
               )}
             </div>

@@ -1,6 +1,6 @@
 //! Process environment capture and provider-safe command spawning.
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::ffi::{OsStr, OsString};
 use std::io;
 use std::path::{Path, PathBuf};
@@ -47,6 +47,17 @@ pub fn command(program: impl AsRef<OsStr>) -> Command {
     if let Some(search_path) = search_path {
         command.env("PATH", search_path);
     }
+    command
+}
+
+/// Builds a provider command and applies one concrete instance's environment.
+/// Instance values intentionally win over the captured shell environment.
+pub fn command_with_environment(
+    program: impl AsRef<OsStr>,
+    environment: &BTreeMap<String, String>,
+) -> Command {
+    let mut command = command(program);
+    command.envs(environment);
     command
 }
 
@@ -853,6 +864,35 @@ impl Drop for ShellEnvironmentCapture {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn provider_instance_environment_wins_on_the_child_command() {
+        let environment = BTreeMap::from([
+            ("CODEX_HOME".to_owned(), "C:/codex/work".to_owned()),
+            ("WAKU_PROVIDER_TEST".to_owned(), "instance".to_owned()),
+        ]);
+        let command = command_with_environment("codex", &environment);
+        let values = command
+            .get_envs()
+            .filter_map(|(key, value)| {
+                value.map(|value| {
+                    (
+                        key.to_string_lossy().into_owned(),
+                        value.to_string_lossy().into_owned(),
+                    )
+                })
+            })
+            .collect::<std::collections::HashMap<_, _>>();
+
+        assert_eq!(
+            values.get("CODEX_HOME").map(String::as_str),
+            Some("C:/codex/work")
+        );
+        assert_eq!(
+            values.get("WAKU_PROVIDER_TEST").map(String::as_str),
+            Some("instance")
+        );
+    }
 
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;

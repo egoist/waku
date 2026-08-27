@@ -46,6 +46,7 @@ export type { Project } from "./Project";
 export type { ProjectSlice } from "./ProjectSlice";
 export type { ProviderAgentPreset } from "./ProviderAgentPreset";
 export type { ProviderDay } from "./ProviderDay";
+export type { ProviderInstance } from "./ProviderInstance";
 export type { ProviderKind } from "./ProviderKind";
 export type { ProviderModel } from "./ProviderModel";
 export type { ProviderModelOption } from "./ProviderModelOption";

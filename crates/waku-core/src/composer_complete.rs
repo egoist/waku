@@ -134,27 +134,65 @@ pub fn discover_slash_commands(
     project_root: &Path,
     binary_override: Option<&str>,
 ) -> Vec<SlashCommand> {
+    discover_slash_commands_with_environment(
+        provider,
+        project_root,
+        binary_override,
+        &std::collections::BTreeMap::new(),
+    )
+}
+
+pub fn discover_slash_commands_with_environment(
+    provider: ProviderKind,
+    project_root: &Path,
+    binary_override: Option<&str>,
+    environment: &std::collections::BTreeMap<String, String>,
+) -> Vec<SlashCommand> {
     let cli_commands = match binary_override {
         Some(binary) => crate::command_env::resolve_binary_override(binary),
         None => crate::command_env::find_executable(provider.command()),
     }
     .as_deref()
-    .and_then(|binary| crate::slash_command_catalog::discover(provider, binary, project_root))
+    .and_then(|binary| {
+        crate::slash_command_catalog::discover(provider, binary, project_root, environment)
+    })
     .unwrap_or_default();
-    assemble_slash_commands(provider, project_root, cli_commands)
+    assemble_slash_commands_with_environment(provider, project_root, cli_commands, environment)
 }
 
+#[cfg(test)]
 fn assemble_slash_commands(
     provider: ProviderKind,
     project_root: &Path,
     cli_commands: Vec<SlashCommand>,
 ) -> Vec<SlashCommand> {
+    assemble_slash_commands_with_environment(
+        provider,
+        project_root,
+        cli_commands,
+        &std::collections::BTreeMap::new(),
+    )
+}
+
+fn assemble_slash_commands_with_environment(
+    provider: ProviderKind,
+    project_root: &Path,
+    cli_commands: Vec<SlashCommand>,
+    environment: &std::collections::BTreeMap<String, String>,
+) -> Vec<SlashCommand> {
     let home = dirs::home_dir();
-    let claude_config_dir = std::env::var("CLAUDE_CONFIG_DIR")
-        .ok()
+    let claude_config_dir = environment
+        .get("CLAUDE_CONFIG_DIR")
+        .cloned()
+        .or_else(|| std::env::var("CLAUDE_CONFIG_DIR").ok())
         .map(PathBuf::from)
         .filter(|path| path.is_absolute())
         .or_else(|| home.as_deref().map(|home| home.join(".claude")));
+    let codex_home = environment
+        .get("CODEX_HOME")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| home.as_deref().map(|home| home.join(".codex")));
     let mut commands = Vec::new();
     match provider {
         ProviderKind::Claude => {
@@ -183,14 +221,14 @@ fn assemble_slash_commands(
         }
         ProviderKind::Codex => {
             scan_skill_files(provider, &project_root.join(".codex/skills"), &mut commands);
-            if let Some(home) = home.as_deref() {
+            if let Some(config_dir) = codex_home.as_deref() {
                 scan_command_files(
-                    &home.join(".codex/prompts"),
+                    &config_dir.join("prompts"),
                     CommandScope::User,
                     true,
                     &mut commands,
                 );
-                scan_skill_files(provider, &home.join(".codex/skills"), &mut commands);
+                scan_skill_files(provider, &config_dir.join("skills"), &mut commands);
             }
         }
         ProviderKind::OpenCode => {
