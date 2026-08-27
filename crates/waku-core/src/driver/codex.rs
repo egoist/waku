@@ -3008,6 +3008,57 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires an installed, authenticated codex"]
+    fn real_codex_driver_receives_turn_completion_over_shared_socket() {
+        let binary = crate::command_env::find_executable("codex").expect("codex is not installed");
+        let (events, receiver) = super::super::test_event_channel();
+        let driver = CodexDriver::start(
+            DriverStartOptions {
+                binary,
+                cwd: std::env::current_dir().expect("current directory"),
+                mode: RuntimeMode::FullAccess,
+                interaction_mode: InteractionMode::Build,
+                model: None,
+                reasoning_effort: None,
+                service_tier: None,
+                context_window: None,
+                agent_preset: None,
+                computer_use_enabled: false,
+                provider_cursor: None,
+            },
+            events,
+        )
+        .expect("Codex driver should start");
+        driver.prompt("Reply with exactly OK and do not use tools.".to_owned());
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(90);
+        let mut saw_text = false;
+        let mut saw_completion = false;
+        while std::time::Instant::now() < deadline {
+            let remaining = deadline
+                .checked_duration_since(std::time::Instant::now())
+                .unwrap_or_default();
+            let event = receiver
+                .recv_timeout(remaining)
+                .expect("Codex driver should emit a completion event");
+            match event {
+                DriverEvent::TextDelta(_) => saw_text = true,
+                DriverEvent::TurnFinished { success, .. } => {
+                    assert!(success, "the real Codex turn should complete successfully");
+                    saw_completion = true;
+                    break;
+                }
+                _ => {}
+            }
+        }
+        assert!(saw_text, "the real Codex driver should stream answer text");
+        assert!(
+            saw_completion,
+            "the real Codex driver should receive turn/completed"
+        );
+    }
+
+    #[test]
     fn turns_request_readable_reasoning_summaries() {
         let params = turn_start_params(
             "thread-1",

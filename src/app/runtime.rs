@@ -100,6 +100,14 @@ pub(super) fn session_has_active_provider_turn(session: &AgentSession) -> bool {
             .is_some_and(|turn| turn.status == TurnStatus::Running && turn.provider_turn_started)
 }
 
+/// A busy status without a running turn is stale session metadata, not a
+/// provider turn that can own a follow-up. This can happen while a runtime is
+/// being reattached or after a completion event was applied to the transcript
+/// but the status projection lagged behind it.
+pub(super) fn session_has_unsettled_turn(session: &AgentSession) -> bool {
+    session.is_busy() && session.active_turn_id().is_some()
+}
+
 /// Merge the daemon's list-only session projection into the desktop catalog.
 ///
 /// Existing rows may already contain a hydrated transcript, so only list
@@ -2920,7 +2928,7 @@ impl Waku {
         if self.response_fork_preparations.contains_key(&session.id) {
             return;
         }
-        if session.is_busy() {
+        if session_has_unsettled_turn(session) {
             // While the agent is working, Enter queues a follow-up instead of
             // refusing the message. The queue drains once the turn settles.
             self.enqueue_follow_up_submission(session.id, submission, cx);
@@ -2940,7 +2948,7 @@ impl Waku {
         let Some(session) = self.selected_session().cloned() else {
             return;
         };
-        if !session.is_busy() {
+        if !session_has_unsettled_turn(&session) {
             self.submit_composer_submission(submission, cx);
             return;
         }
@@ -3152,7 +3160,7 @@ impl Waku {
             self.defer_queue_drain(session_id);
             return;
         }
-        if session.status.is_busy() {
+        if session_has_unsettled_turn(session) {
             self.enqueue_follow_up_submission(session_id, submission, cx);
             return;
         }

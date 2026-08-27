@@ -2,7 +2,9 @@ use super::composer::{
     ComposerSubmitAction, composer_submit_action, dropped_file_mention, merged_submission,
     next_picker_highlight, visible_branch_entries,
 };
-use super::runtime::{merge_remote_session_catalog, session_has_active_provider_turn};
+use super::runtime::{
+    merge_remote_session_catalog, session_has_active_provider_turn, session_has_unsettled_turn,
+};
 use super::settings::visible_settings_pages;
 use super::{
     ESCAPE_STOP_CONFIRMATION_TIMEOUT, EscapeStopConfirmation, EscapeStopPress, EscapeStopTarget,
@@ -171,6 +173,23 @@ fn foreground_output_recovers_a_missed_provider_turn_start_for_steering() {
     assert!(session_accepts_turn_output(&mut session));
     assert_eq!(session.status, SessionStatus::Working);
     assert!(session_has_active_provider_turn(&session));
+}
+
+#[test]
+fn stale_busy_status_does_not_queue_a_new_submission() {
+    let mut session = AgentSession::new(Uuid::new_v4(), ProviderKind::Codex);
+    session.status = SessionStatus::Working;
+
+    assert!(!session_has_unsettled_turn(&session));
+}
+
+#[test]
+fn active_turn_keeps_submission_on_the_follow_up_path() {
+    let mut session = AgentSession::new(Uuid::new_v4(), ProviderKind::Codex);
+    session.begin_turn("still working");
+    session.status = SessionStatus::Working;
+
+    assert!(session_has_unsettled_turn(&session));
 }
 
 #[test]
