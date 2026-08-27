@@ -179,6 +179,8 @@ impl ClaudeDriver {
     pub fn start(options: DriverStartOptions, events: DriverEventSender) -> anyhow::Result<Self> {
         let DriverStartOptions {
             binary,
+            provider_instance_id: _,
+            environment,
             cwd,
             mode,
             interaction_mode,
@@ -209,7 +211,7 @@ impl ClaudeDriver {
             .clone()
             .unwrap_or_else(|| Uuid::new_v4().to_string());
 
-        let mut command = crate::command_env::command(&binary);
+        let mut command = crate::command_env::command_with_environment(&binary, &environment);
         command.current_dir(&cwd);
         configure_stream_command(&mut command, mode, interaction_mode);
         let launch_model = wire_model(model.as_deref(), context_window.as_deref());
@@ -1809,6 +1811,8 @@ mod tests {
         let driver = ClaudeDriver::start(
             DriverStartOptions {
                 binary,
+                provider_instance_id: None,
+                environment: Default::default(),
                 cwd: std::env::temp_dir(),
                 mode: RuntimeMode::FullAccess,
                 interaction_mode: InteractionMode::Build,
@@ -1878,6 +1882,8 @@ mod tests {
         let driver = ClaudeDriver::start(
             DriverStartOptions {
                 binary,
+                provider_instance_id: None,
+                environment: Default::default(),
                 cwd: std::env::temp_dir(),
                 mode: RuntimeMode::FullAccess,
                 interaction_mode: InteractionMode::Build,

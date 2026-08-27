@@ -3,6 +3,8 @@ use super::*;
 use anyhow::Context as _;
 use base64::Engine as _;
 
+type PickerModel = (ProviderKind, Option<String>, ProviderModel);
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum ComposerSubmitAction {
     Send,
@@ -793,11 +795,17 @@ impl Waku {
         let session = self.selected_session();
         let provider = session.map(|session| session.provider).unwrap_or_default();
         let selected_model = session.and_then(|session| self.model_for_session(session));
-        let selected_model_name = self.model_display_name(provider, selected_model);
-        let locked_provider = session
+        let selected_model_name = session
+            .map(|session| self.model_display_name_for_session(session))
+            .unwrap_or_else(|| provider.short_name().to_owned());
+        let selected_provider_instance =
+            session.map(|session| session.provider_instance_id().to_owned());
+        let locked_provider_instance = session
             .filter(|session| !session.messages.is_empty())
-            .map(|session| session.provider);
-        let picker_enabled = session.is_some_and(|session| session.can_choose_model(provider));
+            .map(|session| (session.provider, session.provider_instance_id().to_owned()));
+        let picker_enabled = session.is_some_and(|session| {
+            session.can_choose_provider_instance(provider, session.provider_instance_id.as_deref())
+        });
 
         if !picker_enabled {
             return div()
@@ -827,7 +835,7 @@ impl Waku {
         let selected_tab = self.model_picker_tab;
         let selected_model = selected_model.map(str::to_owned);
         let probes = self.probes.clone();
-        let disabled_providers = self.state.disabled_providers.clone();
+        let provider_instances = self.state.provider_instances();
         let pending_discoveries = self.provider_model_discoveries_pending.clone();
         let favorites = self.state.favorite_models.clone();
         let weak = cx.entity().downgrade();
@@ -917,8 +925,8 @@ impl Waku {
             visible_picker_models(
                 &probes,
                 &favorites,
-                &disabled_providers,
-                locked_provider,
+                &provider_instances,
+                locked_provider_instance.as_ref(),
                 selected_tab,
                 &normalized_query,
             )
@@ -1011,7 +1019,11 @@ impl Waku {
 
                 // One predicate with the `tab` cycle, so clicking and cycling
                 // agree on which tabs are usable.
-                let rail_tabs = visible_picker_tabs(&probes, &disabled_providers, locked_provider);
+                let rail_tabs = visible_picker_tabs(
+                    &probes,
+                    &provider_instances,
+                    locked_provider_instance.as_ref(),
+                );
                 for kind in ProviderKind::ALL {
                     // A provider with no CLI on the machine, or one switched
                     // off in the Providers settings, leaves the rail entirely
@@ -1022,8 +1034,8 @@ impl Waku {
                     // true only until the next session.
                     if !picker_rail_shows_provider(
                         &probes,
-                        &disabled_providers,
-                        locked_provider,
+                        &provider_instances,
+                        locked_provider_instance.as_ref(),
                         kind,
                     ) {
                         continue;
@@ -1103,7 +1115,10 @@ impl Waku {
                     } else if matches!(
                         selected_tab,
                         ModelPickerTab::Provider(provider)
-                            if pending_discoveries.contains(&provider)
+                            if provider_instances.iter().any(|instance| {
+                                instance.provider == provider
+                                    && pending_discoveries.contains(&instance.id)
+                            })
                     ) {
                         tr!("models.loading")
                     } else {
@@ -1121,20 +1136,35 @@ impl Waku {
                     );
                 }
 
-                for (row_index, (kind, model)) in available_models.iter().enumerate() {
+                for (row_index, (kind, provider_instance_id, model)) in
+                    available_models.iter().enumerate()
+                {
                     let kind = *kind;
-                    let is_selected =
-                        kind == provider && selected_model.as_deref() == Some(model.id.as_str());
+                    let identity = provider_instance_id.as_deref().unwrap_or_else(|| kind.id());
+                    let is_selected = kind == provider
+                        && selected_provider_instance.as_deref() == Some(identity)
+                        && selected_model.as_deref() == Some(model.id.as_str());
                     let is_highlighted = highlight == Some(row_index);
-                    let is_favorite = favorites
-                        .iter()
-                        .any(|favorite| favorite.provider == kind && favorite.model == model.id);
+                    let is_favorite = favorites.iter().any(|favorite| {
+                        favorite.provider == kind
+                            && favorite.provider_instance_id() == identity
+                            && favorite.model == model.id
+                    });
                     let model_id = model.id.clone();
+                    let select_provider_instance_id = provider_instance_id.clone();
                     let select_weak = weak.clone();
                     let select_popover = popover.clone();
                     let favorite_model_id = model.id.clone();
+                    let favorite_provider_instance_id = provider_instance_id.clone();
                     let favorite_weak = weak.clone();
-                    let subtitle = model_picker_subtitle(kind, model.sub_provider.as_deref());
+                    let instance_name = provider_instances
+                        .iter()
+                        .find(|instance| instance.id == identity)
+                        .map(|instance| instance.name.as_str());
+                    let subtitle = model_picker_subtitle(
+                        kind,
+                        instance_name.or(model.sub_provider.as_deref()),
+                    );
                     rows = rows.child(
                         div()
                             .id(SharedString::from(format!(
@@ -1224,8 +1254,9 @@ impl Waku {
                                     .on_click(move |_, _, cx| {
                                         cx.stop_propagation();
                                         let _ = favorite_weak.update(cx, |this, cx| {
-                                            this.toggle_favorite_model(
+                                            this.toggle_favorite_provider_instance_model(
                                                 kind,
+                                                favorite_provider_instance_id.clone(),
                                                 favorite_model_id.clone(),
                                                 cx,
                                             );
@@ -1234,7 +1265,12 @@ impl Waku {
                             )
                             .on_click(move |_, window, cx| {
                                 let _ = select_weak.update(cx, |this, cx| {
-                                    this.choose_model(kind, model_id.clone(), cx);
+                                    this.choose_provider_instance_model(
+                                        kind,
+                                        select_provider_instance_id.clone(),
+                                        model_id.clone(),
+                                        cx,
+                                    );
                                 });
                                 select_popover.close(window, cx);
                             }),
@@ -1322,7 +1358,7 @@ impl Waku {
     fn move_model_picker_highlight(
         &mut self,
         key: &str,
-        models: &[(ProviderKind, ProviderModel)],
+        models: &[PickerModel],
         cx: &mut Context<Self>,
     ) {
         let current = self
@@ -1345,14 +1381,14 @@ impl Waku {
         if !self.model_search.read(cx).content().trim().is_empty() {
             return;
         }
-        let locked_provider = self
+        let locked_provider_instance = self
             .selected_session()
             .filter(|session| !session.messages.is_empty())
-            .map(|session| session.provider);
+            .map(|session| (session.provider, session.provider_instance_id().to_owned()));
         let tabs = visible_picker_tabs(
             &self.probes,
-            &self.state.disabled_providers,
-            locked_provider,
+            &self.state.provider_instances(),
+            locked_provider_instance.as_ref(),
         );
         let current = tabs.iter().position(|tab| *tab == self.model_picker_tab);
         let Some(next) = next_picker_highlight(current, tabs.len(), key) else {
@@ -1373,35 +1409,44 @@ impl Waku {
         let session = self.selected_session();
         let provider = session.map(|session| session.provider).unwrap_or_default();
         let selected_model = session.and_then(|session| self.model_for_session(session));
-        let locked_provider = session
+        let locked_provider_instance = session
             .filter(|session| !session.messages.is_empty())
-            .map(|session| session.provider);
+            .map(|session| (session.provider, session.provider_instance_id().to_owned()));
         let index = visible_picker_models(
             &self.probes,
             &self.state.favorite_models,
-            &self.state.disabled_providers,
-            locked_provider,
+            &self.state.provider_instances(),
+            locked_provider_instance.as_ref(),
             self.model_picker_tab,
             "",
         )
         .iter()
-        .position(|(kind, model)| *kind == provider && selected_model == Some(model.id.as_str()))
+        .position(|(kind, provider_instance_id, model)| {
+            *kind == provider
+                && provider_instance_id.as_deref().unwrap_or_else(|| kind.id())
+                    == session
+                        .map(|session| session.provider_instance_id())
+                        .unwrap_or_else(|| provider.id())
+                && selected_model == Some(model.id.as_str())
+        })
         .unwrap_or(0);
         self.model_picker_scroll.scroll_to_item(index);
     }
 
     /// Take the row the selection is on, defaulting to the first so `enter`
     /// works the moment the panel opens.
-    fn choose_highlighted_model(
-        &mut self,
-        models: &[(ProviderKind, ProviderModel)],
-        cx: &mut Context<Self>,
-    ) {
-        let Some((kind, model)) = models.get(self.model_picker_highlight.unwrap_or(0)) else {
+    fn choose_highlighted_model(&mut self, models: &[PickerModel], cx: &mut Context<Self>) {
+        let Some((kind, provider_instance_id, model)) =
+            models.get(self.model_picker_highlight.unwrap_or(0))
+        else {
             return;
         };
-        let (kind, model_id) = (*kind, model.id.clone());
-        self.choose_model(kind, model_id, cx);
+        self.choose_provider_instance_model(
+            *kind,
+            provider_instance_id.clone(),
+            model.id.clone(),
+            cx,
+        );
     }
 
     pub(super) fn render_model_traits_control(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
@@ -2190,14 +2235,16 @@ impl Waku {
     fn execute_goal_composer_command(&mut self, prompt: &str, cx: &mut Context<Self>) -> bool {
         use crate::composer_complete::GoalCommand;
         use crate::model::{GoalOperation, ThreadGoalStatus};
-        let Some((session_id, command, current_goal)) = self.selected_session().and_then(|session| {
-            let command = crate::composer_complete::parse_goal_submission(
-                session.provider,
-                prompt,
-                &self.slash_command_index,
-            )?;
-            Some((session.id, command, session.thread_goal.clone()))
-        }) else {
+        let Some((session_id, command, current_goal)) =
+            self.selected_session().and_then(|session| {
+                let command = crate::composer_complete::parse_goal_submission(
+                    session.provider,
+                    prompt,
+                    &self.slash_command_index,
+                )?;
+                Some((session.id, command, session.thread_goal.clone()))
+            })
+        else {
             return false;
         };
         match command {
@@ -3752,13 +3799,15 @@ pub(super) fn next_picker_highlight(
 /// while every other provider drops out for the lock's duration.
 pub(super) fn visible_picker_tabs(
     probes: &[ProviderProbe],
-    disabled_providers: &[ProviderKind],
-    locked_provider: Option<ProviderKind>,
+    provider_instances: &[waku_client::settings::ProviderInstance],
+    locked_provider_instance: Option<&(ProviderKind, String)>,
 ) -> Vec<ModelPickerTab> {
     let mut tabs = vec![ModelPickerTab::Favorites];
     tabs.extend(ProviderKind::ALL.into_iter().filter_map(|kind| {
-        let drawn = picker_rail_shows_provider(probes, disabled_providers, locked_provider, kind);
-        let allowed = locked_provider.is_none() || locked_provider == Some(kind);
+        let drawn =
+            picker_rail_shows_provider(probes, provider_instances, locked_provider_instance, kind);
+        let allowed = locked_provider_instance.is_none()
+            || locked_provider_instance.is_some_and(|(provider, _)| *provider == kind);
         (drawn && allowed).then_some(ModelPickerTab::Provider(kind))
     }));
     tabs
@@ -3881,15 +3930,23 @@ fn open_provider_settings_from_picker(
 /// that session's only route to another model.
 pub(super) fn picker_rail_shows_provider(
     probes: &[ProviderProbe],
-    disabled_providers: &[ProviderKind],
-    locked_provider: Option<ProviderKind>,
+    provider_instances: &[waku_client::settings::ProviderInstance],
+    locked_provider_instance: Option<&(ProviderKind, String)>,
     kind: ProviderKind,
 ) -> bool {
-    let installed = probes
-        .iter()
-        .any(|probe| probe.provider == kind && probe.installed);
-    let switched_off = disabled_providers.contains(&kind) && locked_provider != Some(kind);
-    installed && !switched_off
+    probes.iter().any(|probe| {
+        if probe.provider != kind || !probe.installed {
+            return false;
+        }
+        let identity = probe.provider_instance_id();
+        let locked = locked_provider_instance
+            .is_some_and(|(provider, instance_id)| *provider == kind && instance_id == identity);
+        locked
+            || provider_instances
+                .iter()
+                .find(|instance| instance.provider == kind && instance.id == identity)
+                .is_some_and(|instance| instance.enabled)
+    })
 }
 
 pub(super) fn model_picker_subtitle(provider: ProviderKind, sub_provider: Option<&str>) -> String {
@@ -3910,13 +3967,13 @@ pub(super) fn model_picker_subtitle(provider: ProviderKind, sub_provider: Option
 /// the trigger would flash an empty state during every launch.
 pub(super) fn picker_has_no_providers(
     probes: &[ProviderProbe],
-    disabled_providers: &[ProviderKind],
-    locked_provider: Option<ProviderKind>,
+    provider_instances: &[waku_client::settings::ProviderInstance],
+    locked_provider_instance: Option<&(ProviderKind, String)>,
     detection_settled: bool,
 ) -> bool {
     detection_settled
         && !ProviderKind::ALL.into_iter().any(|kind| {
-            picker_rail_shows_provider(probes, disabled_providers, locked_provider, kind)
+            picker_rail_shows_provider(probes, provider_instances, locked_provider_instance, kind)
         })
 }
 
@@ -3927,11 +3984,11 @@ pub(super) fn picker_has_no_providers(
 pub(super) fn visible_picker_models(
     probes: &[ProviderProbe],
     favorites: &[FavoriteModel],
-    disabled_providers: &[ProviderKind],
-    locked_provider: Option<ProviderKind>,
+    provider_instances: &[waku_client::settings::ProviderInstance],
+    locked_provider_instance: Option<&(ProviderKind, String)>,
     selected_tab: ModelPickerTab,
     normalized_query: &str,
-) -> Vec<(ProviderKind, ProviderModel)> {
+) -> Vec<PickerModel> {
     let searching = !normalized_query.is_empty();
     let mut models = probes
         .iter()
@@ -3941,20 +3998,41 @@ pub(super) fn visible_picker_models(
                 .models
                 .iter()
                 .cloned()
-                .map(move |model| (probe.provider, model))
+                .map(move |model| (probe.provider, probe.provider_instance_id.clone(), model))
         })
-        .filter(|(kind, _)| locked_provider.is_none() || locked_provider == Some(*kind))
+        .filter(|(kind, provider_instance_id, _)| {
+            let identity = provider_instance_id.as_deref().unwrap_or_else(|| kind.id());
+            locked_provider_instance.is_none()
+                || locked_provider_instance.is_some_and(|(provider, instance_id)| {
+                    provider == kind && instance_id == identity
+                })
+        })
         // Switched-off providers keep serving the session already locked to
         // them, but offer nothing to new work — including favorites.
-        .filter(|(kind, _)| !disabled_providers.contains(kind) || locked_provider == Some(*kind))
-        .filter(|(kind, model)| {
+        .filter(|(kind, provider_instance_id, _)| {
+            let identity = provider_instance_id.as_deref().unwrap_or_else(|| kind.id());
+            locked_provider_instance
+                .is_some_and(|(provider, instance_id)| provider == kind && instance_id == identity)
+                || provider_instances
+                    .iter()
+                    .find(|instance| instance.provider == *kind && instance.id == identity)
+                    .is_some_and(|instance| instance.enabled)
+        })
+        .filter(|(kind, provider_instance_id, model)| {
+            let identity = provider_instance_id.as_deref().unwrap_or_else(|| kind.id());
             if searching {
+                let instance_name = provider_instances
+                    .iter()
+                    .find(|instance| instance.provider == *kind && instance.id == identity)
+                    .map(|instance| instance.name.as_str())
+                    .unwrap_or("");
                 let searchable = format!(
-                    "{} {} {} {}",
+                    "{} {} {} {} {}",
                     model.name,
                     model.id,
                     kind.short_name(),
-                    model.sub_provider.as_deref().unwrap_or("")
+                    model.sub_provider.as_deref().unwrap_or(""),
+                    instance_name,
                 )
                 .to_ascii_lowercase();
                 return normalized_query
@@ -3962,18 +4040,25 @@ pub(super) fn visible_picker_models(
                     .all(|token| searchable.contains(token));
             }
             match selected_tab {
-                ModelPickerTab::Favorites => favorites
-                    .iter()
-                    .any(|favorite| favorite.provider == *kind && favorite.model == model.id),
+                ModelPickerTab::Favorites => favorites.iter().any(|favorite| {
+                    favorite.provider == *kind
+                        && favorite.provider_instance_id() == identity
+                        && favorite.model == model.id
+                }),
                 ModelPickerTab::Provider(provider) => provider == *kind,
             }
         })
         .collect::<Vec<_>>();
     if !searching && selected_tab == ModelPickerTab::Favorites {
-        models.sort_by_key(|(kind, model)| {
+        models.sort_by_key(|(kind, provider_instance_id, model)| {
+            let identity = provider_instance_id.as_deref().unwrap_or_else(|| kind.id());
             favorites
                 .iter()
-                .position(|favorite| favorite.provider == *kind && favorite.model == model.id)
+                .position(|favorite| {
+                    favorite.provider == *kind
+                        && favorite.provider_instance_id() == identity
+                        && favorite.model == model.id
+                })
                 .unwrap_or(usize::MAX)
         });
     }

@@ -126,6 +126,7 @@ pub(crate) struct OpenCodeServer {
 }
 
 impl OpenCodeServer {
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn start(binary: &Path, cwd: &Path) -> anyhow::Result<Self> {
         Self::start_with_env(binary, cwd, &[])
     }

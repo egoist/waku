@@ -384,6 +384,24 @@ providers.binary_path:
   en: Binary path
 providers.binary_path_description:
   en: The executable Waku launches for %{provider}. Press Return to apply; leave empty to detect from PATH
+providers.environment:
+  en: Environment variables
+providers.environment_description:
+  en: JSON object applied only when Waku launches this provider instance
+providers.environment_hint:
+  en: "Example: {\"CODEX_HOME\":\"/path/to/codex-home\"}. Values are stored in daemon settings; do not put secrets here"
+providers.environment_invalid:
+  en: "Environment variables must be a JSON object of strings: %{error}"
+providers.instance_in_use:
+  en: A provider instance used by an existing task cannot be removed
+providers.add_instance:
+  en: Add another %{provider} instance
+providers.remove_instance:
+  en: Remove %{provider}
+providers.instance_name:
+  en: Instance name
+providers.instance_name_invalid:
+  en: Instance name cannot be empty
 providers.checked_just_now:
   en: Checked just now
 providers.checked_minutes_ago:

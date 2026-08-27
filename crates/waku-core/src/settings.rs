@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 
 use parking_lot::Mutex;
 use uuid::Uuid;
-pub use waku_protocol::settings::DaemonSettings;
+pub use waku_protocol::settings::{DaemonSettings, ProviderInstance};
 
 pub struct DaemonSettingsStore {
     path: PathBuf,

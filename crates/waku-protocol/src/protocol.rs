@@ -134,12 +134,16 @@ pub enum Command {
     },
     ProbeProvider {
         provider: ProviderKind,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        provider_instance_id: Option<String>,
         binary_override: Option<String>,
         discover_models: bool,
         probe_version: bool,
     },
     FetchPlanUsage {
         provider: ProviderKind,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        provider_instance_id: Option<String>,
         binary_override: Option<String>,
         cli_version: Option<String>,
     },
@@ -250,6 +254,8 @@ pub enum Command {
 #[serde(rename_all = "camelCase")]
 pub struct WireDriverStartOptions {
     pub provider: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_instance_id: Option<String>,
     pub binary: PathBuf,
     pub cwd: PathBuf,
     pub mode: String,

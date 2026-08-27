@@ -100,6 +100,8 @@ impl DeepSeekDriver {
     pub fn start(options: DriverStartOptions, events: DriverEventSender) -> anyhow::Result<Self> {
         let DriverStartOptions {
             binary,
+            provider_instance_id: _,
+            environment,
             cwd,
             mode,
             interaction_mode,
@@ -124,7 +126,7 @@ impl DeepSeekDriver {
             _ => (Uuid::new_v4().to_string(), false),
         };
 
-        let server = crate::deepseek_pool::acquire(&binary)?;
+        let server = crate::deepseek_pool::acquire_with_environment(&binary, &environment)?;
         // Subscribe first. A create immediately publishes host and mux state,
         // and buffering that state closes the create/history race.
         let event_rx = server.subscribe(&requested_session_id);

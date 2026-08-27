@@ -86,6 +86,8 @@ impl AmpDriver {
     pub fn start(options: DriverStartOptions, events: DriverEventSender) -> anyhow::Result<Self> {
         let DriverStartOptions {
             binary,
+            provider_instance_id: _,
+            environment,
             cwd,
             mode,
             interaction_mode,
@@ -119,7 +121,8 @@ impl AmpDriver {
         let title_binary = binary.clone();
         let title_cwd = cwd.clone();
         let reader_initial_thread_id = thread_id.clone();
-        let mut command: Command = crate::command_env::command(&binary);
+        let mut command: Command =
+            crate::command_env::command_with_environment(&binary, &environment);
         command.current_dir(&cwd).args(amp_args(
             model.as_deref(),
             reasoning_effort.as_deref(),
@@ -566,6 +569,8 @@ mod tests {
         let driver = AmpDriver::start(
             DriverStartOptions {
                 binary,
+                provider_instance_id: None,
+                environment: Default::default(),
                 cwd: std::env::temp_dir(),
                 mode: RuntimeMode::FullAccess,
                 interaction_mode: InteractionMode::Build,
@@ -625,6 +630,8 @@ mod tests {
         let driver = AmpDriver::start(
             DriverStartOptions {
                 binary,
+                provider_instance_id: None,
+                environment: Default::default(),
                 cwd: std::env::temp_dir(),
                 mode: RuntimeMode::FullAccess,
                 interaction_mode: InteractionMode::Build,

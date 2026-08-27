@@ -180,6 +180,11 @@ pub trait DriverControl: Send + Sync {
 
 pub struct DriverStartOptions {
     pub binary: PathBuf,
+    /// Stable provider configuration identity. Resident process pools include
+    /// this in their key so two environment-isolated instances never share.
+    pub provider_instance_id: Option<String>,
+    /// Environment applied after Waku's normalized login-shell environment.
+    pub environment: std::collections::BTreeMap<String, String>,
     pub cwd: PathBuf,
     pub mode: RuntimeMode,
     pub interaction_mode: InteractionMode,

@@ -1085,16 +1085,16 @@ pub struct Waku {
     probes: Vec<ProviderProbe>,
     provider_probe_tx: Sender<ProviderProbe>,
     provider_probe_events: Receiver<ProviderProbe>,
-    provider_model_discoveries: HashSet<ProviderKind>,
-    provider_model_discoveries_pending: HashSet<ProviderKind>,
+    provider_model_discoveries: HashSet<String>,
+    provider_model_discoveries_pending: HashSet<String>,
     /// CLI version per provider, probed off-thread. Missing key means the
     /// probe has not answered yet; `None` means it ran and found nothing.
-    provider_versions: HashMap<ProviderKind, Option<String>>,
-    provider_version_tx: Sender<(ProviderKind, Option<String>)>,
-    provider_version_events: Receiver<(ProviderKind, Option<String>)>,
+    provider_versions: HashMap<String, Option<String>>,
+    provider_version_tx: Sender<(String, Option<String>)>,
+    provider_version_events: Receiver<(String, Option<String>)>,
     /// Providers with a version probe in flight, so a re-detect cannot stack
     /// a second subprocess on one that has not answered.
-    provider_version_probes_pending: HashSet<ProviderKind>,
+    provider_version_probes_pending: HashSet<String>,
     /// Fast provider detection results from the daemon, including its cached
     /// model catalog. Live discovery revalidates these probes afterward.
     provider_detection_tx: Sender<ProviderProbe>,
@@ -1106,8 +1106,10 @@ pub struct Waku {
     provider_detection_checked_at: Option<Instant>,
     /// The provider row expanded on the Providers page, if any. The binary
     /// override input below edits this provider's entry.
-    expanded_provider_settings: Option<ProviderKind>,
+    expanded_provider_settings: Option<String>,
+    provider_name_input: Entity<TextInput>,
     provider_path_input: Entity<TextInput>,
+    provider_environment_input: Entity<TextInput>,
     computer_permissions: ComputerPermissions,
     computer_permission_tx: Sender<Result<ComputerPermissions, String>>,
     computer_permission_events: Receiver<Result<ComputerPermissions, String>>,
@@ -1115,29 +1117,31 @@ pub struct Waku {
     /// Account rate-limit meters per provider, fetched off-thread (Claude,
     /// Codex, and OpenCode Go over HTTPS; Grok through a stdio probe) and
     /// refreshed live by Codex's own stream. Frames read only this snapshot.
-    plan_usage: HashMap<ProviderKind, crate::usage::PlanUsage>,
+    plan_usage: HashMap<String, crate::usage::PlanUsage>,
     /// Why a provider's last fetch failed, kept alongside stale data for the
     /// meter's tooltip. Cleared by that provider's next success.
-    plan_usage_error: HashMap<ProviderKind, String>,
+    plan_usage_error: HashMap<String, String>,
     plan_usage_tx: Sender<(
+        String,
         ProviderKind,
         Result<Option<crate::usage::PlanUsage>, String>,
     )>,
     plan_usage_events: Receiver<(
+        String,
         ProviderKind,
         Result<Option<crate::usage::PlanUsage>, String>,
     )>,
-    plan_usage_pending: HashSet<ProviderKind>,
+    plan_usage_pending: HashSet<String>,
     /// Fetchable providers with no matching account credential. Unlike a
     /// request failure, this hides the plan section until a later refresh
     /// discovers a newly configured account.
-    plan_usage_unconfigured: HashSet<ProviderKind>,
+    plan_usage_unconfigured: HashSet<String>,
     /// When each provider's last fetch settled, successful or not — the
     /// refresh backoff measures from here.
-    plan_usage_checked_at: HashMap<ProviderKind, Instant>,
+    plan_usage_checked_at: HashMap<String, Instant>,
     /// Providers whose turn settled since the last fetch, so the meters have
     /// moved.
-    plan_usage_stale: HashSet<ProviderKind>,
+    plan_usage_stale: HashSet<String>,
     /// The settings Usage page's snapshot: historical token/cost usage
     /// scanned from provider transcripts off-thread. Frames read only this.
     usage_history: Option<crate::usage_history::UsageHistory>,
@@ -1231,12 +1235,12 @@ pub struct Waku {
     commit_operation: Option<commit_dialog::CommitOperationState>,
     /// Slash commands discovered per (provider, project root, CLI override).
     /// Filesystem and CLI probes live off the UI thread; frames read this cache.
-    slash_commands: QueryCache<(ProviderKind, PathBuf, Option<String>), Vec<SlashCommand>>,
+    slash_commands: QueryCache<(ProviderKind, String, PathBuf, Option<String>), Vec<SlashCommand>>,
     /// The merged command list the autocomplete popup draws, and the key it
     /// was built for — a stale key means "no commands", never another
     /// provider's list.
     slash_command_index: Rc<Vec<SlashCommand>>,
-    slash_command_index_key: Option<(ProviderKind, PathBuf, Option<String>)>,
+    slash_command_index_key: Option<(ProviderKind, String, PathBuf, Option<String>)>,
     slash_command_index_loading: bool,
     /// Workspace file index per project root, for `@` mentions.
     mention_files: QueryCache<PathBuf, Vec<FileEntry>>,
@@ -2008,6 +2012,8 @@ impl Waku {
                 .placeholder(tr!("skills.search"))
         });
         let session_rename_input = cx.new(|cx| TextInput::new(window, cx));
+        let provider_name_input =
+            cx.new(|cx| TextInput::new(window, cx).select_all_on_focus_click());
         let provider_path_input = cx.new(|cx| {
             TextInput::new(window, cx)
                 .select_all_on_focus_click()
@@ -2020,6 +2026,11 @@ impl Waku {
         let right_panel_diff_filter = cx.new(|cx| {
             TextInput::new(window, cx)
                 .placeholder(tr!("diff.filter_files"))
+        });
+        let provider_environment_input = cx.new(|cx| {
+            TextInput::new(window, cx)
+                .select_all_on_focus_click()
+                .placeholder(r#"{"CODEX_HOME":"/path/to/codex-home"}"#)
         });
         let navigation_rail = cx.new(|_| ConversationNavigationRail::new());
         let sidebar_pane = WakuPane::new(Waku::sidebar_pane_content, cx);
@@ -2163,14 +2174,17 @@ impl Waku {
             .into_iter()
             .map(ComposerAttachment::from)
             .collect();
-        let probes = ProviderKind::ALL
+        let probes = state
+            .provider_instances()
             .into_iter()
-            .map(|provider| ProviderProbe {
-                provider,
+            .map(|instance| ProviderProbe {
+                provider: instance.provider,
+                provider_instance_id: (instance.id != instance.provider.id())
+                    .then_some(instance.id),
                 installed: false,
                 path: None,
-                models: crate::model_catalog::fallback_models(provider),
-                agent_presets: crate::model_catalog::fallback_agent_presets(provider),
+                models: crate::model_catalog::fallback_models(instance.provider),
+                agent_presets: crate::model_catalog::fallback_agent_presets(instance.provider),
             })
             .collect::<Vec<_>>();
         let (provider_probe_tx, provider_probe_events) = unbounded();
@@ -2590,10 +2604,28 @@ impl Waku {
             )
             .detach();
             cx.subscribe(
+                &provider_name_input,
+                |this: &mut Self, _, event: &InputEvent, cx| {
+                    if matches!(event, InputEvent::Submit(_)) {
+                        this.apply_provider_instance_name(cx);
+                    }
+                },
+            )
+            .detach();
+            cx.subscribe(
                 &provider_path_input,
                 |this: &mut Self, _, event: &InputEvent, cx| {
                     if matches!(event, InputEvent::Submit(_)) {
                         this.apply_provider_path_override(cx);
+                    }
+                },
+            )
+            .detach();
+            cx.subscribe(
+                &provider_environment_input,
+                |this: &mut Self, _, event: &InputEvent, cx| {
+                    if matches!(event, InputEvent::Submit(_)) {
+                        this.apply_provider_environment(cx);
                     }
                 },
             )
@@ -2757,7 +2789,9 @@ impl Waku {
                 provider_detection_remaining: 0,
                 provider_detection_checked_at: None,
                 expanded_provider_settings: None,
+                provider_name_input,
                 provider_path_input,
+                provider_environment_input,
                 computer_permissions: ComputerPermissions::default(),
                 computer_permission_tx,
                 computer_permission_events,

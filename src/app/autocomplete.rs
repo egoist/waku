@@ -128,9 +128,22 @@ impl Waku {
             .selected_session()
             .map(|session| session.available_commands.clone())
             .unwrap_or_default();
-        let binary_override = self.state.provider_binary_overrides.get(&provider).cloned();
+        let provider_instance_id = self
+            .selected_session()
+            .filter(|session| session.provider == provider)
+            .map(|session| session.provider_instance_id().to_owned())
+            .unwrap_or_else(|| provider.id().to_owned());
+        let binary_override = self
+            .state
+            .provider_instance(provider, Some(&provider_instance_id))
+            .and_then(|instance| instance.binary_override);
 
-        let command_key = (provider, project_path.clone(), binary_override.clone());
+        let command_key = (
+            provider,
+            provider_instance_id.clone(),
+            project_path.clone(),
+            binary_override.clone(),
+        );
         match self.slash_commands.read(&command_key) {
             Query::Ready(commands) => {
                 self.slash_command_index = Rc::new(composer_complete::merge_reported_commands(
@@ -163,6 +176,8 @@ impl Waku {
                             match workspace.request(
                                 waku_client::WorkspaceOperation::DiscoverSlashCommands {
                                     provider,
+                                    provider_instance_id: (provider_instance_id != provider.id())
+                                        .then_some(provider_instance_id),
                                     project_root: path,
                                     binary_override,
                                 },
@@ -247,9 +262,21 @@ impl Waku {
                 .selected_session()
                 .map(|session| session.provider)
                 .unwrap_or(self.state.last_provider);
-            let binary_override = self.state.provider_binary_overrides.get(&provider).cloned();
-            self.slash_commands
-                .invalidate(&(provider, path.clone(), binary_override));
+            let provider_instance_id = self
+                .selected_session()
+                .filter(|session| session.provider == provider)
+                .map(|session| session.provider_instance_id().to_owned())
+                .unwrap_or_else(|| provider.id().to_owned());
+            let binary_override = self
+                .state
+                .provider_instance(provider, Some(&provider_instance_id))
+                .and_then(|instance| instance.binary_override);
+            self.slash_commands.invalidate(&(
+                provider,
+                provider_instance_id,
+                path.clone(),
+                binary_override,
+            ));
             self.mention_files.invalidate(&path);
         }
         self.refresh_composer_sources(cx);

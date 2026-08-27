@@ -74,24 +74,44 @@ impl Default for PoolSlot {
     }
 }
 
-fn pool() -> &'static Mutex<HashMap<PathBuf, Arc<PoolSlot>>> {
-    static POOL: OnceLock<Mutex<HashMap<PathBuf, Arc<PoolSlot>>>> = OnceLock::new();
+type PoolKey = (PathBuf, Vec<(String, String)>);
+
+fn pool() -> &'static Mutex<HashMap<PoolKey, Arc<PoolSlot>>> {
+    static POOL: OnceLock<Mutex<HashMap<PoolKey, Arc<PoolSlot>>>> = OnceLock::new();
     POOL.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
 /// Returns the resident Harness Host for `binary`, starting it when needed.
 /// Blocking by design; driver construction already runs off the UI thread.
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn acquire(binary: &Path) -> anyhow::Result<PooledDeepSeekServer> {
-    acquire_with_start(binary, || DeepSeekServer::start(binary))
+    acquire_with_environment(binary, &std::collections::BTreeMap::new())
+}
+
+pub(crate) fn acquire_with_environment(
+    binary: &Path,
+    environment: &std::collections::BTreeMap<String, String>,
+) -> anyhow::Result<PooledDeepSeekServer> {
+    acquire_with_start(binary, environment, || {
+        DeepSeekServer::start_with_environment(binary, environment)
+    })
 }
 
 fn acquire_with_start(
     binary: &Path,
+    environment: &std::collections::BTreeMap<String, String>,
     start: impl FnOnce() -> anyhow::Result<DeepSeekServer>,
 ) -> anyhow::Result<PooledDeepSeekServer> {
+    let key = (
+        binary.to_path_buf(),
+        environment
+            .iter()
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect(),
+    );
     let slot = {
         let mut pool = pool().lock().unwrap();
-        Arc::clone(pool.entry(binary.to_path_buf()).or_default())
+        Arc::clone(pool.entry(key).or_default())
     };
 
     let superseded = loop {

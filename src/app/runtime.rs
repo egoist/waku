@@ -1299,36 +1299,60 @@ impl Waku {
     }
 
     pub(super) fn provider_probe(&self, provider: ProviderKind) -> Option<&ProviderProbe> {
-        self.probes.iter().find(|probe| probe.provider == provider)
+        self.provider_probe_for_instance(provider, None)
     }
 
-    pub(super) fn request_provider_model_discovery(&mut self, provider: ProviderKind) {
+    pub(super) fn provider_probe_for_instance(
+        &self,
+        provider: ProviderKind,
+        provider_instance_id: Option<&str>,
+    ) -> Option<&ProviderProbe> {
+        let identity = provider_instance_id.unwrap_or_else(|| provider.id());
+        self.probes
+            .iter()
+            .find(|probe| probe.provider == provider && probe.provider_instance_id() == identity)
+    }
+
+    pub(super) fn request_provider_instance_model_discovery(
+        &mut self,
+        provider: ProviderKind,
+        provider_instance_id: Option<String>,
+    ) {
+        let identity = provider_instance_id
+            .clone()
+            .unwrap_or_else(|| provider.id().to_owned());
         if !provider.supports_model_discovery()
-            || self.provider_model_discoveries.contains(&provider)
+            || self.provider_model_discoveries.contains(&identity)
         {
             return;
         }
         let Some(probe) = self
-            .provider_probe(provider)
+            .provider_probe_for_instance(provider, provider_instance_id.as_deref())
             .filter(|probe| probe.installed)
             .cloned()
         else {
             return;
         };
-        self.provider_model_discoveries.insert(provider);
-        self.provider_model_discoveries_pending.insert(provider);
+        self.provider_model_discoveries.insert(identity.clone());
+        self.provider_model_discoveries_pending
+            .insert(identity.clone());
         let provider_probe_tx = self.provider_probe_tx.clone();
         let event_wake = self.event_wake_tx.clone();
         let daemon = self.daemon.client();
-        let binary_override = self.state.provider_binary_overrides.get(&provider).cloned();
+        let binary_override = self
+            .state
+            .provider_instance(provider, provider_instance_id.as_deref())
+            .and_then(|instance| instance.binary_override);
+        let thread_identity = identity.clone();
         if std::thread::Builder::new()
-            .name(format!("waku-{}-model-discovery", provider.id()))
+            .name(format!("waku-{thread_identity}-model-discovery"))
             .spawn(move || {
                 let discovered = match daemon.request(
                     Uuid::nil(),
                     Uuid::nil(),
                     waku_client::Command::ProbeProvider {
                         provider,
+                        provider_instance_id,
                         binary_override,
                         discover_models: true,
                         probe_version: false,
@@ -1343,8 +1367,8 @@ impl Waku {
             })
             .is_err()
         {
-            self.provider_model_discoveries.remove(&provider);
-            self.provider_model_discoveries_pending.remove(&provider);
+            self.provider_model_discoveries.remove(&identity);
+            self.provider_model_discoveries_pending.remove(&identity);
         }
     }
 
@@ -1354,11 +1378,22 @@ impl Waku {
     /// The stale catalog stays on screen until the fresh probe lands, so an
     /// open menu never blanks into a loading state while it refreshes.
     pub(super) fn refresh_provider_model_discovery(&mut self, provider: ProviderKind) {
-        if self.provider_model_discoveries_pending.contains(&provider) {
+        self.refresh_provider_instance_model_discovery(provider, None);
+    }
+
+    pub(super) fn refresh_provider_instance_model_discovery(
+        &mut self,
+        provider: ProviderKind,
+        provider_instance_id: Option<String>,
+    ) {
+        let identity = provider_instance_id
+            .clone()
+            .unwrap_or_else(|| provider.id().to_owned());
+        if self.provider_model_discoveries_pending.contains(&identity) {
             return;
         }
-        self.provider_model_discoveries.remove(&provider);
-        self.request_provider_model_discovery(provider);
+        self.provider_model_discoveries.remove(&identity);
+        self.request_provider_instance_model_discovery(provider, provider_instance_id);
     }
 
     /// Ask every installed CLI for its version, one short-lived subprocess per
@@ -1369,24 +1404,36 @@ impl Waku {
             .probes
             .iter()
             .filter(|probe| probe.installed)
-            .map(|probe| probe.provider)
+            .map(|probe| (probe.provider, probe.provider_instance_id.clone()))
             .collect::<Vec<_>>();
-        for provider in targets {
-            if !self.provider_version_probes_pending.insert(provider) {
+        for (provider, provider_instance_id) in targets {
+            let identity = provider_instance_id
+                .clone()
+                .unwrap_or_else(|| provider.id().to_owned());
+            if !self
+                .provider_version_probes_pending
+                .insert(identity.clone())
+            {
                 continue;
             }
             let provider_version_tx = self.provider_version_tx.clone();
             let event_wake = self.event_wake_tx.clone();
             let daemon = self.daemon.client();
-            let binary_override = self.state.provider_binary_overrides.get(&provider).cloned();
+            let binary_override = self
+                .state
+                .provider_instance(provider, provider_instance_id.as_deref())
+                .and_then(|instance| instance.binary_override);
+            let thread_identity = identity.clone();
+            let response_identity = identity.clone();
             if std::thread::Builder::new()
-                .name(format!("waku-{}-version-probe", provider.id()))
+                .name(format!("waku-{thread_identity}-version-probe"))
                 .spawn(move || {
                     let version = match daemon.request(
                         Uuid::nil(),
                         Uuid::nil(),
                         waku_client::Command::ProbeProvider {
                             provider,
+                            provider_instance_id,
                             binary_override,
                             discover_models: false,
                             probe_version: true,
@@ -1395,22 +1442,25 @@ impl Waku {
                         Ok(waku_client::ResponsePayload::ProviderProbe { version, .. }) => version,
                         _ => None,
                     };
-                    if provider_version_tx.send((provider, version)).is_ok() {
+                    if provider_version_tx
+                        .send((response_identity, version))
+                        .is_ok()
+                    {
                         signal_event_pump(&event_wake);
                     }
                 })
                 .is_err()
             {
-                self.provider_version_probes_pending.remove(&provider);
+                self.provider_version_probes_pending.remove(&identity);
             }
         }
     }
 
     pub(super) fn drain_provider_version_events(&mut self) -> bool {
         let mut changed = false;
-        while let Ok((provider, version)) = self.provider_version_events.try_recv() {
-            self.provider_version_probes_pending.remove(&provider);
-            self.provider_versions.insert(provider, version);
+        while let Ok((identity, version)) = self.provider_version_events.try_recv() {
+            self.provider_version_probes_pending.remove(&identity);
+            self.provider_versions.insert(identity, version);
             changed = true;
         }
         changed
@@ -1425,11 +1475,14 @@ impl Waku {
             return;
         }
         let providers = match scope {
-            Some(provider) => vec![provider],
-            None => ProviderKind::ALL.to_vec(),
+            Some(provider) => self
+                .state
+                .provider_instance(provider, None)
+                .into_iter()
+                .collect::<Vec<_>>(),
+            None => self.state.provider_instances(),
         };
         self.provider_detection_remaining = providers.len();
-        let overrides = self.state.provider_binary_overrides.clone();
         let provider_detection_tx = self.provider_detection_tx.clone();
         let event_wake = self.event_wake_tx.clone();
         let detect_providers = providers.clone();
@@ -1437,13 +1490,17 @@ impl Waku {
         if std::thread::Builder::new()
             .name("waku-provider-detection".into())
             .spawn(move || {
-                for provider in detect_providers {
+                for instance in detect_providers {
+                    let provider = instance.provider;
+                    let provider_instance_id =
+                        (instance.id != provider.id()).then_some(instance.id.clone());
                     let response = daemon.request(
                         Uuid::nil(),
                         Uuid::nil(),
                         waku_client::Command::ProbeProvider {
                             provider,
-                            binary_override: overrides.get(&provider).cloned(),
+                            provider_instance_id: provider_instance_id.clone(),
+                            binary_override: instance.binary_override.clone(),
                             discover_models: false,
                             probe_version: false,
                         },
@@ -1452,6 +1509,7 @@ impl Waku {
                         Ok(waku_client::ResponsePayload::ProviderProbe { probe, .. }) => probe,
                         _ => ProviderProbe {
                             provider,
+                            provider_instance_id,
                             installed: false,
                             path: None,
                             models: crate::model_catalog::fallback_models(provider),
@@ -1471,8 +1529,8 @@ impl Waku {
         // A refresh means "re-check everything about these providers":
         // clearing the per-launch guard lets each one's catalog discovery run
         // again as its detection lands below.
-        for provider in providers {
-            self.provider_model_discoveries.remove(&provider);
+        for instance in providers {
+            self.provider_model_discoveries.remove(&instance.id);
         }
     }
 
@@ -1481,17 +1539,17 @@ impl Waku {
         let mut installed_providers = Vec::new();
         while let Ok(probe) = self.provider_detection_events.try_recv() {
             let provider = probe.provider;
+            let identity = probe.provider_instance_id().to_owned();
+            let provider_instance_id = probe.provider_instance_id.clone();
             let installed = probe.installed;
             self.provider_detection_remaining = self.provider_detection_remaining.saturating_sub(1);
             if self.provider_detection_remaining == 0 {
                 self.provider_detection_checked_at = Some(Instant::now());
             }
-            if let Some(existing) = self
-                .probes
-                .iter_mut()
-                .find(|existing| existing.provider == provider)
-            {
-                if self.provider_model_discoveries_pending.contains(&provider) {
+            if let Some(existing) = self.probes.iter_mut().find(|existing| {
+                existing.provider == provider && existing.provider_instance_id() == identity
+            }) {
+                if self.provider_model_discoveries_pending.contains(&identity) {
                     // A manual refresh may overlap an older live discovery.
                     // Keep that newer catalog while still accepting PATH
                     // detection from this response.
@@ -1504,14 +1562,14 @@ impl Waku {
                 self.probes.push(probe);
             }
             if installed {
-                installed_providers.push(provider);
+                installed_providers.push((provider, provider_instance_id));
             } else {
-                self.provider_versions.remove(&provider);
+                self.provider_versions.remove(&identity);
             }
             changed = true;
         }
-        for provider in installed_providers {
-            self.request_provider_model_discovery(provider);
+        for (provider, provider_instance_id) in installed_providers {
+            self.request_provider_instance_model_discovery(provider, provider_instance_id);
         }
         if changed {
             self.request_provider_version_probes();
@@ -1522,9 +1580,19 @@ impl Waku {
     /// Whether the provider can back a new session: installed and not switched
     /// off in the Providers settings.
     pub(super) fn provider_enabled(&self, provider: ProviderKind) -> bool {
-        !self.state.disabled_providers.contains(&provider)
+        self.provider_instance_enabled(provider, None)
+    }
+
+    pub(super) fn provider_instance_enabled(
+        &self,
+        provider: ProviderKind,
+        provider_instance_id: Option<&str>,
+    ) -> bool {
+        self.state
+            .provider_instance(provider, provider_instance_id)
+            .is_some_and(|instance| instance.enabled)
             && self
-                .provider_probe(provider)
+                .provider_probe_for_instance(provider, provider_instance_id)
                 .is_some_and(|probe| probe.installed)
     }
 
@@ -1533,31 +1601,34 @@ impl Waku {
     /// composer's trigger, the picker panel, and the send button all swap to
     /// their unavailable state.
     pub(super) fn model_picker_has_no_providers(&self) -> bool {
-        let locked_provider = self
+        let locked_provider_instance = self
             .selected_session()
             .filter(|session| !session.messages.is_empty())
-            .map(|session| session.provider);
+            .map(|session| (session.provider, session.provider_instance_id().to_owned()));
         super::composer::picker_has_no_providers(
             &self.probes,
-            &self.state.disabled_providers,
-            locked_provider,
+            &self.state.provider_instances(),
+            locked_provider_instance.as_ref(),
             self.provider_detection_checked_at.is_some(),
         )
     }
 
     pub(super) fn model_for_session<'a>(&'a self, session: &'a AgentSession) -> Option<&'a str> {
         session.model.as_deref().or_else(|| {
-            self.provider_probe(session.provider)
-                .and_then(ProviderProbe::preferred_model)
-                .map(|model| model.id.as_str())
+            self.provider_probe_for_instance(
+                session.provider,
+                session.provider_instance_id.as_deref(),
+            )
+            .and_then(ProviderProbe::preferred_model)
+            .map(|model| model.id.as_str())
         })
     }
 
-    pub(super) fn model_display_name(&self, provider: ProviderKind, model: Option<&str>) -> String {
-        let Some(model) = model else {
-            return provider.short_name().to_owned();
+    pub(super) fn model_display_name_for_session(&self, session: &AgentSession) -> String {
+        let Some(model) = self.model_for_session(session) else {
+            return session.provider.short_name().to_owned();
         };
-        self.provider_probe(provider)
+        self.provider_probe_for_instance(session.provider, session.provider_instance_id.as_deref())
             .and_then(|probe| probe.models.iter().find(|candidate| candidate.id == model))
             .map(|candidate| candidate.name.clone())
             .unwrap_or_else(|| model.to_owned())
@@ -1568,7 +1639,7 @@ impl Waku {
         session: &AgentSession,
     ) -> Option<&ProviderModel> {
         let model = self.model_for_session(session)?;
-        self.provider_probe(session.provider)?
+        self.provider_probe_for_instance(session.provider, session.provider_instance_id.as_deref())?
             .models
             .iter()
             .find(|candidate| candidate.id == model)
@@ -2526,9 +2597,12 @@ impl Waku {
     /// disagree about what the session is currently set to.
     pub(super) fn session_options(&self, session: &AgentSession) -> SessionOptions {
         let model = session.model.clone().or_else(|| {
-            self.provider_probe(session.provider)
-                .and_then(ProviderProbe::preferred_model)
-                .map(|model| model.id.clone())
+            self.provider_probe_for_instance(
+                session.provider,
+                session.provider_instance_id.as_deref(),
+            )
+            .and_then(ProviderProbe::preferred_model)
+            .map(|model| model.id.clone())
         });
         let model_metadata = self.model_metadata_for_session(session);
         let reasoning_effort = session.reasoning_effort.clone().filter(|effort| {
@@ -2568,19 +2642,25 @@ impl Waku {
             return None;
         }
         session.agent_preset.clone().or_else(|| {
-            self.provider_probe(session.provider)
-                .and_then(ProviderProbe::preferred_agent_preset)
-                .map(|preset| preset.id.clone())
+            self.provider_probe_for_instance(
+                session.provider,
+                session.provider_instance_id.as_deref(),
+            )
+            .and_then(ProviderProbe::preferred_agent_preset)
+            .map(|preset| preset.id.clone())
         })
     }
 
     pub(super) fn agent_preset_label_for_session(&self, session: &AgentSession) -> Option<String> {
         let id = self.agent_preset_for_session(session)?;
         Some(
-            self.provider_probe(session.provider)
-                .and_then(|probe| probe.agent_presets.iter().find(|preset| preset.id == id))
-                .map(|preset| preset.display_name())
-                .unwrap_or(id),
+            self.provider_probe_for_instance(
+                session.provider,
+                session.provider_instance_id.as_deref(),
+            )
+            .and_then(|probe| probe.agent_presets.iter().find(|preset| preset.id == id))
+            .map(|preset| preset.display_name())
+            .unwrap_or(id),
         )
     }
 
@@ -2667,9 +2747,7 @@ impl Waku {
         cwd: PathBuf,
     ) -> anyhow::Result<DriverStartRequest> {
         let binary = self
-            .probes
-            .iter()
-            .find(|probe| probe.provider == session.provider)
+            .provider_probe_for_instance(session.provider, session.provider_instance_id.as_deref())
             .and_then(|probe| probe.path.clone())
             .ok_or_else(|| {
                 anyhow::anyhow!(tr!(
@@ -2691,6 +2769,7 @@ impl Waku {
             provider: session.provider,
             options: DriverStartOptions {
                 binary,
+                provider_instance_id: session.provider_instance_id.clone(),
                 cwd,
                 mode,
                 interaction_mode,
@@ -3509,13 +3588,11 @@ impl Waku {
     pub(super) fn drain_provider_probe_events(&mut self) -> bool {
         let mut changed = false;
         while let Ok(probe) = self.provider_probe_events.try_recv() {
-            self.provider_model_discoveries_pending
-                .remove(&probe.provider);
-            if let Some(existing) = self
-                .probes
-                .iter_mut()
-                .find(|existing| existing.provider == probe.provider)
-            {
+            let identity = probe.provider_instance_id().to_owned();
+            self.provider_model_discoveries_pending.remove(&identity);
+            if let Some(existing) = self.probes.iter_mut().find(|existing| {
+                existing.provider == probe.provider && existing.provider_instance_id() == identity
+            }) {
                 *existing = probe;
             } else {
                 self.probes.push(probe);

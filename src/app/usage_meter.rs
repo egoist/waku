@@ -40,16 +40,22 @@ impl Waku {
         // usage panel still owes the account meters. Without this the panel
         // would show its loading skeleton forever: fetchable provider, no
         // snapshot, and no fetch ever allowed to start.
-        let selected_provider = self.selected_session().map(|session| session.provider);
-        for provider in PLAN_USAGE_PROVIDERS {
-            if self.plan_usage_pending.contains(&provider)
-                || (!self.provider_enabled(provider) && selected_provider != Some(provider))
-            {
+        let instances = self.state.provider_instances();
+        let selected_instance = self
+            .selected_session()
+            .map(|session| session.provider_instance_id().to_owned());
+        for instance in instances.into_iter().filter(|instance| {
+            PLAN_USAGE_PROVIDERS.contains(&instance.provider)
+                && (instance.enabled || selected_instance.as_deref() == Some(instance.id.as_str()))
+        }) {
+            let provider = instance.provider;
+            let identity = instance.id.clone();
+            if self.plan_usage_pending.contains(&identity) {
                 continue;
             }
-            let interval = if self.plan_usage_error.contains_key(&provider) {
+            let interval = if self.plan_usage_error.contains_key(&identity) {
                 PLAN_USAGE_RETRY
-            } else if self.plan_usage_stale.contains(&provider) {
+            } else if self.plan_usage_stale.contains(&identity) {
                 PLAN_USAGE_REFRESH_STALE
             } else if provider == ProviderKind::Grok {
                 PLAN_USAGE_REFRESH_GROK
@@ -58,20 +64,17 @@ impl Waku {
             };
             if self
                 .plan_usage_checked_at
-                .get(&provider)
+                .get(&identity)
                 .is_some_and(|checked| checked.elapsed() < interval)
             {
                 continue;
             }
-            self.plan_usage_pending.insert(provider);
+            self.plan_usage_pending.insert(identity.clone());
             let tx = self.plan_usage_tx.clone();
             let event_wake = self.event_wake_tx.clone();
-            let claude_version = self
-                .provider_versions
-                .get(&ProviderKind::Claude)
-                .cloned()
-                .flatten();
-            let binary_override = self.state.provider_binary_overrides.get(&provider).cloned();
+            let claude_version = self.provider_versions.get(&identity).cloned().flatten();
+            let binary_override = instance.binary_override.clone();
+            let provider_instance_id = (identity != provider.id()).then_some(identity.clone());
             let daemon = self.daemon.client();
             cx.background_executor()
                 .spawn(async move {
@@ -80,6 +83,7 @@ impl Waku {
                         Uuid::nil(),
                         waku_client::Command::FetchPlanUsage {
                             provider,
+                            provider_instance_id,
                             binary_override,
                             cli_version: claude_version,
                         },
@@ -91,7 +95,11 @@ impl Waku {
                         Err(error) => Err(error),
                     };
                     if tx
-                        .send((provider, result.map_err(|error| format!("{error:#}"))))
+                        .send((
+                            identity,
+                            provider,
+                            result.map_err(|error| format!("{error:#}")),
+                        ))
                         .is_ok()
                     {
                         signal_event_pump(&event_wake);
@@ -103,32 +111,33 @@ impl Waku {
 
     pub(super) fn drain_plan_usage_events(&mut self) -> bool {
         let mut changed = false;
-        while let Ok((provider, result)) = self.plan_usage_events.try_recv() {
-            self.plan_usage_pending.remove(&provider);
-            self.plan_usage_stale.remove(&provider);
-            self.plan_usage_checked_at.insert(provider, Instant::now());
+        while let Ok((identity, _provider, result)) = self.plan_usage_events.try_recv() {
+            self.plan_usage_pending.remove(&identity);
+            self.plan_usage_stale.remove(&identity);
+            self.plan_usage_checked_at
+                .insert(identity.clone(), Instant::now());
             match result {
                 Ok(Some(usage)) => {
-                    changed |= self.plan_usage.get(&provider) != Some(&usage)
-                        || self.plan_usage_error.contains_key(&provider)
-                        || self.plan_usage_unconfigured.contains(&provider);
-                    self.plan_usage.insert(provider, usage);
-                    self.plan_usage_error.remove(&provider);
-                    self.plan_usage_unconfigured.remove(&provider);
+                    changed |= self.plan_usage.get(&identity) != Some(&usage)
+                        || self.plan_usage_error.contains_key(&identity)
+                        || self.plan_usage_unconfigured.contains(&identity);
+                    self.plan_usage.insert(identity.clone(), usage);
+                    self.plan_usage_error.remove(&identity);
+                    self.plan_usage_unconfigured.remove(&identity);
                 }
                 Ok(None) => {
-                    let had_usage = self.plan_usage.remove(&provider).is_some();
-                    let had_error = self.plan_usage_error.remove(&provider).is_some();
-                    let newly_unconfigured = self.plan_usage_unconfigured.insert(provider);
+                    let had_usage = self.plan_usage.remove(&identity).is_some();
+                    let had_error = self.plan_usage_error.remove(&identity).is_some();
+                    let newly_unconfigured = self.plan_usage_unconfigured.insert(identity.clone());
                     changed |= had_usage || had_error || newly_unconfigured;
                 }
                 Err(error) => {
-                    let was_unconfigured = self.plan_usage_unconfigured.remove(&provider);
+                    let was_unconfigured = self.plan_usage_unconfigured.remove(&identity);
                     changed |=
-                        self.plan_usage_error.get(&provider) != Some(&error) || was_unconfigured;
+                        self.plan_usage_error.get(&identity) != Some(&error) || was_unconfigured;
                     // Keep any previous snapshot; stale meters with reset
                     // times still self-correct visually.
-                    self.plan_usage_error.insert(provider, error);
+                    self.plan_usage_error.insert(identity.clone(), error);
                 }
             }
         }
@@ -180,15 +189,16 @@ impl Waku {
         }
         let session = self.selected_session()?;
         let provider = session.provider;
+        let provider_instance_id = session.provider_instance_id().to_owned();
         let context = session.context_usage;
         let theme = Theme::current(cx);
-        let plan = self.plan_usage.get(&provider).cloned();
-        let error = self.plan_usage_error.get(&provider).cloned();
+        let plan = self.plan_usage.get(&provider_instance_id).cloned();
+        let error = self.plan_usage_error.get(&provider_instance_id).cloned();
         // Fetchable but nothing cached yet: the panel shows a skeleton
         // whether the fetch is already in flight or lands on the next tick.
         let plan_loading = plan.is_none()
             && error.is_none()
-            && !self.plan_usage_unconfigured.contains(&provider)
+            && !self.plan_usage_unconfigured.contains(&provider_instance_id)
             && PLAN_USAGE_PROVIDERS.contains(&provider);
 
         let weak = cx.entity().downgrade();
@@ -198,12 +208,12 @@ impl Waku {
                 let _ = weak.update(cx, |this, cx| {
                     // An opening panel wants fresh numbers; the pump honors
                     // the stale flag on its next tick once the backoff allows.
-                    if let Some(provider) = this
+                    if let Some(provider_instance_id) = this
                         .selected_session()
-                        .map(|session| session.provider)
-                        .filter(|provider| PLAN_USAGE_PROVIDERS.contains(provider))
+                        .filter(|session| PLAN_USAGE_PROVIDERS.contains(&session.provider))
+                        .map(|session| session.provider_instance_id().to_owned())
                     {
-                        this.plan_usage_stale.insert(provider);
+                        this.plan_usage_stale.insert(provider_instance_id);
                     }
                     this.maybe_refresh_plan_usage(cx);
                     card_focus = this

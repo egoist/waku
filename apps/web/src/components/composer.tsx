@@ -74,6 +74,7 @@ import {
 import { usePrimaryShortcut } from '@/lib/platform'
 import { agentPresetDescription, agentPresetLabel } from '@/lib/agent-preset-presentation'
 import { isProjectlessProject, projectDisplayName } from '@/lib/project-presentation'
+import { sessionProviderInstanceId } from '@/lib/provider-instances'
 import type { PendingUserInput } from '@/lib/event-reducer'
 import { useRuntime } from '@/lib/runtime-context'
 import { sessionHasStarted } from '@/lib/sidebar-presentation'
@@ -171,11 +172,15 @@ export function Composer({
     userInputs,
     runtimes,
   } = useRuntime()
-  const probe = useProviderProbe(session.provider)
+  const probe = useProviderProbe(session.provider, session.provider_instance_id)
   const cwd = sessionCwd(session, project)
   const branches = useWorkspaceBranches(cwd)
   const composerFiles = useComposerFiles(cwd)
-  const composerCommands = useComposerCommands(session.provider, cwd)
+  const composerCommands = useComposerCommands(
+    session.provider,
+    session.provider_instance_id,
+    cwd,
+  )
   const [prompt, setPrompt] = useState(initialComposerDraft?.text ?? '')
   const [goalDialog, setGoalDialog] = useState<{ prefill: string | null; replace: boolean } | null>(
     null,
@@ -762,15 +767,16 @@ export function Composer({
               onOpenSignalHandled={onModelPickerSignalHandled}
               returnFocus={composerInput}
               session={session}
-              onChange={(provider, model) => {
+              onChange={(provider, providerInstanceId, model) => {
                 const preferences = config
                   ? readComposerPreferences(browserComposerPreferenceStorage(), config.address)
                   : null
                 const remembered = preferences
-                  ? rememberedModelTraits(preferences, provider, model.id)
+                  ? rememberedModelTraits(preferences, provider, model.id, providerInstanceId)
                   : undefined
                 savePatch({
                   provider,
+                  provider_instance_id: providerInstanceId,
                   model: model.id,
                   reasoning_effort: remembered?.reasoningEffort
                     ?? model.default_reasoning_effort
@@ -778,7 +784,10 @@ export function Composer({
                   service_tier: remembered?.serviceTier
                     ?? model.default_service_tier
                     ?? null,
-                  agent_preset: provider === session.provider ? session.agent_preset : null,
+                  agent_preset: provider === session.provider
+                    && (providerInstanceId ?? provider) === sessionProviderInstanceId(session)
+                    ? session.agent_preset
+                    : null,
                 })
               }}
             />

@@ -41,6 +41,7 @@ import {
   PROVIDER_PROBE_CACHE_STALE_TIME,
   writeProviderProbeCache,
 } from './provider-probe-cache'
+import { providerInstance, sessionProviderInstanceId } from './provider-instances'
 import {
   reduceRuntimeEvent,
   type PendingPermission,
@@ -665,15 +666,26 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
             queryFn: () => loadDaemonSettings(client),
             staleTime: 60_000,
           })
-          const binaryOverride = settings.provider_binary_overrides?.[currentSession.provider] ?? null
+          const instanceId = sessionProviderInstanceId(currentSession)
+          const binaryOverride = providerInstance(
+            settings,
+            currentSession.provider,
+            currentSession.provider_instance_id,
+          )?.binaryOverride ?? null
           const providerProbe = await queryClient.fetchQuery({
-            queryKey: daemonKeys.provider(config.address, currentSession.provider, binaryOverride),
+            queryKey: daemonKeys.provider(config.address, instanceId, binaryOverride),
             queryFn: async () => {
-              const data = await probeProvider(client, currentSession.provider, settings)
+              const data = await probeProvider(
+                client,
+                currentSession.provider,
+                settings,
+                {},
+                currentSession.provider_instance_id,
+              )
               writeProviderProbeCache(
                 browserProviderProbeStorage(),
                 config.address,
-                currentSession.provider,
+                instanceId,
                 binaryOverride,
                 data,
               )
@@ -726,6 +738,7 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
               type: 'start',
               options: {
                 provider: session.provider,
+                providerInstanceId: session.provider_instance_id ?? null,
                 binary: startup!.probe.path!,
                 cwd: sessionCwd(session, project),
                 mode: session.runtime_mode,
@@ -905,15 +918,26 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
         queryFn: () => loadDaemonSettings(client),
         staleTime: 60_000,
       })
-      const binaryOverride = settings.provider_binary_overrides?.[currentSession.provider] ?? null
+      const instanceId = sessionProviderInstanceId(currentSession)
+      const binaryOverride = providerInstance(
+        settings,
+        currentSession.provider,
+        currentSession.provider_instance_id,
+      )?.binaryOverride ?? null
       const providerProbe = await queryClient.fetchQuery({
-        queryKey: daemonKeys.provider(config.address, currentSession.provider, binaryOverride),
+        queryKey: daemonKeys.provider(config.address, instanceId, binaryOverride),
         queryFn: async () => {
-          const data = await probeProvider(client, currentSession.provider, settings)
+          const data = await probeProvider(
+            client,
+            currentSession.provider,
+            settings,
+            {},
+            currentSession.provider_instance_id,
+          )
           writeProviderProbeCache(
             browserProviderProbeStorage(),
             config.address,
-            currentSession.provider,
+            instanceId,
             binaryOverride,
             data,
           )
@@ -947,6 +971,7 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
             type: 'start',
             options: {
               provider: session.provider,
+              providerInstanceId: session.provider_instance_id ?? null,
               binary: providerProbe.path,
               cwd: sessionCwd(session, project),
               mode: session.runtime_mode,

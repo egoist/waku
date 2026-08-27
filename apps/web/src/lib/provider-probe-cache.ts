@@ -1,4 +1,4 @@
-import type { ProviderKind, ProviderProbe } from '@waku/client'
+import type { ProviderProbe } from '@waku/client'
 
 const CACHE_KEY = 'waku.provider-probes.v1'
 const CACHE_VERSION = 1
@@ -25,12 +25,12 @@ type StorageLike = Pick<Storage, 'getItem' | 'setItem'>
 export function readProviderProbeCache(
   storage: StorageLike | null,
   address: string,
-  provider: ProviderKind,
+  providerInstanceId: string,
   expectedBinaryOverride?: string | null,
   now = Date.now(),
 ): CachedProviderProbe | undefined {
   const state = readState(storage)
-  const entry = state?.entries[entryKey(address, provider)]
+  const entry = state?.entries[entryKey(address, providerInstanceId)]
   if (!entry || now - entry.updatedAt > CACHE_MAX_AGE) return undefined
   if (expectedBinaryOverride !== undefined && entry.binaryOverride !== expectedBinaryOverride) {
     return undefined
@@ -41,7 +41,7 @@ export function readProviderProbeCache(
 export function writeProviderProbeCache(
   storage: StorageLike | null,
   address: string,
-  provider: ProviderKind,
+  providerInstanceId: string,
   binaryOverride: string | null,
   data: ProviderProbeResult,
   now = Date.now(),
@@ -54,7 +54,7 @@ export function writeProviderProbeCache(
       .sort(([, left], [, right]) => right.updatedAt - left.updatedAt)
       .slice(0, CACHE_MAX_ENTRIES - 1),
   )
-  entries[entryKey(address, provider)] = { binaryOverride, data, updatedAt: now }
+  entries[entryKey(address, providerInstanceId)] = { binaryOverride, data, updatedAt: now }
   try {
     storage.setItem(CACHE_KEY, JSON.stringify({ version: CACHE_VERSION, entries }))
   } catch {
@@ -105,6 +105,6 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
-function entryKey(address: string, provider: ProviderKind): string {
-  return `${address}\u0000${provider}`
+function entryKey(address: string, providerInstanceId: string): string {
+  return `${address}\u0000${providerInstanceId}`
 }

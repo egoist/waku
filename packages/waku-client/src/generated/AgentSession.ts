@@ -28,7 +28,12 @@ auto_title?: string | null, project_id: string,
 /**
  * Local project checkout or an isolated Git worktree for this task.
  */
-workspace?: SessionWorkspace, provider: ProviderKind, model?: string | null, runtime_mode: RuntimeMode, interaction_mode: InteractionMode, reasoning_effort?: string | null, service_tier?: string | null,
+workspace?: SessionWorkspace, provider: ProviderKind,
+/**
+ * Concrete provider configuration used by this task. `None` preserves the
+ * built-in instance identity used by state written before provider instances.
+ */
+provider_instance_id?: string | null, model?: string | null, runtime_mode: RuntimeMode, interaction_mode: InteractionMode, reasoning_effort?: string | null, service_tier?: string | null,
 /**
  * Selected context window, when the provider exposes more than one.
  */

@@ -4,10 +4,8 @@ import { useEffect, useRef, useState, type RefObject } from 'react'
 import { ProviderIcon, PROVIDERS, providerMeta, WakuIcon } from '@/components/waku-icon'
 import { useDaemonSettings, useProviderProbes } from '@/hooks/use-daemon-data'
 import { useI18n } from '@/lib/i18n'
-import {
-  nextModelPickerHighlight,
-  selectedModelPickerIndex,
-} from '@/lib/model-picker-presentation'
+import { nextModelPickerHighlight } from '@/lib/model-picker-presentation'
+import { providerInstances, sessionProviderInstanceId } from '@/lib/provider-instances'
 import { cn } from '@/lib/utils'
 
 type PickerTab = 'favorites' | ProviderKind
@@ -24,7 +22,7 @@ export function ModelPicker({
   currentProbe?: ProviderProbe
   openSignal?: number
   onOpenSignalHandled?: () => void
-  onChange: (provider: ProviderKind, model: ProviderModel) => void
+  onChange: (provider: ProviderKind, providerInstanceId: string | null, model: ProviderModel) => void
   returnFocus?: RefObject<HTMLElement | null>
 }) {
   const { t } = useI18n()
@@ -41,7 +39,10 @@ export function ModelPicker({
   const list = useRef<HTMLDivElement>(null)
   const settings = useDaemonSettings()
   const probes = useProviderProbes(open)
+  const instances = settings.data ? providerInstances(settings.data) : []
+  const sessionInstanceId = sessionProviderInstanceId(session)
   const lockedProvider = session.messages.length ? session.provider : null
+  const lockedProviderInstance = session.messages.length ? sessionInstanceId : null
   const currentModel = currentProbe?.models.find((model) => model.id === session.model)
     ?? currentProbe?.models.find((model) => model.is_default)
     ?? currentProbe?.models[0]
@@ -63,30 +64,36 @@ export function ModelPicker({
 
   const probeMap = ({
     ...(probes.data ?? {}),
-    ...(currentProbe ? { [session.provider]: currentProbe } : {}),
-  }) as Partial<Record<ProviderKind, ProviderProbe>>
+    ...(currentProbe ? { [sessionInstanceId]: currentProbe } : {}),
+  }) as Record<string, ProviderProbe | undefined>
 
-  const usable = PROVIDERS.filter(({ id }) => {
-    if (lockedProvider && id !== lockedProvider) return false
-    if (id === session.provider) return true
-    return !settings.data?.disabled_providers.includes(id) && probeMap[id]?.installed
+  const usable = instances.filter((instance) => {
+    if (lockedProvider && instance.provider !== lockedProvider) return false
+    if (lockedProviderInstance && instance.id !== lockedProviderInstance) return false
+    if (instance.id === sessionInstanceId) return true
+    return instance.enabled && probeMap[instance.id]?.installed
   })
   const rows = (() => {
     const normalized = query.trim().toLowerCase()
-    const providers = normalized ? usable : usable.filter(({ id }) => tab === 'favorites' || id === tab)
-    return providers.flatMap(({ id }) => (probeMap[id]?.models ?? [])
+    const providers = normalized ? usable : usable.filter((instance) => tab === 'favorites' || instance.provider === tab)
+    return providers.flatMap((instance) => (probeMap[instance.id]?.models ?? [])
       .filter((model) => {
-        const key = `${id}:${model.id}`
+        const key = `${instance.id}:${model.id}`
         if (!normalized && tab === 'favorites' && !favorites.includes(key)) return false
-        return !normalized || `${model.name} ${model.id} ${model.sub_provider ?? ''} ${providerMeta(id).name}`.toLowerCase().includes(normalized)
+        return !normalized || `${model.name} ${model.id} ${model.sub_provider ?? ''} ${instance.name} ${providerMeta(instance.provider).name}`.toLowerCase().includes(normalized)
       })
-      .map((model) => ({ provider: id, model })))
+      .map((model) => ({
+        provider: instance.provider,
+        providerInstanceId: instance.id === instance.provider ? null : instance.id,
+        instance,
+        model,
+      })))
   })()
-  const selectedIndex = selectedModelPickerIndex(
-    rows,
-    session.provider,
-    selectedModelId,
-  )
+  const selectedIndex = rows.findIndex((row) => (
+    row.provider === session.provider
+    && (row.providerInstanceId ?? row.provider) === sessionInstanceId
+    && row.model.id === selectedModelId
+  ))
 
   useEffect(() => {
     setHighlight((current) => current === null
@@ -111,12 +118,12 @@ export function ModelPicker({
   function choose(index: number) {
     const row = rows[index]
     if (!row) return
-    onChange(row.provider, row.model)
+    onChange(row.provider, row.providerInstanceId, row.model)
     setOpen(false)
   }
 
-  function toggleFavorite(provider: ProviderKind, model: string) {
-    const key = `${provider}:${model}`
+  function toggleFavorite(providerInstanceId: string, model: string) {
+    const key = `${providerInstanceId}:${model}`
     setFavorites((current) => {
       const next = current.includes(key) ? current.filter((item) => item !== key) : [...current, key]
       window.localStorage.setItem('waku.favorite-models', JSON.stringify(next))
@@ -160,7 +167,7 @@ export function ModelPicker({
             </ModelTab>
             <div className="my-[3px] h-px w-[34px] shrink-0 bg-border" />
             {PROVIDERS.map((provider) => {
-              const enabled = usable.some((candidate) => candidate.id === provider.id)
+              const enabled = usable.some((candidate) => candidate.provider === provider.id)
               return (
                 <ModelTab
                   active={tab === provider.id && !query}
@@ -180,7 +187,7 @@ export function ModelPicker({
                 <WakuIcon className="size-[15px] text-[var(--text-secondary)]" name="search" />
                 <input
                   aria-activedescendant={highlight !== null && rows[highlight]
-                    ? `model-${rows[highlight]!.provider}-${rows[highlight]!.model.id}`
+                    ? `model-${rows[highlight]!.instance.id}-${rows[highlight]!.model.id}`
                     : undefined}
                   className="min-w-0 flex-1 bg-transparent text-[12px] outline-none placeholder:text-[var(--text-ghost)]"
                   placeholder={t('input.search_models')}
@@ -203,7 +210,7 @@ export function ModelPicker({
                       choose(highlight ?? (selectedIndex >= 0 ? selectedIndex : 0))
                     } else if (event.key === 'Tab' && !query) {
                       event.preventDefault()
-                      const tabs: PickerTab[] = ['favorites', ...usable.map(({ id }) => id)]
+                      const tabs: PickerTab[] = ['favorites', ...new Set(usable.map(({ provider }) => provider))]
                       const current = tabs.indexOf(tab)
                       const delta = event.shiftKey ? -1 : 1
                       setTab(tabs[(current + delta + tabs.length) % tabs.length]!)
@@ -226,8 +233,10 @@ export function ModelPicker({
                 </div>
               )}
               {rows.map((row, index) => {
-                const selected = row.provider === session.provider && row.model.id === selectedModelId
-                const favorite = favorites.includes(`${row.provider}:${row.model.id}`)
+                const selected = row.provider === session.provider
+                  && (row.providerInstanceId ?? row.provider) === sessionInstanceId
+                  && row.model.id === selectedModelId
+                const favorite = favorites.includes(`${row.instance.id}:${row.model.id}`)
                 return (
                   <div
                     aria-selected={selected}
@@ -236,8 +245,8 @@ export function ModelPicker({
                       selected && 'bg-accent',
                       index === highlight && 'border-ring bg-accent',
                     )}
-                    id={`model-${row.provider}-${row.model.id}`}
-                    key={`${row.provider}-${row.model.id}`}
+                    id={`model-${row.instance.id}-${row.model.id}`}
+                    key={`${row.instance.id}-${row.model.id}`}
                     data-model-index={index}
                     role="option"
                     tabIndex={0}
@@ -254,7 +263,9 @@ export function ModelPicker({
                       <span className="block truncate text-[13px] font-semibold">{row.model.name}</span>
                       <span className="mt-1 flex items-center gap-1.5 truncate text-[11px] text-[var(--text-tertiary)]">
                         <ProviderIcon className="size-[10.5px]" provider={row.provider} />
-                        {row.model.sub_provider ?? providerMeta(row.provider).name}
+                        {row.model.sub_provider
+                          ? `${row.instance.name} · ${row.model.sub_provider}`
+                          : row.instance.name}
                       </span>
                     </span>
                     <span
@@ -262,12 +273,12 @@ export function ModelPicker({
                       className="grid size-7 shrink-0 place-items-center rounded-md hover:bg-[color:var(--foreground)]/[0.08]"
                       role="button"
                       tabIndex={0}
-                      onClick={(event) => { event.stopPropagation(); toggleFavorite(row.provider, row.model.id) }}
+                      onClick={(event) => { event.stopPropagation(); toggleFavorite(row.instance.id, row.model.id) }}
                       onKeyDown={(event) => {
                         if (event.key === 'Enter' || event.key === ' ') {
                           event.preventDefault()
                           event.stopPropagation()
-                          toggleFavorite(row.provider, row.model.id)
+                          toggleFavorite(row.instance.id, row.model.id)
                         }
                       }}
                     >

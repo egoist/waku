@@ -113,6 +113,8 @@ impl AcpDriver {
     ) -> anyhow::Result<Self> {
         let DriverStartOptions {
             binary,
+            provider_instance_id: _,
+            environment,
             cwd,
             mode,
             interaction_mode,
@@ -156,6 +158,7 @@ impl AcpDriver {
             &binary,
             &cwd,
             launch,
+            &environment,
             computer_use.as_ref().map(|runtime| &runtime.config),
             stderr_lines.clone(),
         )?;
@@ -211,6 +214,7 @@ fn sdk_agent(
     binary: &Path,
     cwd: &Path,
     mut launch: AcpLaunch,
+    provider_environment: &std::collections::BTreeMap<String, String>,
     computer_use: Option<&super::support::HeadlessComputerUseConfig>,
     stderr_lines: Arc<Mutex<Vec<String>>>,
 ) -> anyhow::Result<AcpAgent> {
@@ -232,6 +236,11 @@ fn sdk_agent(
             )
         })
         .collect::<Vec<_>>();
+    environment.extend(
+        provider_environment
+            .iter()
+            .map(|(name, value)| (name.clone(), value.clone())),
+    );
     environment.append(&mut launch.env);
     environment.extend(computer_env);
 
@@ -2467,6 +2476,8 @@ mod tests {
             ProviderKind::Grok,
             DriverStartOptions {
                 binary,
+                provider_instance_id: None,
+                environment: Default::default(),
                 cwd: std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")),
                 mode: RuntimeMode::FullAccess,
                 interaction_mode: InteractionMode::Build,
@@ -2521,6 +2532,8 @@ mod tests {
             ProviderKind::Cursor,
             DriverStartOptions {
                 binary,
+                provider_instance_id: None,
+                environment: Default::default(),
                 cwd: std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")),
                 mode: RuntimeMode::FullAccess,
                 interaction_mode: InteractionMode::Build,
@@ -2580,6 +2593,8 @@ mod tests {
             ProviderKind::Kimi,
             DriverStartOptions {
                 binary,
+                provider_instance_id: None,
+                environment: Default::default(),
                 cwd: std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")),
                 mode: RuntimeMode::FullAccess,
                 interaction_mode: InteractionMode::Build,

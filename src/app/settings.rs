@@ -1576,9 +1576,14 @@ impl Waku {
             }));
 
         let mut rows = div().mt(px(4.0)).flex().flex_col();
-        let provider_count = ProviderKind::ALL.len();
-        for (index, kind) in ProviderKind::ALL.into_iter().enumerate() {
-            let probe = self.provider_probe(kind);
+        let provider_instances = self.state.provider_instances();
+        let provider_count = provider_instances.len();
+        for (index, instance) in provider_instances.into_iter().enumerate() {
+            let kind = instance.provider;
+            let provider_instance_id = instance.id.clone();
+            let custom = provider_instance_id != kind.id();
+            let probe = self
+                .provider_probe_for_instance(kind, custom.then_some(provider_instance_id.as_str()));
             let installed = probe.is_some_and(|probe| probe.installed);
             let binary_path = probe
                 .filter(|probe| probe.installed)
@@ -1587,9 +1592,9 @@ impl Waku {
             let model_count = probe.map(|probe| probe.models.len()).unwrap_or(0);
             let version = self
                 .provider_versions
-                .get(&kind)
+                .get(&provider_instance_id)
                 .and_then(|version| version.clone());
-            let disabled = self.state.disabled_providers.contains(&kind);
+            let disabled = !instance.enabled;
 
             let dot_color = if !installed {
                 theme.text_ghost
@@ -1630,17 +1635,28 @@ impl Waku {
 
             let toggle_on = !disabled;
             let toggle = toggle_switch(
-                SharedString::from(format!("provider-enabled-{}", kind.id())),
+                SharedString::from(format!("provider-enabled-{provider_instance_id}")),
                 toggle_on,
                 false,
                 theme,
                 cx,
-                move |this, _, cx| this.set_provider_enabled(kind, disabled, cx),
+                {
+                    let provider_instance_id = provider_instance_id.clone();
+                    move |this, _, cx| {
+                        this.set_provider_instance_enabled(
+                            kind,
+                            provider_instance_id.clone(),
+                            disabled,
+                            cx,
+                        )
+                    }
+                },
             );
 
-            let expanded = self.expanded_provider_settings == Some(kind);
+            let expanded =
+                self.expanded_provider_settings.as_deref() == Some(provider_instance_id.as_str());
             let expand_button = icon_button(
-                SharedString::from(format!("provider-expand-{}", kind.id())),
+                SharedString::from(format!("provider-expand-{provider_instance_id}")),
                 if expanded {
                     "icons/chevron-down.svg"
                 } else {
@@ -1650,9 +1666,42 @@ impl Waku {
             )
             .tab_index(0)
             .focus_visible(|style| style.border_1().border_color(theme.accent))
-            .on_click(cx.listener(move |this, _, window, cx| {
-                this.toggle_provider_expanded(kind, window, cx);
+            .on_click(cx.listener({
+                let provider_instance_id = provider_instance_id.clone();
+                move |this, _, window, cx| {
+                    this.toggle_provider_instance_expanded(
+                        kind,
+                        provider_instance_id.clone(),
+                        window,
+                        cx,
+                    );
+                }
             }));
+
+            let instance_action = if custom {
+                let provider_instance_id = provider_instance_id.clone();
+                icon_button(
+                    SharedString::from(format!("provider-remove-{provider_instance_id}")),
+                    "icons/trash.svg",
+                    theme,
+                )
+                .tab_index(0)
+                .focus_visible(|style| style.border_1().border_color(theme.accent))
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.remove_provider_instance(&provider_instance_id, cx);
+                }))
+            } else {
+                icon_button(
+                    SharedString::from(format!("provider-add-instance-{}", kind.id())),
+                    "icons/plus.svg",
+                    theme,
+                )
+                .tab_index(0)
+                .focus_visible(|style| style.border_1().border_color(theme.accent))
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    this.add_provider_instance(kind, window, cx);
+                }))
+            };
 
             let header = div()
                 .flex()
@@ -1705,7 +1754,7 @@ impl Waku {
                                         } else {
                                             theme.text_secondary
                                         })
-                                        .child(kind.display_name()),
+                                        .child(SharedString::from(instance.name.clone())),
                                 )
                                 .when_some(version, |element, version| {
                                     element.child(
@@ -1725,6 +1774,7 @@ impl Waku {
                                 .child(detail),
                         ),
                 )
+                .child(instance_action)
                 .child(expand_button)
                 .when(installed, |element| element.child(toggle));
 
@@ -1738,7 +1788,9 @@ impl Waku {
                     })
                     .child(header)
                     .when(expanded, |element| {
-                        element.child(self.render_provider_expanded_settings(kind, theme, cx))
+                        element.child(
+                            self.render_provider_instance_expanded_settings(&instance, theme, cx),
+                        )
                     }),
             );
         }
@@ -1799,15 +1851,17 @@ impl Waku {
 
     /// The expanded row's settings body: the binary override for this
     /// provider, with the detection result as its caption.
-    fn render_provider_expanded_settings(
+    fn render_provider_instance_expanded_settings(
         &self,
-        kind: ProviderKind,
+        instance: &waku_client::settings::ProviderInstance,
         theme: Theme,
         cx: &mut Context<Self>,
     ) -> Div {
-        let override_value = self.state.provider_binary_overrides.get(&kind).cloned();
+        let kind = instance.provider;
+        let custom = instance.id != kind.id();
+        let override_value = instance.binary_override.clone();
         let full_path = self
-            .provider_probe(kind)
+            .provider_probe_for_instance(kind, custom.then_some(instance.id.as_str()))
             .filter(|probe| probe.installed)
             .and_then(|probe| probe.path.as_ref())
             .map(|path| path.display().to_string());
@@ -1822,7 +1876,7 @@ impl Waku {
         let reset = div()
             .id(SharedString::from(format!(
                 "provider-path-reset-{}",
-                kind.id()
+                instance.id
             )))
             .tab_index(0)
             .focus_visible(|style| style.border_color(theme.accent))
@@ -1876,7 +1930,7 @@ impl Waku {
                     .gap(px(8.0))
                     .child(
                         TextField::new(
-                            SharedString::from(format!("provider-path-field-{}", kind.id())),
+                            SharedString::from(format!("provider-path-field-{}", instance.id)),
                             self.provider_path_input.clone(),
                         )
                         .flex_1()
@@ -1890,32 +1944,138 @@ impl Waku {
                     .text_color(theme.text_ghost)
                     .child(SharedString::from(caption)),
             )
+            .when(custom, |element| {
+                element.child(
+                    div()
+                        .mt(px(12.0))
+                        .flex()
+                        .flex_col()
+                        .gap(px(5.0))
+                        .child(
+                            div()
+                                .text_size(sp(12.5))
+                                .font_weight(FontWeight::MEDIUM)
+                                .text_color(theme.text)
+                                .child(tr!("providers.instance_name")),
+                        )
+                        .child(
+                            TextField::new(
+                                SharedString::from(format!("provider-name-field-{}", instance.id)),
+                                self.provider_name_input.clone(),
+                            )
+                            .max_w(px(430.0)),
+                        )
+                        .child(
+                            div()
+                                .mt(px(12.0))
+                                .text_size(sp(12.5))
+                                .font_weight(FontWeight::MEDIUM)
+                                .text_color(theme.text)
+                                .child(tr!("providers.environment")),
+                        )
+                        .child(
+                            div()
+                                .text_size(sp(12.5))
+                                .line_height(sp(15.0))
+                                .text_color(theme.text_tertiary)
+                                .child(tr!("providers.environment_description")),
+                        )
+                        .child(
+                            TextField::new(
+                                SharedString::from(format!(
+                                    "provider-environment-field-{}",
+                                    instance.id
+                                )),
+                                self.provider_environment_input.clone(),
+                            )
+                            .max_w(px(520.0)),
+                        )
+                        .child(
+                            div()
+                                .text_size(sp(12.5))
+                                .text_color(theme.text_ghost)
+                                .child(tr!("providers.environment_hint")),
+                        ),
+                )
+            })
     }
 
-    fn toggle_provider_expanded(
+    fn toggle_provider_instance_expanded(
         &mut self,
         provider: ProviderKind,
+        provider_instance_id: String,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         // Commit any pending edit for the previously expanded provider before
         // the input is handed to another row.
+        self.apply_provider_instance_name(cx);
         self.apply_provider_path_override(cx);
-        if self.expanded_provider_settings == Some(provider) {
+        self.apply_provider_environment(cx);
+        if self.expanded_provider_settings.as_deref() == Some(provider_instance_id.as_str()) {
             self.expanded_provider_settings = None;
         } else {
-            self.expanded_provider_settings = Some(provider);
-            let override_value = self
+            self.expanded_provider_settings = Some(provider_instance_id.clone());
+            let instance = self
                 .state
-                .provider_binary_overrides
-                .get(&provider)
-                .cloned()
-                .unwrap_or_default();
+                .provider_instance(provider, Some(&provider_instance_id))
+                .unwrap_or_else(|| {
+                    waku_client::settings::ProviderInstance::builtin(provider, true, None)
+                });
+            self.provider_name_input
+                .update(cx, |input, cx| input.set_content(instance.name, cx));
+            let override_value = instance.binary_override.unwrap_or_default();
             self.provider_path_input
                 .update(cx, |input, cx| input.set_content(override_value, cx));
-            let focus = self.provider_path_input.read(cx).focus();
+            let environment = instance.environment;
+            let environment = if environment.is_empty() {
+                String::new()
+            } else {
+                serde_json::to_string(&environment).unwrap_or_default()
+            };
+            self.provider_environment_input
+                .update(cx, |input, cx| input.set_content(environment, cx));
+            let focus = if provider_instance_id == provider.id() {
+                self.provider_path_input.read(cx).focus()
+            } else {
+                self.provider_name_input.read(cx).focus()
+            };
             window.focus(&focus, cx);
         }
+        cx.notify();
+    }
+
+    pub(super) fn apply_provider_instance_name(&mut self, cx: &mut Context<Self>) {
+        let Some(provider_instance_id) = self.expanded_provider_settings.clone() else {
+            return;
+        };
+        let Some(index) = self
+            .state
+            .custom_provider_instances
+            .iter()
+            .position(|instance| instance.id == provider_instance_id)
+        else {
+            return;
+        };
+        let text = self
+            .provider_name_input
+            .read(cx)
+            .content()
+            .trim()
+            .to_owned();
+        if text.is_empty() {
+            let current = self.state.custom_provider_instances[index].name.clone();
+            self.provider_name_input
+                .update(cx, |input, cx| input.set_content(current, cx));
+            self.show_toast(tr!("providers.instance_name_invalid"));
+            cx.notify();
+            return;
+        }
+        if self.state.custom_provider_instances[index].name == text {
+            return;
+        }
+        self.state.custom_provider_instances[index].name = text;
+        self.save();
         cx.notify();
     }
 
@@ -1923,31 +2083,201 @@ impl Waku {
     /// detect from PATH. Re-detects that provider and refreshes every catalog
     /// keyed by the executable path.
     pub(super) fn apply_provider_path_override(&mut self, cx: &mut Context<Self>) {
-        let Some(provider) = self.expanded_provider_settings else {
+        let Some(provider_instance_id) = self.expanded_provider_settings.clone() else {
             return;
         };
+        let Some(instance) = self
+            .state
+            .provider_instances()
+            .into_iter()
+            .find(|instance| instance.id == provider_instance_id)
+        else {
+            return;
+        };
+        let provider = instance.provider;
         let text = self
             .provider_path_input
             .read(cx)
             .content()
             .trim()
             .to_owned();
-        let current = self
-            .state
-            .provider_binary_overrides
-            .get(&provider)
-            .cloned()
-            .unwrap_or_default();
+        let current = instance.binary_override.unwrap_or_default();
         if text == current {
             return;
         }
-        if text.is_empty() {
-            self.state.provider_binary_overrides.remove(&provider);
+        if provider_instance_id == provider.id() {
+            if text.is_empty() {
+                self.state.provider_binary_overrides.remove(&provider);
+            } else {
+                self.state.provider_binary_overrides.insert(provider, text);
+            }
+        } else if let Some(instance) = self
+            .state
+            .custom_provider_instances
+            .iter_mut()
+            .find(|instance| instance.id == provider_instance_id)
+        {
+            instance.binary_override = (!text.is_empty()).then_some(text);
         } else {
-            self.state.provider_binary_overrides.insert(provider, text);
+            return;
         }
         self.save();
-        self.refresh_provider_detection(Some(provider));
+        self.refresh_provider_detection(None);
+        self.refresh_composer_sources(cx);
+        cx.notify();
+    }
+
+    pub(super) fn apply_provider_environment(&mut self, cx: &mut Context<Self>) {
+        let Some(provider_instance_id) = self.expanded_provider_settings.clone() else {
+            return;
+        };
+        let Some(index) = self
+            .state
+            .custom_provider_instances
+            .iter()
+            .position(|instance| instance.id == provider_instance_id)
+        else {
+            return;
+        };
+        let text = self
+            .provider_environment_input
+            .read(cx)
+            .content()
+            .trim()
+            .to_owned();
+        let environment = if text.is_empty() {
+            std::collections::BTreeMap::new()
+        } else {
+            match serde_json::from_str::<std::collections::BTreeMap<String, String>>(&text) {
+                Ok(environment) => environment,
+                Err(error) => {
+                    self.show_toast(tr!("providers.environment_invalid", error = error));
+                    cx.notify();
+                    return;
+                }
+            }
+        };
+        let current = &self.state.custom_provider_instances[index].environment;
+        if *current == environment {
+            return;
+        }
+        self.state.custom_provider_instances[index].environment = environment;
+        self.save();
+        self.refresh_provider_detection(None);
+        self.refresh_composer_sources(cx);
+        cx.notify();
+    }
+
+    fn add_provider_instance(
+        &mut self,
+        provider: ProviderKind,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.apply_provider_instance_name(cx);
+        self.apply_provider_path_override(cx);
+        self.apply_provider_environment(cx);
+        let ordinal = self
+            .state
+            .custom_provider_instances
+            .iter()
+            .filter(|instance| instance.provider == provider)
+            .count()
+            + 2;
+        let instance = waku_client::settings::ProviderInstance {
+            id: format!("{}-{}", provider.id(), Uuid::new_v4()),
+            provider,
+            name: format!("{} {ordinal}", provider.display_name()),
+            // A newly cloned configuration should not become selectable until
+            // its environment has been filled in and deliberately enabled.
+            enabled: false,
+            binary_override: self.state.provider_binary_overrides.get(&provider).cloned(),
+            environment: std::collections::BTreeMap::new(),
+        };
+        let id = instance.id.clone();
+        self.state.custom_provider_instances.push(instance);
+        self.save();
+        self.refresh_provider_detection(None);
+        self.toggle_provider_instance_expanded(provider, id, window, cx);
+    }
+
+    fn remove_provider_instance(&mut self, provider_instance_id: &str, cx: &mut Context<Self>) {
+        if self.state.sessions.iter().any(|session| {
+            session.provider_instance_id() == provider_instance_id && session.has_started()
+        }) {
+            self.show_toast(tr!("providers.instance_in_use"));
+            cx.notify();
+            return;
+        }
+        let Some(index) = self
+            .state
+            .custom_provider_instances
+            .iter()
+            .position(|instance| instance.id == provider_instance_id)
+        else {
+            return;
+        };
+        let provider = self.state.custom_provider_instances[index].provider;
+        self.state.custom_provider_instances.remove(index);
+        for session in self.state.sessions.iter_mut().filter(|session| {
+            session.provider_instance_id() == provider_instance_id && !session.has_started()
+        }) {
+            session.provider_instance_id = None;
+        }
+        self.state
+            .favorite_models
+            .retain(|favorite| favorite.provider_instance_id() != provider_instance_id);
+        if self.state.last_provider_instance_id() == provider_instance_id {
+            self.state.last_provider = provider;
+            self.state.last_provider_instance_id = None;
+            self.state.last_model = None;
+            self.state.last_reasoning_effort = None;
+            self.state.last_service_tier = None;
+            self.state.last_context_window = None;
+        }
+        if self.expanded_provider_settings.as_deref() == Some(provider_instance_id) {
+            self.expanded_provider_settings = None;
+        }
+        self.probes
+            .retain(|probe| probe.provider_instance_id() != provider_instance_id);
+        self.provider_versions.remove(provider_instance_id);
+        self.provider_model_discoveries.remove(provider_instance_id);
+        self.provider_model_discoveries_pending
+            .remove(provider_instance_id);
+        self.save();
+        self.refresh_composer_sources(cx);
+        cx.notify();
+    }
+
+    fn set_provider_instance_enabled(
+        &mut self,
+        provider: ProviderKind,
+        provider_instance_id: String,
+        enable: bool,
+        cx: &mut Context<Self>,
+    ) {
+        if provider_instance_id == provider.id() {
+            self.set_provider_enabled(provider, enable, cx);
+            return;
+        }
+        let Some(instance) = self
+            .state
+            .custom_provider_instances
+            .iter_mut()
+            .find(|instance| instance.id == provider_instance_id)
+        else {
+            return;
+        };
+        instance.enabled = enable;
+        if !enable && self.state.last_provider_instance_id() == provider_instance_id {
+            self.state.last_provider = provider;
+            self.state.last_provider_instance_id = None;
+            self.state.last_model = None;
+            self.state.last_reasoning_effort = None;
+            self.state.last_service_tier = None;
+            self.state.last_context_window = None;
+        }
+        self.save();
         self.refresh_composer_sources(cx);
         cx.notify();
     }
@@ -1976,8 +2306,11 @@ impl Waku {
             // default and any unstarted drafts off the switched-off provider.
             // The remembered model belongs to the old provider, so it resets
             // with it.
-            if self.state.last_provider == provider {
+            if self.state.last_provider == provider
+                && self.state.last_provider_instance_id() == provider.id()
+            {
                 self.state.last_provider = fallback;
+                self.state.last_provider_instance_id = None;
                 self.state.last_model = None;
                 self.state.last_reasoning_effort = None;
                 self.state.last_service_tier = None;
@@ -1987,7 +2320,11 @@ impl Waku {
                 .state
                 .sessions
                 .iter()
-                .filter(|session| session.provider == provider && !session.has_started())
+                .filter(|session| {
+                    session.provider == provider
+                        && session.provider_instance_id() == provider.id()
+                        && !session.has_started()
+                })
                 .map(|session| session.id)
                 .collect::<Vec<_>>();
             for id in draft_ids {

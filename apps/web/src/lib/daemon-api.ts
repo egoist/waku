@@ -26,6 +26,7 @@ import type {
   WorkspaceOperation,
   WorkspaceResult,
 } from '@waku/client'
+import { providerInstance } from '@/lib/provider-instances'
 
 export type TaskState = Extract<ResponsePayload, { type: 'taskState' }>
 export type DaemonDirectory = Extract<WorkspaceResult, { type: 'directory' }>
@@ -37,10 +38,10 @@ export const daemonKeys = {
     ['daemon', address, 'session', sessionId] as const,
   settings: (address: string) => ['daemon', address, 'settings'] as const,
   providers: (address: string) => ['daemon', address, 'providers'] as const,
-  provider: (address: string, provider: ProviderKind, binaryOverride: string | null = null) =>
-    [...daemonKeys.providers(address), 'catalog', provider, binaryOverride] as const,
-  providerDetection: (address: string, provider: ProviderKind) =>
-    [...daemonKeys.providers(address), 'detection', provider] as const,
+  provider: (address: string, providerInstanceId: string, binaryOverride: string | null = null) =>
+    [...daemonKeys.providers(address), 'catalog', providerInstanceId, binaryOverride] as const,
+  providerDetection: (address: string, providerInstanceId: string) =>
+    [...daemonKeys.providers(address), 'detection', providerInstanceId] as const,
   planUsage: (address: string, provider: ProviderKind) =>
     ['daemon', address, 'plan-usage', provider] as const,
   skills: (address: string) => ['daemon', address, 'skills'] as const,
@@ -58,9 +59,10 @@ export const daemonKeys = {
   slashCommands: (
     address: string,
     provider: ProviderKind,
+    providerInstanceId: string,
     cwd: string,
     binaryOverride: string | null,
-  ) => [...daemonKeys.composerSources(address), 'commands', provider, cwd, binaryOverride] as const,
+  ) => [...daemonKeys.composerSources(address), 'commands', provider, providerInstanceId, cwd, binaryOverride] as const,
   workspaceTree: (address: string, cwd: string, expanded: string[]) =>
     ['daemon', address, 'workspace-tree', cwd, ...[...expanded].sort()] as const,
   directory: (address: string, path: string | null) =>
@@ -149,13 +151,15 @@ export async function probeProvider(
   provider: ProviderKind,
   settings: DaemonSettings,
   options: { discoverModels?: boolean; probeVersion?: boolean } = {},
+  providerInstanceId?: string | null,
 ): Promise<ProviderProbe & { version: string | null }> {
   const { discoverModels = true, probeVersion = true } = options
   const response = expectResponse(
     await client.request({
       type: 'probeProvider',
       provider,
-      binaryOverride: settings.provider_binary_overrides?.[provider] ?? null,
+      providerInstanceId,
+      binaryOverride: providerInstance(settings, provider, providerInstanceId)?.binaryOverride ?? null,
       discoverModels,
       probeVersion,
     }),
@@ -211,12 +215,14 @@ export async function fetchPlanUsage(
   provider: ProviderKind,
   settings: DaemonSettings,
   version: string | null,
+  providerInstanceId?: string | null,
 ): Promise<PlanUsage | null> {
   const response = expectResponse(
     await client.request({
       type: 'fetchPlanUsage',
       provider,
-      binaryOverride: settings.provider_binary_overrides?.[provider] ?? null,
+      providerInstanceId,
+      binaryOverride: providerInstance(settings, provider, providerInstanceId)?.binaryOverride ?? null,
       cliVersion: version,
     }),
     'planUsage',
@@ -387,12 +393,14 @@ export async function listComposerFiles(
 export async function discoverComposerCommands(
   client: WakuClient,
   provider: ProviderKind,
+  providerInstanceId: string | null,
   projectRoot: string,
   binaryOverride: string | null,
 ): Promise<SlashCommand[]> {
   const result = await workspaceRequest(client, {
     type: 'discoverSlashCommands',
     provider,
+    provider_instance_id: providerInstanceId,
     project_root: projectRoot,
     binary_override: binaryOverride,
   })

@@ -123,9 +123,23 @@ fn profile_plan_label(body: &Value) -> Option<String> {
 /// the OAuth token and account id, and the ChatGPT backend answers with the
 /// same primary/secondary windows the CLI's own status view shows. Blocking.
 pub fn fetch_codex_plan_usage() -> anyhow::Result<PlanUsage> {
-    let path = dirs::home_dir()
-        .ok_or_else(|| anyhow!(tr!("usage_error.no_home_directory")))?
-        .join(".codex/auth.json");
+    fetch_codex_plan_usage_for_instance(None)
+}
+
+pub fn fetch_codex_plan_usage_for_instance(
+    environment: Option<&std::collections::BTreeMap<String, String>>,
+) -> anyhow::Result<PlanUsage> {
+    let codex_home = environment
+        .and_then(|environment| environment.get("CODEX_HOME"))
+        .filter(|value| !value.trim().is_empty())
+        .map(std::path::PathBuf::from)
+        .map(Ok)
+        .unwrap_or_else(|| {
+            dirs::home_dir()
+                .ok_or_else(|| anyhow!(tr!("usage_error.no_home_directory")))
+                .map(|home| home.join(".codex"))
+        })?;
+    let path = codex_home.join("auth.json");
     let auth: Value = serde_json::from_str(
         &std::fs::read_to_string(&path)
             .with_context(|| tr!("usage_error.read_file", path = path.display()))?,

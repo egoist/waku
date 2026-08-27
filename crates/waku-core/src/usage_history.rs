@@ -838,6 +838,19 @@ pub fn scan(
     window: UsageWindow,
     project_roots: &[PathBuf],
 ) -> UsageHistory {
+    scan_with_provider_roots(cache, rates, window, project_roots, &[])
+}
+
+/// Scan the process-default roots plus provider-instance transcript roots.
+/// The latter makes account/config profiles such as a custom `CODEX_HOME`
+/// visible without changing Waku's own environment.
+pub fn scan_with_provider_roots(
+    cache: &mut ScanCache,
+    rates: &RateTable,
+    window: UsageWindow,
+    project_roots: &[PathBuf],
+    additional_roots: &[(UsageProvider, PathBuf)],
+) -> UsageHistory {
     let started = Instant::now();
     let (since_day, until_day) = window.bounds(Local::now().date_naive());
     // Local midnight on the window's first day; a DST gap falls back to the
@@ -854,10 +867,15 @@ pub fn scan(
     let mut skipped_files = 0;
     let mut errors = Vec::new();
 
-    for provider in UsageProvider::ALL {
-        let Some(root) = provider_root(provider) else {
-            continue;
-        };
+    let mut provider_roots = UsageProvider::ALL
+        .into_iter()
+        .filter_map(|provider| provider_root(provider).map(|root| (provider, root)))
+        .collect::<Vec<_>>();
+    provider_roots.extend(additional_roots.iter().cloned());
+    let mut seen_roots = HashSet::new();
+    provider_roots.retain(|entry| seen_roots.insert(entry.clone()));
+
+    for (provider, root) in provider_roots {
         if !root.is_dir() {
             // Provider never used on this machine; zero usage, not an error.
             continue;

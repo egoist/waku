@@ -188,6 +188,15 @@ providers.detected_as: 已检测到 %{command}
 providers.searches_path: Waku 未在 PATH 中找到 %{command}
 providers.binary_path: 可执行文件路径
 providers.binary_path_description: Waku 用于启动 %{provider} 的可执行文件。按 Return 应用；留空则从 PATH 自动检测
+providers.environment: 环境变量
+providers.environment_description: 仅在 Waku 启动此 provider 实例时应用的 JSON 对象
+providers.environment_hint: "示例：{\"CODEX_HOME\":\"/path/to/codex-home\"}。值会明文保存在 daemon 设置中，请勿在此填写密钥"
+providers.environment_invalid: "环境变量必须是字符串组成的 JSON 对象：%{error}"
+providers.instance_in_use: 已有任务正在使用此 provider 实例，无法删除
+providers.add_instance: 新增一个 %{provider} 实例
+providers.remove_instance: 删除 %{provider}
+providers.instance_name: 实例名称
+providers.instance_name_invalid: 实例名称不能为空
 providers.checked_just_now: 刚刚检查过
 providers.checked_minutes_ago: "%{count} 分钟前检查过"
 providers.checked_hours_ago: "%{count} 小时前检查过"
