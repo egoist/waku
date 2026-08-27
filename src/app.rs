@@ -1107,6 +1107,7 @@ pub struct Waku {
     /// The provider row expanded on the Providers page, if any. The binary
     /// override input below edits this provider's entry.
     expanded_provider_settings: Option<String>,
+    provider_name_input: Entity<TextInput>,
     provider_path_input: Entity<TextInput>,
     provider_environment_input: Entity<TextInput>,
     computer_permissions: ComputerPermissions,
@@ -2011,6 +2012,8 @@ impl Waku {
                 .placeholder(tr!("skills.search"))
         });
         let session_rename_input = cx.new(|cx| TextInput::new(window, cx));
+        let provider_name_input =
+            cx.new(|cx| TextInput::new(window, cx).select_all_on_focus_click());
         let provider_path_input = cx.new(|cx| {
             TextInput::new(window, cx)
                 .select_all_on_focus_click()
@@ -2601,6 +2604,15 @@ impl Waku {
             )
             .detach();
             cx.subscribe(
+                &provider_name_input,
+                |this: &mut Self, _, event: &InputEvent, cx| {
+                    if matches!(event, InputEvent::Submit(_)) {
+                        this.apply_provider_instance_name(cx);
+                    }
+                },
+            )
+            .detach();
+            cx.subscribe(
                 &provider_path_input,
                 |this: &mut Self, _, event: &InputEvent, cx| {
                     if matches!(event, InputEvent::Submit(_)) {
@@ -2777,6 +2789,7 @@ impl Waku {
                 provider_detection_remaining: 0,
                 provider_detection_checked_at: None,
                 expanded_provider_settings: None,
+                provider_name_input,
                 provider_path_input,
                 provider_environment_input,
                 computer_permissions: ComputerPermissions::default(),

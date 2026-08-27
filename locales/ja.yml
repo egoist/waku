@@ -200,6 +200,7 @@ providers.instance_in_use: 既存のタスクで使用中のプロバイダー�
 providers.add_instance: "%{provider} インスタンスを追加"
 providers.remove_instance: "%{provider} を削除"
 providers.instance_name: インスタンス名
+providers.instance_name_invalid: インスタンス名は空にできません
 providers.checked_just_now: たった今確認済み
 providers.checked_minutes_ago: "%{count} 分前に確認済み"
 providers.checked_hours_ago: "%{count} 時間前に確認済み"

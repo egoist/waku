@@ -248,6 +248,7 @@ function ProvidersSettings() {
   const probes = useProviderProbes()
   const [expanded, setExpanded] = useState<string | null>(null)
   const [paths, setPaths] = useState<Record<string, string>>({})
+  const [nameInputs, setNameInputs] = useState<Record<string, string>>({})
   const [environmentInputs, setEnvironmentInputs] = useState<Record<string, string>>({})
   const checkedAt = Math.max(
     0,
@@ -294,6 +295,9 @@ function ProvidersSettings() {
           ? settings.data?.provider_binary_overrides?.[builtin.id] ?? ''
           : custom?.binaryOverride ?? '',
       }))
+      if (custom) {
+        setNameInputs((current) => ({ ...current, [custom.id]: custom.name }))
+      }
     }
     setExpanded(expanded === provider ? null : provider)
   }
@@ -315,6 +319,7 @@ function ProvidersSettings() {
       environment: {},
     }
     setPaths((current) => ({ ...current, [instance.id]: instance.binaryOverride ?? '' }))
+    setNameInputs((current) => ({ ...current, [instance.id]: instance.name }))
     setEnvironmentInputs((current) => ({ ...current, [instance.id]: '{}' }))
     setExpanded(instance.id)
     void apply({
@@ -344,6 +349,17 @@ function ProvidersSettings() {
     } catch (error) {
       toast.error(t('providers.environment_invalid', { error: errorMessage(error) }))
     }
+  }
+
+  function applyProviderName(instance: ProviderInstance, value: string) {
+    const name = value.trim()
+    if (!name) {
+      setNameInputs((current) => ({ ...current, [instance.id]: instance.name }))
+      toast.error(t('providers.instance_name_invalid'))
+      return
+    }
+    setNameInputs((current) => ({ ...current, [instance.id]: name }))
+    if (name !== instance.name) updateProviderInstance(instance.id, { name })
   }
 
   function removeProviderInstance(instance: ProviderInstance) {
@@ -541,8 +557,13 @@ function ProvidersSettings() {
                   <label className="text-[11.5px] font-medium">{t('providers.instance_name')}</label>
                   <Input
                     className="h-[29px] bg-[var(--inset)] text-[11px]"
-                    value={instance.name}
-                    onChange={(event) => updateProviderInstance(instance.id, { name: event.target.value })}
+                    value={nameInputs[instance.id] ?? instance.name}
+                    onChange={(event) => setNameInputs((current) => ({ ...current, [instance.id]: event.target.value }))}
+                    onBlur={(event) => applyProviderName(instance, event.currentTarget.value)}
+                    onKeyDown={(event) => {
+                      if (event.key !== 'Enter') return
+                      applyProviderName(instance, event.currentTarget.value)
+                    }}
                   />
                   <label className="mt-2 text-[11.5px] font-medium">{t('providers.binary_path')}</label>
                   <Input

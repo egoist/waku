@@ -392,6 +392,8 @@ providers.remove_instance:
   en: Remove %{provider}
 providers.instance_name:
   en: Instance name
+providers.instance_name_invalid:
+  en: Instance name cannot be empty
 providers.checked_just_now:
   en: Checked just now
 providers.checked_minutes_ago:

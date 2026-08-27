@@ -1956,6 +1956,21 @@ impl Waku {
                                 .text_size(sp(12.5))
                                 .font_weight(FontWeight::MEDIUM)
                                 .text_color(theme.text)
+                                .child(tr!("providers.instance_name")),
+                        )
+                        .child(
+                            TextField::new(
+                                SharedString::from(format!("provider-name-field-{}", instance.id)),
+                                self.provider_name_input.clone(),
+                            )
+                            .max_w(px(430.0)),
+                        )
+                        .child(
+                            div()
+                                .mt(px(12.0))
+                                .text_size(sp(12.5))
+                                .font_weight(FontWeight::MEDIUM)
+                                .text_color(theme.text)
                                 .child(tr!("providers.environment")),
                         )
                         .child(
@@ -1994,24 +2009,25 @@ impl Waku {
     ) {
         // Commit any pending edit for the previously expanded provider before
         // the input is handed to another row.
+        self.apply_provider_instance_name(cx);
         self.apply_provider_path_override(cx);
         self.apply_provider_environment(cx);
         if self.expanded_provider_settings.as_deref() == Some(provider_instance_id.as_str()) {
             self.expanded_provider_settings = None;
         } else {
             self.expanded_provider_settings = Some(provider_instance_id.clone());
-            let override_value = self
+            let instance = self
                 .state
                 .provider_instance(provider, Some(&provider_instance_id))
-                .and_then(|instance| instance.binary_override)
-                .unwrap_or_default();
+                .unwrap_or_else(|| {
+                    waku_client::settings::ProviderInstance::builtin(provider, true, None)
+                });
+            self.provider_name_input
+                .update(cx, |input, cx| input.set_content(instance.name, cx));
+            let override_value = instance.binary_override.unwrap_or_default();
             self.provider_path_input
                 .update(cx, |input, cx| input.set_content(override_value, cx));
-            let environment = self
-                .state
-                .provider_instance(provider, Some(&provider_instance_id))
-                .map(|instance| instance.environment)
-                .unwrap_or_default();
+            let environment = instance.environment;
             let environment = if environment.is_empty() {
                 String::new()
             } else {
@@ -2019,9 +2035,47 @@ impl Waku {
             };
             self.provider_environment_input
                 .update(cx, |input, cx| input.set_content(environment, cx));
-            let focus = self.provider_path_input.read(cx).focus();
+            let focus = if provider_instance_id == provider.id() {
+                self.provider_path_input.read(cx).focus()
+            } else {
+                self.provider_name_input.read(cx).focus()
+            };
             window.focus(&focus, cx);
         }
+        cx.notify();
+    }
+
+    pub(super) fn apply_provider_instance_name(&mut self, cx: &mut Context<Self>) {
+        let Some(provider_instance_id) = self.expanded_provider_settings.clone() else {
+            return;
+        };
+        let Some(index) = self
+            .state
+            .custom_provider_instances
+            .iter()
+            .position(|instance| instance.id == provider_instance_id)
+        else {
+            return;
+        };
+        let text = self
+            .provider_name_input
+            .read(cx)
+            .content()
+            .trim()
+            .to_owned();
+        if text.is_empty() {
+            let current = self.state.custom_provider_instances[index].name.clone();
+            self.provider_name_input
+                .update(cx, |input, cx| input.set_content(current, cx));
+            self.show_toast(tr!("providers.instance_name_invalid"));
+            cx.notify();
+            return;
+        }
+        if self.state.custom_provider_instances[index].name == text {
+            return;
+        }
+        self.state.custom_provider_instances[index].name = text;
+        self.save();
         cx.notify();
     }
 
@@ -2120,6 +2174,7 @@ impl Waku {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.apply_provider_instance_name(cx);
         self.apply_provider_path_override(cx);
         self.apply_provider_environment(cx);
         let ordinal = self

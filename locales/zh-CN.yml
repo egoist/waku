@@ -192,6 +192,7 @@ providers.instance_in_use: 已有任务正在使用此 provider 实例，无法�
 providers.add_instance: 新增一个 %{provider} 实例
 providers.remove_instance: 删除 %{provider}
 providers.instance_name: 实例名称
+providers.instance_name_invalid: 实例名称不能为空
 providers.checked_just_now: 刚刚检查过
 providers.checked_minutes_ago: "%{count} 分钟前检查过"
 providers.checked_hours_ago: "%{count} 小时前检查过"
