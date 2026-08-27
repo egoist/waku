@@ -2,9 +2,16 @@
 
 use std::collections::{HashMap, HashSet};
 use std::fs;
-use std::io::{BufRead, BufReader, Write};
+#[cfg(not(unix))]
+use std::io::Write;
+#[cfg(not(unix))]
+use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+#[cfg(not(unix))]
+use std::process::ChildStdin;
+use std::process::Command;
+#[cfg(not(unix))]
+use std::process::Stdio;
 use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -13,6 +20,8 @@ use anyhow::{Context as _, anyhow};
 use crossbeam_channel::{Sender, bounded, unbounded};
 use parking_lot::Mutex;
 use serde_json::{Value, json};
+#[cfg(unix)]
+use tungstenite::Message;
 #[cfg(test)]
 use uuid::Uuid;
 
@@ -129,6 +138,8 @@ impl BackgroundRpcState {
 
 pub struct CodexDriver {
     commands: Sender<CommandMessage>,
+    #[cfg(unix)]
+    _server: Option<super::codex_pool::PooledCodexServer>,
     mode: RuntimeMode,
     interaction_mode: InteractionMode,
     computer_use_process_directory: Option<PathBuf>,
@@ -136,7 +147,7 @@ pub struct CodexDriver {
     computer_use_preview_monitor: Option<computer_use_runtime::ComputerUsePreviewMonitor>,
 }
 
-struct CodexComputerUseConfig {
+pub(crate) struct CodexComputerUseConfig {
     server_path: PathBuf,
     server: String,
     repl: String,
@@ -168,7 +179,10 @@ impl CodexComputerUseConfig {
 /// Register Waku's long-lived QuickJS MCP server and keep the raw native helper
 /// private behind its built-in `sky` object. Codex sees only the compact
 /// `js` / `js_reset` execution surface.
-fn configure_computer_use_command(command: &mut Command, config: Option<&CodexComputerUseConfig>) {
+pub(crate) fn configure_computer_use_command(
+    command: &mut Command,
+    config: Option<&CodexComputerUseConfig>,
+) {
     if let Some(config) = config {
         command
             .arg("-c")
@@ -240,27 +254,39 @@ impl CodexDriver {
         let computer_use_server_path = computer_use
             .as_ref()
             .map(|config| config.server_path.clone());
+        #[cfg(unix)]
+        let server = super::codex_pool::acquire(&binary, &cwd, computer_use.as_ref())?;
+        #[cfg(unix)]
+        let socket = Arc::new(Mutex::new(server.connect()?));
         let title_binary = binary.clone();
         let title_cwd = cwd.clone();
+        #[cfg(not(unix))]
         let mut command = crate::command_env::command(&binary);
+        #[cfg(not(unix))]
         command.args(["app-server", "--stdio"]);
+        #[cfg(not(unix))]
         configure_computer_use_command(&mut command, computer_use.as_ref());
+        #[cfg(not(unix))]
         let command = command
             .current_dir(&cwd)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
+        #[cfg(not(unix))]
         let mut child =
             crate::command_env::spawn(command).context("failed to start `codex app-server`")?;
 
+        #[cfg(not(unix))]
         let stdin = child
             .stdin
             .take()
             .ok_or_else(|| anyhow!("Codex stdin unavailable"))?;
+        #[cfg(not(unix))]
         let stdout = child
             .stdout
             .take()
             .ok_or_else(|| anyhow!("Codex stdout unavailable"))?;
+        #[cfg(not(unix))]
         let stderr = child
             .stderr
             .take()
@@ -305,6 +331,10 @@ impl CodexDriver {
         let writer_title_generation = title_generation.clone();
         let writer_events = events.clone();
         let cwd_string = cwd.display().to_string();
+        #[cfg(unix)]
+        let stdin = CodexWriter::Socket(socket.clone());
+        #[cfg(not(unix))]
+        let stdin = CodexWriter::Stdio(stdin);
         thread::Builder::new()
             .name("waku-codex-writer".into())
             .spawn(move || {
@@ -323,8 +353,8 @@ impl CodexDriver {
                         }
                     }
                 });
-                if write_json_line(&mut stdin, &initialize).is_err()
-                    || write_json_line(
+                if write_codex_json_line(&mut stdin, &initialize).is_err()
+                    || write_codex_json_line(
                         &mut stdin,
                         &json!({
                             "method": "initialized",
@@ -343,7 +373,7 @@ impl CodexDriver {
                     // Register Waku's bundled skill through Codex's discoverable-skill
                     // mechanism. Keep the skill out of developerInstructions so it is
                     // loaded and displayed like Codex's own bundled skills.
-                    if write_json_line(
+                    if write_codex_json_line(
                         &mut stdin,
                         &json!({
                             "method": "skills/extraRoots/set",
@@ -410,7 +440,7 @@ impl CodexDriver {
                         "params": params
                     })
                 };
-                let _ = write_json_line(&mut stdin, &open_thread);
+                let _ = write_codex_json_line(&mut stdin, &open_thread);
 
                 let mut next_request_id = 10_u64;
                 while let Ok(command) = command_rx.recv() {
@@ -484,7 +514,7 @@ impl CodexDriver {
                                     "input": [{"type": "text", "text": text}]
                                 }
                             });
-                            if let Err(error) = write_json_line(&mut stdin, &message)
+                            if let Err(error) = write_codex_json_line(&mut stdin, &message)
                                 && let Some(text) = writer_pending_steers.lock().remove(&request_id)
                             {
                                 let _ = writer_events.send(DriverEvent::SteerRejected {
@@ -556,7 +586,7 @@ impl CodexDriver {
                                     "numTurns": turns
                                 }
                             });
-                            if let Err(error) = write_json_line(&mut stdin, &message)
+                            if let Err(error) = write_codex_json_line(&mut stdin, &message)
                                 && let Some((_, response)) =
                                     writer_pending_rollbacks.lock().remove(&request_id)
                             {
@@ -595,7 +625,7 @@ impl CodexDriver {
                                     "lastTurnId": last_turn_id
                                 }
                             });
-                            if let Err(error) = write_json_line(&mut stdin, &message)
+                            if let Err(error) = write_codex_json_line(&mut stdin, &message)
                                 && let Some(response) =
                                     writer_pending_forks.lock().remove(&request_id)
                             {
@@ -736,7 +766,7 @@ impl CodexDriver {
                         }
                         CommandMessage::Shutdown => break,
                     };
-                    if let Err(error) = write_json_line(&mut stdin, &message) {
+                    if let Err(error) = write_codex_json_line(&mut stdin, &message) {
                         let _ = writer_events.send(DriverEvent::Error(tr!(
                             "errors.provider_transport_write",
                             provider = "Codex",
@@ -758,13 +788,28 @@ impl CodexDriver {
         let reader_title_generation = title_generation;
         let reader_commands = commands.clone();
         let reader_events = events.clone();
-        let reader_thread = thread::Builder::new()
+        #[cfg(unix)]
+        let socket_for_reader = socket.clone();
+        let _reader_thread = thread::Builder::new()
             .name("waku-codex-reader".into())
             .spawn(move || {
                 let mut stream_state = CodexStreamState::default();
-                for line in BufReader::new(stdout).lines() {
+                #[cfg(not(unix))]
+                let mut stdout = BufReader::new(stdout);
+                loop {
+                    #[cfg(unix)]
+                    let line = read_codex_socket_message(&socket_for_reader);
+                    #[cfg(not(unix))]
+                    let line = {
+                        let mut line = String::new();
+                        match stdout.read_line(&mut line) {
+                            Ok(0) => Ok(None),
+                            Ok(_) => Ok(Some(line)),
+                            Err(error) => Err(error),
+                        }
+                    };
                     match line {
-                        Ok(line) if !line.trim().is_empty() => {
+                        Ok(Some(line)) if !line.trim().is_empty() => {
                             match serde_json::from_str::<Value>(&line) {
                                 Ok(value) => {
                                     let main_turn_started = is_codex_turn_started(
@@ -825,7 +870,10 @@ impl CodexDriver {
                                 }
                             }
                         }
-                        Ok(_) => {}
+                        Ok(Some(_)) => {}
+                        Ok(None) => break,
+                        #[cfg(unix)]
+                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => continue,
                         Err(error) => {
                             let _ = reader_events.send(DriverEvent::Error(tr!(
                                 "errors.provider_transport_read",
@@ -836,11 +884,17 @@ impl CodexDriver {
                         }
                     }
                 }
+                #[cfg(unix)]
+                let _ = reader_events.send(DriverEvent::ProcessExited);
             })?;
 
+        #[cfg(not(unix))]
         let last_visible_stderr = Arc::new(Mutex::new(None::<String>));
+        #[cfg(not(unix))]
         let stderr_last_error = last_visible_stderr.clone();
+        #[cfg(not(unix))]
         let stderr_events = events.clone();
+        #[cfg(not(unix))]
         let stderr_thread = thread::Builder::new()
             .name("waku-codex-stderr".into())
             .spawn(move || {
@@ -853,11 +907,12 @@ impl CodexDriver {
                 }
             })?;
 
+        #[cfg(not(unix))]
         thread::Builder::new()
             .name("waku-codex-process".into())
             .spawn(move || {
                 let status = child.wait();
-                let _ = reader_thread.join();
+                let _ = _reader_thread.join();
                 let _ = stderr_thread.join();
                 match status {
                     Ok(status) if !status.success() && last_visible_stderr.lock().is_none() => {
@@ -881,6 +936,8 @@ impl CodexDriver {
 
         Ok(Self {
             commands,
+            #[cfg(unix)]
+            _server: Some(server),
             mode,
             interaction_mode,
             computer_use_process_directory,
@@ -1123,10 +1180,56 @@ impl Drop for CodexDriver {
     }
 }
 
+enum CodexWriter {
+    #[cfg(unix)]
+    Socket(Arc<Mutex<super::codex_pool::CodexSocket>>),
+    #[cfg(not(unix))]
+    Stdio(ChildStdin),
+}
+
+#[cfg(unix)]
+fn write_codex_json_line(writer: &mut CodexWriter, value: &Value) -> std::io::Result<()> {
+    let CodexWriter::Socket(socket) = writer;
+    let payload = serde_json::to_string(value)?;
+    socket
+        .lock()
+        .send(Message::Text(payload.into()))
+        .map_err(std::io::Error::other)
+}
+
+#[cfg(not(unix))]
+fn write_codex_json_line(writer: &mut CodexWriter, value: &Value) -> std::io::Result<()> {
+    let CodexWriter::Stdio(writer) = writer;
+    serde_json::to_writer(&mut *writer, value)?;
+    writer.write_all(b"\n")?;
+    writer.flush()
+}
+
+#[cfg(not(unix))]
 fn write_json_line(writer: &mut impl Write, value: &Value) -> std::io::Result<()> {
     serde_json::to_writer(&mut *writer, value)?;
     writer.write_all(b"\n")?;
     writer.flush()
+}
+
+#[cfg(unix)]
+fn read_codex_socket_message(
+    socket: &Arc<Mutex<super::codex_pool::CodexSocket>>,
+) -> std::io::Result<Option<String>> {
+    loop {
+        match socket.lock().read() {
+            Ok(Message::Text(text)) => return Ok(Some(text.to_string())),
+            Ok(Message::Binary(bytes)) => {
+                return String::from_utf8(bytes.to_vec())
+                    .map(Some)
+                    .map_err(std::io::Error::other);
+            }
+            Ok(Message::Close(_)) => return Ok(None),
+            Ok(Message::Ping(_)) | Ok(Message::Pong(_)) | Ok(Message::Frame(_)) => continue,
+            Err(tungstenite::Error::Io(error)) => return Err(error),
+            Err(error) => return Err(std::io::Error::other(error)),
+        }
+    }
 }
 
 const CODEX_TITLE_INSTRUCTIONS: &str = "Generate a concise title for the user's coding task. Return only a plain title of at most six words. Do not use tools, quotes, markdown, labels, or ending punctuation.";
@@ -1178,6 +1281,106 @@ fn codex_title_turn_params(thread_id: &str, user_message: &str) -> Value {
 /// Codex app-server can persist a thread name but does not generate one. Match
 /// Codex Desktop's client-owned behavior with an isolated ephemeral turn, then
 /// hand the result back to the main writer for `thread/name/set`.
+#[cfg(unix)]
+fn generate_codex_title(binary: &Path, cwd: &Path, prompt: &str) -> anyhow::Result<String> {
+    let server = super::codex_pool::acquire(binary, cwd, None)?;
+    let socket = Arc::new(Mutex::new(server.connect()?));
+    let mut writer = CodexWriter::Socket(socket.clone());
+
+    write_codex_json_line(
+        &mut writer,
+        &json!({
+            "method": "initialize",
+            "id": 0,
+            "params": {
+                "clientInfo": {
+                    "name": "waku-title",
+                    "title": "Waku Title",
+                    "version": env!("CARGO_PKG_VERSION")
+                },
+                "capabilities": {"experimentalApi": true}
+            }
+        }),
+    )?;
+    write_codex_json_line(&mut writer, &json!({"method": "initialized", "params": {}}))?;
+    write_codex_json_line(
+        &mut writer,
+        &json!({
+            "method": "thread/start",
+            "id": 1,
+            "params": codex_title_thread_params(cwd)
+        }),
+    )?;
+
+    let deadline = Instant::now() + CODEX_TITLE_TIMEOUT;
+    let mut title_thread_id = None::<String>;
+    let mut generated = None::<String>;
+    loop {
+        if Instant::now() >= deadline {
+            return Err(anyhow!("Codex title generation timed out"));
+        }
+        let value = match read_codex_socket_message(&socket) {
+            Ok(Some(line)) => serde_json::from_str::<Value>(&line)?,
+            Ok(None) => return Err(anyhow!("Codex title connection closed")),
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => continue,
+            Err(error) => return Err(error.into()),
+        };
+
+        if value.get("id").and_then(Value::as_u64) == Some(1) && value.get("method").is_none() {
+            if let Some(error) = value.pointer("/error/message").and_then(Value::as_str) {
+                return Err(anyhow!("Codex could not open a title thread: {error}"));
+            }
+            let thread_id = value
+                .pointer("/result/thread/id")
+                .and_then(Value::as_str)
+                .ok_or_else(|| anyhow!("Codex returned no title thread ID"))?
+                .to_owned();
+            title_thread_id = Some(thread_id.clone());
+            write_codex_json_line(
+                &mut writer,
+                &json!({
+                    "method": "turn/start",
+                    "id": 2,
+                    "params": codex_title_turn_params(&thread_id, prompt)
+                }),
+            )?;
+            continue;
+        }
+
+        if value.get("method").and_then(Value::as_str) == Some("item/completed")
+            && value.pointer("/params/threadId").and_then(Value::as_str)
+                == title_thread_id.as_deref()
+            && value.pointer("/params/item/type").and_then(Value::as_str) == Some("agentMessage")
+            && let Some(text) = value.pointer("/params/item/text").and_then(Value::as_str)
+        {
+            generated = Some(text.to_owned());
+            continue;
+        }
+
+        if value.get("method").and_then(Value::as_str) == Some("turn/completed")
+            && value.pointer("/params/threadId").and_then(Value::as_str)
+                == title_thread_id.as_deref()
+        {
+            let status = value
+                .pointer("/params/turn/status")
+                .and_then(Value::as_str)
+                .unwrap_or("failed");
+            if status != "completed" {
+                let message = value
+                    .pointer("/params/turn/error/message")
+                    .and_then(Value::as_str)
+                    .unwrap_or("the title turn did not complete");
+                return Err(anyhow!("Codex title generation failed: {message}"));
+            }
+            return generated
+                .as_deref()
+                .and_then(normalize_codex_title)
+                .ok_or_else(|| anyhow!("Codex returned an empty task title"));
+        }
+    }
+}
+
+#[cfg(not(unix))]
 fn generate_codex_title(binary: &Path, cwd: &Path, prompt: &str) -> anyhow::Result<String> {
     let mut command = crate::command_env::command(binary);
     let command = command
@@ -1939,6 +2142,18 @@ fn handle_codex_message(
                 success: status == "completed",
                 summary: error,
             });
+            // A steer can race the provider's final turn notification. If the
+            // response to `turn/steer` arrives after this point (or is lost
+            // with the closing connection), do not leave the composer stuck
+            // in the steering state forever. The app will requeue it as a
+            // normal follow-up once it observes the completed turn.
+            for (_, message) in pending_steers.lock().drain() {
+                let _ = events.send(DriverEvent::SteerRejected {
+                    message,
+                    reason: "Codex completed the turn before acknowledging the steering request"
+                        .to_owned(),
+                });
+            }
         }
         "thread/name/updated" => {
             let current_thread_id = thread_id.lock().clone();
@@ -2498,12 +2713,14 @@ fn split_camel_case(value: &str) -> String {
         .unwrap_or_else(|| "Activity".into())
 }
 
+#[cfg(not(unix))]
 fn clean_stderr(line: &str) -> String {
     line.split_once(": ")
         .map(|(_, message)| message.to_owned())
         .unwrap_or_else(|| line.to_owned())
 }
 
+#[cfg(any(not(unix), test))]
 fn is_visible_stderr_notice(line: &str) -> bool {
     let lowercase = line.to_ascii_lowercase();
     if lowercase.contains("transport channel closed")
@@ -2594,11 +2811,7 @@ mod tests {
     #[test]
     fn goal_set_responses_become_goal_updates() {
         let harness = GoalHarness::new();
-        harness
-            .goals
-            .lock()
-            .pending
-            .insert(42, PendingGoalRpc::Set);
+        harness.goals.lock().pending.insert(42, PendingGoalRpc::Set);
         harness.handle(json!({"id": 42, "result": {"goal": goal_json()}}));
 
         let Ok(DriverEvent::GoalUpdated(Some(goal))) = harness.received.try_recv() else {
@@ -2853,6 +3066,8 @@ mod tests {
         let (commands, command_rx) = unbounded();
         let driver = CodexDriver {
             commands,
+            #[cfg(unix)]
+            _server: None,
             mode: RuntimeMode::FullAccess,
             interaction_mode: InteractionMode::Build,
             computer_use_process_directory: None,
@@ -3322,6 +3537,63 @@ mod tests {
             other => panic!("expected a rejected steer, got {other:?}"),
         }
         assert!(event_rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn completed_turn_rejects_unacknowledged_steers() {
+        let thread_id = Mutex::new(Some("thread-1".to_owned()));
+        let turn_id = Mutex::new(Some("turn-9".to_owned()));
+        let turn_ids = Mutex::new(vec!["turn-9".to_owned()]);
+        let pending_rollbacks = Mutex::new(HashMap::new());
+        let pending_forks = Mutex::new(HashMap::new());
+        let pending_steers = Mutex::new(HashMap::from([
+            (52, "Please include a test".to_owned()),
+            (53, "Also explain the failure".to_owned()),
+        ]));
+        let background_rpcs = Mutex::new(BackgroundRpcState::default());
+        let goal_rpcs = Mutex::new(GoalRpcState::default());
+        let (goal_commands, _goal_command_rx) = unbounded();
+        let (event_tx, event_rx) = unbounded();
+        let mut stream_state = CodexStreamState::default();
+
+        handle_codex_message(
+            json!({
+                "method": "turn/completed",
+                "params": {
+                    "threadId": "thread-1",
+                    "turn": {"id": "turn-9", "status": "completed"}
+                }
+            }),
+            &thread_id,
+            &turn_id,
+            &turn_ids,
+            &pending_rollbacks,
+            &pending_forks,
+            &pending_steers,
+            &background_rpcs,
+            &goal_rpcs,
+            &goal_commands,
+            &event_tx,
+            &mut stream_state,
+        );
+
+        assert!(pending_steers.lock().is_empty());
+        assert!(matches!(
+            event_rx.try_recv().unwrap(),
+            DriverEvent::TurnFinished { success: true, .. }
+        ));
+        let mut rejected = Vec::new();
+        while let Ok(DriverEvent::SteerRejected { message, .. }) = event_rx.try_recv() {
+            rejected.push(message);
+        }
+        rejected.sort();
+        assert_eq!(
+            rejected,
+            vec![
+                "Also explain the failure".to_owned(),
+                "Please include a test".to_owned()
+            ]
+        );
     }
 
     #[test]

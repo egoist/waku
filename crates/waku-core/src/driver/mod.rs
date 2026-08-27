@@ -5,6 +5,8 @@ mod activity;
 mod amp;
 mod claude;
 mod codex;
+#[cfg(unix)]
+mod codex_pool;
 mod computer_use;
 mod deepseek;
 mod opencode;
