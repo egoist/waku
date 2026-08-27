@@ -96,11 +96,53 @@ enum PaletteIcon {
     Provider(ProviderKind),
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PaletteIdentifier {
+    TaskId,
+    AgentCliThreadId,
+}
+
+impl PaletteIdentifier {
+    const ALL: [Self; 2] = [Self::TaskId, Self::AgentCliThreadId];
+
+    fn value(self, session: Option<&AgentSession>) -> Option<String> {
+        let session = session?;
+        match self {
+            Self::TaskId => Some(session.id.to_string()),
+            Self::AgentCliThreadId => session.provider_native_id().map(str::to_owned),
+        }
+    }
+
+    fn label(self) -> String {
+        tr!(match self {
+            Self::TaskId => "command_palette.copy_task_id",
+            Self::AgentCliThreadId => "command_palette.copy_agent_cli_thread_id",
+        })
+    }
+
+    fn copied_message(self) -> String {
+        tr!(match self {
+            Self::TaskId => "command_palette.task_id_copied",
+            Self::AgentCliThreadId => "command_palette.agent_cli_thread_id_copied",
+        })
+    }
+
+    fn keywords(self) -> &'static str {
+        match self {
+            Self::TaskId => "copy task id uuid identifier session debug",
+            Self::AgentCliThreadId => {
+                "copy agent cli thread id native session uuid identifier codex claude debug"
+            }
+        }
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum PaletteAction {
     NewTask,
     OpenProject,
     FocusComposer,
+    CopyIdentifier(PaletteIdentifier),
     ChooseModel,
     ToggleUsage,
     CollapseSidebarGroups,
@@ -572,6 +614,19 @@ impl Waku {
             "focus composer prompt input message",
             next(),
         ));
+        for identifier in PaletteIdentifier::ALL {
+            if identifier.value(self.selected_session()).is_some() {
+                commands.push(CommandPaletteItem::command(
+                    PaletteSection::Commands,
+                    identifier.label(),
+                    "icons/copy.svg",
+                    None,
+                    PaletteAction::CopyIdentifier(identifier),
+                    identifier.keywords(),
+                    next(),
+                ));
+            }
+        }
         if self.usage_meter_available() {
             commands.push(CommandPaletteItem::command(
                 PaletteSection::Commands,
@@ -921,6 +976,13 @@ impl Waku {
             PaletteAction::NewTask => self.new_session_action(&NewSession, window, cx),
             PaletteAction::OpenProject => self.new_project_action(&NewProject, window, cx),
             PaletteAction::FocusComposer => self.focus_composer_action(&FocusComposer, window, cx),
+            PaletteAction::CopyIdentifier(identifier) => {
+                if let Some(value) = identifier.value(self.selected_session()) {
+                    cx.write_to_clipboard(ClipboardItem::new_string(value));
+                    self.show_success_toast(identifier.copied_message());
+                    cx.notify();
+                }
+            }
             PaletteAction::CollapseSidebarGroups => self.collapse_all_sidebar_groups(cx),
             PaletteAction::ToggleSidebar => self.toggle_sidebar_action(&ToggleSidebar, window, cx),
             PaletteAction::ToggleRightPanel => {
@@ -1269,6 +1331,31 @@ mod tests {
         assert!(score("open proj", "Open project folder repository").is_some());
         assert!(score("cmptr use", "Computer Use settings accessibility").is_some());
         assert!(score("totally absent", "Open project folder repository").is_none());
+    }
+
+    #[test]
+    fn copy_identifier_commands_use_the_selected_tasks_live_ids() {
+        let mut session = AgentSession::new(Uuid::nil(), ProviderKind::Codex);
+        session.id = Uuid::parse_str("ed28ee51-43cf-4a83-a52f-04c509ca2c09").unwrap();
+
+        assert_eq!(
+            PaletteIdentifier::TaskId.value(Some(&session)).as_deref(),
+            Some("ed28ee51-43cf-4a83-a52f-04c509ca2c09")
+        );
+        assert_eq!(
+            PaletteIdentifier::AgentCliThreadId.value(Some(&session)),
+            None
+        );
+
+        session.provider_cursor = Some(ProviderResumeCursor::Codex {
+            thread_id: "019cfd7a-6942-78b1-9d47-30576c562321".into(),
+        });
+        assert_eq!(
+            PaletteIdentifier::AgentCliThreadId
+                .value(Some(&session))
+                .as_deref(),
+            Some("019cfd7a-6942-78b1-9d47-30576c562321")
+        );
     }
 
     #[test]

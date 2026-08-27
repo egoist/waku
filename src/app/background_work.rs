@@ -5,6 +5,8 @@ const MAX_SETTLED_BACKGROUND_ITEMS: usize = 24;
 const OUTPUT_CACHE_REFRESH_INTERVAL: Duration = Duration::from_millis(100);
 const BACKGROUND_SUMMARY_MENU_ID: &str = "background-work-summary";
 const OPEN_IN_MENU_ID: &str = "open-in-app";
+const TASK_ID_COPY_CONTROL_ID: &str = "background-summary-copy-task-id";
+const AGENT_THREAD_ID_COPY_CONTROL_ID: &str = "background-summary-copy-agent-thread-id";
 
 #[derive(Default)]
 pub(super) struct BackgroundWorkRegistry {
@@ -46,6 +48,30 @@ struct EnvironmentSummary {
     commit_status: Option<String>,
     commit_focus: FocusHandle,
     compare_focus: FocusHandle,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct TaskIdentifiers {
+    task_id: Uuid,
+    agent_cli_thread_id: Option<String>,
+}
+
+#[derive(Clone)]
+struct TaskIdentifierSection {
+    values: TaskIdentifiers,
+    task_id_copy_focus: FocusHandle,
+    agent_cli_thread_id_copy_focus: FocusHandle,
+    task_id_copied: bool,
+    agent_cli_thread_id_copied: bool,
+}
+
+impl From<&AgentSession> for TaskIdentifiers {
+    fn from(session: &AgentSession) -> Self {
+        Self {
+            task_id: session.id,
+            agent_cli_thread_id: session.provider_native_id().map(str::to_owned),
+        }
+    }
 }
 
 impl BackgroundWorkRegistry {
@@ -666,6 +692,14 @@ impl Waku {
     pub(super) fn render_background_work_summary(&self, cx: &mut Context<Self>) -> AnyElement {
         let session = self.selected_session();
         let session_id = session.map(|session| session.id);
+        let identifiers = session.map(|session| TaskIdentifierSection {
+            values: TaskIdentifiers::from(session),
+            task_id_copy_focus: self.transcript_control_focus(TASK_ID_COPY_CONTROL_ID, cx),
+            agent_cli_thread_id_copy_focus: self
+                .transcript_control_focus(AGENT_THREAD_ID_COPY_CONTROL_ID, cx),
+            task_id_copied: self.control_was_copied(TASK_ID_COPY_CONTROL_ID),
+            agent_cli_thread_id_copied: self.control_was_copied(AGENT_THREAD_ID_COPY_CONTROL_ID),
+        });
         let entries = session_id
             .and_then(|session_id| self.background_work.get(&session_id))
             .map(|registry| {
@@ -812,6 +846,7 @@ impl Waku {
                 render_background_summary_card(
                     handle,
                     session_id.unwrap_or_else(Uuid::nil),
+                    identifiers.clone(),
                     environment.clone(),
                     entries.clone(),
                     weak.clone(),
@@ -1348,6 +1383,7 @@ fn background_work_count_summary(processes: usize, agents: usize) -> String {
 fn render_background_summary_card(
     handle: &ContextMenuHandle,
     session_id: Uuid,
+    identifiers: Option<TaskIdentifierSection>,
     environment: Option<EnvironmentSummary>,
     entries: Rc<Vec<BackgroundSummaryEntry>>,
     weak: WeakEntity<Waku>,
@@ -1374,6 +1410,7 @@ fn render_background_summary_card(
         .gap(px(8.0));
     let has_environment = environment.is_some();
     let has_background = !processes.is_empty() || !agents.is_empty();
+    let has_identifiers = identifiers.is_some();
     if let Some(environment) = environment {
         content = content.child(render_environment_summary_section(
             environment,
@@ -1405,6 +1442,12 @@ fn render_background_summary_card(
             &theme,
         ));
     }
+    if has_identifiers && (has_environment || has_background) {
+        content = content.child(div().mx(px(8.0)).h(px(1.0)).bg(theme.border));
+    }
+    if let Some(identifiers) = identifiers {
+        content = content.child(render_task_identifiers_section(identifiers, weak, &theme));
+    }
     div()
         .id("background-summary-card")
         .track_focus(handle.focus_handle())
@@ -1417,6 +1460,138 @@ fn render_background_summary_card(
         .shadow_lg()
         .child(content)
         .into_any_element()
+}
+
+fn render_task_identifiers_section(
+    section: TaskIdentifierSection,
+    weak: WeakEntity<Waku>,
+    theme: &Theme,
+) -> Div {
+    let mut rows = vec![render_task_identifier_row(
+        tr!("environment.task_id"),
+        section.values.task_id.to_string(),
+        TASK_ID_COPY_CONTROL_ID,
+        &section.task_id_copy_focus,
+        section.task_id_copied,
+        weak.clone(),
+        theme,
+    )];
+    if let Some(thread_id) = section.values.agent_cli_thread_id {
+        rows.push(render_task_identifier_row(
+            tr!("environment.agent_cli_thread_id"),
+            thread_id,
+            AGENT_THREAD_ID_COPY_CONTROL_ID,
+            &section.agent_cli_thread_id_copy_focus,
+            section.agent_cli_thread_id_copied,
+            weak,
+            theme,
+        ));
+    }
+
+    div()
+        .w_full()
+        .tab_group()
+        .tab_stop(false)
+        .flex()
+        .flex_col()
+        .gap(px(7.0))
+        .children(rows)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_task_identifier_row(
+    label: String,
+    value: String,
+    control_id: &'static str,
+    focus: &FocusHandle,
+    copied: bool,
+    weak: WeakEntity<Waku>,
+    theme: &Theme,
+) -> Div {
+    let tooltip = Tooltip::text(if copied {
+        tr!("common.copied")
+    } else {
+        tr!("common.copy_named", name = label.clone())
+    });
+    let copy_value = value.clone();
+    let copy_action = Rc::new(move |cx: &mut App| {
+        cx.write_to_clipboard(ClipboardItem::new_string(copy_value.clone()));
+        let _ = weak.update(cx, |this, cx| {
+            this.show_control_copied(control_id, cx);
+        });
+    });
+    let key_copy_action = copy_action.clone();
+    let copy_button = div()
+        .id(control_id)
+        .track_focus(focus)
+        .tab_index(0)
+        .size(px(24.0))
+        .rounded(px(6.0))
+        .flex_none()
+        .flex()
+        .items_center()
+        .justify_center()
+        .cursor_default()
+        .focus_visible(|style| {
+            style
+                .bg(theme.overlay)
+                .border_1()
+                .border_color(theme.accent)
+        })
+        .hover(|style| style.bg(theme.overlay_strong))
+        .active(|style| style.bg(theme.overlay))
+        .tooltip(tooltip)
+        .child(icon(
+            if copied {
+                "icons/check.svg"
+            } else {
+                "icons/copy.svg"
+            },
+            12.0,
+            theme.text_tertiary,
+        ))
+        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+        .on_click(move |_, _, cx| {
+            copy_action(cx);
+            cx.stop_propagation();
+        })
+        .on_key_down(move |event: &KeyDownEvent, _, cx| {
+            if !event.keystroke.modifiers.modified()
+                && matches!(event.keystroke.key.as_str(), "enter" | "space")
+            {
+                key_copy_action(cx);
+                cx.stop_propagation();
+            }
+        });
+
+    div()
+        .w_full()
+        .px(px(8.0))
+        .flex()
+        .flex_col()
+        .child(
+            div()
+                .h(px(24.0))
+                .flex()
+                .items_center()
+                .justify_between()
+                .child(
+                    div()
+                        .text_size(sp(12.0))
+                        .text_color(theme.text_tertiary)
+                        .child(label),
+                )
+                .child(copy_button),
+        )
+        .child(
+            div()
+                .min_w_0()
+                .whitespace_normal()
+                .text_size(sp(11.5))
+                .font_family(md::render::MONO_FAMILY)
+                .text_color(theme.text_secondary)
+                .child(value),
+        )
 }
 
 fn render_environment_summary_section(
@@ -1798,6 +1973,24 @@ mod tests {
         assert_eq!(
             single_line_label("/bin/zsh -lc 'set -euo pipefail\n  for n in one two'"),
             "/bin/zsh -lc 'set -euo pipefail for n in one two'"
+        );
+    }
+
+    #[test]
+    fn info_popover_uses_waku_task_and_native_agent_ids() {
+        let task_id = Uuid::parse_str("ed28ee51-43cf-4a83-a52f-04c509ca2c09").unwrap();
+        let mut session = AgentSession::new(Uuid::nil(), ProviderKind::Codex);
+        session.id = task_id;
+        session.provider_cursor = Some(ProviderResumeCursor::Codex {
+            thread_id: "019cfd7a-6942-78b1-9d47-30576c562321".into(),
+        });
+
+        assert_eq!(
+            TaskIdentifiers::from(&session),
+            TaskIdentifiers {
+                task_id,
+                agent_cli_thread_id: Some("019cfd7a-6942-78b1-9d47-30576c562321".into()),
+            }
         );
     }
 

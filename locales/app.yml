@@ -80,6 +80,14 @@ command_palette.open_project:
   en: Open project…
 command_palette.choose_model:
   en: Choose model…
+command_palette.copy_task_id:
+  en: Copy Task ID
+command_palette.copy_agent_cli_thread_id:
+  en: Copy Agent CLI thread ID
+command_palette.task_id_copied:
+  en: Task ID copied
+command_palette.agent_cli_thread_id_copied:
+  en: Agent CLI thread ID copied
 command_palette.collapse_sidebar_groups:
   en: Collapse all sidebar groups
 command_palette.show_sidebar:
@@ -1479,6 +1487,10 @@ environment.commit_or_push:
   en: Commit or push
 environment.compare_branch:
   en: Compare branch
+environment.task_id:
+  en: Task ID
+environment.agent_cli_thread_id:
+  en: Agent CLI thread ID
 
 commit.message_placeholder:
   en: Commit message (leave blank to generate)…

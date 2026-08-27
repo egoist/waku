@@ -41,6 +41,10 @@ command_palette.settings: 設定
 command_palette.new_task: 新規タスク
 command_palette.open_project: プロジェクトを開く…
 command_palette.choose_model: モデルを選択…
+command_palette.copy_task_id: タスク ID をコピー
+command_palette.copy_agent_cli_thread_id: エージェント CLI スレッド ID をコピー
+command_palette.task_id_copied: タスク ID をコピーしました
+command_palette.agent_cli_thread_id_copied: エージェント CLI スレッド ID をコピーしました
 command_palette.collapse_sidebar_groups: サイドバーのすべてのグループを折りたたむ
 command_palette.show_sidebar: サイドバーを表示
 command_palette.hide_sidebar: サイドバーを隠す
@@ -759,6 +763,8 @@ environment.summary: 環境とバックグラウンド作業
 environment.changes: 変更
 environment.commit_or_push: コミットまたはプッシュ
 environment.compare_branch: ブランチを比較
+environment.task_id: タスク ID
+environment.agent_cli_thread_id: エージェント CLI スレッド ID
 
 commit.message_placeholder: コミットメッセージ（空欄の場合は自動生成）…
 commit.message: コミットメッセージ

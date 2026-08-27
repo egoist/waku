@@ -39,6 +39,10 @@ command_palette.settings: 设置
 command_palette.new_task: 新建任务
 command_palette.open_project: 打开项目…
 command_palette.choose_model: 选择模型…
+command_palette.copy_task_id: 复制任务 ID
+command_palette.copy_agent_cli_thread_id: 复制智能体 CLI 线程 ID
+command_palette.task_id_copied: 已复制任务 ID
+command_palette.agent_cli_thread_id_copied: 已复制智能体 CLI 线程 ID
 command_palette.collapse_sidebar_groups: 折叠所有侧边栏分组
 command_palette.show_sidebar: 显示侧边栏
 command_palette.hide_sidebar: 隐藏侧边栏
@@ -720,6 +724,8 @@ environment.summary: 环境和后台工作
 environment.changes: 更改
 environment.commit_or_push: 提交或推送
 environment.compare_branch: 比较分支
+environment.task_id: 任务 ID
+environment.agent_cli_thread_id: 智能体 CLI 线程 ID
 commit.message_placeholder: 提交信息（留空以自动生成）…
 commit.message: 提交信息
 commit.include_unstaged: 包含未暂存的更改
