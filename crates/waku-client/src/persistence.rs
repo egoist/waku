@@ -62,6 +62,11 @@ fn default_computer_use_enabled() -> bool {
     false
 }
 
+fn default_stream_thinking_live() -> bool {
+    // T3 Code parity: buffered by default (`enableLegacyTokenStreaming: false`).
+    false
+}
+
 fn default_ui_font_size() -> f32 {
     DEFAULT_UI_FONT_SIZE
 }
@@ -388,6 +393,12 @@ pub struct PersistedState {
     /// instead of source. One global mode, not per file.
     #[serde(default)]
     pub markdown_preview: bool,
+    /// Whether the live reasoning peek renders growing thinking text.
+    /// Some providers (e.g. GLM via OpenRouter) emit line-delimited reasoning
+    /// deltas whose joined text renders one token per line, which reads as
+    /// garbage mid-stream; buffering hides it until the block completes.
+    #[serde(default = "default_stream_thinking_live")]
+    pub stream_thinking_live: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub window_state: Option<PersistedWindowState>,
     #[serde(default = "default_computer_use_enabled")]
@@ -450,6 +461,7 @@ impl PersistedState {
             sidebar_ordering: SidebarOrdering::Newest,
             right_panel_width: DEFAULT_RIGHT_PANEL_WIDTH,
             markdown_preview: false,
+            stream_thinking_live: false,
             window_state: None,
             computer_use_enabled: false,
             computer_use_allowed_apps: Vec::new(),
