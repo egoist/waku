@@ -180,8 +180,8 @@ windows-sys = { version = "0.61", features = [
 ed25519-dalek = "2"
 
 [profile.release]
-lto = "thin"
-codegen-units = 1
+lto = "off"
+codegen-units = 16
 strip = true
 
 # Keep debug assertions and incremental builds for app code, but do not run
