@@ -28,6 +28,14 @@ const CHART_GUTTER: f32 = 56.0;
 const USAGE_PROJECT_ROW_HEIGHT: f32 = 96.0;
 /// A snapshot older than this rescans when the page is next opened.
 const USAGE_RESCAN_AFTER: Duration = Duration::from_secs(120);
+const USAGE_TABLE_CELL_WIDTH: f32 = 84.0;
+const USAGE_TABLE_SHARE_WIDTH: f32 = 64.0;
+const USAGE_TABLE_COLUMN_GAP: f32 = 12.0;
+/// The numeric columns never shrink, so without a floor the label column is
+/// the only thing left to starve, and a starved label wraps one glyph a line.
+const USAGE_TABLE_LABEL_MIN_WIDTH: f32 = 88.0;
+const USAGE_QUALITY_PANEL_WIDTH: f32 = 240.0;
+const USAGE_BREAKDOWN_GAP: f32 = 32.0;
 fn provider_kind(provider: UsageProvider) -> ProviderKind {
     match provider {
         UsageProvider::Claude => ProviderKind::Claude,
@@ -155,7 +163,12 @@ impl Waku {
         cx.notify();
     }
 
-    pub(super) fn render_usage_settings(&self, cx: &mut Context<Self>) -> AnyElement {
+    /// The daily view reflows on `content_width`.
+    pub(super) fn render_usage_settings(
+        &self,
+        content_width: f32,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let theme = Theme::current(cx);
         let pending = self.usage_history_pending_for.is_some();
         let expected = self.effective_usage_window();
@@ -218,15 +231,18 @@ impl Waku {
                         .child(self.render_usage_chart_column(history, &theme, cx)),
                 )
                 .child(usage_metric_strip(history, &theme))
-                .child(
+                .child({
+                    let split = usage_breakdown_splits(content_width);
                     div()
                         .mt(px(24.0))
                         .flex()
-                        .items_start()
-                        .gap(px(32.0))
-                        .child(self.render_usage_breakdown(history, &theme, cx))
-                        .child(usage_quality_panel(history, &theme)),
-                ),
+                        .when(split, |element| {
+                            element.items_start().gap(px(USAGE_BREAKDOWN_GAP))
+                        })
+                        .when(!split, |element| element.flex_col().gap(px(24.0)))
+                        .child(self.render_usage_breakdown(history, split, &theme, cx))
+                        .child(usage_quality_panel(history, &theme, !split))
+                }),
             UsageViewMode::Monthly => page.child(usage_month_list(
                 self,
                 history,
@@ -957,10 +973,12 @@ impl Waku {
         div().flex().gap(px(8.0)).child(gutter).child(plot)
     }
 
-    /// The breakdown table with its model/day toggle.
+    /// The breakdown table with its model/day toggle. `split` shares the row
+    /// with the cost-quality panel; otherwise the table owns the full width.
     fn render_usage_breakdown(
         &self,
         history: &UsageHistory,
+        split: bool,
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> Div {
@@ -1007,8 +1025,13 @@ impl Waku {
         }
 
         div()
-            .flex_1()
-            .min_w(px(0.0))
+            .map(|element| {
+                if split {
+                    element.flex_1().min_w(px(0.0))
+                } else {
+                    element.w_full()
+                }
+            })
             .flex()
             .flex_col()
             .gap(px(10.0))
@@ -1693,6 +1716,30 @@ fn usage_table_empty_row(theme: &Theme) -> Div {
         .child(tr!("usage.no_activity_window"))
 }
 
+/// What the day table needs before its label column starts starving.
+fn usage_day_table_min_width() -> f32 {
+    // One column per provider, then the total and the token count.
+    let cells = (UsageProvider::ALL.len() + 2) as f32;
+    USAGE_TABLE_LABEL_MIN_WIDTH
+        + cells * USAGE_TABLE_CELL_WIDTH
+        + (cells + 1.0) * USAGE_TABLE_COLUMN_GAP
+}
+
+/// Whether the cost-quality panel fits beside the breakdown table. The wider
+/// day table sets the threshold for both, so the MODEL/DAY toggle never
+/// reflows the page.
+fn usage_breakdown_splits(content_width: f32) -> bool {
+    content_width >= usage_day_table_min_width() + USAGE_BREAKDOWN_GAP + USAGE_QUALITY_PANEL_WIDTH
+}
+
+/// Leading label column of both breakdown tables.
+fn usage_table_label_cell() -> Div {
+    div()
+        .flex_1()
+        .min_w(px(USAGE_TABLE_LABEL_MIN_WIDTH))
+        .truncate()
+}
+
 /// Right-aligned numeric cell of fixed width.
 fn usage_cell(width: f32, text: String, color: Hsla) -> Div {
     div()
@@ -1706,21 +1753,38 @@ fn usage_cell(width: f32, text: String, color: Hsla) -> Div {
 
 /// Per-model costs, largest first.
 fn usage_model_table(history: &UsageHistory, theme: &Theme) -> Div {
-    let mut table = div().flex().flex_col().text_size(sp(12.5)).child(
-        div()
-            .pb(px(7.0))
-            .border_b_1()
-            .border_color(theme.border)
-            .flex()
-            .items_center()
-            .gap(px(12.0))
-            .text_size(sp(12.5))
-            .text_color(theme.text_tertiary)
-            .child(div().flex_1().min_w_0().child(tr!("usage.model")))
-            .child(usage_cell(84.0, tr!("usage.cost"), theme.text_tertiary))
-            .child(usage_cell(64.0, tr!("usage.share"), theme.text_tertiary))
-            .child(usage_cell(84.0, tr!("usage.tokens"), theme.text_tertiary)),
-    );
+    let mut table = div()
+        .flex()
+        .flex_col()
+        .overflow_hidden()
+        .text_size(sp(12.5))
+        .child(
+            div()
+                .pb(px(7.0))
+                .border_b_1()
+                .border_color(theme.border)
+                .flex()
+                .items_center()
+                .gap(px(USAGE_TABLE_COLUMN_GAP))
+                .text_size(sp(12.5))
+                .text_color(theme.text_tertiary)
+                .child(usage_table_label_cell().child(tr!("usage.model")))
+                .child(usage_cell(
+                    USAGE_TABLE_CELL_WIDTH,
+                    tr!("usage.cost"),
+                    theme.text_tertiary,
+                ))
+                .child(usage_cell(
+                    USAGE_TABLE_SHARE_WIDTH,
+                    tr!("usage.share"),
+                    theme.text_tertiary,
+                ))
+                .child(usage_cell(
+                    USAGE_TABLE_CELL_WIDTH,
+                    tr!("usage.tokens"),
+                    theme.text_tertiary,
+                )),
+        );
     if history.models.is_empty() {
         return table.child(usage_table_empty_row(theme));
     }
@@ -1733,11 +1797,9 @@ fn usage_model_table(history: &UsageHistory, theme: &Theme) -> Div {
                 .border_color(theme.border)
                 .flex()
                 .items_center()
-                .gap(px(12.0))
+                .gap(px(USAGE_TABLE_COLUMN_GAP))
                 .child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
+                    usage_table_label_cell()
                         .flex()
                         .items_center()
                         .gap(px(7.0))
@@ -1750,14 +1812,18 @@ fn usage_model_table(history: &UsageHistory, theme: &Theme) -> Div {
                                 .child(SharedString::from(model.model.clone())),
                         ),
                 )
-                .child(usage_cell(84.0, format_usd(model.cost_usd), theme.text))
                 .child(usage_cell(
-                    64.0,
+                    USAGE_TABLE_CELL_WIDTH,
+                    format_usd(model.cost_usd),
+                    theme.text,
+                ))
+                .child(usage_cell(
+                    USAGE_TABLE_SHARE_WIDTH,
                     format_percent(model.cost_share),
                     theme.text_tertiary,
                 ))
                 .child(usage_cell(
-                    84.0,
+                    USAGE_TABLE_CELL_WIDTH,
                     format_tokens_compact(model.total_tokens as f64),
                     theme.text_tertiary,
                 )),
@@ -1774,22 +1840,35 @@ fn usage_day_table(history: &UsageHistory, theme: &Theme) -> Div {
         .border_color(theme.border)
         .flex()
         .items_center()
-        .gap(px(12.0))
+        .gap(px(USAGE_TABLE_COLUMN_GAP))
         .text_size(sp(12.5))
         .text_color(theme.text_tertiary)
-        .child(div().flex_1().min_w_0().child(tr!("usage.day")));
+        .child(usage_table_label_cell().child(tr!("usage.day")));
     for provider in UsageProvider::ALL {
         header = header.child(usage_cell(
-            84.0,
+            USAGE_TABLE_CELL_WIDTH,
             provider.label().to_owned(),
             theme.text_tertiary,
         ));
     }
     header = header
-        .child(usage_cell(84.0, tr!("usage.total"), theme.text_tertiary))
-        .child(usage_cell(84.0, tr!("usage.tokens"), theme.text_tertiary));
+        .child(usage_cell(
+            USAGE_TABLE_CELL_WIDTH,
+            tr!("usage.total"),
+            theme.text_tertiary,
+        ))
+        .child(usage_cell(
+            USAGE_TABLE_CELL_WIDTH,
+            tr!("usage.tokens"),
+            theme.text_tertiary,
+        ));
 
-    let mut table = div().flex().flex_col().text_size(sp(12.5)).child(header);
+    let mut table = div()
+        .flex()
+        .flex_col()
+        .overflow_hidden()
+        .text_size(sp(12.5))
+        .child(header);
     if history.daily.is_empty() {
         return table.child(usage_table_empty_row(theme));
     }
@@ -1800,36 +1879,39 @@ fn usage_day_table(history: &UsageHistory, theme: &Theme) -> Div {
             .border_color(theme.border)
             .flex()
             .items_center()
-            .gap(px(12.0))
+            .gap(px(USAGE_TABLE_COLUMN_GAP))
             .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
+                usage_table_label_cell()
                     .text_color(theme.text)
                     .child(SharedString::from(format_day_short(day.day))),
             );
         for provider in UsageProvider::ALL {
             row = row.child(usage_cell(
-                84.0,
+                USAGE_TABLE_CELL_WIDTH,
                 format_usd(day.by_provider[provider.index()].cost_usd),
                 theme.text_tertiary,
             ));
         }
         table = table.child(
-            row.child(usage_cell(84.0, format_usd(day.cost_usd), theme.text))
-                .child(usage_cell(
-                    84.0,
-                    format_tokens_compact(day.total_tokens as f64),
-                    theme.text_tertiary,
-                )),
+            row.child(usage_cell(
+                USAGE_TABLE_CELL_WIDTH,
+                format_usd(day.cost_usd),
+                theme.text,
+            ))
+            .child(usage_cell(
+                USAGE_TABLE_CELL_WIDTH,
+                format_tokens_compact(day.total_tokens as f64),
+                theme.text_tertiary,
+            )),
         );
     }
     table
 }
 
 /// How much of the window's cost is provider-reported, table-priced, or
-/// unpriced — the reader's confidence in the headline number.
-fn usage_quality_panel(history: &UsageHistory, theme: &Theme) -> Div {
+/// unpriced — the reader's confidence in the headline number. `full_width` is
+/// the stacked placement, under the breakdown table rather than beside it.
+fn usage_quality_panel(history: &UsageHistory, theme: &Theme, full_width: bool) -> Div {
     let row = |label: String, value: String| {
         div()
             .py(px(8.0))
@@ -1847,7 +1929,13 @@ fn usage_quality_panel(history: &UsageHistory, theme: &Theme) -> Div {
             )
     };
     div()
-        .w(px(240.0))
+        .map(|element| {
+            if full_width {
+                element.w_full()
+            } else {
+                element.w(px(USAGE_QUALITY_PANEL_WIDTH))
+            }
+        })
         .flex_none()
         .flex()
         .flex_col()
@@ -2899,6 +2987,21 @@ mod tests {
             usage_top_models_label(&models).as_deref(),
             Some("gpt-5.6-sol · claude-fable-5 · +1")
         );
+    }
+
+    #[test]
+    fn the_breakdown_stacks_before_its_day_column_starves() {
+        use super::super::SettingsPage;
+        use super::super::settings::settings_content_width;
+
+        // At the narrowest allowed window the panel stacks, and the table then
+        // clears its own minimum.
+        let narrowest = settings_content_width(crate::MIN_WINDOW_WIDTH, SettingsPage::Usage);
+        assert!(!usage_breakdown_splits(narrowest));
+        assert!(narrowest >= usage_day_table_min_width());
+
+        let widest = settings_content_width(4_000.0, SettingsPage::Usage);
+        assert!(usage_breakdown_splits(widest));
     }
 
     #[test]
