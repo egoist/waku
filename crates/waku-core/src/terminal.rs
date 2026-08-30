@@ -174,6 +174,23 @@ mod platform {
                 libc::kill(child_pid, libc::SIGHUP);
             }
             if let Some(reader) = self.reader.take() {
+                // A shell that survives the hangup — a login shell still in
+                // its startup files, for one — leaves the reader blocked in
+                // `read` and this join, and with it the daemon's mailbox,
+                // waiting forever. Escalate to SIGKILL after a short grace.
+                let deadline = std::time::Instant::now() + Duration::from_secs(2);
+                while !reader.is_finished() && std::time::Instant::now() < deadline {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                if !reader.is_finished() {
+                    // Group kill: a startup-file subprocess holding the PTY
+                    // slave open would otherwise keep the master readable.
+                    if unsafe { libc::kill(-child_pid, libc::SIGKILL) } != 0 {
+                        unsafe {
+                            libc::kill(child_pid, libc::SIGKILL);
+                        }
+                    }
+                }
                 let _ = reader.join();
             }
         }
