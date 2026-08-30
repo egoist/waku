@@ -473,7 +473,8 @@ impl Waku {
             &palette,
             self.scaled_markdown_metrics(MarkdownMetrics::COMPACT),
             self.toast_selection.clone(),
-        );
+        )
+        .with_code_family(self.code_font_family());
         let message = md::render::plain_text(
             message,
             md::render::SANS_FAMILY,

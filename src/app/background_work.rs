@@ -1276,7 +1276,7 @@ impl Waku {
                     .child(
                         div()
                             .text_size(sp(12.5))
-                            .font_family(md::render::MONO_FAMILY)
+                            .font_family(self.code_font_family())
                             .text_color(theme.text_secondary)
                             .child(value),
                     ),
@@ -1285,7 +1285,7 @@ impl Waku {
         let output = output.unwrap_or_else(|| SharedString::from(tr!("background.no_output")));
         let output_flat = md::render::flatten_plain(
             output,
-            md::render::MONO_FAMILY,
+            self.code_font_family(),
             FontWeight::NORMAL,
             theme.text_secondary,
         );
@@ -1348,7 +1348,7 @@ impl Waku {
                                 .p(px(8.0))
                                 .text_size(sp(12.5))
                                 .line_height(sp(15.0))
-                                .font_family(md::render::MONO_FAMILY)
+                                .font_family(self.code_font_family())
                                 .text_color(theme.text_secondary)
                                 .child(output_text),
                         )

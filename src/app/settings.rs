@@ -1302,6 +1302,68 @@ impl Waku {
             },
         );
 
+        let selected_code_font = self.state.code_font_family.clone();
+        let code_font_families = crate::fonts::picker_families(&selected_code_font, cx);
+        let weak = cx.entity().downgrade();
+        let code_font_handle = self.menu_handle("code-font-selector", cx);
+        let code_font_selector = dropdown_menu(
+            MenuChip::new("code-font-selector")
+                .label(selected_code_font.clone())
+                .outlined()
+                .selected(code_font_handle.is_open())
+                .w(px(180.0))
+                .justify_between(),
+            "code-font-selector-menu",
+            &code_font_handle,
+            MenuAlign::BelowRight,
+            move |_| {
+                code_font_families
+                    .iter()
+                    .cloned()
+                    .map(|family| {
+                        let weak = weak.clone();
+                        let selected = family.as_ref() == selected_code_font;
+                        let preview = family.clone();
+                        MenuItem::custom(move |_, cx| {
+                            let theme = Theme::current(cx);
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap(px(8.0))
+                                .w_full()
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .min_w_0()
+                                        .truncate()
+                                        .font_family(preview.clone())
+                                        .text_color(if selected {
+                                            theme.text
+                                        } else {
+                                            theme.text_secondary
+                                        })
+                                        .child(preview.clone()),
+                                )
+                                .when(selected, |element| {
+                                    element.child(icon(
+                                        "icons/check.svg",
+                                        11.0,
+                                        theme.text_tertiary,
+                                    ))
+                                })
+                                .into_any_element()
+                        })
+                        .on_click(move |_, cx| {
+                            let family = family.clone();
+                            let _ = weak.update(cx, |this, cx| {
+                                this.set_code_font_family(family, cx);
+                            });
+                        })
+                    })
+                    .collect()
+            },
+        );
+
         let selected_code_font_size = self.state.code_font_size;
         let weak = cx.entity().downgrade();
         let code_font_size_handle = self.menu_handle("code-font-size-selector", cx);
@@ -1481,6 +1543,38 @@ impl Waku {
                                     .text_size(sp(13.5))
                                     .font_weight(FontWeight::MEDIUM)
                                     .text_color(theme.text)
+                                    .child(tr!("settings.code_font")),
+                            )
+                            .child(
+                                div()
+                                    .mt(px(5.0))
+                                    .text_size(sp(12.5))
+                                    .line_height(sp(18.0))
+                                    .text_color(theme.text_secondary)
+                                    .child(tr!("settings.code_font_description")),
+                            ),
+                    )
+                    .child(code_font_selector),
+            )
+            .child(div().mx(px(20.0)).h(px(1.0)).bg(theme.border))
+            .child(
+                div()
+                    .w_full()
+                    .min_h(px(60.0))
+                    .px(px(20.0))
+                    .py(px(12.0))
+                    .flex()
+                    .items_center()
+                    .gap(px(24.0))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .child(
+                                div()
+                                    .text_size(sp(13.5))
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .text_color(theme.text)
                                     .child(tr!("settings.code_font_size")),
                             )
                             .child(
@@ -1517,6 +1611,21 @@ impl Waku {
             return;
         }
         self.state.code_font_size = size;
+        self.remeasure_font_sized_surfaces();
+        self.save();
+        cx.notify();
+    }
+
+    pub(super) fn code_font_family(&self) -> SharedString {
+        SharedString::from(self.state.code_font_family.clone())
+    }
+
+    fn set_code_font_family(&mut self, family: impl AsRef<str>, cx: &mut Context<Self>) {
+        let family = waku_client::persistence::sanitized_code_font_family(family);
+        if self.state.code_font_family == family {
+            return;
+        }
+        self.state.code_font_family = family;
         self.remeasure_font_sized_surfaces();
         self.save();
         cx.notify();

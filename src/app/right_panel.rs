@@ -365,6 +365,7 @@ pub(super) fn render_diff_code_row(
     selection: &TranscriptSelection,
     style: DiffRowStyle,
     theme: &Theme,
+    code_family: SharedString,
 ) -> AnyElement {
     let semantic_body_opacity = if theme.is_dark { 0.20 } else { 0.12 };
     let semantic_gutter_opacity = if theme.is_dark { 0.15 } else { 0.09 };
@@ -386,7 +387,7 @@ pub(super) fn render_diff_code_row(
         _ => (" ", None, None, None, theme.text_tertiary),
     };
     let shown_line = line.new_line.or(line.old_line);
-    let flat = review_diff_flat_text(line, theme);
+    let flat = review_diff_flat_text(line, theme, &code_family);
     let selectable = md::render::selectable_flat_text(
         &flat,
         crate::md::selection::TextKey::new(diff_row_selection_key(key_prefix, line, index), 0),
@@ -451,7 +452,7 @@ pub(super) fn render_diff_code_row(
         .flex_none()
         .flex()
         .items_stretch()
-        .font_family(md::render::MONO_FAMILY)
+        .font_family(code_family)
         .text_size(px(style.text_size))
         .line_height(px(style.row_height))
         .when_some(edge, |row, edge| row.border_l_2().border_color(edge))
@@ -460,10 +461,14 @@ pub(super) fn render_diff_code_row(
         .into_any_element()
 }
 
-fn review_diff_flat_text(line: &crate::review_diff::Line, theme: &Theme) -> md::render::FlatText {
+fn review_diff_flat_text(
+    line: &crate::review_diff::Line,
+    theme: &Theme,
+    code_family: &str,
+) -> md::render::FlatText {
     let text = line.content.clone();
     let palette = MarkdownPalette::from_theme(theme);
-    let code_font = font(md::render::MONO_FAMILY);
+    let code_font = font(code_family);
     let mut runs = Vec::with_capacity(line.tokens.len() * 2 + 1);
     let mut offset = 0;
     let mut push = |len: usize, color: Hsla| {
@@ -3012,14 +3017,11 @@ impl Waku {
         .detach();
 
         let focused_path = relative_path.to_owned();
-        cx.subscribe(
-            &state,
-            move |this: &mut Self, _, event: &InputEvent, cx| {
-                if matches!(event, InputEvent::Focus) {
-                    this.reload_right_panel_file_if_clean(focused_path.as_str(), cx);
-                }
-            },
-        )
+        cx.subscribe(&state, move |this: &mut Self, _, event: &InputEvent, cx| {
+            if matches!(event, InputEvent::Focus) {
+                this.reload_right_panel_file_if_clean(focused_path.as_str(), cx);
+            }
+        })
         .detach();
 
         self.read_right_panel_file_into_editor(relative_path.to_owned(), cx);
@@ -3167,6 +3169,8 @@ impl Waku {
 
         let viewport = self.right_panel_editor_scroll_handle.clone();
         let number_color = theme.text_ghost;
+        let code_family = self.code_font_family();
+        let gutter_family = code_family.clone();
         let gutter = canvas(
             |_, _, _| (),
             move |bounds: gpui::Bounds<Pixels>, _, window: &mut Window, cx: &mut App| {
@@ -3185,7 +3189,7 @@ impl Waku {
                         let text = SharedString::from(number.to_string());
                         let run = gpui::TextRun {
                             len: text.len(),
-                            font: gpui::font(md::render::MONO_FAMILY),
+                            font: gpui::font(gutter_family.clone()),
                             color: number_color,
                             ..Default::default()
                         };
@@ -3221,7 +3225,7 @@ impl Waku {
             .flex()
             .flex_col()
             .bg(theme.surface)
-            .font_family(md::render::MONO_FAMILY)
+            .font_family(code_family)
             .text_size(px(text_size))
             .line_height(px(line_height))
             .children(find_bar)
@@ -3295,6 +3299,7 @@ impl Waku {
             MarkdownMetrics::document(self.state.ui_font_size, self.state.code_font_size),
             self.file_preview_selection.clone(),
         )
+        .with_code_family(self.code_font_family())
         .with_link_handler(self.markdown_link_handler.clone());
         let document = md::render::markdown(view, &ctx);
 
@@ -3863,7 +3868,7 @@ impl Waku {
                 .min_w_0()
                 .flex()
                 .items_stretch()
-                .font_family(md::render::MONO_FAMILY)
+                .font_family(self.code_font_family())
                 .text_size(px(12.5))
                 .line_height(px(16.0))
                 .text_color(theme.text_tertiary)
@@ -3898,7 +3903,7 @@ impl Waku {
                 .min_w_0()
                 .flex()
                 .items_stretch()
-                .font_family(md::render::MONO_FAMILY)
+                .font_family(self.code_font_family())
                 .text_size(px(12.5))
                 .line_height(px(16.0))
                 .text_color(theme.text_tertiary)
@@ -3930,6 +3935,7 @@ impl Waku {
                 &self.right_panel_diff_selection,
                 style,
                 &theme,
+                self.code_font_family(),
             ),
         }
     }

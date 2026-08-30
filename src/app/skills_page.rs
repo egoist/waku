@@ -910,11 +910,12 @@ impl Waku {
         }
         contents.push(format_bytes(skill.total_bytes));
 
+        let code_family = self.code_font_family();
         let mono_value = |value: String, size: f32| {
             div()
                 .min_w_0()
                 .truncate()
-                .font_family(crate::md::render::MONO_FAMILY)
+                .font_family(code_family.clone())
                 .text_size(px(size.max(12.5)))
                 .text_color(theme.text_secondary)
                 .child(SharedString::from(value))
@@ -1116,7 +1117,8 @@ impl Waku {
                 &palette,
                 self.scaled_markdown_metrics(MarkdownMetrics::COMPACT),
                 self.skills_selection.clone(),
-            );
+            )
+            .with_code_family(self.code_font_family());
             div()
                 .mt(px(18.0))
                 .pt(px(14.0))
@@ -1124,7 +1126,7 @@ impl Waku {
                 .border_color(theme.border)
                 .child(
                     div()
-                        .font_family(crate::md::render::MONO_FAMILY)
+                        .font_family(self.code_font_family())
                         .text_size(sp(12.5))
                         .text_color(theme.text_ghost)
                         .child("SKILL.md"),

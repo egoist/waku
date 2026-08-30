@@ -77,7 +77,7 @@ settings.usage: 用量
 settings.daemon: 守护进程
 settings.computer_use: 电脑操作
 settings.general_keywords: 通用 本地 项目 对话 隐私 匿名 使用数据 分析 分享 更新 自动 版本
-settings.appearance_keywords: 外观 主题 系统 浅色 深色 语言 英语 中文 简体 字号 字体 大小 编辑器
+settings.appearance_keywords: 外观 主题 系统 浅色 深色 语言 英语 中文 简体 字号 字体 大小 编辑器 等宽 jetbrains menlo monaco iosevka
 settings.providers_keywords: 服务商 智能体 模型 命令行 版本 安装 检测 claude codex cursor opencode amp grok pi
 settings.skills: 技能
 settings.skills_keywords: 技能 技能库 智能体 禁用 启用 删除 claude codex cursor opencode pi amp 共享
@@ -155,6 +155,8 @@ settings.theme: 主题
 settings.theme_description: 选择跟随系统、浅色或深色主题
 settings.ui_font_size: 界面字号
 settings.ui_font_size_description: 整个界面与消息的文字大小
+settings.code_font: 代码字体
+settings.code_font_description: 文件编辑器、差分视图、代码块与工具输出所用的字体
 settings.code_font_size: 代码字号
 settings.code_font_size_description: 文件编辑器、差分视图、代码块与工具输出的文字大小
 settings.theme_system: 跟随系统

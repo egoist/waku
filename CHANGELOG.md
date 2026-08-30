@@ -16,6 +16,8 @@ the original feature bullet instead of adding separate entries for them.
 
 ## [unreleased]
 
+- Choose a monospaced font for the file editor, diffs, code blocks, and tool output
+
 ## 0.1.16
 
 - Import and continue conversations started in agent CLIs with `/resume` or the command palette across every provider, in both Waku and Waku Web

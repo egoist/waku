@@ -1161,6 +1161,7 @@ impl Waku {
         animate_streaming: bool,
     ) -> MarkdownCtx<'a> {
         MarkdownCtx::new(row, palette, metrics, self.transcript_selection.clone())
+            .with_code_family(self.code_font_family())
             .with_link_handler(self.markdown_link_handler.clone())
             .with_streaming_animation(animate_streaming)
     }
@@ -1292,12 +1293,12 @@ impl Waku {
                         .collect();
                     let attachments_can_reveal = !self.daemon.is_remote();
                     let menu = self.menu_handle(format!("message-{}", message.id), cx);
-                    let metrics = self.scaled_markdown_metrics(if message.role == MessageRole::User
-                    {
-                        MarkdownMetrics::USER_MESSAGE
-                    } else {
-                        MarkdownMetrics::BODY
-                    });
+                    let metrics =
+                        self.scaled_markdown_metrics(if message.role == MessageRole::User {
+                            MarkdownMetrics::USER_MESSAGE
+                        } else {
+                            MarkdownMetrics::BODY
+                        });
                     let animate_streaming = message.streaming && !cx.reduce_motion();
                     let mut ctx = self.markdown_ctx(
                         format!("message-{}", message.id),
@@ -2287,7 +2288,7 @@ impl Waku {
                     .flex()
                     .flex_col()
                     .gap(px(8.0))
-                    .font_family(md::render::MONO_FAMILY)
+                    .font_family(self.code_font_family())
                     .text_size(px(mono_size))
                     .line_height(px(mono_line))
                     .text_color(theme.text_secondary)
@@ -2394,7 +2395,7 @@ impl Waku {
                                             .pr(px(8.0))
                                             .child(md::render::plain_text(
                                                 content.clone(),
-                                                md::render::MONO_FAMILY,
+                                                self.code_font_family(),
                                                 FontWeight::NORMAL,
                                                 theme.text_secondary,
                                                 &ctx,
@@ -2429,18 +2430,15 @@ impl Waku {
                                     )),
                             );
                         } else {
-                            section_view = section_view.child(
-                                div()
-                                    .w_full()
-                                    .min_w_0()
-                                    .child(md::render::plain_text(
-                                        content.clone(),
-                                        md::render::MONO_FAMILY,
-                                        FontWeight::NORMAL,
-                                        theme.text_secondary,
-                                        &ctx,
-                                    )),
-                            );
+                            section_view = section_view.child(div().w_full().min_w_0().child(
+                                md::render::plain_text(
+                                    content.clone(),
+                                    self.code_font_family(),
+                                    FontWeight::NORMAL,
+                                    theme.text_secondary,
+                                    &ctx,
+                                ),
+                            ));
                         }
                     }
                     detail_card = detail_card.child(section_view);
@@ -2492,7 +2490,7 @@ impl Waku {
             .track_scroll(&viewport.scroll_handle)
             .flex()
             .flex_col()
-            .font_family(md::render::MONO_FAMILY)
+            .font_family(self.code_font_family())
             .text_size(px(diff_mono_size))
             .line_height(px(diff_mono_line))
             .on_scroll_wheel(move |_, _, cx| contain_scroll(&wheel_scroll, cx));
@@ -2614,10 +2612,12 @@ impl Waku {
             LineKind::Gap(gap) => activity_diff_break_row(
                 Some(tr!("diff.unmodified_lines", count = gap.count())),
                 theme,
+                self.code_font_family(),
             ),
             LineKind::HunkHeader | LineKind::Meta => activity_diff_break_row(
                 (!line.content.is_empty()).then(|| line.content.clone()),
                 theme,
+                self.code_font_family(),
             ),
             LineKind::Context | LineKind::Addition | LineKind::Deletion => render_diff_code_row(
                 line,
@@ -2626,13 +2626,18 @@ impl Waku {
                 &self.transcript_selection,
                 DiffRowStyle::activity(self.state.code_font_size),
                 theme,
+                self.code_font_family(),
             ),
         }
     }
 }
 
 /// The separator between two hunks of the same file.
-fn activity_diff_break_row(label: Option<String>, theme: &Theme) -> AnyElement {
+fn activity_diff_break_row(
+    label: Option<String>,
+    theme: &Theme,
+    code_family: SharedString,
+) -> AnyElement {
     div()
         .w_full()
         .min_w_0()
@@ -2640,7 +2645,7 @@ fn activity_diff_break_row(label: Option<String>, theme: &Theme) -> AnyElement {
         .flex_none()
         .flex()
         .items_center()
-        .font_family(md::render::MONO_FAMILY)
+        .font_family(code_family)
         // Fixed like the Review panel's gap and hunk captions: a caption in
         // the code surface follows neither font setting.
         .text_size(px(12.5))
