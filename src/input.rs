@@ -60,6 +60,10 @@ pub fn init(cx: &mut App) {
     cx.bind_keys([
         KeyBinding::new("backspace", Backspace, Some("TextInput")),
         KeyBinding::new("delete", Delete, Some("TextInput")),
+        // Bindings match modifiers exactly, so an unbound shift chord would
+        // swallow the keystroke; native fields treat it as a plain delete.
+        KeyBinding::new("shift-backspace", Backspace, Some("TextInput")),
+        KeyBinding::new("shift-delete", Delete, Some("TextInput")),
         KeyBinding::new("alt-backspace", DeleteToPreviousWord, Some("TextInput")),
         KeyBinding::new("alt-delete", DeleteToNextWord, Some("TextInput")),
         KeyBinding::new("left", Left, Some("TextInput")),
@@ -104,6 +108,13 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("cmd-delete", DeleteToEnd, Some("TextInput")),
         KeyBinding::new("ctrl-h", Backspace, Some("TextInput")),
         KeyBinding::new("ctrl-d", Delete, Some("TextInput")),
+        // Native macOS maps ctrl-backspace to a (decomposing) backspace and
+        // ctrl-forward-delete to a plain forward delete; with shift held as
+        // well the chord still deletes.
+        KeyBinding::new("ctrl-backspace", Backspace, Some("TextInput")),
+        KeyBinding::new("ctrl-delete", Delete, Some("TextInput")),
+        KeyBinding::new("ctrl-shift-backspace", Backspace, Some("TextInput")),
+        KeyBinding::new("ctrl-shift-delete", Delete, Some("TextInput")),
         KeyBinding::new("ctrl-u", DeleteToStart, Some("TextInput")),
         KeyBinding::new("ctrl-k", DeleteToEnd, Some("TextInput")),
         KeyBinding::new("ctrl-b", Left, Some("TextInput")),
