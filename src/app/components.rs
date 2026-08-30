@@ -958,7 +958,14 @@ fn is_ask_user_question(activity: &ActivityItem) -> bool {
 fn humanize_tool_name(name: &str) -> String {
     let name = name.trim();
     if name.chars().any(char::is_whitespace) {
-        return name.to_owned();
+        let mut display = String::with_capacity(name.len());
+        for word in name.split_whitespace() {
+            if !display.is_empty() {
+                display.push(' ');
+            }
+            display.push_str(word);
+        }
+        return display;
     }
 
     let leaf = tool_name_leaf(name);
@@ -1631,6 +1638,26 @@ mod message_time_tests {
         assert_eq!(activity_display_title(&named), "Create thread");
         assert_eq!(activity_action_label(&unnamed), "Tool");
         assert_eq!(activity_row_detail(&unnamed, false), "");
+    }
+
+    #[test]
+    fn generic_tool_rows_collapse_multiline_provider_names() {
+        let activity = ActivityItem::new(
+            Some("tool-1".into()),
+            crate::model::ActivityKind::Tool,
+            "set -euo pipefail\necho 'first'\n\techo 'second'",
+            None,
+            true,
+        );
+
+        assert_eq!(
+            activity_row_detail(&activity, false),
+            "set -euo pipefail echo 'first' echo 'second'"
+        );
+        assert_eq!(
+            activity_display_title(&activity),
+            "set -euo pipefail echo 'first' echo 'second'"
+        );
     }
 
     #[test]
