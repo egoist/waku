@@ -1616,6 +1616,42 @@ mod tests {
         );
     }
 
+    /// Chooser cards mix chrome text (`sp`) with a fitted 112-unit stack.
+    /// Height, padding, and the gaps between icon/title/description have to
+    /// be rem-authored too: a `px` height stays 112px while the UI font size
+    /// setting scales the copy, and the second description line clips to a
+    /// sliver of glyphs.
+    #[test]
+    fn right_panel_chooser_cards_scale_with_ui_font_size() {
+        let source = include_str!("right_panel.rs");
+        let chooser = source
+            .split_once("\n    fn render_right_panel_chooser(")
+            .expect("right panel chooser renderer")
+            .1
+            .split_once("\n    fn render_right_panel_files(")
+            .expect("right panel chooser renderer end")
+            .0;
+
+        assert!(chooser.contains(".max_w(sp(420.0))"));
+        assert!(!chooser.contains(".max_w(px(420.0))"));
+
+        let card = source
+            .split_once("\n    fn render_right_panel_card(")
+            .expect("right panel chooser card renderer")
+            .1
+            .split_once("\n    fn render_right_panel_files(")
+            .expect("right panel chooser card renderer end")
+            .0;
+
+        assert!(card.contains(".h(sp(112.0))"));
+        assert!(!card.contains(".h(px(112.0))"));
+        assert!(card.contains(".p(sp(14.0))"));
+        assert!(card.contains(".mt(sp(12.0))"));
+        assert!(card.contains(".mt(sp(4.0))"));
+        assert!(card.contains(".text_size(sp(12.5))"));
+        assert!(card.contains(".line_height(sp(15.0))"));
+    }
+
     #[test]
     fn only_reuses_single_instance_surface_tabs() {
         let browser = RightPanelSurface::new_browser();
@@ -2586,7 +2622,7 @@ impl Waku {
             .child(
                 div()
                     .w_full()
-                    .max_w(px(420.0))
+                    .max_w(sp(420.0))
                     .flex()
                     .flex_col()
                     .items_center()
@@ -2655,10 +2691,10 @@ impl Waku {
                 "right-panel-card-{}",
                 label.to_lowercase()
             )))
-            .h(px(112.0))
+            .h(sp(112.0))
             .flex_1()
             .min_w_0()
-            .p(px(14.0))
+            .p(sp(14.0))
             .rounded(px(8.0))
             .border_1()
             .border_color(theme.border_strong)
@@ -2672,7 +2708,9 @@ impl Waku {
             .child(icon(icon_path, 18.0, theme.text_secondary))
             .child(
                 div()
-                    .mt(px(12.0))
+                    .mt(sp(12.0))
+                    .w_full()
+                    .min_w_0()
                     .text_size(sp(12.5))
                     .font_weight(FontWeight::MEDIUM)
                     .text_color(theme.text)
@@ -2680,7 +2718,9 @@ impl Waku {
             )
             .child(
                 div()
-                    .mt(px(4.0))
+                    .mt(sp(4.0))
+                    .w_full()
+                    .min_w_0()
                     .text_size(sp(12.5))
                     .line_height(sp(15.0))
                     .text_color(theme.text_tertiary)
