@@ -73,6 +73,10 @@ fn default_code_font_size() -> f32 {
     DEFAULT_CODE_FONT_SIZE
 }
 
+fn default_code_font_family() -> String {
+    DEFAULT_CODE_FONT_FAMILY.to_owned()
+}
+
 fn default_analytics_enabled() -> bool {
     true
 }
@@ -252,6 +256,11 @@ pub struct AppSettings {
     /// and tool output — in pixels. Hand-edited values are clamped when
     /// applied.
     pub code_font_size: f32,
+    /// Family used on those same code surfaces. Empty or oversized hand-edits
+    /// fall back to the bundled mono face; an uninstalled name is kept so it
+    /// still round-trips if the font returns.
+    #[serde(default = "default_code_font_family")]
+    pub code_font_family: String,
     pub daemon_exposure: DaemonExposureSettings,
     /// Preferred target of the header's "open project in app" control, by
     /// catalog id. `None` — and an id no longer installed — fall back to the
@@ -268,6 +277,7 @@ impl Default for AppSettings {
             language: AppLanguage::default(),
             ui_font_size: DEFAULT_UI_FONT_SIZE,
             code_font_size: DEFAULT_CODE_FONT_SIZE,
+            code_font_family: DEFAULT_CODE_FONT_FAMILY.to_owned(),
             daemon_exposure: DaemonExposureSettings::default(),
             open_in_app: None,
         }
@@ -276,6 +286,7 @@ impl Default for AppSettings {
 
 pub const DEFAULT_UI_FONT_SIZE: f32 = 14.0;
 pub const DEFAULT_CODE_FONT_SIZE: f32 = 13.0;
+pub const DEFAULT_CODE_FONT_FAMILY: &str = "JetBrains Mono";
 
 /// Bounds a possibly hand-edited font size to something the layout survives.
 fn sanitized_font_size(size: f32, fallback: f32) -> f32 {
@@ -292,6 +303,18 @@ pub fn sanitized_ui_font_size(size: f32) -> f32 {
 
 pub fn sanitized_code_font_size(size: f32) -> f32 {
     sanitized_font_size(size, DEFAULT_CODE_FONT_SIZE)
+}
+
+/// Bounds a possibly hand-edited family name. Unknown names are kept: GPUI
+/// already falls back at resolve time, and dropping them would forget a font
+/// the user has not installed on this machine yet.
+pub fn sanitized_code_font_family(family: impl AsRef<str>) -> String {
+    let trimmed = family.as_ref().trim();
+    if trimmed.is_empty() || trimmed.chars().count() > 128 {
+        DEFAULT_CODE_FONT_FAMILY.to_owned()
+    } else {
+        trimmed.to_owned()
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -371,6 +394,8 @@ pub struct PersistedState {
     pub ui_font_size: f32,
     #[serde(default = "default_code_font_size")]
     pub code_font_size: f32,
+    #[serde(default = "default_code_font_family")]
+    pub code_font_family: String,
     #[serde(default)]
     pub daemon_exposure: DaemonExposureSettings,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -444,6 +469,7 @@ impl PersistedState {
             language: AppLanguage::default(),
             ui_font_size: DEFAULT_UI_FONT_SIZE,
             code_font_size: DEFAULT_CODE_FONT_SIZE,
+            code_font_family: DEFAULT_CODE_FONT_FAMILY.to_owned(),
             daemon_exposure: DaemonExposureSettings::default(),
             open_in_app: None,
             sidebar_visible: true,
@@ -567,6 +593,7 @@ impl PersistedState {
             language: self.language,
             ui_font_size: self.ui_font_size,
             code_font_size: self.code_font_size,
+            code_font_family: self.code_font_family.clone(),
             daemon_exposure: self.daemon_exposure.clone(),
             open_in_app: self.open_in_app.clone(),
         }
@@ -603,6 +630,7 @@ impl PersistedState {
         self.language = settings.language;
         self.ui_font_size = sanitized_ui_font_size(settings.ui_font_size);
         self.code_font_size = sanitized_code_font_size(settings.code_font_size);
+        self.code_font_family = sanitized_code_font_family(settings.code_font_family);
         self.daemon_exposure = settings.daemon_exposure;
         self.open_in_app = settings.open_in_app;
     }
@@ -1167,6 +1195,28 @@ mod tests {
 
         assert_eq!(session.runtime_mode, RuntimeMode::Ask);
         assert_eq!(state.app_state().last_runtime_mode, RuntimeMode::Ask);
+    }
+
+    #[test]
+    fn missing_code_font_family_defaults_to_the_bundled_mono_face() {
+        let settings: AppSettings = serde_json::from_str(r#"{"theme":"dark"}"#).unwrap();
+        assert_eq!(settings.code_font_family, DEFAULT_CODE_FONT_FAMILY);
+
+        let state: PersistedState = serde_json::from_str(
+            r#"{"version":5,"analytics_id":"00000000-0000-0000-0000-000000000000","analytics_enabled":true,"projects":[],"sessions":[],"last_provider":"codex"}"#,
+        )
+        .unwrap();
+        assert_eq!(state.code_font_family, DEFAULT_CODE_FONT_FAMILY);
+    }
+
+    #[test]
+    fn blank_code_font_family_sanitizes_to_the_default() {
+        assert_eq!(sanitized_code_font_family("   "), DEFAULT_CODE_FONT_FAMILY);
+        assert_eq!(sanitized_code_font_family("Menlo"), "Menlo");
+        assert_eq!(
+            sanitized_code_font_family("  Iosevka Fixed  "),
+            "Iosevka Fixed"
+        );
     }
 
     #[test]

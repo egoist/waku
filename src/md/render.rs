@@ -139,10 +139,11 @@ impl Metrics {
 }
 
 pub const SANS_FAMILY: &str = ".SystemUIFont";
-/// The bundled mono face. "SF Mono" only exists on machines that installed it
-/// with Xcode or Terminal, and silently falls back to the sans face when it
-/// does not — which reads as proportional code.
-pub const MONO_FAMILY: &str = "JetBrains Mono";
+/// The bundled mono face, and the default code-font setting. "SF Mono" only
+/// exists on machines that installed it with Xcode or Terminal, and silently
+/// falls back to the sans face when it does not — which reads as proportional
+/// code.
+pub const MONO_FAMILY: &str = crate::persistence::DEFAULT_CODE_FONT_FAMILY;
 
 /// Inline-code wash geometry. Paint-only: the box overhangs the glyphs
 /// horizontally and insets vertically inside the line box.
@@ -212,8 +213,11 @@ impl Palette {
             code_wash: theme.code_wash,
             selection: theme.selection,
             search_match: search_yellow.opacity(if theme.is_dark { 0.18 } else { 0.20 }),
-            active_search_match: active_search_orange
-                .opacity(if theme.is_dark { 0.78 } else { 0.70 }),
+            active_search_match: active_search_orange.opacity(if theme.is_dark {
+                0.78
+            } else {
+                0.70
+            }),
             accent: theme.accent,
             added: theme.success,
             removed: theme.danger,
@@ -277,10 +281,12 @@ pub struct SearchHighlights {
     pub active: Option<TextSearchMatch>,
 }
 
-/// Flatten inline runs for shaping. Pure given the palette and base weight.
+/// Flatten inline runs for shaping. Pure given the palette, code family, and
+/// base weight.
 pub fn flatten(
     runs: &[InlineRun],
     palette: &Palette,
+    code_family: &str,
     base_weight: FontWeight,
     base_color: Hsla,
 ) -> FlatText {
@@ -298,7 +304,7 @@ pub fn flatten(
         let end = text.len();
 
         let mut run_font = font(if run.style.code {
-            MONO_FAMILY
+            code_family
         } else {
             SANS_FAMILY
         });
@@ -365,7 +371,7 @@ pub fn flatten(
 /// A flat string with uniform styling, for non-markdown transcript text.
 pub fn flatten_plain(
     text: impl Into<SharedString>,
-    family: &'static str,
+    family: impl Into<SharedString>,
     weight: FontWeight,
     color: Hsla,
 ) -> FlatText {
@@ -408,10 +414,10 @@ pub struct MarkdownView {
     /// append can change. Recorded during render, because only the renderer
     /// knows how many text elements each block expands into.
     volatile_from: Cell<usize>,
-    /// Style the cached flats were built for. Colors live inside `TextRun`s, so
-    /// a theme switch has to drop them or the transcript keeps painting the old
-    /// palette.
-    style: Cell<Option<(Palette, Metrics)>>,
+    /// Style the cached flats were built for. Colors live inside `TextRun`s and
+    /// the code family lives inside their `Font`, so a theme or code-font
+    /// switch has to drop them or the transcript keeps painting the old look.
+    style: RefCell<Option<(Palette, Metrics, SharedString)>>,
     /// Per-element opacity spans for the live response. Text is committed to
     /// layout immediately; only these paint colors animate.
     veil: RefCell<RowVeil>,
@@ -435,7 +441,7 @@ impl MarkdownView {
             tail: Vec::new(),
             flats: RefCell::new(HashMap::new()),
             volatile_from: Cell::new(0),
-            style: Cell::new(None),
+            style: RefCell::new(None),
             veil: RefCell::new(RowVeil::default()),
             copied_code_blocks: Rc::new(RefCell::new(HashMap::new())),
             streaming: Cell::new(false),
@@ -506,10 +512,14 @@ impl MarkdownView {
     }
 
     /// Drop cached flats if the style they were built for no longer applies.
-    fn sync_style(&self, palette: &Palette, metrics: &Metrics) {
-        let current = (*palette, *metrics);
-        if self.style.get() != Some(current) {
-            self.style.set(Some(current));
+    fn sync_style(&self, palette: &Palette, metrics: &Metrics, code_family: &str) {
+        let current = (
+            *palette,
+            *metrics,
+            SharedString::from(code_family.to_owned()),
+        );
+        if self.style.borrow().as_ref() != Some(&current) {
+            *self.style.borrow_mut() = Some(current);
             self.flats.borrow_mut().clear();
         }
     }
@@ -548,6 +558,7 @@ pub struct Ctx<'a> {
     row: Rc<str>,
     palette: &'a Palette,
     metrics: Metrics,
+    code_family: SharedString,
     selection: TranscriptSelection,
     search: Option<SearchHighlights>,
     link_handler: Option<LinkHandler>,
@@ -571,6 +582,7 @@ impl<'a> Ctx<'a> {
             row: row.into(),
             palette,
             metrics,
+            code_family: SharedString::from(MONO_FAMILY),
             selection,
             search: None,
             link_handler: None,
@@ -580,6 +592,11 @@ impl<'a> Ctx<'a> {
             animate_streaming: true,
             now: Instant::now(),
         }
+    }
+
+    pub fn with_code_family(mut self, family: impl Into<SharedString>) -> Self {
+        self.code_family = family.into();
+        self
     }
 
     pub fn selection(&self) -> &TranscriptSelection {
@@ -606,6 +623,7 @@ impl<'a> Ctx<'a> {
             row: self.row.clone(),
             palette: self.palette,
             metrics: self.metrics,
+            code_family: self.code_family.clone(),
             selection: self.selection.clone(),
             search: self.search.clone(),
             link_handler: self.link_handler.clone(),
@@ -820,7 +838,7 @@ pub fn selectable_flat_text(
 /// is not markdown but still takes part in transcript-wide selection.
 pub fn plain_text(
     text: impl Into<SharedString>,
-    family: &'static str,
+    family: impl Into<SharedString>,
     weight: FontWeight,
     color: Hsla,
     ctx: &Ctx,
@@ -1211,7 +1229,7 @@ fn markdown_capped<'a>(
         return None;
     };
 
-    view.sync_style(ctx.palette, &ctx.metrics);
+    view.sync_style(ctx.palette, &ctx.metrics, ctx.code_family.as_ref());
     let ctx = ctx.with_cache(view);
     if ctx.animate_streaming && view.streaming.get() {
         view.veil.borrow_mut().begin_frame();
@@ -1256,7 +1274,13 @@ fn render_block(block: &Block, ctx: &Ctx) -> AnyElement {
         Block::Paragraph { runs } => {
             let key = ctx.next_key();
             let flat = ctx.flat(key.index, || {
-                flatten(runs, ctx.palette, FontWeight::NORMAL, ctx.palette.text)
+                flatten(
+                    runs,
+                    ctx.palette,
+                    ctx.code_family.as_ref(),
+                    FontWeight::NORMAL,
+                    ctx.palette.text,
+                )
             });
             div()
                 .w_full()
@@ -1270,7 +1294,13 @@ fn render_block(block: &Block, ctx: &Ctx) -> AnyElement {
             let (size, line_height, weight) = heading_metrics(*level, &ctx.metrics);
             let key = ctx.next_key();
             let flat = ctx.flat(key.index, || {
-                flatten(runs, ctx.palette, weight, ctx.palette.text)
+                flatten(
+                    runs,
+                    ctx.palette,
+                    ctx.code_family.as_ref(),
+                    weight,
+                    ctx.palette.text,
+                )
             });
             div()
                 .w_full()
@@ -1521,7 +1551,7 @@ fn render_code_block(language: Option<&str>, code: &str, ctx: &Ctx) -> AnyElemen
     // code block is exactly the case the cache exists for.
     let flat = ctx.flat(key.index, || {
         let lang = language.and_then(highlight::lang_for_tag);
-        let mut code_font = font(MONO_FAMILY);
+        let mut code_font = font(ctx.code_family.clone());
         code_font.weight = FontWeight::NORMAL;
         FlatText {
             text: SharedString::from(code.to_owned()),
@@ -1760,7 +1790,13 @@ fn table_row(
     for (index, cell) in cells.iter().enumerate() {
         let key = ctx.next_key();
         let flat = ctx.flat(key.index, || {
-            flatten(cell, ctx.palette, weight, ctx.palette.text)
+            flatten(
+                cell,
+                ctx.palette,
+                ctx.code_family.as_ref(),
+                weight,
+                ctx.palette.text,
+            )
         });
         let alignment = align.get(index).copied().unwrap_or_default();
         row = row.child(
@@ -1889,6 +1925,7 @@ mod tests {
         let flat = flatten(
             &runs_of("plain **bold** `code` [link](https://example.com) ~~gone~~"),
             &palette(),
+            MONO_FAMILY,
             FontWeight::NORMAL,
             palette().text,
         );
@@ -1912,6 +1949,7 @@ mod tests {
         let flat = flatten(
             &runs_of(&format!("see [docs]({PENDING_LINK_URL})")),
             &palette(),
+            MONO_FAMILY,
             FontWeight::NORMAL,
             palette().text,
         );
@@ -1931,6 +1969,7 @@ mod tests {
         let flat = flatten(
             &runs_of("[**a** `b`](https://x) tail"),
             &palette(),
+            MONO_FAMILY,
             FontWeight::NORMAL,
             palette().text,
         );
@@ -2097,12 +2136,12 @@ mod tests {
         let dark = Palette::from_theme(&Theme::dark());
         let light = Palette::from_theme(&Theme::light());
 
-        view.sync_style(&dark, &Metrics::BODY);
+        view.sync_style(&dark, &Metrics::BODY, MONO_FAMILY);
         let cached = view.flat(0, || {
             flatten_plain("a", SANS_FAMILY, FontWeight::NORMAL, dark.text)
         });
 
-        view.sync_style(&dark, &Metrics::BODY);
+        view.sync_style(&dark, &Metrics::BODY, MONO_FAMILY);
         assert!(
             Rc::ptr_eq(
                 &cached,
@@ -2111,12 +2150,45 @@ mod tests {
             "re-syncing the same style must not invalidate"
         );
 
-        view.sync_style(&light, &Metrics::BODY);
+        view.sync_style(&light, &Metrics::BODY, MONO_FAMILY);
         let relit = view.flat(0, || {
             flatten_plain("a", SANS_FAMILY, FontWeight::NORMAL, light.text)
         });
         assert!(!Rc::ptr_eq(&cached, &relit));
         assert_eq!(relit.runs[0].color, light.text);
+    }
+
+    #[test]
+    fn a_code_family_change_drops_cached_flats() {
+        let view = MarkdownView::new();
+        let palette = palette();
+        view.sync_style(&palette, &Metrics::BODY, MONO_FAMILY);
+        let cached = view.flat(0, || {
+            flatten_plain("`x`", MONO_FAMILY, FontWeight::NORMAL, palette.text)
+        });
+        view.sync_style(&palette, &Metrics::BODY, "Menlo");
+        let rebuilt = view.flat(0, || {
+            flatten_plain("`x`", "Menlo", FontWeight::NORMAL, palette.text)
+        });
+        assert!(!Rc::ptr_eq(&cached, &rebuilt));
+        assert_eq!(rebuilt.runs[0].font.family.as_ref(), "Menlo");
+    }
+
+    #[test]
+    fn flattened_code_runs_use_the_requested_family() {
+        let flat = flatten(
+            &runs_of("`code`"),
+            &palette(),
+            "Menlo",
+            FontWeight::NORMAL,
+            palette().text,
+        );
+        assert_runs_tile(&flat);
+        assert!(
+            flat.runs
+                .iter()
+                .all(|run| run.font.family.as_ref() == "Menlo")
+        );
     }
 
     /// Reasoning text goes through the same view as a response, so a plain

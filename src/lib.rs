@@ -35,6 +35,7 @@ mod browser;
 mod computer_use;
 pub mod daemon;
 mod driver;
+mod fonts;
 mod input;
 mod md;
 mod platform;
@@ -203,6 +204,7 @@ pub fn run() {
             // process identity.
             cx.set_app_identity(APP_ID, APP_NAME);
             crate::assets::register_fonts(cx).expect("failed to register bundled fonts");
+            crate::fonts::init(cx);
             crate::input::init(cx);
             crate::ui::menu::init(cx);
             crate::app::init_composer_autocomplete(cx);
