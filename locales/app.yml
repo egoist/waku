@@ -459,6 +459,20 @@ common.rename:
 
 session.new_task:
   en: New task
+session.hand_off:
+  en: Hand off
+session.hand_off_to:
+  en: Hand off to %{provider}
+session.handoff_available:
+  en: Continue this task with another provider
+session.handoff_finish_turn:
+  en: Finish the current turn before handing off
+session.handoff_complete_native_turn:
+  en: Complete a turn with this provider before another handoff
+session.handoff_no_targets:
+  en: No other providers are available
+session.handoff_provider_unavailable:
+  en: "%{provider} is not available on this machine"
 
 sidebar.today:
   en: Today

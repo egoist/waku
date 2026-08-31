@@ -282,6 +282,50 @@ impl Waku {
         self.select_session(id, cx);
     }
 
+    /// Create a linked destination task on another provider while preserving
+    /// the source workspace and settled transcript. The destination remains
+    /// idle until the user sends its first native turn.
+    pub(super) fn handoff_selected_session_to(
+        &mut self,
+        target_provider: ProviderKind,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(source) = self.selected_session().cloned() else {
+            return;
+        };
+        if !self.provider_enabled(target_provider) {
+            self.show_toast(tr!(
+                "session.handoff_provider_unavailable",
+                provider = target_provider.short_name()
+            ));
+            return;
+        }
+
+        let mut destination = self.state.new_session(source.project_id, target_provider);
+        if destination.model.is_none() {
+            destination.model = self
+                .provider_probe(target_provider)
+                .and_then(ProviderProbe::preferred_model)
+                .map(|model| model.id.clone());
+        }
+        if let Some(model) = destination.model.as_deref() {
+            let (reasoning_effort, service_tier, context_window) =
+                self.state.model_traits_for(target_provider, model);
+            destination.reasoning_effort = reasoning_effort;
+            destination.service_tier = service_tier;
+            destination.context_window = context_window;
+        }
+
+        match crate::handover::create_handover_session(&source, destination) {
+            Ok(destination) => {
+                let destination_id = destination.id;
+                self.state.push_session(destination);
+                self.select_session(destination_id, cx);
+            }
+            Err(error) => self.show_toast(error.to_string()),
+        }
+    }
+
     pub(super) fn select_workspace(&mut self, workspace: SessionWorkspace, cx: &mut Context<Self>) {
         let Some(session) = self.selected_session_mut() else {
             return;

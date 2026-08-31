@@ -7,6 +7,8 @@ use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 use uuid::Uuid;
 
+use crate::handover::SessionHandover;
+
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, Hash, PartialEq, Serialize, TS)]
 #[serde(rename_all = "camelCase")]
 pub enum ProviderKind {
@@ -929,6 +931,11 @@ pub struct AgentSession {
     /// conversation history exists.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_preset: Option<String>,
+    /// Cross-provider provenance plus the one-shot bootstrap state. A handoff
+    /// shares the source workspace and transcript, but starts a fresh native
+    /// provider conversation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub handover: Option<SessionHandover>,
     pub status: SessionStatus,
     pub created_at: u64,
     /// Any mutation, including title edits and truncation. Use
@@ -1003,6 +1010,7 @@ impl AgentSession {
             service_tier: None,
             context_window: None,
             agent_preset: None,
+            handover: None,
             status: SessionStatus::Idle,
             created_at: now,
             updated_at: now,
@@ -1040,6 +1048,7 @@ impl AgentSession {
             service_tier: None,
             context_window: None,
             agent_preset: None,
+            handover: self.handover.clone(),
             status: self.status,
             created_at: self.created_at,
             updated_at: self.updated_at,

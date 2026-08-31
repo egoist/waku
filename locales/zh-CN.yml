@@ -224,6 +224,13 @@ common.copy: 复制
 common.remove: 移除
 common.rename: 重命名
 session.new_task: 新任务
+session.hand_off: 交接
+session.hand_off_to: 交接给 %{provider}
+session.handoff_available: 使用其他提供商继续此任务
+session.handoff_finish_turn: 当前回合结束后才能交接
+session.handoff_complete_native_turn: 使用当前提供商完成一个回合后才能再次交接
+session.handoff_no_targets: 没有其他可用的提供商
+session.handoff_provider_unavailable: 本机无法使用 %{provider}
 sidebar.today: 今天
 sidebar.search: 搜索
 sidebar.options: 侧边栏选项

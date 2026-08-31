@@ -1170,6 +1170,26 @@ mod tests {
     }
 
     #[test]
+    fn new_session_only_inherits_model_traits_for_the_same_provider() {
+        let mut state = PersistedState::empty();
+        state.last_provider = ProviderKind::Claude;
+        state.last_model = Some("claude-opus".into());
+        state.last_reasoning_effort = Some("high".into());
+        state.last_service_tier = Some("priority".into());
+        state.last_context_window = Some("1m".into());
+
+        let same_provider = state.new_session(Uuid::new_v4(), ProviderKind::Claude);
+        assert_eq!(same_provider.model.as_deref(), Some("claude-opus"));
+        assert_eq!(same_provider.reasoning_effort.as_deref(), Some("high"));
+
+        let other_provider = state.new_session(Uuid::new_v4(), ProviderKind::Codex);
+        assert!(other_provider.model.is_none());
+        assert!(other_provider.reasoning_effort.is_none());
+        assert!(other_provider.service_tier.is_none());
+        assert!(other_provider.context_window.is_none());
+    }
+
+    #[test]
     fn daemon_task_state_becomes_list_only_after_crossing_the_client_boundary() {
         let mut session = AgentSession::new(Uuid::new_v4(), ProviderKind::Codex);
         session.detail_loaded = false;

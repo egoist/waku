@@ -1216,6 +1216,7 @@ impl StateStore {
         session.reasoning_effort = stored.reasoning_effort;
         session.service_tier = stored.service_tier;
         session.context_window = stored.context_window;
+        session.handover = stored.handover;
         session.context_usage = stored.context_usage;
         session.runtime_event_cursor = stored.runtime_event_cursor;
 
@@ -1500,6 +1501,7 @@ fn session_skeleton(row: SessionColumns) -> Option<AgentSession> {
         service_tier: None,
         context_window: None,
         agent_preset: None,
+        handover: None,
         status: serde_json::from_value(serde_json::Value::String(status)).ok()?,
         created_at: created_at as u64,
         updated_at: updated_at as u64,
@@ -2122,6 +2124,14 @@ mod tests {
             path: PathBuf::from("/tmp/worktrees/investigate"),
             branch: "waku/investigate".into(),
         };
+        let handover = waku_protocol::handover::SessionHandover {
+            source_session: Uuid::from_u128(77),
+            source_provider: ProviderKind::Claude,
+            imported_at: 123,
+            imported_message_count: 2,
+            bootstrap_pending: true,
+        };
+        state.sessions[0].handover = Some(handover.clone());
         state.sessions[0].begin_turn("Ask");
         state.sessions[0].push_message(MessageRole::Assistant, "an answer");
         state.sessions[0].finish_active_turn(crate::model::TurnStatus::Completed);
@@ -2141,6 +2151,7 @@ mod tests {
         assert!(session.messages.is_empty());
         assert!(session.turns.is_empty());
         assert_eq!(session.workspace, SessionWorkspace::Local);
+        assert!(session.handover.is_none());
         // A skeleton still counts as started, since only started sessions
         // are stored at all.
         assert!(session.has_started());
@@ -2149,6 +2160,7 @@ mod tests {
         let session = &restored.sessions[0];
         assert!(session.detail_loaded);
         assert_eq!(session.turns.len(), 1);
+        assert_eq!(session.handover.as_ref(), Some(&handover));
         assert_eq!(
             session.workspace,
             SessionWorkspace::Worktree {

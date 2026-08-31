@@ -3423,10 +3423,21 @@ impl Waku {
         // while templates expand and skills adopt provider-native syntax.
         // Claude's commands pass through untouched; its CLI owns expansion.
         let prompt = submission.prompt;
-        let driver_prompt = self.resolve_provider_submission(provider, &prompt);
+        let mut driver_prompt = self.resolve_provider_submission(provider, &prompt);
+        let handover_bootstrap = self
+            .state
+            .sessions
+            .iter()
+            .find(|session| session.id == session_id)
+            .and_then(|session| crate::handover::handover_provider_prompt(session, &driver_prompt));
+        if let Some(bootstrap) = handover_bootstrap.as_ref() {
+            driver_prompt.clone_from(bootstrap);
+        }
         let mut failed_to_start = false;
         match driver {
-            Ok(driver) => driver.prompt(driver_prompt),
+            Ok(driver) => {
+                driver.prompt(driver_prompt);
+            }
             Err(error) => {
                 failed_to_start = true;
                 let message = tr!("errors.start_agent", error = error);
@@ -3569,6 +3580,7 @@ impl Waku {
                 force_save |= matches!(
                     event,
                     DriverEvent::Connected { .. }
+                        | DriverEvent::TurnStarted
                         | DriverEvent::AgentPresetSelected(_)
                         | DriverEvent::AutoTitleUpdated(_)
                         | DriverEvent::Permission { .. }

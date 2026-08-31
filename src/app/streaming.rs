@@ -278,6 +278,12 @@ impl Waku {
                         // a `/goal` began: the provider's start confirms it.
                         session.mark_active_turn_provider_started();
                         session.status = SessionStatus::Working;
+                        // A provider adapter emits `TurnStarted` only after it has
+                        // accepted the prompt. Keep the one-shot bootstrap pending
+                        // across dispatch failures so retrying cannot lose context.
+                        if let Some(handover) = session.handover.as_mut() {
+                            handover.bootstrap_pending = false;
+                        }
                     } else if session.provider == ProviderKind::Codex {
                         // Codex starts turns on its own: goal continuation
                         // pursues an active goal whenever the thread is

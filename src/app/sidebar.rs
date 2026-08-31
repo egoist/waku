@@ -1915,6 +1915,11 @@ impl Waku {
                     .gap(px(6.0))
                     .overflow_hidden()
                     .line_height(sp(18.0))
+                    .child(icon(
+                        provider_icon(session.provider),
+                        12.0,
+                        provider_color(&theme, session.provider),
+                    ))
                     .child(title)
                     .when(working, |element| {
                         element.child(motion::spin_slow(icon(
@@ -2049,6 +2054,92 @@ impl Waku {
 
     // ── Header ─────────────────────────────────────────────────────────────
 
+    /// Synara-style compact handoff control. It lives immediately before the
+    /// environment summary so change counts and workspace tools retain their
+    /// existing order.
+    fn render_handoff_menu(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let session = self.selected_session()?;
+        if !session.has_started() {
+            return None;
+        }
+
+        let target_providers = ProviderKind::ALL
+            .into_iter()
+            .filter(|provider| *provider != session.provider && self.provider_enabled(*provider))
+            .collect::<Vec<_>>();
+        let enabled =
+            crate::handover::can_handover_session(session) && !target_providers.is_empty();
+        let theme = Theme::current(cx);
+        let tooltip = if session.status.is_busy() {
+            tr!("session.handoff_finish_turn")
+        } else if session.handover.is_some() && session.turns.is_empty() {
+            tr!("session.handoff_complete_native_turn")
+        } else if target_providers.is_empty() {
+            tr!("session.handoff_no_targets")
+        } else {
+            tr!("session.handoff_available")
+        };
+        let trigger = div()
+            .id("session-handoff-trigger")
+            .h(px(28.0))
+            .px(px(8.0))
+            .rounded(px(7.0))
+            .flex_none()
+            .flex()
+            .items_center()
+            .gap(px(5.0))
+            .cursor_default()
+            .text_size(sp(12.0))
+            .font_weight(FontWeight::MEDIUM)
+            .text_color(if enabled {
+                theme.text_secondary
+            } else {
+                theme.text_tertiary
+            })
+            .hover(move |element| {
+                if enabled {
+                    element.bg(theme.overlay)
+                } else {
+                    element
+                }
+            })
+            .tooltip(Tooltip::text(tooltip))
+            .child(icon("icons/fork.svg", 12.0, theme.text_tertiary))
+            .child(tr_cow!("session.hand_off"))
+            .child(icon("icons/chevron-down.svg", 9.0, theme.text_tertiary));
+
+        if !enabled {
+            return Some(trigger.opacity(0.62).into_any_element());
+        }
+
+        let weak = cx.entity().downgrade();
+        let handle = self.menu_handle(HANDOFF_MENU_ID, cx);
+        Some(dropdown_menu(
+            trigger.when(handle.is_open(), |element| element.bg(theme.overlay_strong)),
+            "session-handoff-menu-card",
+            &handle,
+            MenuAlign::BelowRight,
+            move |_| {
+                target_providers
+                    .iter()
+                    .copied()
+                    .map(|provider| {
+                        let weak = weak.clone();
+                        MenuItem::new(
+                            tr!("session.hand_off_to", provider = provider.short_name()),
+                            move |_, cx| {
+                                let _ = weak.update(cx, |this, cx| {
+                                    this.handoff_selected_session_to(provider, cx);
+                                });
+                            },
+                        )
+                        .icon(provider_icon(provider))
+                    })
+                    .collect()
+            },
+        ))
+    }
+
     pub(super) fn render_header(
         &self,
         window: &Window,
@@ -2062,6 +2153,12 @@ impl Waku {
         let agent_preset_label = session
             .filter(|session| session.provider == ProviderKind::DeepSeek && session.has_started())
             .and_then(|session| self.agent_preset_label_for_session(session));
+        let handover_badge = session.and_then(|session| {
+            session
+                .handover
+                .as_ref()
+                .map(|handover| (handover.source_provider, session.provider))
+        });
         let left_window_controls = (!self.sidebar_visible)
             .then(|| {
                 self.render_client_window_controls(
@@ -2174,6 +2271,29 @@ impl Waku {
                                 .text_color(theme.text_secondary)
                                 .child(icon("icons/bot.svg", 10.5, theme.text_tertiary))
                                 .child(div().min_w_0().truncate().child(SharedString::from(label)))
+                        }))
+                        .children(handover_badge.map(|(source, target)| {
+                            div()
+                                .id("header-handoff-origin")
+                                .h(px(22.0))
+                                .px(px(6.0))
+                                .rounded(px(6.0))
+                                .flex_none()
+                                .flex()
+                                .items_center()
+                                .gap(px(4.0))
+                                .bg(theme.overlay)
+                                .child(icon(
+                                    provider_icon(source),
+                                    11.0,
+                                    provider_color(&theme, source),
+                                ))
+                                .child(icon("icons/arrow-right.svg", 8.0, theme.text_tertiary))
+                                .child(icon(
+                                    provider_icon(target),
+                                    11.0,
+                                    provider_color(&theme, target),
+                                ))
                         })),
                     cx,
                 ),
@@ -2184,6 +2304,7 @@ impl Waku {
                     cx,
                 ),
             )
+            .children(self.render_handoff_menu(cx))
             .child(self.render_background_work_summary(cx))
             .when(!self.right_panel_visible, |element| {
                 element
