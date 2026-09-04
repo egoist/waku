@@ -340,11 +340,28 @@ fn parse_cursor_models(output: &str) -> Vec<ProviderModel> {
 }
 
 fn discover_opencode_models(binary: &Path) -> Vec<ProviderModel> {
+    // `--verbose` prints one JSON document per model after its bare
+    // `provider/model` id, including the `variants` map that carries the
+    // reasoning-effort choices. Prefer it so the picker can offer effort
+    // levels; fall back to the plain listing for older CLIs.
+    let mut verbose = crate::command_env::command(binary);
+    let verbose = verbose.args(["models", "--verbose"]);
+    if let Ok(output) = crate::command_env::output(verbose)
+        && output.status.success()
+    {
+        let models = parse_opencode_verbose_models(&String::from_utf8_lossy(&output.stdout));
+        if !models.is_empty() {
+            return models;
+        }
+    }
     let mut command = crate::command_env::command(binary);
     let command = command.arg("models");
     let Ok(output) = crate::command_env::output(command) else {
         return Vec::new();
     };
+    if !output.status.success() {
+        return Vec::new();
+    }
     parse_opencode_models(&String::from_utf8_lossy(&output.stdout))
 }
 
@@ -522,20 +539,167 @@ fn parse_opencode_models(output: &str) -> Vec<ProviderModel> {
     output
         .lines()
         .filter_map(|line| {
-            let id = strip_ansi(line).trim().to_owned();
-            if id.is_empty() || id.split_whitespace().count() != 1 || !id.contains('/') {
-                return None;
-            }
+            let id = opencode_model_id(line)?;
             let (provider, model) = id.split_once('/')?;
-            if provider.is_empty() || model.is_empty() {
-                return None;
-            }
             Some(
                 ProviderModel::new(id.clone(), display_name_from_slug(model))
                     .sub_provider(display_name_from_slug(provider)),
             )
         })
         .collect()
+}
+
+fn opencode_model_id(line: &str) -> Option<String> {
+    let id = strip_ansi(line).trim().to_owned();
+    if id.is_empty() || id.split_whitespace().count() != 1 {
+        return None;
+    }
+    let (provider, model) = id.split_once('/')?;
+    if provider.is_empty()
+        || model.is_empty()
+        || matches!(id.chars().next(), Some('{' | '[' | '"' | '\''))
+    {
+        return None;
+    }
+    Some(id)
+}
+
+/// Canonical effort ladder for ordering OpenCode variant keys. Unknown ids
+/// sort after the known ladder alphabetically so the picker stays stable even
+/// when a provider invents a new overlay name.
+const OPENCODE_EFFORT_ORDER: [&str; 10] = [
+    "none",
+    "minimal",
+    "off",
+    "low",
+    "medium",
+    "high",
+    "xhigh",
+    "max",
+    "ultra",
+    "ultracode",
+];
+
+fn opencode_effort_rank(effort: &str) -> (usize, &str) {
+    (
+        OPENCODE_EFFORT_ORDER
+            .iter()
+            .position(|known| *known == effort)
+            .unwrap_or(OPENCODE_EFFORT_ORDER.len()),
+        effort,
+    )
+}
+
+fn opencode_reasoning_options(variants: &Value) -> Vec<ProviderModelOption> {
+    let mut efforts: Vec<String> = if let Some(map) = variants.as_object() {
+        map.keys().cloned().collect()
+    } else if let Some(list) = variants.as_array() {
+        list.iter()
+            .filter_map(|entry| {
+                entry
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|id| !id.is_empty())
+                    .map(str::to_owned)
+                    .or_else(|| {
+                        entry
+                            .as_str()
+                            .map(str::trim)
+                            .filter(|id| !id.is_empty())
+                            .map(str::to_owned)
+                    })
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+    efforts.retain(|effort| !effort.trim().is_empty());
+    efforts.sort_by(|left, right| opencode_effort_rank(left).cmp(&opencode_effort_rank(right)));
+    efforts.dedup();
+    efforts
+        .into_iter()
+        .map(|effort| ProviderModelOption::new(effort.clone(), reasoning_effort_label(&effort)))
+        .collect()
+}
+
+fn parse_opencode_verbose_models(output: &str) -> Vec<ProviderModel> {
+    // `--verbose` prints `provider/model` on its own line followed by one JSON
+    // document for that model. Let serde frame each document so arbitrary
+    // string values cannot be mistaken for the next model id.
+    let mut remaining = output;
+    let mut models = Vec::new();
+    while !remaining.is_empty() {
+        let (line, rest) = remaining
+            .split_once('\n')
+            .map_or((remaining, ""), |(line, rest)| (line, rest));
+        remaining = rest;
+        let Some(id) = opencode_model_id(line) else {
+            continue;
+        };
+
+        let document = remaining.trim_start();
+        if document.starts_with('{') {
+            let mut values = serde_json::Deserializer::from_str(document).into_iter::<Value>();
+            if let Some(Ok(value)) = values.next() {
+                remaining = &document[values.byte_offset()..];
+                models.push(parse_opencode_verbose_model(&id, Some(&value)));
+                continue;
+            }
+        }
+        // A bare id or malformed document still yields a selectable model.
+        // Leaving `remaining` in place lets the outer scan resynchronize at a
+        // later valid header.
+        models.push(parse_opencode_verbose_model(&id, None));
+    }
+    models.into_iter().flatten().collect()
+}
+
+fn parse_opencode_verbose_model(id: &str, value: Option<&Value>) -> Option<ProviderModel> {
+    let (fallback_provider, fallback_model) = id.split_once('/')?;
+    if fallback_provider.is_empty() || fallback_model.is_empty() {
+        return None;
+    }
+    let plain = || {
+        ProviderModel::new(id.to_owned(), display_name_from_slug(fallback_model))
+            .sub_provider(display_name_from_slug(fallback_provider))
+    };
+    let Some(value) = value else {
+        return Some(plain());
+    };
+    let provider_id = value
+        .get("providerID")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|provider| !provider.is_empty())
+        .unwrap_or(fallback_provider);
+    let model_id = value
+        .get("id")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|model| !model.is_empty())
+        .unwrap_or(fallback_model);
+    if provider_id.is_empty() || model_id.is_empty() {
+        return None;
+    }
+    let slug = format!("{provider_id}/{model_id}");
+    let name = value
+        .get("name")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .map(str::to_owned)
+        .unwrap_or_else(|| display_name_from_slug(model_id));
+    let mut model =
+        ProviderModel::new(slug, name).sub_provider(display_name_from_slug(provider_id));
+    // OpenCode publishes no per-model default variant. Its explicit `default`
+    // selection uses family-specific base settings, so guessing one effort
+    // would be wrong as often as right. Keep the catalog default unset and let
+    // the picker's Default row represent that sentinel.
+    if let Some(variants) = value.get("variants") {
+        model.reasoning_efforts = opencode_reasoning_options(variants);
+    }
+    Some(model)
 }
 
 fn discover_grok_models(binary: &Path) -> Vec<ProviderModel> {
@@ -1385,6 +1549,173 @@ printf '%s\n' '{"type":"control_response","response":{"request_id":"waku-initial
         assert_eq!(models[1].id, "github-copilot/gpt-5.4");
         assert_eq!(models[1].name, "GPT-5.4");
         assert_eq!(models[1].sub_provider.as_deref(), Some("Github Copilot"));
+    }
+
+    #[test]
+    fn parses_opencode_verbose_variants_as_reasoning_efforts() {
+        let output = concat!(
+            "opencode/big-pickle\n",
+            "{\"id\":\"big-pickle\",\"providerID\":\"opencode\",\"name\":\"Big Pickle\",\"variants\":{}}\n",
+            "opencode/gpt-5.3-codex\n",
+            "{\"id\":\"gpt-5.3-codex\",\"providerID\":\"opencode\",\"name\":\"GPT-5.3 Codex\",",
+            "\"variants\":{\"xhigh\":{},\"low\":{},\"high\":{},\"medium\":{},\"none\":{}}}\n",
+            "openai/gpt-5.4\n",
+            "{\"id\":\"gpt-5.4\",\"providerID\":\"openai\",\"name\":\"GPT-5.4\",",
+            "\"variants\":{\"low\":{\"reasoningEffort\":\"low\"},\"high\":{\"reasoningEffort\":\"high\"}}}\n",
+        );
+        let models = parse_opencode_verbose_models(output);
+        assert_eq!(models.len(), 3);
+        assert_eq!(models[0].id, "opencode/big-pickle");
+        assert_eq!(models[0].name, "Big Pickle");
+        assert!(models[0].reasoning_efforts.is_empty());
+        assert_eq!(models[0].default_reasoning_effort, None);
+        // Variant keys arrive in any JSON order; the picker sees the effort ladder.
+        assert_eq!(
+            models[1]
+                .reasoning_efforts
+                .iter()
+                .map(|option| option.id.as_str())
+                .collect::<Vec<_>>(),
+            ["none", "low", "medium", "high", "xhigh"]
+        );
+        assert_eq!(models[1].default_reasoning_effort, None);
+        assert_eq!(models[2].id, "openai/gpt-5.4");
+        assert_eq!(models[2].sub_provider.as_deref(), Some("Openai"));
+        assert_eq!(
+            models[2]
+                .reasoning_efforts
+                .iter()
+                .map(|option| option.id.as_str())
+                .collect::<Vec<_>>(),
+            ["low", "high"]
+        );
+        assert_eq!(models[2].default_reasoning_effort, None);
+    }
+
+    #[test]
+    fn opencode_verbose_leaves_the_default_unset() {
+        // OpenCode does not identify which variant, if any, matches the base
+        // model settings, so the picker's explicit Default row owns the reset.
+        let output = concat!(
+            "opencode/flash\n",
+            "{\"id\":\"flash\",\"providerID\":\"opencode\",\"name\":\"Flash\",",
+            "\"variants\":{\"low\":{},\"medium\":{},\"high\":{}}}\n",
+        );
+        let models = parse_opencode_verbose_models(output);
+        assert_eq!(models.len(), 1);
+        assert_eq!(
+            models[0]
+                .reasoning_efforts
+                .iter()
+                .map(|option| option.id.as_str())
+                .collect::<Vec<_>>(),
+            ["low", "medium", "high"]
+        );
+        assert_eq!(models[0].default_reasoning_effort, None);
+    }
+
+    #[test]
+    fn opencode_verbose_keeps_bare_ids_when_documents_are_malformed() {
+        let models = parse_opencode_verbose_models(concat!(
+            "opencode/gpt-5.4\nnot json\n",
+            "openai/recovered\n",
+            "{\"id\":\"recovered\",\"providerID\":\"openai\",\"variants\":{\"low\":{}}}\n",
+        ));
+        assert_eq!(models.len(), 2);
+        assert_eq!(models[0].id, "opencode/gpt-5.4");
+        assert_eq!(models[0].name, "GPT-5.4");
+        assert!(models[0].reasoning_efforts.is_empty());
+        assert_eq!(models[1].id, "openai/recovered");
+        assert_eq!(models[1].reasoning_efforts[0].id, "low");
+    }
+
+    #[test]
+    fn opencode_verbose_keeps_slash_strings_inside_their_json_document() {
+        let output = r#"custom/model-a
+{
+  "id": "model-a",
+  "providerID": "custom",
+  "name": "Model A",
+  "options": {
+    "stopSequences": [
+      "</think>",
+      "application/pdf"
+    ]
+  },
+  "variants": {
+    "low": {},
+    "high": {}
+  }
+}
+custom/model-b
+{
+  "id": "model-b",
+  "providerID": "custom",
+  "name": "Model B",
+  "variants": {}
+}
+"#;
+
+        let models = parse_opencode_verbose_models(output);
+
+        assert_eq!(
+            models
+                .iter()
+                .map(|model| model.id.as_str())
+                .collect::<Vec<_>>(),
+            ["custom/model-a", "custom/model-b"]
+        );
+        assert_eq!(
+            models[0]
+                .reasoning_efforts
+                .iter()
+                .map(|option| option.id.as_str())
+                .collect::<Vec<_>>(),
+            ["low", "high"]
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn opencode_discovery_falls_back_after_a_failed_verbose_command() {
+        let binary = write_fake_model_cli(
+            "opencode-verbose-fallback",
+            r#"#!/bin/sh
+if [ "$2" = "--verbose" ]; then
+  printf '%s\n' 'openai/partial'
+  printf '%s\n' '{"id":"partial","providerID":"openai","variants":{"high":{}}}'
+  exit 1
+fi
+printf '%s\n' 'openai/fallback'
+"#,
+        );
+
+        let models = discover_opencode_models(&binary);
+
+        let _ = std::fs::remove_file(binary);
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0].id, "openai/fallback");
+        assert!(models[0].reasoning_efforts.is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn opencode_discovery_rejects_a_failed_plain_command() {
+        let binary = write_fake_model_cli(
+            "opencode-failed-plain",
+            r#"#!/bin/sh
+if [ "$2" = "--verbose" ]; then
+  exit 1
+fi
+printf '%s\n' 'openai/partial'
+exit 1
+"#,
+        );
+
+        let models = discover_opencode_models(&binary);
+
+        let _ = std::fs::remove_file(binary);
+        assert!(models.is_empty());
     }
 
     #[test]
