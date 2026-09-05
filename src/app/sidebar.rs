@@ -1,6 +1,7 @@
 use chrono::{DateTime, Datelike, Days, Local, NaiveDate, Utc};
 use gpui::{KeyBinding, actions};
 
+use super::window_chrome::{ClientCorners, ClientCornersExt};
 use super::*;
 
 actions!(waku_sidebar, [CancelSessionRename]);
@@ -1089,6 +1090,9 @@ impl Waku {
             } else {
                 theme.sidebar
             })
+            // The sidebar is pinned to the window's left edge, so it owns both
+            // left corners of a client-drawn frame whenever it is on screen.
+            .rounded_client_corners(ClientCorners::Left, window)
             .child(self.render_sidebar_titlebar(window, cx))
             .child(
                 div()
