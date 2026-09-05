@@ -931,33 +931,61 @@ fn layout_missing(layout: &TextLayout) -> bool {
     layout.line_layouts().is_empty()
 }
 
-/// The registry entry containing `position`, else the nearest by vertical
-/// distance so a drag through a gutter or between blocks clamps sensibly.
-fn registry_point(
-    registry: &SelectionRegistry<TextGeometry>,
+/// The index a drag point resolves to: the first bounds containing it, else
+/// the nearest by gap distance.
+///
+/// The containment pass mirrors the mouse-down hit test, and the fallback
+/// measures both axes: side-by-side elements (table cells) share the vertical
+/// band of their row's first line, so a purely vertical distance would pin
+/// any point level with that band to the row's *first* cell, whatever column
+/// the drag is actually in. Stacked blocks are full-width, so for them the
+/// horizontal gap is always zero and the distance degenerates to the old
+/// vertical one — a drag through a gutter or between blocks still clamps
+/// sensibly. Pure over the bounds so the table geometry is unit-testable.
+fn hit_index(
+    entries: impl Iterator<Item = Option<Bounds<Pixels>>>,
     position: Point<Pixels>,
-) -> Option<(usize, usize)> {
+) -> Option<usize> {
     let mut best: Option<(usize, f32)> = None;
-    for (index, entry) in registry.entries().iter().enumerate() {
-        if layout_missing(&entry.geometry) {
-            continue;
+    for (index, bounds) in entries.enumerate() {
+        let Some(bounds) = bounds else { continue };
+        if bounds.contains(&position) {
+            return Some(index);
         }
-        let bounds = entry.geometry.bounds();
-        let distance = if position.y < bounds.top() {
+        let gap_x = if position.x < bounds.left() {
+            f32::from(bounds.left() - position.x)
+        } else if position.x > bounds.right() {
+            f32::from(position.x - bounds.right())
+        } else {
+            0.0
+        };
+        let gap_y = if position.y < bounds.top() {
             f32::from(bounds.top() - position.y)
         } else if position.y > bounds.bottom() {
             f32::from(position.y - bounds.bottom())
         } else {
             0.0
         };
+        let distance = gap_x + gap_y;
         if best.is_none_or(|(_, best)| distance < best) {
             best = Some((index, distance));
         }
-        if distance == 0.0 {
-            break;
-        }
     }
-    let (index, _) = best?;
+    best.map(|(index, _)| index)
+}
+
+/// The registry entry containing `position`, else the nearest one so a drag
+/// through a gutter or between blocks clamps sensibly.
+fn registry_point(
+    registry: &SelectionRegistry<TextGeometry>,
+    position: Point<Pixels>,
+) -> Option<(usize, usize)> {
+    let index = hit_index(
+        registry.entries().iter().map(|entry| {
+            (!layout_missing(&entry.geometry)).then(|| entry.geometry.bounds())
+        }),
+        position,
+    )?;
     let offset = match registry.entries()[index]
         .geometry
         .index_for_position(position)
@@ -2179,5 +2207,70 @@ mod tests {
         // An empty table falls back to even columns.
         let even = column_widths(&[], &[], 3);
         assert!(even.iter().all(|width| (width - 1.0 / 3.0).abs() < 1e-6));
+    }
+
+    fn some_bounds(x: f32, y: f32, w: f32, h: f32) -> Option<Bounds<Pixels>> {
+        Some(Bounds {
+            origin: point(px(x), px(y)),
+            size: size(px(w), px(h)),
+        })
+    }
+
+    /// The drag head must resolve to the cell *under the point*, not the row's
+    /// first cell: every cell shares the row's first-line y band, so a
+    /// vertical-only lookup pins the head to column one whenever a wrapped
+    /// cell stretches the row. Regression test for copying one tall cell and
+    /// getting the whole row.
+    #[test]
+    fn drag_hit_in_a_table_row_respects_the_column() {
+        let row = [
+            some_bounds(0.0, 0.0, 50.0, 20.0),    // id
+            some_bounds(50.0, 0.0, 50.0, 20.0),   // name
+            some_bounds(100.0, 0.0, 50.0, 20.0),  // city
+            some_bounds(150.0, 0.0, 100.0, 60.0), // note, wrapped over 3 lines
+        ];
+        // Level with the first line but over the note column: the note cell
+        // contains the point, so it wins over the earlier same-band cells.
+        assert_eq!(
+            hit_index(row.into_iter(), point(px(200.0), px(10.0))),
+            Some(3)
+        );
+        // Deeper in the tall cell, only the note cell contains the point.
+        assert_eq!(
+            hit_index(row.into_iter(), point(px(160.0), px(50.0))),
+            Some(3)
+        );
+        // A point in a single-line cell still resolves there.
+        assert_eq!(
+            hit_index(row.into_iter(), point(px(60.0), px(10.0))),
+            Some(1)
+        );
+        // Below the row, the fallback's horizontal gap keeps the drag in the
+        // note column instead of jumping to the row's first cell.
+        assert_eq!(
+            hit_index(row.into_iter(), point(px(200.0), px(80.0))),
+            Some(3)
+        );
+    }
+
+    /// Stacked blocks are full-width, so their horizontal gap is always zero
+    /// and the fallback stays the old vertical clamp: a drag through the
+    /// gutter between two paragraphs lands on the nearer one.
+    #[test]
+    fn drag_hit_between_stacked_blocks_keeps_vertical_clamping() {
+        let blocks = [
+            some_bounds(0.0, 0.0, 300.0, 20.0),
+            None, // a spliced row whose layout is not ready is skipped
+            some_bounds(0.0, 30.0, 300.0, 20.0),
+        ];
+        assert_eq!(
+            hit_index(blocks.into_iter(), point(px(10.0), px(23.0))),
+            Some(0)
+        );
+        assert_eq!(
+            hit_index(blocks.into_iter(), point(px(10.0), px(27.0))),
+            Some(2)
+        );
+        assert_eq!(hit_index([].into_iter(), point(px(0.0), px(0.0))), None);
     }
 }
