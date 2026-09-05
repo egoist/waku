@@ -186,6 +186,8 @@ common.creating: 作成中…
 settings.local_by_default: デフォルトでローカルに保存
 settings.local_by_default_description: プロジェクト、会話、設定はこのコンピュータに保存されます
 settings.local_by_default_web_description: プロジェクト、会話、添付ファイルは接続先デーモンのホストに保存されます。Waku Web の設定はこのブラウザに保存されます。
+settings.stream_thinking: レガシートークンストリーミング
+settings.stream_thinking_description: モデルの思考テキストをトークン単位でリアルタイム表示します。オフの場合、思考内容はモデルの思考完了後に表示されます。
 settings.automatic_updates: 自動アップデート
 settings.automatic_updates_description: バックグラウンドで新しいバージョンを確認し、インストールを案内します
 settings.share_anonymous_usage_data: 匿名の使用状況データを共有

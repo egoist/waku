@@ -365,6 +365,10 @@ settings.local_by_default_description:
   en: Projects, conversations, and settings are stored on this computer
 settings.local_by_default_web_description:
   en: Projects, conversations, and attachments stay on the connected daemon host. Waku Web preferences stay in this browser.
+settings.stream_thinking:
+  en: Legacy token streaming
+settings.stream_thinking_description:
+  en: Stream the model's reasoning text token by token while it thinks. When off, thinking appears once the model finishes.
 settings.automatic_updates:
   en: Automatic updates
 settings.automatic_updates_description:
