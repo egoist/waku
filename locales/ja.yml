@@ -486,6 +486,7 @@ models.favorites: お気に入り
 models.add_favorite: お気に入りに追加
 models.remove_favorite: お気に入りから削除
 models.standard: 標準
+models.default: デフォルト
 models.reasoning: 推論レベル
 models.service_tier: サービスティア
 models.context_window: コンテキストウィンドウ

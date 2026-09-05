@@ -1073,6 +1073,23 @@ impl Waku {
         }
     }
 
+    /// Clears an explicitly chosen OpenCode variant back to its base-model
+    /// `default` selection.
+    pub(super) fn clear_reasoning_effort(&mut self, cx: &mut Context<Self>) {
+        if let Some(session) = self.selected_session_mut()
+            && super::composer::supports_reasoning_default_reset(session.provider)
+            && session.reasoning_effort.is_some()
+        {
+            let session_id = session.id;
+            session.reasoning_effort = None;
+            self.state.last_reasoning_effort = None;
+            self.remember_selected_model_traits();
+            self.apply_session_options(session_id, cx);
+            self.save();
+            cx.notify();
+        }
+    }
+
     pub(super) fn set_service_tier(&mut self, tier: String, cx: &mut Context<Self>) {
         if let Some(session) = self.selected_session_mut()
             && session.service_tier.as_deref() != Some(tier.as_str())
