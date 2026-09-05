@@ -215,7 +215,31 @@ const SIDEBAR_GROUP_HEADER_BOTTOM_GAP: f32 = 2.0;
 const SIDEBAR_SHOW_MORE_ROW_HEIGHT: f32 = 30.0;
 const SIDEBAR_GROUP_SPACER_HEIGHT: f32 = 10.0;
 const SIDEBAR_GROUP_GUIDE_X: f32 = 15.0;
+const SIDEBAR_GROUP_GUIDE_WIDTH: f32 = 1.0;
 const SIDEBAR_GROUP_CHILD_PADDING: f32 = 28.0;
+
+/// The session card's vertical budget, spelled out so the card height above
+/// stays a checkable consequence of the parts rather than a magic number.
+/// `session_row_height_is_the_sum_of_its_parts` holds them together.
+const SIDEBAR_SESSION_ROW_PADDING_Y: f32 = 7.0;
+const SIDEBAR_SESSION_STACK_GAP: f32 = 4.0;
+const SIDEBAR_SESSION_TITLE_LINE_HEIGHT: f32 = 18.0;
+const SIDEBAR_SESSION_DETAIL_LINE_HEIGHT: f32 = 15.0;
+
+/// The provider mark leading every session row. Size and gap match the task
+/// switcher's card header so the two surfaces name a provider the same way.
+/// The mark is centered against the title line, never taller than the stack,
+/// so it cannot move the measured row height the virtualized list depends on.
+const SIDEBAR_SESSION_PROVIDER_ICON_SIZE: f32 = 14.0;
+const SIDEBAR_SESSION_PROVIDER_ICON_GAP: f32 = 7.0;
+/// Vertical band the mark is centered in: the title line, deliberately not the
+/// whole text stack. The second line is only sometimes filled — a session with
+/// no project has no branch to name — and a mark centered on the stack drifts
+/// half a line down the moment that line loses its label.
+const SIDEBAR_SESSION_PROVIDER_ICON_BAND_HEIGHT: f32 = SIDEBAR_SESSION_TITLE_LINE_HEIGHT;
+/// Unselected rows damp the brand hue so a long list is not eleven competing
+/// colors fighting the titles; hovering the row restores it.
+const SIDEBAR_SESSION_PROVIDER_ICON_REST_ALPHA: f32 = 0.8;
 const SIDEBAR_PROJECT_RECENT_WINDOW_SECONDS: u64 = 3 * 24 * 60 * 60;
 const SIDEBAR_PROJECT_REVEAL_BATCH: usize = 30;
 
@@ -1894,30 +1918,41 @@ impl Waku {
         let menu = self.menu_handle(format!("session-{session_id}"), cx);
         let row_focus = menu.trigger_focus_handle().clone();
         let keyboard_menu = menu.clone();
-        let row = div()
-            .id(SharedString::from(format!("session-{}", session.id)))
-            .w_full()
+        let provider = session.provider;
+        let row_group = SharedString::from(format!("session-row-{session_id}"));
+        // Presentational only: the row itself stays the focusable, clickable
+        // target, and the tooltip repeats what the mark's shape already says.
+        let provider_mark = div()
+            .id(SharedString::from(format!("session-provider-{session_id}")))
+            .flex_none()
+            .flex()
+            .h(sp(SIDEBAR_SESSION_PROVIDER_ICON_BAND_HEIGHT))
+            .items_center()
+            .opacity(if selected {
+                1.0
+            } else {
+                SIDEBAR_SESSION_PROVIDER_ICON_REST_ALPHA
+            })
+            .group_hover(row_group.clone(), |style| style.opacity(1.0))
+            .tooltip(Tooltip::text(provider.display_name()))
+            .child(icon(
+                provider_icon(provider),
+                SIDEBAR_SESSION_PROVIDER_ICON_SIZE,
+                provider_color(&theme, provider),
+            ));
+        let text_stack = div()
+            .flex_1()
             .min_w_0()
             .flex()
             .flex_col()
-            .gap(px(4.0))
-            .pl(px(left_padding))
-            .pr(px(8.0))
-            .py(px(7.0))
-            .rounded(px(7.0))
-            .cursor_default()
-            .when(selected, |element| {
-                element.bg(theme.sidebar_item_background)
-            })
-            .hover(|element| element.bg(theme.sidebar_item_background))
-            .active(|element| element.bg(theme.sidebar_item_background))
+            .gap(px(SIDEBAR_SESSION_STACK_GAP))
             .child(
                 div()
                     .flex()
                     .items_center()
                     .gap(px(6.0))
                     .overflow_hidden()
-                    .line_height(sp(18.0))
+                    .line_height(sp(SIDEBAR_SESSION_TITLE_LINE_HEIGHT))
                     .child(title)
                     .when(working, |element| {
                         element.child(motion::spin_slow(icon(
@@ -1954,7 +1989,7 @@ impl Waku {
                     .items_center()
                     .gap(px(5.0))
                     .text_size(sp(if grouped_by_project { 12.5 } else { 13.0 }))
-                    .line_height(sp(15.0))
+                    .line_height(sp(SIDEBAR_SESSION_DETAIL_LINE_HEIGHT))
                     .when_some(detail_label, |element, label| {
                         element
                             .child(icon(detail_icon, 12.5, theme.text_tertiary))
@@ -1984,7 +2019,31 @@ impl Waku {
                             )
                         },
                     ),
-            )
+            );
+        let row = div()
+            .id(SharedString::from(format!("session-{}", session.id)))
+            .group(row_group)
+            .w_full()
+            .min_w_0()
+            .flex()
+            // The mark carries its own band, so the row aligns to the top and
+            // lets each child answer for its vertical position. The text stack
+            // is exactly as tall as the row's content box, which makes this a
+            // no-op for it.
+            .items_start()
+            .gap(px(SIDEBAR_SESSION_PROVIDER_ICON_GAP))
+            .pl(px(left_padding))
+            .pr(px(8.0))
+            .py(px(SIDEBAR_SESSION_ROW_PADDING_Y))
+            .rounded(px(7.0))
+            .cursor_default()
+            .when(selected, |element| {
+                element.bg(theme.sidebar_item_background)
+            })
+            .hover(|element| element.bg(theme.sidebar_item_background))
+            .active(|element| element.bg(theme.sidebar_item_background))
+            .child(provider_mark)
+            .child(text_stack)
             .when(!renaming, |element| {
                 element
                     .track_focus(&row_focus)
@@ -2050,7 +2109,7 @@ impl Waku {
                         .left(px(SIDEBAR_GROUP_GUIDE_X))
                         .top_0()
                         .bottom_0()
-                        .w(px(1.0))
+                        .w(px(SIDEBAR_GROUP_GUIDE_WIDTH))
                         .bg(theme.border),
                 )
             })
@@ -2432,6 +2491,69 @@ fn sidebar_session_selected(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The virtualized list measures every session row with
+    /// `SIDEBAR_SESSION_CARD_HEIGHT`, and `list()` requires the measured and
+    /// estimated heights to agree. Adding the provider column must therefore
+    /// stay inside the existing budget instead of growing the row.
+    #[test]
+    fn session_row_height_is_the_sum_of_its_parts() {
+        let stack = SIDEBAR_SESSION_TITLE_LINE_HEIGHT
+            + SIDEBAR_SESSION_STACK_GAP
+            + SIDEBAR_SESSION_DETAIL_LINE_HEIGHT;
+        assert_eq!(
+            stack + 2.0 * SIDEBAR_SESSION_ROW_PADDING_Y,
+            SIDEBAR_SESSION_CARD_HEIGHT
+        );
+    }
+
+    /// The provider mark sits beside the two-line stack, banded to the title
+    /// line. While it is no taller than the stack it cannot become the element
+    /// that decides the row height.
+    #[test]
+    fn provider_mark_cannot_grow_the_session_row() {
+        let stack = SIDEBAR_SESSION_TITLE_LINE_HEIGHT
+            + SIDEBAR_SESSION_STACK_GAP
+            + SIDEBAR_SESSION_DETAIL_LINE_HEIGHT;
+        assert!(SIDEBAR_SESSION_PROVIDER_ICON_SIZE <= stack);
+    }
+
+    /// The mark is centered on the title line, never on the whole stack. The
+    /// second line is not always filled: a session with no project has no
+    /// branch to show, so `detail_label` is `None` and the row keeps only a
+    /// spacer and the relative time. A mark centered on the stack would then
+    /// hang half a line below the title it belongs to, and two rows in the
+    /// same list would disagree about where a provider sits.
+    #[test]
+    fn provider_mark_sits_on_the_title_line_whatever_the_detail_row_does() {
+        assert_eq!(
+            SIDEBAR_SESSION_PROVIDER_ICON_BAND_HEIGHT,
+            SIDEBAR_SESSION_TITLE_LINE_HEIGHT
+        );
+        assert!(SIDEBAR_SESSION_PROVIDER_ICON_SIZE <= SIDEBAR_SESSION_PROVIDER_ICON_BAND_HEIGHT);
+
+        // The band ends at the title, so nothing below it — the stack gap, the
+        // detail line, whether that line found a label — can reach the mark's
+        // vertical position. The drift below is what centering on the stack
+        // instead would have cost.
+        let stack = SIDEBAR_SESSION_TITLE_LINE_HEIGHT
+            + SIDEBAR_SESSION_STACK_GAP
+            + SIDEBAR_SESSION_DETAIL_LINE_HEIGHT;
+        let drift = stack / 2.0 - SIDEBAR_SESSION_PROVIDER_ICON_BAND_HEIGHT / 2.0;
+        assert!(
+            drift > 0.0,
+            "centering on the stack drops the mark {drift}px below the title"
+        );
+    }
+
+    /// In project grouping a 1px guide line is drawn at
+    /// `SIDEBAR_GROUP_GUIDE_X`, outside the row's padding box. The provider
+    /// column is the row's first child, so the row's left padding is what
+    /// keeps the two apart — the guide must never run through the mark.
+    #[test]
+    fn provider_column_clears_the_group_guide_line() {
+        assert!(SIDEBAR_GROUP_CHILD_PADDING > SIDEBAR_GROUP_GUIDE_X + SIDEBAR_GROUP_GUIDE_WIDTH);
+    }
 
     #[test]
     fn groups_sessions_by_calendar_period() {
