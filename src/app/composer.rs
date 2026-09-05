@@ -2499,6 +2499,7 @@ impl Waku {
                     .when(menu_open, |element| element.bg(theme.overlay_strong))
                     .hover(|element| element.bg(theme.overlay_strong))
                     .active(|element| element.opacity(0.8))
+                    .tooltip(Tooltip::text(tr!("composer.queued_message_actions")))
                     .child(icon("icons/ellipsis.svg", 12.5, theme.text_secondary)),
                 SharedString::from(format!("queued-message-more-menu-{message_id}")),
                 &menu_handle,
@@ -2522,32 +2523,62 @@ impl Waku {
                     ]
                 },
             );
+            // Edit-in-composer is the row's click action, but the tooltip
+            // belongs on the text region only. GPUI still fires ancestor
+            // tooltips over children, so a row-level hint flashes on
+            // steer/remove and sticks on the more trigger (which had none).
             list = list.child(
                 div()
                     .id(SharedString::from(format!("queued-message-{message_id}")))
                     .h(px(30.0))
-                    .pl(px(12.0))
                     .pr(px(6.0))
                     .flex()
                     .items_center()
                     .gap(px(9.0))
-                    .cursor_default()
-                    .tab_index(0)
-                    .focus_visible(|style| style.border_1().border_color(theme.accent))
                     .hover(|element| element.bg(theme.overlay))
-                    .tooltip(Tooltip::text(tr!("composer.edit_in_composer")))
-                    .child(icon("icons/queue.svg", 12.0, theme.text_tertiary))
                     .child(
                         div()
+                            .id(SharedString::from(format!(
+                                "queued-message-edit-{message_id}"
+                            )))
                             .flex_1()
                             .min_w_0()
-                            .truncate()
-                            .text_size(sp(12.5))
-                            .text_color(theme.text)
-                            .child(SharedString::from(content)),
+                            .h_full()
+                            .pl(px(12.0))
+                            .flex()
+                            .items_center()
+                            .gap(px(9.0))
+                            .cursor_default()
+                            .tab_index(0)
+                            .focus_visible(|style| style.border_1().border_color(theme.accent))
+                            .tooltip(Tooltip::text(tr!("composer.edit_in_composer")))
+                            .child(icon("icons/queue.svg", 12.0, theme.text_tertiary))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .truncate()
+                                    .text_size(sp(12.5))
+                                    .text_color(theme.text)
+                                    .child(SharedString::from(content)),
+                            )
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.edit_queued_message(session_id, message_id, window, cx);
+                            }))
+                            .on_key_down(cx.listener(
+                                move |this, event: &KeyDownEvent, window, cx| {
+                                    if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                                        this.edit_queued_message(
+                                            session_id, message_id, window, cx,
+                                        );
+                                        cx.stop_propagation();
+                                    }
+                                },
+                            )),
                     )
                     .child(
                         div()
+                            .flex_none()
                             .flex()
                             .items_center()
                             .gap(px(2.0))
@@ -2591,16 +2622,7 @@ impl Waku {
                                     )),
                             )
                             .child(more_control),
-                    )
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        this.edit_queued_message(session_id, message_id, window, cx);
-                    }))
-                    .on_key_down(cx.listener(move |this, event: &KeyDownEvent, window, cx| {
-                        if matches!(event.keystroke.key.as_str(), "enter" | "space") {
-                            this.edit_queued_message(session_id, message_id, window, cx);
-                            cx.stop_propagation();
-                        }
-                    })),
+                    ),
             );
         }
         Some(
