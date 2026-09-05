@@ -37,6 +37,9 @@ const DISABLE_EXTERNAL_COMPUTER_USE_MCP_COMMAND: &str =
 const DISABLE_EXTERNAL_COMPUTER_USE_MCP: &str = "mcp_servers.computer-use.enabled=false";
 const DISABLE_EXTERNAL_COMPUTER_USE_SKILL: &str =
     r#"skills.config=[{name="computer-use:computer-use",enabled=false}]"#;
+// Codex validates MCP transport fields even for disabled servers, so the
+// override needs a valid stdio command before disabling the bundled server.
+const DISABLE_CODEX_NODE_REPL_COMMAND: &str = "mcp_servers.node_repl.command=\"/usr/bin/true\"";
 const DISABLE_CODEX_NODE_REPL: &str = "mcp_servers.node_repl.enabled=false";
 
 enum CommandMessage {
@@ -178,6 +181,8 @@ fn configure_computer_use_command(command: &mut Command, config: Option<&CodexCo
             .arg(DISABLE_EXTERNAL_COMPUTER_USE_MCP)
             .arg("-c")
             .arg(DISABLE_EXTERNAL_COMPUTER_USE_SKILL)
+            .arg("-c")
+            .arg(DISABLE_CODEX_NODE_REPL_COMMAND)
             .arg("-c")
             .arg(DISABLE_CODEX_NODE_REPL)
             .env("WAKU_COMPUTER_USE_SERVER", &config.server_path)
@@ -2929,6 +2934,11 @@ mod tests {
             enabled_arguments
                 .iter()
                 .any(|argument| argument == DISABLE_CODEX_NODE_REPL)
+        );
+        assert!(
+            enabled_arguments
+                .iter()
+                .any(|argument| argument == DISABLE_CODEX_NODE_REPL_COMMAND)
         );
         assert!(
             enabled
