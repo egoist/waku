@@ -1055,8 +1055,10 @@ mod tests {
             .stdout(Stdio::null())
             .stderr(Stdio::null());
         let mut child = spawn(&mut command).expect("spawn PowerShell probe");
+        // The timeout only guards against a hung probe; PowerShell cold-start
+        // on a busy CI runner routinely needs more than a few seconds.
         assert!(
-            wait_for_child(&mut child, Duration::from_secs(10)),
+            wait_for_child(&mut child, Duration::from_secs(60)),
             "PowerShell probe did not finish in time"
         );
         let environment =
