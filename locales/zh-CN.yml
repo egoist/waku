@@ -461,6 +461,7 @@ models.favorites: 收藏
 models.add_favorite: 添加到收藏
 models.remove_favorite: 从收藏中移除
 models.standard: 标准
+models.default: 默认
 models.reasoning: 推理强度
 models.service_tier: 服务等级
 models.context_window: 上下文窗口

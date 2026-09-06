@@ -16,6 +16,8 @@ the original feature bullet instead of adding separate entries for them.
 
 ## [unreleased]
 
+- Add reasoning effort selection for OpenCode models, with an explicit Default option for the base model; switching model or effort now applies to the live session without restarting it
+
 ## [0.1.17]
 
 - Fix the OpenCode Resume list showing only sessions started outside a git checkout; it now lists sessions from every project

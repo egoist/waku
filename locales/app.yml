@@ -944,6 +944,8 @@ models.remove_favorite:
   en: Remove from favorites
 models.standard:
   en: Standard
+models.default:
+  en: Default
 models.reasoning:
   en: Reasoning
 models.service_tier:

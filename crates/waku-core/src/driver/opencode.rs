@@ -41,6 +41,7 @@ enum CommandMessage {
     Prompt(String),
     Steer(String),
     Cancel,
+    Options(SessionOptions),
     Respond {
         request_id: String,
         option_id: String,
@@ -53,8 +54,10 @@ enum CommandMessage {
 }
 
 /// The prompt body both turn starts and steers post; the model rides on every
-/// prompt because the server has no session-level model setting.
-fn prompt_body(text: &str, model: Option<&str>, agent: &str) -> Value {
+/// prompt because the server has no session-level model setting. The variant
+/// rides alongside it as the top-level `variant` field (`PromptInput`), which
+/// is how OpenCode selects a model's reasoning-effort overlay.
+fn prompt_body(text: &str, model: Option<&str>, variant: Option<&str>, agent: &str) -> Value {
     let mut body = json!({
         "agent": agent,
         "parts": [{"type": "text", "text": text}]
@@ -62,6 +65,13 @@ fn prompt_body(text: &str, model: Option<&str>, agent: &str) -> Value {
     if let Some((provider_id, model_id)) = model.and_then(|model| model.split_once('/')) {
         body["model"] = json!({"providerID": provider_id, "modelID": model_id});
     }
+    // Omitting this field lets a matching `build` agent's configured variant
+    // take over. OpenCode uses `default` as the explicit base-model selection.
+    body["variant"] = json!(
+        variant
+            .filter(|variant| !variant.is_empty())
+            .unwrap_or("default")
+    );
     body
 }
 
@@ -102,7 +112,7 @@ impl OpenCodeDriver {
             cwd,
             mode,
             model,
-            reasoning_effort: _,
+            reasoning_effort,
             service_tier: _,
             context_window: _,
             agent_preset: _,
@@ -364,6 +374,11 @@ impl OpenCodeDriver {
         thread::Builder::new()
             .name("waku-opencode-driver".into())
             .spawn(move || {
+                // The model and variant ride on every prompt, so keep the
+                // latest options here and apply them to the next turn without
+                // restarting the resident server.
+                let mut current_model = model;
+                let mut current_variant = reasoning_effort;
                 while let Ok(message) = command_rx.recv() {
                     match message {
                         CommandMessage::Prompt(text) => {
@@ -379,7 +394,12 @@ impl OpenCodeDriver {
                                 "/session/{}/prompt_async",
                                 encode_path_segment(&worker_session)
                             );
-                            let body = prompt_body(&text, model.as_deref(), agent);
+                            let body = prompt_body(
+                                &text,
+                                current_model.as_deref(),
+                                current_variant.as_deref(),
+                                agent,
+                            );
                             if let Err(error) = worker_server.request("POST", &path, Some(&body)) {
                                 let _ = worker_events.send(DriverEvent::Error(tr!(
                                     "errors.provider_rejected_prompt_detail",
@@ -424,7 +444,12 @@ impl OpenCodeDriver {
                                 "/session/{}/prompt_async",
                                 encode_path_segment(&worker_session)
                             );
-                            let body = prompt_body(&text, model.as_deref(), agent);
+                            let body = prompt_body(
+                                &text,
+                                current_model.as_deref(),
+                                current_variant.as_deref(),
+                                agent,
+                            );
                             match worker_server.request("POST", &path, Some(&body)) {
                                 Ok(_) => {
                                     let _ = worker_events
@@ -452,6 +477,10 @@ impl OpenCodeDriver {
                                     error = error
                                 )));
                             }
+                        }
+                        CommandMessage::Options(options) => {
+                            current_model = options.model;
+                            current_variant = options.reasoning_effort;
                         }
                         CommandMessage::Respond {
                             request_id,
@@ -555,9 +584,13 @@ impl DriverControl for OpenCodeDriver {
     }
 
     fn apply_options(&self, options: SessionOptions) -> bool {
-        // The model rides on each prompt, but access is installed when the
-        // driver starts, so changing it restarts the driver.
-        options.mode == self.mode
+        // The model and variant ride on each prompt, so they apply to the
+        // live session. Access is installed when the driver starts, so a mode
+        // change restarts the driver.
+        if options.mode != self.mode {
+            return false;
+        }
+        self.commands.send(CommandMessage::Options(options)).is_ok()
     }
 
     fn rollback(&self, turns: usize) -> anyhow::Result<Option<ProviderResumeCursor>> {
@@ -1332,6 +1365,7 @@ mod tests {
             prompt_body(
                 "Inspect the failure",
                 Some("opencode-go/deepseek-v4-flash"),
+                None,
                 "build",
             ),
             json!({
@@ -1340,9 +1374,36 @@ mod tests {
                     "providerID": "opencode-go",
                     "modelID": "deepseek-v4-flash",
                 },
+                "variant": "default",
                 "parts": [{"type": "text", "text": "Inspect the failure"}],
             })
         );
+    }
+
+    #[test]
+    fn prompts_carry_the_variant_as_reasoning_effort() {
+        assert_eq!(
+            prompt_body(
+                "Inspect the failure",
+                Some("openai/gpt-5.4"),
+                Some("high"),
+                "build",
+            ),
+            json!({
+                "agent": "build",
+                "model": {
+                    "providerID": "openai",
+                    "modelID": "gpt-5.4",
+                },
+                "variant": "high",
+                "parts": [{"type": "text", "text": "Inspect the failure"}],
+            })
+        );
+        // Empty and absent variants both explicitly select the base model.
+        let body = prompt_body("hi", None, Some(""), "build");
+        assert_eq!(body.get("variant"), Some(&json!("default")));
+        let body = prompt_body("hi", None, None, "build");
+        assert_eq!(body.get("variant"), Some(&json!("default")));
     }
 
     #[test]
