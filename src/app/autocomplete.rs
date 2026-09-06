@@ -41,6 +41,10 @@ pub fn init(cx: &mut App) {
     cx.bind_keys([
         KeyBinding::new("down", SelectNextEntry, Some(AUTOCOMPLETE_CONTEXT)),
         KeyBinding::new("up", SelectPreviousEntry, Some(AUTOCOMPLETE_CONTEXT)),
+        // The field binds the emacs spelling of the arrows too; while the
+        // popup owns them they must move the highlight, not the caret.
+        KeyBinding::new("ctrl-n", SelectNextEntry, Some(AUTOCOMPLETE_CONTEXT)),
+        KeyBinding::new("ctrl-p", SelectPreviousEntry, Some(AUTOCOMPLETE_CONTEXT)),
         KeyBinding::new("enter", ConfirmEntry, Some(AUTOCOMPLETE_CONTEXT)),
         KeyBinding::new("tab", ConfirmEntry, Some(AUTOCOMPLETE_CONTEXT)),
         KeyBinding::new("escape", DismissMenu, Some(AUTOCOMPLETE_CONTEXT)),

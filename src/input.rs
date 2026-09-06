@@ -37,6 +37,8 @@ actions!(
         LineEnd,
         ParagraphStart,
         ParagraphEnd,
+        ParagraphBackward,
+        ParagraphForward,
         MoveToPreviousWord,
         MoveToNextWord,
         SelectToStart,
@@ -45,10 +47,14 @@ actions!(
         SelectToLineEnd,
         SelectToParagraphStart,
         SelectToParagraphEnd,
+        SelectParagraphBackward,
+        SelectParagraphForward,
         SelectToPreviousWord,
         SelectToNextWord,
         DeleteToLineStart,
         DeleteToLineEnd,
+        DeleteToParagraphStart,
+        DeleteToParagraphEnd,
         DeleteToPreviousWord,
         DeleteToNextWord,
         Paste,
@@ -66,6 +72,8 @@ actions!(
 const CURSOR_BLINK_INTERVAL: Duration = Duration::from_millis(500);
 const CURSOR_BLINK_PAUSE: Duration = Duration::from_millis(300);
 
+/// The full table, with the AppKit selector each chord answers to, is in
+/// `docs/text-field-keys.md`.
 pub fn init(cx: &mut App) {
     cx.bind_keys([
         KeyBinding::new("backspace", Backspace, Some("TextInput")),
@@ -101,6 +109,10 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("secondary-shift-z", Redo, Some("TextInput")),
         KeyBinding::new("enter", Enter, Some("TextInput")),
         KeyBinding::new("shift-enter", Newline, Some("TextInput")),
+        // Native field editors take ctrl-enter and alt-enter as a literal line
+        // break where Enter itself would submit.
+        KeyBinding::new("ctrl-enter", Newline, Some("TextInput")),
+        KeyBinding::new("alt-enter", Newline, Some("TextInput")),
         // While a turn is running, Enter queues a follow-up; the platform's
         // primary modifier + Enter injects it when the provider supports it.
         KeyBinding::new("secondary-enter", SubmitSteer, Some("TextInput")),
@@ -132,10 +144,21 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("ctrl-delete", Delete, Some("TextInput")),
         KeyBinding::new("ctrl-shift-backspace", Backspace, Some("TextInput")),
         KeyBinding::new("ctrl-shift-delete", Delete, Some("TextInput")),
-        // The emacs kill pair is line-scoped everywhere it comes from —
-        // readline, NSTextView — so it stops at the line ends here too.
-        KeyBinding::new("ctrl-u", DeleteToLineStart, Some("TextInput")),
-        KeyBinding::new("ctrl-k", DeleteToLineEnd, Some("TextInput")),
+        // The emacs kills work on the logical line — `deleteToEndOfParagraph:`
+        // in AppKit, the whole input line in readline — so a soft wrap does
+        // not stop them; only cmd-backspace/cmd-delete are row-scoped.
+        KeyBinding::new("ctrl-u", DeleteToParagraphStart, Some("TextInput")),
+        KeyBinding::new("ctrl-k", DeleteToParagraphEnd, Some("TextInput")),
+        // Emacs word motion and the ctrl-alt spelling of the word backspace.
+        KeyBinding::new(
+            "ctrl-alt-backspace",
+            DeleteToPreviousWord,
+            Some("TextInput"),
+        ),
+        KeyBinding::new("ctrl-alt-b", MoveToPreviousWord, Some("TextInput")),
+        KeyBinding::new("ctrl-alt-f", MoveToNextWord, Some("TextInput")),
+        KeyBinding::new("ctrl-alt-shift-b", SelectToPreviousWord, Some("TextInput")),
+        KeyBinding::new("ctrl-alt-shift-f", SelectToNextWord, Some("TextInput")),
         KeyBinding::new("ctrl-b", Left, Some("TextInput")),
         KeyBinding::new("ctrl-f", Right, Some("TextInput")),
         // The vertical half of the emacs motion set, bound system-wide on
@@ -146,22 +169,31 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("cmd-right", LineEnd, Some("TextInput")),
         KeyBinding::new("cmd-up", Home, Some("TextInput")),
         KeyBinding::new("cmd-down", End, Some("TextInput")),
-        KeyBinding::new("ctrl-a", LineStart, Some("TextInput")),
-        KeyBinding::new("ctrl-e", LineEnd, Some("TextInput")),
-        KeyBinding::new("alt-up", ParagraphStart, Some("TextInput")),
-        KeyBinding::new("alt-down", ParagraphEnd, Some("TextInput")),
+        // Like the kills, ctrl-a/ctrl-e are paragraph motion in AppKit
+        // (`moveToBeginningOfParagraph:`, which stays put at a start); the row
+        // ends belong to cmd-left/right. alt-up/alt-down are the stepping
+        // pair (`moveParagraphBackward:`) that keeps going from a start.
+        KeyBinding::new("ctrl-a", ParagraphStart, Some("TextInput")),
+        KeyBinding::new("ctrl-e", ParagraphEnd, Some("TextInput")),
+        KeyBinding::new("alt-up", ParagraphBackward, Some("TextInput")),
+        KeyBinding::new("alt-down", ParagraphForward, Some("TextInput")),
         KeyBinding::new("shift-cmd-left", SelectToLineStart, Some("TextInput")),
         KeyBinding::new("shift-cmd-right", SelectToLineEnd, Some("TextInput")),
         KeyBinding::new("cmd-shift-up", SelectToStart, Some("TextInput")),
         KeyBinding::new("cmd-shift-down", SelectToEnd, Some("TextInput")),
-        KeyBinding::new("ctrl-shift-a", SelectToLineStart, Some("TextInput")),
-        KeyBinding::new("ctrl-shift-e", SelectToLineEnd, Some("TextInput")),
-        KeyBinding::new("alt-shift-up", SelectToParagraphStart, Some("TextInput")),
-        KeyBinding::new("alt-shift-down", SelectToParagraphEnd, Some("TextInput")),
-        // Word-wise selection on the control chords too, mirroring the
-        // alt-shift pair (and the ctrl-shift convention elsewhere).
-        KeyBinding::new("ctrl-shift-left", SelectToPreviousWord, Some("TextInput")),
-        KeyBinding::new("ctrl-shift-right", SelectToNextWord, Some("TextInput")),
+        KeyBinding::new("ctrl-shift-a", SelectToParagraphStart, Some("TextInput")),
+        KeyBinding::new("ctrl-shift-e", SelectToParagraphEnd, Some("TextInput")),
+        KeyBinding::new("ctrl-shift-b", SelectLeft, Some("TextInput")),
+        KeyBinding::new("ctrl-shift-f", SelectRight, Some("TextInput")),
+        KeyBinding::new("ctrl-shift-p", SelectUp, Some("TextInput")),
+        KeyBinding::new("ctrl-shift-n", SelectDown, Some("TextInput")),
+        KeyBinding::new("alt-shift-up", SelectParagraphBackward, Some("TextInput")),
+        KeyBinding::new("alt-shift-down", SelectParagraphForward, Some("TextInput")),
+        // AppKit's ctrl-shift-left/right select to the row ends
+        // (`moveToLeftEndOfLineAndModifySelection:`); word-wise selection on
+        // ctrl-shift is the Windows and Linux convention, bound below.
+        KeyBinding::new("ctrl-shift-left", SelectToLineStart, Some("TextInput")),
+        KeyBinding::new("ctrl-shift-right", SelectToLineEnd, Some("TextInput")),
     ]);
 
     // The chords Windows and the Linux desktops share: word motion on ctrl,
@@ -1137,7 +1169,11 @@ impl TextInput {
                 // The field is one row, so there is no row to step to, but a
                 // native one-line field still extends to its own end here.
                 let edge = if down { self.content.len() } else { 0 };
-                self.select_to(edge, cx);
+                if self.cursor_offset() == edge {
+                    cx.propagate();
+                } else {
+                    self.select_to(edge, cx);
+                }
                 return;
             }
             cx.propagate();
@@ -1269,9 +1305,13 @@ impl TextInput {
     /// counting a soft wrap as a row the way the vertical motion above does.
     fn move_to_row_edge(&mut self, to_end: bool, extend: bool, cx: &mut Context<Self>) {
         let Some((offset, affinity)) = self.row_edge(to_end) else {
-            // One row, or no layout to consult: the field's own ends are the
-            // only line ends there are.
-            let offset = if to_end { self.content.len() } else { 0 };
+            // One row, or no layout to consult: fall back to the hard line
+            // breaks, which need no geometry and are never wider than a row.
+            let offset = if to_end {
+                self.hard_line_end()
+            } else {
+                self.hard_line_start()
+            };
             if extend {
                 self.select_to(offset, cx);
             } else {
@@ -1338,12 +1378,14 @@ impl TextInput {
         ))
     }
 
+    /// ctrl-a: AppKit's `moveToBeginningOfParagraph:`. It stops at the start
+    /// of the caret's own paragraph and stays there on a repeat.
     fn paragraph_start(&mut self, _: &ParagraphStart, _: &mut Window, cx: &mut Context<Self>) {
-        self.move_to(self.paragraph_start_offset(), cx);
+        self.move_to(self.hard_line_start(), cx);
     }
 
     fn paragraph_end(&mut self, _: &ParagraphEnd, _: &mut Window, cx: &mut Context<Self>) {
-        self.move_to(self.paragraph_end_offset(), cx);
+        self.move_to(self.hard_line_end(), cx);
     }
 
     fn select_to_paragraph_start(
@@ -1352,12 +1394,45 @@ impl TextInput {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.select_to(self.paragraph_start_offset(), cx);
+        self.select_to(self.hard_line_start(), cx);
     }
 
     fn select_to_paragraph_end(
         &mut self,
         _: &SelectToParagraphEnd,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.select_to(self.hard_line_end(), cx);
+    }
+
+    /// alt-up: AppKit's `moveParagraphBackward:`, which steps to the previous
+    /// paragraph when the caret already sits at a start.
+    fn paragraph_backward(
+        &mut self,
+        _: &ParagraphBackward,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.move_to(self.paragraph_start_offset(), cx);
+    }
+
+    fn paragraph_forward(&mut self, _: &ParagraphForward, _: &mut Window, cx: &mut Context<Self>) {
+        self.move_to(self.paragraph_end_offset(), cx);
+    }
+
+    fn select_paragraph_backward(
+        &mut self,
+        _: &SelectParagraphBackward,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.select_to(self.paragraph_start_offset(), cx);
+    }
+
+    fn select_paragraph_forward(
+        &mut self,
+        _: &SelectParagraphForward,
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -1375,6 +1450,23 @@ impl TextInput {
             Some(index) => before[..index].rfind('\n').map_or(0, |index| index + 1),
             None => 0,
         }
+    }
+
+    /// Start of the newline-delimited line holding the caret, with no
+    /// stepping to the previous one: the kill and fallback bound.
+    fn hard_line_start(&self) -> usize {
+        self.content[..self.cursor_offset()]
+            .rfind('\n')
+            .map_or(0, |index| index + 1)
+    }
+
+    /// End of the newline-delimited line holding the caret, the offset of its
+    /// `\n` or the end of the field.
+    fn hard_line_end(&self) -> usize {
+        let cursor = self.cursor_offset();
+        self.content[cursor..]
+            .find('\n')
+            .map_or(self.content.len(), |index| cursor + index)
     }
 
     /// End of the paragraph holding the caret, or of the next one when the
@@ -1493,7 +1585,11 @@ impl TextInput {
         cx: &mut Context<Self>,
     ) {
         if self.selected_range.is_empty() {
-            let offset = self.row_edge(false).map_or(0, |(offset, _)| offset);
+            // Without a trustworthy layout the hard line break is the bound:
+            // a stale row must never cost more than the line.
+            let offset = self
+                .row_edge(false)
+                .map_or_else(|| self.hard_line_start(), |(offset, _)| offset);
             self.select_to(offset, cx);
         }
         self.replace_text_in_range(None, "", window, cx);
@@ -1506,18 +1602,51 @@ impl TextInput {
         cx: &mut Context<Self>,
     ) {
         if self.selected_range.is_empty() {
-            let cursor = self.cursor_offset();
-            let mut offset = self
+            let offset = self
                 .row_edge(true)
-                .map_or(self.content.len(), |(offset, _)| offset);
-            if offset == cursor && self.content[cursor..].starts_with('\n') {
-                // Standing on the break itself, the kill takes it and joins
-                // the next line up, the way readline and NSTextView do.
-                offset = cursor + 1;
-            }
+                .map_or_else(|| self.hard_line_end(), |(offset, _)| offset);
+            self.select_to(self.kill_end_taking_the_break(offset), cx);
+        }
+        self.replace_text_in_range(None, "", window, cx);
+    }
+
+    /// ctrl-u: kill to the start of the logical line, readline's
+    /// `unix-line-discard`. At the line start there is nothing to take.
+    fn delete_to_paragraph_start(
+        &mut self,
+        _: &DeleteToParagraphStart,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.selected_range.is_empty() {
+            self.select_to(self.hard_line_start(), cx);
+        }
+        self.replace_text_in_range(None, "", window, cx);
+    }
+
+    /// ctrl-k: AppKit's `deleteToEndOfParagraph:`, which ignores soft wraps.
+    fn delete_to_paragraph_end(
+        &mut self,
+        _: &DeleteToParagraphEnd,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.selected_range.is_empty() {
+            let offset = self.kill_end_taking_the_break(self.hard_line_end());
             self.select_to(offset, cx);
         }
         self.replace_text_in_range(None, "", window, cx);
+    }
+
+    /// Standing on the break itself, a forward kill takes it and joins the
+    /// next line up, the way readline and NSTextView do.
+    fn kill_end_taking_the_break(&self, offset: usize) -> usize {
+        let cursor = self.cursor_offset();
+        if offset == cursor && self.content[cursor..].starts_with('\n') {
+            cursor + 1
+        } else {
+            offset
+        }
     }
 
     fn delete_to_previous_word(
@@ -2654,6 +2783,8 @@ impl Render for TextInput {
             .on_action(cx.listener(Self::line_end))
             .on_action(cx.listener(Self::paragraph_start))
             .on_action(cx.listener(Self::paragraph_end))
+            .on_action(cx.listener(Self::paragraph_backward))
+            .on_action(cx.listener(Self::paragraph_forward))
             .on_action(cx.listener(Self::move_to_previous_word))
             .on_action(cx.listener(Self::move_to_next_word))
             .on_action(cx.listener(Self::select_to_start))
@@ -2662,10 +2793,14 @@ impl Render for TextInput {
             .on_action(cx.listener(Self::select_to_line_end))
             .on_action(cx.listener(Self::select_to_paragraph_start))
             .on_action(cx.listener(Self::select_to_paragraph_end))
+            .on_action(cx.listener(Self::select_paragraph_backward))
+            .on_action(cx.listener(Self::select_paragraph_forward))
             .on_action(cx.listener(Self::select_to_previous_word))
             .on_action(cx.listener(Self::select_to_next_word))
             .on_action(cx.listener(Self::delete_to_line_start))
             .on_action(cx.listener(Self::delete_to_line_end))
+            .on_action(cx.listener(Self::delete_to_paragraph_start))
+            .on_action(cx.listener(Self::delete_to_paragraph_end))
             .on_action(cx.listener(Self::delete_to_previous_word))
             .on_action(cx.listener(Self::delete_to_next_word))
             .on_action(cx.listener(Self::paste))
@@ -2972,11 +3107,11 @@ mod tests {
 
     use super::TokenClass;
     use super::{
-        ComposerEvent, ComposerInput, DeleteToLineEnd, EditHistory, FieldMode, SearchPaint,
-        TextInput, UNDO_GROUP_INTERVAL, UNDO_HISTORY_CAP, cursor_should_be_visible,
-        input_text_runs, media_paste_entries, next_word_boundary, pasted_text_for_mode,
-        previous_word_boundary, single_line_scroll, trimmed_splice, visual_row_count,
-        word_range_at,
+        ComposerEvent, ComposerInput, DeleteToLineEnd, DeleteToLineStart, DeleteToParagraphEnd,
+        EditHistory, FieldMode, SearchPaint, TextInput, UNDO_GROUP_INTERVAL, UNDO_HISTORY_CAP,
+        cursor_should_be_visible, input_text_runs, media_paste_entries, next_word_boundary,
+        pasted_text_for_mode, previous_word_boundary, single_line_scroll, trimmed_splice,
+        visual_row_count, word_range_at,
     };
 
     struct InputHarness {
@@ -3206,21 +3341,139 @@ mod tests {
     fn killing_to_the_line_end_stops_there_and_then_takes_the_break(cx: &mut TestAppContext) {
         let (input, cx) = setup_input(cx, "first\nsecond", px(300.));
 
-        cx.update(|_, cx| input.update(cx, |input, cx| input.select_range(2..2, cx)));
-        cx.update(|window, cx| {
-            input.update(cx, |input, cx| {
-                input.delete_to_line_end(&DeleteToLineEnd, window, cx);
-            })
-        });
-        cx.read_entity(&input, |input, _| assert_eq!(input.content(), "fi\nsecond"));
+        // Both the row kill (cmd-delete) and the paragraph kill (ctrl-k)
+        // behave the same on an unwrapped line.
+        for paragraph_kill in [false, true] {
+            let kill = |input: &mut TextInput, window: &mut Window, cx: &mut Context<TextInput>| {
+                if paragraph_kill {
+                    input.delete_to_paragraph_end(&DeleteToParagraphEnd, window, cx);
+                } else {
+                    input.delete_to_line_end(&DeleteToLineEnd, window, cx);
+                }
+            };
+            cx.update(|_, cx| input.update(cx, |input, cx| input.set_content("first\nsecond", cx)));
+            cx.run_until_parked();
+            cx.update(|_, cx| input.update(cx, |input, cx| input.select_range(2..2, cx)));
+            cx.update(|window, cx| input.update(cx, |input, cx| kill(input, window, cx)));
+            cx.read_entity(&input, |input, _| assert_eq!(input.content(), "fi\nsecond"));
 
-        // Standing on the break itself, the kill joins the next line up.
+            // Standing on the break itself, the kill joins the next line up.
+            cx.update(|window, cx| input.update(cx, |input, cx| kill(input, window, cx)));
+            cx.read_entity(&input, |input, _| assert_eq!(input.content(), "fisecond"));
+        }
+    }
+
+    #[gpui::test]
+    fn the_paragraph_kill_ignores_a_soft_wrap(cx: &mut TestAppContext) {
+        let text = "one two three four five six seven eight nine ten\nlast";
+        let (input, cx) = setup_input(cx, text, px(90.));
+        cx.read_entity(&input, |input, _| {
+            assert!(
+                visual_row_count(input.last_layout.as_ref().unwrap()) >= 4,
+                "fixture must soft-wrap the first paragraph"
+            );
+        });
+        cx.update(|_, cx| input.update(cx, |input, cx| input.select_range(4..4, cx)));
+
+        // cmd-delete is row-scoped and stops at the wrap.
         cx.update(|window, cx| {
             input.update(cx, |input, cx| {
                 input.delete_to_line_end(&DeleteToLineEnd, window, cx);
             })
         });
-        cx.read_entity(&input, |input, _| assert_eq!(input.content(), "fisecond"));
+        cx.read_entity(&input, |input, _| {
+            assert!(input.content().starts_with("one "));
+            assert!(
+                input.content().len() > "one \nlast".len(),
+                "the row kill must leave the rest of the paragraph: {:?}",
+                input.content()
+            );
+        });
+
+        // ctrl-k is paragraph-scoped and runs to the hard break.
+        cx.update(|_, cx| input.update(cx, |input, cx| input.set_content(text, cx)));
+        cx.run_until_parked();
+        cx.update(|_, cx| input.update(cx, |input, cx| input.select_range(4..4, cx)));
+        cx.update(|window, cx| {
+            input.update(cx, |input, cx| {
+                input.delete_to_paragraph_end(&DeleteToParagraphEnd, window, cx);
+            })
+        });
+        cx.read_entity(&input, |input, _| assert_eq!(input.content(), "one \nlast"));
+    }
+
+    #[gpui::test]
+    fn a_row_kill_without_a_current_layout_stops_at_the_hard_break(cx: &mut TestAppContext) {
+        let (input, cx) = setup_input(cx, "first\nsecond", px(300.));
+
+        // Replace the content and kill before the next paint: the stale layout
+        // must not send the kill to the start of the field.
+        cx.update(|window, cx| {
+            input.update(cx, |input, cx| {
+                input.set_content("first\nsecond\nthird", cx);
+                input.select_range(9..9, cx);
+                assert_ne!(
+                    input.last_layout.as_ref().unwrap().len(),
+                    input.content.len()
+                );
+                input.delete_to_line_start(&DeleteToLineStart, window, cx);
+            })
+        });
+        cx.read_entity(&input, |input, _| {
+            assert_eq!(input.content(), "first\nond\nthird")
+        });
+    }
+
+    #[cfg(target_os = "macos")]
+    #[gpui::test]
+    fn ctrl_a_stops_at_the_paragraph_start_while_alt_up_keeps_stepping(cx: &mut TestAppContext) {
+        // "first" 0..5, break at 5, "second" 6..12.
+        let (input, cx) = setup_input(cx, "first\nsecond\nthird", px(300.));
+        cx.update(|_, cx| input.update(cx, |input, cx| input.select_range(9..9, cx)));
+
+        cx.simulate_keystrokes("ctrl-a");
+        cx.read_entity(&input, |input, _| assert_eq!(input.cursor(), 6));
+        cx.simulate_keystrokes("ctrl-a");
+        cx.read_entity(&input, |input, _| assert_eq!(input.cursor(), 6));
+
+        cx.simulate_keystrokes("alt-up");
+        cx.read_entity(&input, |input, _| assert_eq!(input.cursor(), 0));
+
+        cx.update(|_, cx| input.update(cx, |input, cx| input.select_range(9..9, cx)));
+        cx.simulate_keystrokes("ctrl-e");
+        cx.read_entity(&input, |input, _| assert_eq!(input.cursor(), 12));
+        cx.simulate_keystrokes("ctrl-e");
+        cx.read_entity(&input, |input, _| assert_eq!(input.cursor(), 12));
+        cx.simulate_keystrokes("alt-down");
+        cx.read_entity(&input, |input, _| assert_eq!(input.cursor(), 18));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[gpui::test]
+    fn the_emacs_line_chords_reach_the_paragraph_ends_across_a_soft_wrap(cx: &mut TestAppContext) {
+        let text = "one two three four five six seven eight nine ten\nlast";
+        let (input, cx) = setup_input(cx, text, px(90.));
+        let break_at = text.find('\n').unwrap();
+        cx.update(|_, cx| input.update(cx, |input, cx| input.select_range(4..4, cx)));
+
+        cx.simulate_keystrokes("ctrl-e");
+        cx.read_entity(&input, |input, _| assert_eq!(input.cursor(), break_at));
+
+        cx.simulate_keystrokes("ctrl-a");
+        cx.read_entity(&input, |input, _| assert_eq!(input.cursor(), 0));
+
+        cx.update(|_, cx| input.update(cx, |input, cx| input.select_range(4..4, cx)));
+        cx.simulate_keystrokes("ctrl-shift-e");
+        cx.read_entity(&input, |input, _| {
+            assert_eq!(input.selected_range, 4..break_at)
+        });
+
+        // cmd-right stays on the rendered row.
+        cx.update(|_, cx| input.update(cx, |input, cx| input.select_range(0..0, cx)));
+        cx.simulate_keystrokes("cmd-right");
+        cx.read_entity(&input, |input, _| {
+            assert!(input.cursor() > 0 && input.cursor() < break_at);
+        });
     }
 
     #[test]
