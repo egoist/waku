@@ -207,6 +207,36 @@ fn grok_home_directory() -> anyhow::Result<PathBuf> {
         .ok_or_else(|| anyhow!("Grok's home directory could not be located"))
 }
 
+/// The model's context window from Grok's own `models_cache.json`.
+///
+/// Grok does not send ACP `usage_update`, so the gauge's denominator has to
+/// come from this catalog. Missing, zero, or unreadable entries stay `None`
+/// rather than inventing a window.
+pub fn model_context_window(model_id: &str) -> Option<u64> {
+    model_context_window_in(&grok_home_directory().ok()?, model_id)
+}
+
+fn model_context_window_in(grok_home: &Path, model_id: &str) -> Option<u64> {
+    let id = model_id.trim();
+    if id.is_empty() {
+        return None;
+    }
+    let bytes = fs::read(grok_home.join("models_cache.json")).ok()?;
+    let value: Value = serde_json::from_slice(&bytes).ok()?;
+    let models = value.get("models")?.as_object()?;
+    let model = models.get(id).or_else(|| {
+        models
+            .iter()
+            .find(|(key, _)| key.eq_ignore_ascii_case(id))
+            .map(|(_, model)| model)
+    })?;
+    model
+        .pointer("/info/context_window")
+        .or_else(|| model.pointer("/info/totalContextTokens"))
+        .and_then(Value::as_u64)
+        .filter(|window| *window > 0)
+}
+
 fn find_session_directory_in(grok_home: &Path, session_id: &str) -> anyhow::Result<PathBuf> {
     let sessions = grok_home.join("sessions");
     for entry in fs::read_dir(&sessions)
@@ -507,5 +537,29 @@ mod tests {
         ] {
             assert!(provider_summary(&value).is_none());
         }
+    }
+
+    #[test]
+    fn reads_context_window_from_groks_model_cache() {
+        let root = std::env::temp_dir().join(format!("waku-grok-models-{}", Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        fs::write(
+            root.join("models_cache.json"),
+            serde_json::to_vec(&json!({
+                "models": {
+                    "grok-4.6": {"info": {"context_window": 500000}},
+                    "grok-4.5": {"info": {"totalContextTokens": 256000}},
+                    "broken": {"info": {"context_window": 0}}
+                }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(model_context_window_in(&root, "grok-4.6"), Some(500_000));
+        assert_eq!(model_context_window_in(&root, "GROK-4.5"), Some(256_000));
+        assert_eq!(model_context_window_in(&root, "broken"), None);
+        assert_eq!(model_context_window_in(&root, "missing"), None);
+        fs::remove_dir_all(root).ok();
     }
 }

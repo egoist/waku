@@ -347,7 +347,10 @@ async fn run_sdk_connection(
     events: DriverEventSender,
 ) -> agent_client_protocol::Result<()> {
     let suppress_session_updates = Arc::new(AtomicBool::new(false));
-    let stream_state = Arc::new(Mutex::new(AcpStreamState::default()));
+    let stream_state = Arc::new(Mutex::new(AcpStreamState {
+        model: model.clone(),
+        ..Default::default()
+    }));
     let pending_permissions: PendingPermissions = Arc::new(Mutex::new(HashMap::new()));
     let pending_user_inputs: PendingAcpUserInputs = Arc::new(Mutex::new(HashMap::new()));
     let prompt_requests = Arc::new(Mutex::new(PendingPrompts::default()));
@@ -382,6 +385,7 @@ async fn run_sdk_connection(
                 let prompt_requests = prompt_requests.clone();
                 let grok_title_home = grok_title_home.clone();
                 let title_refresh = title_refresh.clone();
+                let stream_state = stream_state.clone();
                 async move |notification: UntypedMessage, _connection| {
                     if notification.method() == "_x.ai/session/prompt_complete" {
                         if let Some(session_id) = finish_xai_prompt_complete(
@@ -396,6 +400,12 @@ async fn run_sdk_connection(
                                 events.clone(),
                             );
                         }
+                    } else if notification.method() == "_x.ai/session/update" {
+                        handle_xai_session_update(
+                            notification.params(),
+                            &events,
+                            &mut stream_state.lock(),
+                        );
                     }
                     Ok(())
                 }
@@ -637,6 +647,7 @@ async fn run_sdk_connection(
                         {
                             current_model = options.model;
                             current_effort = options.reasoning_effort;
+                            stream_state.lock().set_model(current_model.clone());
                             apply_model(
                                 &connection,
                                 provider,
@@ -1762,18 +1773,95 @@ fn handle_session_update(
                 .into_iter()
                 .find_map(|key| update.get(key).and_then(Value::as_u64))
                 .filter(|window| *window > 0);
-            if used.is_some() || window.is_some() {
-                let _ = events.send(DriverEvent::UsageUpdated {
-                    context_tokens: used,
-                    context_window: window,
-                });
-            }
+            emit_context_usage(events, state, used, window);
         }
         // `user_message_chunk` is Waku's own prompt echoed back. Other typed
         // updates currently have no transcript representation.
         _ => {}
     }
+    if provider == ProviderKind::Grok {
+        emit_grok_occupancy(
+            events,
+            state,
+            grok_meta_total_tokens(notification.meta.as_ref()),
+            None,
+        );
+    }
     Ok(())
+}
+
+/// Grok streams live context occupancy on `session/update` `_meta.totalTokens`,
+/// not ACP `usage_update`. Latest-wins: this is the window fill right now,
+/// not a billed total. `turn_completed.usage.totalTokens` is the billing sum
+/// and must not land here.
+fn grok_meta_total_tokens(meta: Option<&Map<String, Value>>) -> Option<u64> {
+    meta.and_then(|meta| meta.get("totalTokens").or_else(|| meta.get("total_tokens")))
+        .and_then(json_positive_u64)
+}
+
+fn handle_xai_session_update(
+    params: &Value,
+    events: &impl DriverEventSink,
+    state: &mut AcpStreamState,
+) {
+    let update = params.get("update").unwrap_or(params);
+    match update.get("sessionUpdate").and_then(Value::as_str) {
+        Some("auto_compact_started" | "tokens_used") => {
+            let tokens = ["tokens_used", "tokensUsed"]
+                .into_iter()
+                .find_map(|key| update.get(key).and_then(json_positive_u64));
+            let window = ["context_window", "contextWindow"]
+                .into_iter()
+                .find_map(|key| update.get(key).and_then(json_positive_u64));
+            emit_grok_occupancy(events, state, tokens, window);
+        }
+        _ => {}
+    }
+}
+
+fn emit_grok_occupancy(
+    events: &impl DriverEventSink,
+    state: &mut AcpStreamState,
+    tokens: Option<u64>,
+    window: Option<u64>,
+) {
+    if state.context_window.is_none()
+        && let Some(model) = state.model.as_deref()
+    {
+        state.context_window = crate::grok_session::model_context_window(model);
+    }
+    emit_context_usage(events, state, tokens, window.or(state.context_window));
+}
+
+fn emit_context_usage(
+    events: &impl DriverEventSink,
+    state: &mut AcpStreamState,
+    tokens: Option<u64>,
+    window: Option<u64>,
+) {
+    let tokens = tokens.filter(|tokens| *tokens > 0);
+    let window = window.filter(|window| *window > 0);
+    let next_tokens = tokens.or(state.last_context_tokens);
+    let next_window = window.or(state.context_window);
+    if next_tokens.is_none() && next_window.is_none() {
+        return;
+    }
+    if next_tokens == state.last_context_tokens && next_window == state.context_window {
+        return;
+    }
+    state.last_context_tokens = next_tokens;
+    state.context_window = next_window;
+    let _ = events.send(DriverEvent::UsageUpdated {
+        context_tokens: tokens,
+        context_window: window.or(next_window),
+    });
+}
+
+fn json_positive_u64(value: &Value) -> Option<u64> {
+    value
+        .as_u64()
+        .or_else(|| value.as_i64().and_then(|value| u64::try_from(value).ok()))
+        .filter(|value| *value > 0)
 }
 
 fn fx_context_notice(text: &str) -> bool {
@@ -1787,6 +1875,19 @@ struct AcpStreamState {
     /// ends having produced nothing is the shape a swallowed provider error
     /// takes, which is what makes a native failure worth looking up.
     produced_content: bool,
+    /// Selected model id, used to look up Grok's context-window size.
+    model: Option<String>,
+    last_context_tokens: Option<u64>,
+    context_window: Option<u64>,
+}
+
+impl AcpStreamState {
+    fn set_model(&mut self, model: Option<String>) {
+        if self.model != model {
+            self.model = model;
+            self.context_window = None;
+        }
+    }
 }
 
 /// Pull the agent's explanation out of a permission request's tool call.
@@ -2378,6 +2479,107 @@ mod tests {
             DriverEvent::UsageUpdated {
                 context_tokens: Some(9677),
                 context_window: Some(500000),
+            }
+        ));
+    }
+
+    #[test]
+    fn grok_streams_context_occupancy_from_session_meta() {
+        let (events, event_rx) = crossbeam_channel::unbounded();
+        let mut state = AcpStreamState {
+            context_window: Some(500_000),
+            ..AcpStreamState::default()
+        };
+        let thought = serde_json::from_value(json!({
+            "sessionUpdate": "agent_thought_chunk",
+            "content": {"type": "text", "text": "thinking"}
+        }))
+        .unwrap();
+        let mut meta = Map::new();
+        meta.insert("totalTokens".into(), json!(24_095));
+        handle_session_update(
+            ProviderKind::Grok,
+            SessionNotification::new("s", thought).meta(meta.clone()),
+            &events,
+            &mut state,
+        )
+        .unwrap();
+        handle_session_update(
+            ProviderKind::Grok,
+            SessionNotification::new(
+                "s",
+                serde_json::from_value(json!({
+                    "sessionUpdate": "agent_message_chunk",
+                    "content": {"type": "text", "text": "done"}
+                }))
+                .unwrap(),
+            )
+            .meta(meta),
+            &events,
+            &mut state,
+        )
+        .unwrap();
+
+        let seen = event_rx.try_iter().collect::<Vec<_>>();
+        let usage = seen
+            .iter()
+            .filter(|event| matches!(event, DriverEvent::UsageUpdated { .. }))
+            .count();
+        assert_eq!(usage, 1);
+        assert!(seen.iter().any(|event| matches!(
+            event,
+            DriverEvent::UsageUpdated {
+                context_tokens: Some(24_095),
+                context_window: Some(500_000),
+            }
+        )));
+        assert!(matches!(&seen[0], DriverEvent::ReasoningDelta(text) if text == "thinking"));
+    }
+
+    #[test]
+    fn grok_does_not_treat_billing_totals_as_context_occupancy() {
+        let (events, event_rx) = crossbeam_channel::unbounded();
+        let mut state = AcpStreamState::default();
+        handle_xai_session_update(
+            &json!({
+                "sessionId": "s",
+                "update": {
+                    "sessionUpdate": "turn_completed",
+                    "usage": {
+                        "inputTokens": 91_185,
+                        "outputTokens": 1_820,
+                        "totalTokens": 93_005
+                    }
+                }
+            }),
+            &events,
+            &mut state,
+        );
+        assert!(event_rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn grok_auto_compact_reports_occupancy_and_window() {
+        let (events, event_rx) = crossbeam_channel::unbounded();
+        let mut state = AcpStreamState::default();
+        handle_xai_session_update(
+            &json!({
+                "sessionId": "s",
+                "update": {
+                    "sessionUpdate": "auto_compact_started",
+                    "tokens_used": 402_603,
+                    "context_window": 500_000,
+                    "percentage": 81
+                }
+            }),
+            &events,
+            &mut state,
+        );
+        assert!(matches!(
+            event_rx.try_recv().unwrap(),
+            DriverEvent::UsageUpdated {
+                context_tokens: Some(402_603),
+                context_window: Some(500_000),
             }
         ));
     }
