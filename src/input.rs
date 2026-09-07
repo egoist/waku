@@ -3928,7 +3928,7 @@ mod tests {
             12,
             TextRun {
                 len: 12,
-                font: font(".SystemUIFont"),
+                font: font(crate::fonts::sans()),
                 color: plain,
                 background_color: None,
                 underline: None,
@@ -3971,7 +3971,7 @@ mod tests {
             10,
             TextRun {
                 len: 10,
-                font: font(".SystemUIFont"),
+                font: font(crate::fonts::sans()),
                 color: hsla(0.0, 0.0, 1.0, 1.0),
                 background_color: None,
                 underline: None,
@@ -4021,7 +4021,7 @@ mod tests {
             20,
             TextRun {
                 len: 20,
-                font: font(".SystemUIFont"),
+                font: font(crate::fonts::sans()),
                 color: plain,
                 background_color: None,
                 underline: None,

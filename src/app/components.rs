@@ -532,7 +532,7 @@ fn render_markdown_message_body<'a>(
         .unwrap_or_else(|| {
             md::render::plain_text(
                 content.to_owned(),
-                md::render::SANS_FAMILY,
+                crate::fonts::sans(),
                 FontWeight::NORMAL,
                 theme.text,
                 ctx,
@@ -750,7 +750,7 @@ pub(super) fn render_message(params: MessageRender, cx: &mut App) -> AnyElement 
                 .line_height(sp(16.0))
                 .child(md::render::plain_text(
                     content.clone(),
-                    md::render::SANS_FAMILY,
+                    crate::fonts::sans(),
                     FontWeight::NORMAL,
                     theme.text_tertiary,
                     ctx,

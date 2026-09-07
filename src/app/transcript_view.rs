@@ -2293,7 +2293,7 @@ impl Waku {
                     .flex()
                     .flex_col()
                     .gap(px(8.0))
-                    .font_family(md::render::MONO_FAMILY)
+                    .font_family(crate::fonts::mono())
                     .text_size(px(mono_size))
                     .line_height(px(mono_line))
                     .text_color(theme.text_secondary)
@@ -2400,7 +2400,7 @@ impl Waku {
                                             .pr(px(8.0))
                                             .child(md::render::plain_text(
                                                 content.clone(),
-                                                md::render::MONO_FAMILY,
+                                                crate::fonts::mono(),
                                                 FontWeight::NORMAL,
                                                 theme.text_secondary,
                                                 &ctx,
@@ -2441,7 +2441,7 @@ impl Waku {
                                     .min_w_0()
                                     .child(md::render::plain_text(
                                         content.clone(),
-                                        md::render::MONO_FAMILY,
+                                        crate::fonts::mono(),
                                         FontWeight::NORMAL,
                                         theme.text_secondary,
                                         &ctx,
@@ -2498,7 +2498,7 @@ impl Waku {
             .track_scroll(&viewport.scroll_handle)
             .flex()
             .flex_col()
-            .font_family(md::render::MONO_FAMILY)
+            .font_family(crate::fonts::mono())
             .text_size(px(diff_mono_size))
             .line_height(px(diff_mono_line))
             .on_scroll_wheel(move |_, _, cx| contain_scroll(&wheel_scroll, cx));
@@ -2646,7 +2646,7 @@ fn activity_diff_break_row(label: Option<String>, theme: &Theme) -> AnyElement {
         .flex_none()
         .flex()
         .items_center()
-        .font_family(md::render::MONO_FAMILY)
+        .font_family(crate::fonts::mono())
         // Fixed like the Review panel's gap and hunk captions: a caption in
         // the code surface follows neither font setting.
         .text_size(px(12.5))

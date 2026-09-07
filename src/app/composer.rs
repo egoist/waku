@@ -110,7 +110,7 @@ impl Waku {
                             .p(px(8.0))
                             .rounded(px(7.0))
                             .bg(theme.inset)
-                            .font_family(crate::md::render::MONO_FAMILY)
+                            .font_family(crate::fonts::mono())
                             .text_size(sp(12.5))
                             .line_height(sp(16.0))
                             .text_color(theme.text_secondary)

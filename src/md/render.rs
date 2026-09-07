@@ -138,11 +138,12 @@ impl Metrics {
     }
 }
 
-pub const SANS_FAMILY: &str = ".SystemUIFont";
-/// The bundled mono face. "SF Mono" only exists on machines that installed it
-/// with Xcode or Terminal, and silently falls back to the sans face when it
-/// does not — which reads as proportional code.
-pub const MONO_FAMILY: &str = "JetBrains Mono";
+/// Defaults for the sans and mono families live in [`crate::fonts`], which
+/// also holds the user-configured resolutions read at render time via
+/// [`crate::fonts::sans`] / [`crate::fonts::mono`]. These aliases exist for
+/// tests and callers that need the literal defaults.
+#[allow(unused_imports)] // test-only aliases
+pub use crate::fonts::{DEFAULT_MONO_FAMILY as MONO_FAMILY, DEFAULT_SANS_FAMILY as SANS_FAMILY};
 
 /// Inline-code wash geometry. Paint-only: the box overhangs the glyphs
 /// horizontally and insets vertically inside the line box.
@@ -298,9 +299,9 @@ pub fn flatten(
         let end = text.len();
 
         let mut run_font = font(if run.style.code {
-            MONO_FAMILY
+            crate::fonts::mono()
         } else {
-            SANS_FAMILY
+            crate::fonts::sans()
         });
         run_font.weight = if run.style.bold && base_weight < FontWeight::SEMIBOLD {
             FontWeight::SEMIBOLD
@@ -1521,7 +1522,7 @@ fn render_code_block(language: Option<&str>, code: &str, ctx: &Ctx) -> AnyElemen
     // code block is exactly the case the cache exists for.
     let flat = ctx.flat(key.index, || {
         let lang = language.and_then(highlight::lang_for_tag);
-        let mut code_font = font(MONO_FAMILY);
+        let mut code_font = font(crate::fonts::mono());
         code_font.weight = FontWeight::NORMAL;
         FlatText {
             text: SharedString::from(code.to_owned()),
@@ -1953,7 +1954,7 @@ mod tests {
     #[test]
     fn code_runs_tile_the_block_including_newlines() {
         let code = "fn main() {\n    let x = 1; // c\n}";
-        let mut code_font = font(MONO_FAMILY);
+        let mut code_font = font(crate::fonts::mono());
         code_font.weight = FontWeight::NORMAL;
         let runs = code_runs(code, Some(Lang::Rust), &code_font, &palette());
         assert_eq!(
@@ -2048,7 +2049,7 @@ mod tests {
     #[test]
     fn highlighting_never_changes_run_lengths() {
         let code = "const a = `t ${b}`;\n// note\nlet n = 0x1F;";
-        let mut code_font = font(MONO_FAMILY);
+        let mut code_font = font(crate::fonts::mono());
         code_font.weight = FontWeight::NORMAL;
         let highlighted = code_runs(code, Some(Lang::Script), &code_font, &palette());
         let plain = code_runs(code, None, &code_font, &palette());

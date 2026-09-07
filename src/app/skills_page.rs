@@ -914,7 +914,7 @@ impl Waku {
             div()
                 .min_w_0()
                 .truncate()
-                .font_family(crate::md::render::MONO_FAMILY)
+                .font_family(crate::fonts::mono())
                 .text_size(px(size.max(12.5)))
                 .text_color(theme.text_secondary)
                 .child(SharedString::from(value))
@@ -1124,7 +1124,7 @@ impl Waku {
                 .border_color(theme.border)
                 .child(
                     div()
-                        .font_family(crate::md::render::MONO_FAMILY)
+                        .font_family(crate::fonts::mono())
                         .text_size(sp(12.5))
                         .text_color(theme.text_ghost)
                         .child("SKILL.md"),
