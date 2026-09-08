@@ -437,6 +437,15 @@ impl Waku {
             cx,
             move |this, _, cx| this.set_analytics_enabled(!analytics_enabled, cx),
         );
+        let stream_thinking_live = self.state.stream_thinking_live;
+        let stream_thinking_toggle = toggle_switch(
+            "stream-thinking-toggle",
+            stream_thinking_live,
+            false,
+            theme,
+            cx,
+            move |this, _, cx| this.set_stream_thinking_live(!stream_thinking_live, cx),
+        );
         div()
             .child(
                 div()
@@ -496,6 +505,40 @@ impl Waku {
                     )
                     .child(analytics_toggle),
             )
+            .child(
+                div()
+                    .mt(px(15.0))
+                    .w_full()
+                    .min_h(px(60.0))
+                    .px(px(20.0))
+                    .py(px(12.0))
+                    .rounded(px(13.0))
+                    .bg(theme.raised)
+                    .flex()
+                    .items_center()
+                    .gap(px(24.0))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .child(
+                                div()
+                                    .text_size(sp(13.5))
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .text_color(theme.text)
+                                    .child(tr!("settings.stream_thinking")),
+                            )
+                            .child(
+                                div()
+                                    .mt(px(5.0))
+                                    .text_size(sp(12.5))
+                                    .line_height(sp(18.0))
+                                    .text_color(theme.text_secondary)
+                                    .child(tr!("settings.stream_thinking_description")),
+                            ),
+                    )
+                    .child(stream_thinking_toggle),
+            )
             .when(updater_available, |column| {
                 let enabled = self.automatic_updates_enabled;
                 let toggle = toggle_switch(
@@ -547,6 +590,12 @@ impl Waku {
     fn set_analytics_enabled(&mut self, enabled: bool, cx: &mut Context<Self>) {
         self.state.analytics_enabled = enabled;
         self.analytics.set_enabled(enabled);
+        self.save();
+        cx.notify();
+    }
+
+    fn set_stream_thinking_live(&mut self, enabled: bool, cx: &mut Context<Self>) {
+        self.state.stream_thinking_live = enabled;
         self.save();
         cx.notify();
     }

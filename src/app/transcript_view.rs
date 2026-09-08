@@ -2167,7 +2167,12 @@ impl Waku {
                             }
                         })),
                 );
-            if item_expanded && let Some(reasoning) = reasoning {
+            if item_expanded
+                && let Some(reasoning) = reasoning
+                // Buffered thinking: while the block is live, only the header
+                // shows; the full text renders once the block settles.
+                && (!reasoning_live || self.state.stream_thinking_live)
+            {
                 // Reasoning remains model prose even though it now shares the
                 // activity stream, so keep selectable markdown rather than
                 // presenting it as monospace tool output.

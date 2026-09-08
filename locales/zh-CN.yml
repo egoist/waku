@@ -179,6 +179,8 @@ common.creating: 正在创建…
 settings.local_by_default: 默认存储在本地
 settings.local_by_default_description: 项目、对话和设置均存储在这台电脑上
 settings.local_by_default_web_description: 项目、对话和附件保留在所连接的守护进程主机上。Waku Web 的偏好设置保留在此浏览器中。
+settings.stream_thinking: 旧版逐字流式显示
+settings.stream_thinking_description: 在模型思考时逐字显示其推理文本。关闭时，思考内容会在模型思考完成后一次性显示。
 settings.automatic_updates: 自动更新
 settings.automatic_updates_description: 在后台检查新版本，并在发现更新时提示安装
 settings.share_anonymous_usage_data: 分享匿名使用数据
