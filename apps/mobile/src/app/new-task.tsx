@@ -37,7 +37,13 @@ import {
 } from '@/components/session-option-sheets';
 import { Sheet, SheetRow } from '@/components/sheet';
 import { Radius, Spacing } from '@/constants/theme';
-import { useAllProviderModels, useProviderCatalog, useTaskState } from '@/hooks/use-daemon-data';
+import {
+  useAllProviderModels,
+  useComposerCommands,
+  useProviderCatalog,
+  useTaskState,
+} from '@/hooks/use-daemon-data';
+import { resolvedComposerSubmission } from '@/lib/composer-commands';
 import { useSyncedComposerDraft } from '@/hooks/use-synced-composer-draft';
 import { useTheme } from '@/hooks/use-theme';
 import { daemonKeys, inspectBranches } from '@/lib/daemon-api';
@@ -93,6 +99,9 @@ export default function NewTaskScreen() {
   const modelCatalog = useAllProviderModels(installedProviders);
   const projects = taskState.data?.projects ?? [];
   const selectedProject = projects.find((item) => item.id === projectId);
+  // Same resolution the session composer applies, so a command typed as the
+  // very first prompt reaches the provider in its native form too.
+  const commandCatalog = useComposerCommands(provider, selectedProject?.path);
   const projectless = selectedProject?.name === 'No project';
   const branches = useQuery({
     queryKey: daemonKeys.branches(
@@ -254,8 +263,11 @@ export default function NewTaskScreen() {
   }
 
   async function start() {
-    const value = prompt.trim();
-    if (!selectedProject || !provider || !value || submitting) return;
+    const typed = prompt.trim();
+    const value = provider
+      ? resolvedComposerSubmission(provider, typed, commandCatalog.data ?? []) ?? typed
+      : typed;
+    if (!selectedProject || !provider || !typed || submitting) return;
     setSubmitting(true);
     setError(null);
     try {

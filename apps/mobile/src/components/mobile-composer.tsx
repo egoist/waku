@@ -3,12 +3,13 @@ import type {
   MessageAttachment,
   PendingPermission,
   PendingUserInput,
+  SlashCommand,
   UserInputAnswer,
 } from '@waku/client';
 import * as DocumentPicker from 'expo-document-picker';
 import * as Haptics from 'expo-haptics';
 import * as ImagePicker from 'expo-image-picker';
-import { useEffect, useRef, useState, type ReactNode } from 'react';
+import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import {
   ActivityIndicator,
   Pressable,
@@ -32,7 +33,14 @@ import { GlassSurface, liquidGlass } from './glass-surface';
 import { AgentPresetSheet, ModelSheet } from './session-option-sheets';
 import { MonoFont, NativeTint, Radius } from '@/constants/theme';
 import { useSyncedComposerDraft } from '@/hooks/use-synced-composer-draft';
-import { useProviderModels } from '@/hooks/use-daemon-data';
+import { useComposerCommands, useProviderModels, useTaskState } from '@/hooks/use-daemon-data';
+import {
+  detectComposerTrigger,
+  filterComposerCommands,
+  mergeComposerCommands,
+  replaceComposerTrigger,
+  resolvedComposerSubmission,
+} from '@/lib/composer-commands';
 import { useTheme } from '@/hooks/use-theme';
 import {
   importLocalAttachment,
@@ -197,6 +205,17 @@ export function MobileComposer({
     !sessionHasStarted &&
     (session.provider === 'deepSeek' || session.provider === 'openCode');
   const agentPresetProbe = useProviderModels(supportsAgentPreset ? session.provider : null);
+  const taskState = useTaskState();
+  const projectPath = taskState.data?.projects.find(
+    (project) => project.id === session.project_id,
+  )?.path;
+  const discoveredCommands = useComposerCommands(session.provider, projectPath);
+  // Provider-reported commands ride along with the session; discovery adds the
+  // project, user, and skill commands defined on the daemon host.
+  const commands = useMemo(
+    () => mergeComposerCommands(discoveredCommands.data ?? [], session.available_commands ?? []),
+    [discoveredCommands.data, session.available_commands],
+  );
   const agentPresets = agentPresetProbe.data?.agent_presets ?? [];
   const selectedAgentPreset =
     agentPresets.find((preset) => preset.id === session.agent_preset) ??
@@ -214,6 +233,21 @@ export function MobileComposer({
     : runtimeError;
   const visibleError = visibleLocalError || visibleRuntimeError;
   const queued = session.queued_messages ?? [];
+
+  // The caret is assumed to sit at the end of the draft: single-line composer
+  // input, and the trigger dies at the first whitespace either way.
+  const trigger = useMemo(() => detectComposerTrigger(draft, draft.length), [draft]);
+  const suggestions = useMemo(
+    () => trigger ? filterComposerCommands(commands, trigger.query) : [],
+    [commands, trigger],
+  );
+
+  function applyCommand(command: SlashCommand) {
+    if (!trigger) return;
+    draftSync.markEdited();
+    setDraft(replaceComposerTrigger(draft, trigger, command).text);
+    void Haptics.selectionAsync();
+  }
 
   useEffect(() => setLocalError(null), [session.id]);
   useEffect(() => {
@@ -330,7 +364,10 @@ export function MobileComposer({
   }, [requestSignature]);
 
   async function submit() {
-    const prompt = draft.trim();
+    const typed = draft.trim();
+    // Template commands and skills have to become provider syntax here: the
+    // daemon sends the prompt through verbatim.
+    const prompt = resolvedComposerSubmission(session.provider, typed, commands) ?? typed;
     const submittedAttachments = attachments;
     if (
       (!prompt && submittedAttachments.length === 0)
@@ -453,7 +490,39 @@ export function MobileComposer({
 
       <ComposerCard
         accessibilityLabel="Message agent"
-        beforeInput={attachments.length || importingAttachments ? (
+        beforeInput={attachments.length || importingAttachments || suggestions.length ? (
+          <>
+          {suggestions.length ? (
+            <ScrollView
+              horizontal
+              keyboardShouldPersistTaps="handled"
+              showsHorizontalScrollIndicator={false}
+              contentContainerStyle={styles.commandStrip}>
+              {suggestions.map((command) => (
+                <Pressable
+                  accessibilityLabel={`Use command ${command.name}`}
+                  accessibilityRole="button"
+                  key={`${command.scope}:${command.name}`}
+                  onPress={() => applyCommand(command)}
+                  style={({ pressed }) => [
+                    styles.commandChip,
+                    { backgroundColor: theme.overlayStrong, opacity: pressed ? 0.6 : 1 },
+                  ]}>
+                  <Text numberOfLines={1} style={[styles.commandName, { color: theme.text }]}>
+                    /{command.name}
+                  </Text>
+                  {command.description ? (
+                    <Text
+                      numberOfLines={1}
+                      style={[styles.commandHint, { color: theme.textTertiary }]}>
+                      {command.description}
+                    </Text>
+                  ) : null}
+                </Pressable>
+              ))}
+            </ScrollView>
+          ) : null}
+          {attachments.length || importingAttachments ? (
           <ScrollView
             horizontal
             keyboardShouldPersistTaps="handled"
@@ -501,6 +570,8 @@ export function MobileComposer({
               </View>
             )}
           </ScrollView>
+          ) : null}
+          </>
         ) : undefined}
         editable={!disconnected && !submitting}
         left={(
@@ -872,6 +943,15 @@ const styles = StyleSheet.create({
     paddingVertical: 8,
   },
   attachmentStrip: { gap: 6, paddingHorizontal: 4, paddingTop: 4 },
+  commandStrip: { gap: 6, paddingBottom: 6, paddingHorizontal: 4, paddingTop: 4 },
+  commandChip: {
+    borderRadius: Radius.small,
+    maxWidth: 220,
+    paddingHorizontal: 11,
+    paddingVertical: 7,
+  },
+  commandName: { fontSize: 14, fontWeight: '600' },
+  commandHint: { fontSize: 11.5, marginTop: 1 },
   attachmentChip: {
     alignItems: 'center',
     borderRadius: Radius.small,

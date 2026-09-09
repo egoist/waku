@@ -15,6 +15,7 @@ import type {
   ReviewDiffSource,
   RuntimeMode,
   SessionMessageMatch,
+  SlashCommand,
   UsageHistory,
   UsageWindow,
   WakuClient,
@@ -57,6 +58,19 @@ export const daemonKeys = {
     profileId,
     'message-search',
     query,
+  ] as const,
+  slashCommands: (
+    profileId: string,
+    provider: ProviderKind,
+    cwd: string,
+    binaryOverride: string | null = null,
+  ) => [
+    'daemon',
+    profileId,
+    'slash-commands',
+    provider,
+    cwd,
+    binaryOverride,
   ] as const,
   directory: (profileId: string, path: string | null) => [
     'daemon',
@@ -165,6 +179,33 @@ export async function fetchPlanUsage(
     'planUsage',
   );
   return response.usage;
+}
+
+/** Slash commands the project, user, and skills define for a provider, as
+ * discovered on the daemon host. Provider-reported commands arrive with the
+ * session instead; the composer merges the two. */
+export async function discoverComposerCommands(
+  client: WakuClient,
+  provider: ProviderKind,
+  projectRoot: string,
+  binaryOverride: string | null,
+): Promise<SlashCommand[]> {
+  const response = expectResponse(
+    await client.request({
+      type: 'workspace',
+      operation: {
+        type: 'discoverSlashCommands',
+        provider,
+        project_root: projectRoot,
+        binary_override: binaryOverride,
+      },
+    }),
+    'workspace',
+  );
+  if (response.result.type !== 'slashCommands') {
+    throw new Error('The daemon returned an unexpected slash-command response');
+  }
+  return response.result.commands;
 }
 
 /** Full-text search across every transcript the daemon has. Titles are

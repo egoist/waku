@@ -8,6 +8,7 @@ import {
 
 import {
   daemonKeys,
+  discoverComposerCommands,
   fetchPlanUsage,
   hydrateSession,
   loadDaemonSettings,
@@ -180,6 +181,33 @@ export function useProviderCatalog() {
     isPending: settings.isPending || queries.some((query) => query.isPending && query.fetchStatus !== 'idle'),
     error: settings.error,
   };
+}
+
+/** Slash commands for a provider in a project. Discovery runs on the daemon
+ * host and never changes within a session, so it is fetched once. */
+export function useComposerCommands(provider: ProviderKind | null, cwd: string | undefined) {
+  const { activeProfile, client, phase } = useDaemon();
+  const settings = useDaemonSettings();
+  const binaryOverride = settings.data && provider
+    ? settings.data.provider_binary_overrides?.[provider] ?? null
+    : null;
+  return useQuery({
+    queryKey: daemonKeys.slashCommands(
+      activeProfile?.id ?? 'disconnected',
+      provider ?? 'codex',
+      cwd ?? 'none',
+      binaryOverride,
+    ),
+    queryFn: () => discoverComposerCommands(
+      requireClient(client),
+      provider!,
+      cwd!,
+      binaryOverride,
+    ),
+    enabled: phase === 'connected'
+      && Boolean(activeProfile && client && provider && cwd && settings.data),
+    staleTime: Number.POSITIVE_INFINITY,
+  });
 }
 
 /** Message-body search against the daemon. Callers debounce the query: every
