@@ -8,4 +8,9 @@ target
 node_modules
 temp/
 
+# Local tooling state: the code knowledge-graph index and the agent config
+# directory (which installs its own node_modules).
+.codebase-memory/
+.opencode/
+
 .DS_Store
