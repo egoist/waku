@@ -139,6 +139,20 @@ Protocol already has it: `rewindSessionToMessage { turnCount }` and
 
 Skills page, goal, settings (`updateSettings`), and distribution
 (`eas.json` + TestFlight — today it's a USB dev build).
+- **Settings: implemented.** `app/settings.tsx` exposes the two fields a
+  phone should own — enabled agents and computer use — through
+  `updateSettings`, with `lib/daemon-settings.ts` (6 tests) holding the
+  toggle arithmetic. Reached from the gear button beside Usage on the home
+  and new-task bars. `updateDaemonSettings` invalidates the settings and
+  provider queries, since a stale catalog would keep offering an agent the
+  daemon just hid. Not exposed: provider binary overrides (absolute paths
+  on the daemon host, no picker for one on a phone).
+- **Skills page: not started** — `loadSkills` / `setSkillsEnabled` exist on
+  the wire; needs a screen plus enable/delete.
+- **Goal: not started, and probably not worth it** — Codex-only, and mobile
+  has no surface for a goal today.
+- **Distribution: not started** — see below; iOS is not buildable on this
+  machine.
 
 ## Building locally (chosen over EAS and CI — run after the phases)
 
