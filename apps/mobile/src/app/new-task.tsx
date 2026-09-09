@@ -336,7 +336,7 @@ export default function NewTaskScreen() {
 
   return (
     <KeyboardAvoidingView
-      behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+      behavior="padding"
       style={[styles.screen, { backgroundColor: theme.background }]}>
       {/* Title and back button are the native navigation bar's; keep clear of it. */}
       <View style={{ height: headerInset }} />
@@ -454,11 +454,11 @@ export default function NewTaskScreen() {
           />
         ))}
         <SheetRow
-          description="Pick any folder on the daemon host, or create an empty workspace"
-          label="Browse daemon host…"
+          description="Browse the daemon host, then add a folder or an empty workspace"
+          label="Add new project…"
           leading={(
             <AppSymbol
-              name={{ ios: 'externaldrive', android: 'hard_drive', web: 'hard_drive' }}
+              name={{ ios: 'folder.badge.plus', android: 'create_new_folder', web: 'create_new_folder' }}
               size={16}
               tintColor={theme.textSecondary}
             />

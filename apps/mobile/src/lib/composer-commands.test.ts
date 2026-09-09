@@ -77,8 +77,9 @@ describe('command filtering', () => {
     ]);
   });
 
-  test('caps the list', () => {
-    expect(filterComposerCommands(commands, '', 2)).toHaveLength(2);
+  test('caps a typed query but not the browse view', () => {
+    expect(filterComposerCommands(commands, 'e', 2)).toHaveLength(2);
+    expect(filterComposerCommands(commands, '')).toHaveLength(commands.length);
   });
 });
 

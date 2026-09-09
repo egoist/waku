@@ -35,7 +35,9 @@ export function filterComposerCommands(
   cap = COMPOSER_COMMAND_CAP,
 ): SlashCommand[] {
   const normalized = query.trim().toLocaleLowerCase();
-  if (!normalized) return commands.slice(0, cap);
+  // Browsing (no query) shows every command; the picker scrolls. Capping here
+  // would hide skills once the list passed COMPOSER_COMMAND_CAP.
+  if (!normalized) return commands;
   return commands
     .map((command, index) => ({
       command,

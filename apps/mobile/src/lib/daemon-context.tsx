@@ -77,6 +77,10 @@ interface DaemonContextValue extends ConnectionStatus {
    * token stored now. */
   reconnect: () => Promise<boolean>;
   disconnect: () => void;
+  /** True once the initial profile load has settled (or a safety timeout fired).
+   * The splash hides on this, not on the connection phase — otherwise a stalled
+   * secure-store read after a force-kill can wedge the app on the splash. */
+  booted: boolean;
 }
 
 const DaemonContext = createContext<DaemonContextValue | null>(null);
@@ -109,6 +113,7 @@ export function DaemonProvider({ children }: { children: ReactNode }) {
   const [profiles, setProfiles] = useState<DaemonProfile[]>([]);
   const [activeProfileId, setActiveProfileId] = useState<string | null>(null);
   const [client, setClient] = useState<WakuClient | null>(null);
+  const [booted, setBooted] = useState(false);
   const [status, setStatus] = useState<ConnectionStatus>({
     ...IDLE,
     phase: "booting",
@@ -281,6 +286,9 @@ export function DaemonProvider({ children }: { children: ReactNode }) {
     if (bootstrapped.current) return;
     bootstrapped.current = true;
     void hydratePersistentStorage();
+    // Hard backstop: never wedge on the splash if the initial storage read
+    // stalls (Android keystore can block right after a force-kill).
+    const safety = setTimeout(() => setBooted(true), 5000);
     void (async () => {
       try {
         const [savedProfiles, savedActiveId] = await Promise.all([
@@ -291,20 +299,23 @@ export function DaemonProvider({ children }: { children: ReactNode }) {
         setProfiles(savedProfiles);
         if (!savedProfiles.length) {
           setStatus(IDLE);
+          setBooted(true);
           return;
         }
         const selected = savedProfiles.some((item) => item.id === savedActiveId)
           ? savedActiveId!
           : savedProfiles[0]!.id;
         await activate(selected, savedProfiles);
+        setBooted(true);
       } catch (cause) {
         setStatus({
           ...IDLE,
           phase: "error",
           error: errorMessage(cause, "Couldn’t load saved daemons"),
         });
+        setBooted(true);
       }
-    })();
+    })().finally(() => clearTimeout(safety));
   }, [activate]);
 
   // The link retries and probes only while the app is in the foreground;
@@ -423,6 +434,7 @@ export function DaemonProvider({ children }: { children: ReactNode }) {
         removeProfile,
         reconnect,
         disconnect,
+        booted,
       }}
     >
       {children}

@@ -93,7 +93,7 @@ export default function RootLayout() {
 }
 
 function AppNavigator() {
-  const { phase, profiles } = useDaemon();
+  const { phase, profiles, booted } = useDaemon();
   const { openTaskDrawer } = useTaskDrawer();
   const colorScheme = useColorScheme();
   const theme = Colors[colorScheme === "dark" ? "dark" : "light"];
@@ -137,8 +137,10 @@ function AppNavigator() {
   }), [drawerHeader, settingsAction, usageAction]);
 
   useEffect(() => {
-    if (phase !== "booting") void SplashScreen.hideAsync();
-  }, [phase]);
+    // Hide once bootstrap has settled (or the safety timeout fired) — not on the
+    // connection phase, which can stall and wedge the splash after a force-kill.
+    if (booted) void SplashScreen.hideAsync();
+  }, [booted]);
 
   return (
     <Stack

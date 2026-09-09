@@ -171,7 +171,7 @@ export default function DaemonEditorScreen() {
         contentContainerStyle={styles.content}
         contentInsetAdjustmentBehavior="automatic"
         keyboardDismissMode="interactive"
-        keyboardShouldPersistTaps="handled"
+        keyboardShouldPersistTaps="always"
         showsVerticalScrollIndicator={false}
       >
         <Text style={[styles.sectionLabel, { color: colors.secondaryText }]}>
@@ -191,6 +191,7 @@ export default function DaemonEditorScreen() {
                 setName(value);
                 setLocalError(null);
               }}
+              blurOnSubmit={false}
               onSubmitEditing={() => addressInput.current?.focus()}
               placeholder="Optional"
               placeholderTextColor={colors.placeholder}
@@ -221,6 +222,7 @@ export default function DaemonEditorScreen() {
                 setAddress(value);
                 setLocalError(null);
               }}
+              blurOnSubmit={false}
               onSubmitEditing={() => tokenInput.current?.focus()}
               placeholder="wss://host.example"
               placeholderTextColor={colors.placeholder}
