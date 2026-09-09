@@ -222,6 +222,15 @@ export async function searchSessionMessages(
   return response.matches;
 }
 
+/** Settings are daemon-wide, so a phone writing them changes the desktop too.
+ * The full object is sent: the daemon replaces rather than merges. */
+export async function updateDaemonSettings(
+  client: WakuClient,
+  settings: DaemonSettings,
+): Promise<void> {
+  expectResponse(await client.request({ type: 'updateSettings', settings }), 'ack');
+}
+
 export async function probeProvider(
   client: WakuClient,
   provider: ProviderKind,

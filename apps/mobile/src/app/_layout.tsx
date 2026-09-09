@@ -120,15 +120,21 @@ function AppNavigator() {
     label: "Usage",
     onPress: () => router.push("/usage"),
   }), []);
+  const settingsAction = useMemo<HeaderActionSpec>(() => ({
+    icon: { ios: "gearshape", android: "settings", web: "settings" },
+    label: "Settings",
+    onPress: () => router.push("/settings"),
+  }), []);
   const homeHeader = useMemo<NativeStackNavigationOptions>(() => ({
     ...drawerHeader,
     headerRight: () => (
       <HeaderActionGroup>
         <HeaderAction {...usageAction} />
+        <HeaderAction {...settingsAction} />
       </HeaderActionGroup>
     ),
-    unstable_headerRightItems: () => nativeHeaderButtons([usageAction]),
-  }), [drawerHeader, usageAction]);
+    unstable_headerRightItems: () => nativeHeaderButtons([usageAction, settingsAction]),
+  }), [drawerHeader, settingsAction, usageAction]);
 
   useEffect(() => {
     if (phase !== "booting") void SplashScreen.hideAsync();
@@ -164,6 +170,10 @@ function AppNavigator() {
         <Stack.Screen
           name="usage"
           options={{ title: "Usage" }}
+        />
+        <Stack.Screen
+          name="settings"
+          options={{ title: "Settings" }}
         />
         <Stack.Screen
           name="session/[id]"

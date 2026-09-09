@@ -1,4 +1,9 @@
-import { useQueries, useQuery, useQueryClient } from '@tanstack/react-query';
+import {
+  useMutation,
+  useQueries,
+  useQuery,
+  useQueryClient,
+} from '@tanstack/react-query';
 import type { Project, ProviderKind, UsageWindow } from '@waku/client';
 import {
   PROVIDER_PROBE_CACHE_STALE_TIME,
@@ -16,13 +21,17 @@ import {
   loadUsageHistory,
   probeProvider,
   searchSessionMessages,
+  updateDaemonSettings,
   type TaskState,
 } from '@/lib/daemon-api';
 import { persistentStorageSync } from '@/lib/composer-preferences-store';
 import { useDaemon } from '@/lib/daemon-context';
 import { providerLabel } from '@/lib/session-presentation';
 
-const PROVIDERS: ProviderKind[] = [
+/** Every provider the client knows, whether or not the daemon has it
+ * installed or enabled. Screens that must show a disabled agent — settings —
+ * use this instead of the catalog, which hides them. */
+export const PROVIDERS: ProviderKind[] = [
   'codex',
   'claude',
   'cursor',
@@ -181,6 +190,25 @@ export function useProviderCatalog() {
     isPending: settings.isPending || queries.some((query) => query.isPending && query.fetchStatus !== 'idle'),
     error: settings.error,
   };
+}
+
+/** Write daemon-wide settings. Disabling an agent also changes what the
+ * provider catalog offers, so both queries are refetched — a stale catalog
+ * would keep showing an agent the daemon just hid. */
+export function useUpdateDaemonSettings() {
+  const { activeProfile, client } = useDaemon();
+  const queryClient = useQueryClient();
+  const profileId = activeProfile?.id ?? 'disconnected';
+  return useMutation({
+    mutationFn: (settings: Parameters<typeof updateDaemonSettings>[1]) =>
+      updateDaemonSettings(requireClient(client), settings),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: daemonKeys.settings(profileId) });
+      void queryClient.invalidateQueries({
+        queryKey: ['daemon', profileId, 'provider'],
+      });
+    },
+  });
 }
 
 /** Slash commands for a provider in a project. Discovery runs on the daemon
