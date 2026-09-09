@@ -486,10 +486,11 @@ impl OpenCode2Driver {
             let _ = opencode2_api::switch_model(&endpoint, &session_id, model);
         }
 
-        // One request replaces v1's twenty-message scan: the session carries
-        // its own token totals and model reference.
+        // The session's own token totals are a LIFETIME cumulative counter and
+        // cannot gauge how full the window is, so read the latest assistant
+        // message's per-request usage instead.
         let session_model = model.clone().or_else(|| session.model.clone());
-        let context_tokens = context_tokens(&session.tokens);
+        let context_tokens = resumed_context_tokens(&endpoint, &session_id);
         let context_window = session_model
             .as_ref()
             .and_then(|model| service.model_context_window(&model_key(model)));
@@ -720,6 +721,33 @@ fn context_tokens(tokens: &TokenUsage) -> Option<u64> {
     .filter(|count| count.is_finite() && *count > 0.0)
     .fold(0_u64, |total, count| total.saturating_add(count as u64));
     (total > 0).then_some(total)
+}
+
+/// Context-window occupancy for a resumed or reconnected session.
+///
+/// `SessionInfo.tokens` is a *lifetime* cumulative counter — `cache.read` in
+/// particular only ever grows over a session, so it can run millions of tokens
+/// past the model's window while the actual context is tiny. Gauge occupancy
+/// from the latest assistant message's per-request token total instead, which
+/// is what opencode's own context meter reads. A stale or unknown value is
+/// `None`, which the meter already degrades gracefully to.
+fn resumed_context_tokens(endpoint: &Endpoint, session_id: &str) -> Option<u64> {
+    let Ok((messages, _)) =
+        opencode2_api::list_messages(endpoint, session_id, Order::Desc, Some(20), None)
+    else {
+        return None;
+    };
+    for message in messages {
+        let MessageInfo::Assistant { tokens, .. } = message else {
+            continue;
+        };
+        if let Some(tokens) = tokens
+            && let Some(context_tokens) = context_tokens(&tokens)
+        {
+            return Some(context_tokens);
+        }
+    }
+    None
 }
 
 /// Keeps v1's placeholder filter: OpenCode emits `New session - <timestamp>`
@@ -1081,7 +1109,7 @@ fn reconcile(worker: &Worker, state: &mut StreamState, generation: u64) {
         if let Some(model) = session.model.clone() {
             state.model = Some(model);
         }
-        let context_tokens = context_tokens(&session.tokens);
+        let context_tokens = resumed_context_tokens(&endpoint, &worker.session_id);
         let context_window = state
             .model_key()
             .and_then(|key| worker.service.model_context_window(&key));
@@ -1503,11 +1531,13 @@ fn handle_event(
         }
 
         // Session level.
-        "session.usage.updated" => {
-            // Bypasses the turn gate, as v1 does: usage is session state, not
-            // turn output.
-            emit_usage(data.get("tokens"), state, events, service);
-        }
+        // The session's LIFETIME cumulative token counter (`cache.read` never
+        // shrinks) can run far past the model's window while the actual context
+        // is small, so this is deliberately NOT a context-occupancy source.
+        // Occupancy comes from per-step `session.step.ended` tokens above,
+        // which reflect the actual request. Keep the arm so the event is
+        // acknowledged rather than recorded as unknown.
+        "session.usage.updated" => {}
         "session.renamed" => {
             if let Some(title) = generated_title(data.get("title").and_then(Value::as_str)) {
                 let _ = events.send(DriverEvent::AutoTitleUpdated(Some(title)));
@@ -2609,9 +2639,10 @@ mod tests {
             .insert("anthropic/claude-sonnet-4-5".into(), 200_000);
         harness.feed(step_started("msg_1"));
         harness.feed(json!({
-            "type": "session.usage.updated",
+            "type": "session.step.ended",
             "data": {
                 "sessionID": "ses_1",
+                "assistantMessageID": "msg_1",
                 "cost": 0.01,
                 "tokens": {
                     "input": 13_399.0,
