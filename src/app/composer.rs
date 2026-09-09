@@ -2415,7 +2415,7 @@ impl Waku {
         let theme = Theme::current(cx);
         let steerable = self.session_can_steer(session);
         let mut list = div().flex().flex_col().py(px(4.0));
-        for message in &session.queued_messages {
+        for (index, message) in session.queued_messages.iter().enumerate() {
             let message_id = message.id;
             let content = if message.visible_content().trim().is_empty() {
                 message
@@ -2508,29 +2508,41 @@ impl Waku {
             list = list.child(
                 div()
                     .id(SharedString::from(format!("queued-message-{message_id}")))
-                    .h(px(30.0))
+                    .min_h(px(30.0))
+                    .overflow_hidden()
+                    .when(index > 0, |row| row.border_t_1().border_color(theme.border))
                     .pl(px(12.0))
                     .pr(px(6.0))
                     .flex()
-                    .items_center()
+                    .items_start()
                     .gap(px(9.0))
                     .cursor_default()
                     .tab_index(0)
                     .focus_visible(|style| style.border_1().border_color(theme.accent))
                     .hover(|element| element.bg(theme.overlay))
                     .tooltip(Tooltip::text(tr!("composer.edit_in_composer")))
-                    .child(icon("icons/queue.svg", 12.0, theme.text_tertiary))
+                    .child(div().h(px(30.0)).flex().items_center().child(icon(
+                        "icons/queue.svg",
+                        12.0,
+                        theme.text_tertiary,
+                    )))
                     .child(
                         div()
                             .flex_1()
                             .min_w_0()
-                            .truncate()
+                            // Three lines is enough to recognise a prompt without
+                            // the queue becoming a second transcript.
+                            .py(px(6.0))
+                            .line_height(sp(18.0))
+                            .line_clamp(3)
+                            .text_ellipsis()
                             .text_size(sp(12.5))
                             .text_color(theme.text)
                             .child(SharedString::from(content)),
                     )
                     .child(
                         div()
+                            .h(px(30.0))
                             .flex()
                             .items_center()
                             .gap(px(2.0))
