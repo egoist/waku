@@ -185,6 +185,11 @@ function AppNavigator() {
           name="session/[id]"
           options={{
             ...drawerHeader,
+            // Chat header must be a solid surface, not the floating glass
+            // treatment — content behind it is a live transcript, not a scroll
+            // view meant to bleed under the bar.
+            headerTransparent: false,
+            headerStyle: { backgroundColor: theme.background },
             animation: "none",
             headerTitleAlign: "left",
             title: "Task",
@@ -194,7 +199,10 @@ function AppNavigator() {
       <Stack.Screen
         name="daemon-editor"
         options={{
-          presentation: "pageSheet",
+          // Full-screen push, not a pageSheet modal: a modal steals the first
+          // tap after presentation (focus can't land on the address/token
+          // fields until a dismiss gesture is registered), so the form feels
+          // like its inputs need multiple taps.
           title: "Add Daemon",
         }}
       />

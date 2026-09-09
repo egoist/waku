@@ -170,8 +170,9 @@ export default function DaemonEditorScreen() {
         automaticallyAdjustKeyboardInsets
         contentContainerStyle={styles.content}
         contentInsetAdjustmentBehavior="automatic"
-        keyboardDismissMode="interactive"
-        keyboardShouldPersistTaps="always"
+        keyboardDismissMode={Platform.select({ ios: "interactive", android: "on-drag" })}
+        keyboardShouldPersistTaps="handled"
+        nestedScrollEnabled
         showsVerticalScrollIndicator={false}
       >
         <Text style={[styles.sectionLabel, { color: colors.secondaryText }]}>
