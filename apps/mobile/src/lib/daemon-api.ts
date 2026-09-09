@@ -14,6 +14,7 @@ import type {
   ReviewDiffData,
   ReviewDiffSource,
   RuntimeMode,
+  SessionMessageMatch,
   UsageHistory,
   UsageWindow,
   WakuClient,
@@ -50,6 +51,12 @@ export const daemonKeys = {
     profileId,
     'usage',
     JSON.stringify(window),
+  ] as const,
+  messageSearch: (profileId: string, query: string) => [
+    'daemon',
+    profileId,
+    'message-search',
+    query,
   ] as const,
   directory: (profileId: string, path: string | null) => [
     'daemon',
@@ -158,6 +165,20 @@ export async function fetchPlanUsage(
     'planUsage',
   );
   return response.usage;
+}
+
+/** Full-text search across every transcript the daemon has. Titles are
+ * matched client-side; this is the only way in by content. */
+export async function searchSessionMessages(
+  client: WakuClient,
+  query: string,
+  limit = 40,
+): Promise<SessionMessageMatch[]> {
+  const response = expectResponse(
+    await client.request({ type: 'searchSessionMessages', query, limit }),
+    'sessionMessageMatches',
+  );
+  return response.matches;
 }
 
 export async function probeProvider(

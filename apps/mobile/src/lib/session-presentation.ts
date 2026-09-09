@@ -3,9 +3,11 @@ import type {
   AgentTurn,
   Checkpoint,
   Message,
+  MessageRole,
   Project,
   ProviderKind,
   RuntimeMode,
+  SessionMessageMatch,
   TranscriptBlock,
 } from '@waku/client';
 import { turnAnswerStart, turnFoldLabel } from '@waku/client/transcript-presentation';
@@ -25,6 +27,34 @@ export interface SessionGroup {
   id: SessionGroupId;
   title: string;
   data: SessionListItem[];
+}
+
+export interface MessageSearchRow {
+  session: AgentSession;
+  snippet: string;
+  role: MessageRole;
+}
+
+/**
+ * Daemon message matches resolved against the sessions this client knows.
+ * Matches for a session that is no longer in task state are dropped rather
+ * than shown as a row that cannot be opened, and the daemon's ordering
+ * (it ranks its own results) is preserved.
+ */
+export function messageSearchRows(
+  matches: SessionMessageMatch[],
+  sessions: AgentSession[],
+  limit = 12,
+): MessageSearchRow[] {
+  const known = new Map(sessions.map((session) => [session.id, session]));
+  const rows: MessageSearchRow[] = [];
+  for (const match of matches) {
+    const session = known.get(match.session_id);
+    if (!session) continue;
+    rows.push({ session, snippet: match.snippet, role: match.source });
+    if (rows.length >= limit) break;
+  }
+  return rows;
 }
 
 /**

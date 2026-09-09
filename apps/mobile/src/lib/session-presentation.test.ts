@@ -11,6 +11,7 @@ import {
   expandTranscriptRows,
   findActivityBlock,
   groupSessions,
+  messageSearchRows,
   relativeSessionTime,
   sessionDateGroup,
   stabilizeTranscriptRows,
@@ -418,6 +419,35 @@ describe('turn options for rewind and fork', () => {
   test('has nothing to offer before the first turn settles', () => {
     expect(turnOptionsForSession(null)).toEqual([]);
     expect(turnOptionsForSession(session({ turns: [] }))).toEqual([]);
+  });
+});
+
+describe('message search rows', () => {
+  const sessions = [session({ id: 'known' }), session({ id: 'other' })];
+
+  test('resolves matches against known sessions in daemon order', () => {
+    const rows = messageSearchRows([
+      { session_id: 'other', source: 'assistant', snippet: 'second hit' },
+      { session_id: 'known', source: 'user', snippet: 'first hit' },
+    ], sessions);
+    expect(rows.map((row) => [row.session.id, row.snippet, row.role])).toEqual([
+      ['other', 'second hit', 'assistant'],
+      ['known', 'first hit', 'user'],
+    ]);
+  });
+
+  test('drops matches for sessions that are no longer openable', () => {
+    expect(messageSearchRows([{ session_id: 'gone', source: 'user', snippet: 'x' }], sessions))
+      .toEqual([]);
+  });
+
+  test('caps the list so a broad query cannot flood the drawer', () => {
+    const matches = Array.from({ length: 20 }, (_unused, index) => ({
+      session_id: 'known',
+      source: 'user' as const,
+      snippet: `hit ${index}`,
+    }));
+    expect(messageSearchRows(matches, sessions, 5)).toHaveLength(5);
   });
 });
 

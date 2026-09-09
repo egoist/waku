@@ -36,7 +36,7 @@ import { ProviderIcon } from '@/components/provider-icon';
 import { RenameDialog } from '@/components/rename-dialog';
 import { TaskRowMenu } from '@/components/task-row-menu';
 import { NativeTint, Radius, Spacing } from '@/constants/theme';
-import { useTaskState } from '@/hooks/use-daemon-data';
+import { useSessionMessageSearch, useTaskState } from '@/hooks/use-daemon-data';
 import { useTheme } from '@/hooks/use-theme';
 import { useDaemon } from '@/lib/daemon-context';
 import { sessionIsRunning } from '@/lib/mobile-runtime';
@@ -44,7 +44,9 @@ import { useRuntime } from '@/lib/runtime-context';
 import {
   displaySessionTitle,
   groupSessions,
+  messageSearchRows,
   providerLabel,
+  type MessageSearchRow,
   type SessionListItem,
 } from '@/lib/session-presentation';
 
@@ -134,6 +136,13 @@ function TaskDrawerContent({
   const taskState = useTaskState();
   const [search, setSearch] = useState('');
   const [refreshing, setRefreshing] = useState(false);
+  // Every keystroke would otherwise be a full transcript scan on the daemon.
+  const [messageQuery, setMessageQuery] = useState('');
+  useEffect(() => {
+    const timer = setTimeout(() => setMessageQuery(search.trim()), 180);
+    return () => clearTimeout(timer);
+  }, [search]);
+  const messageSearch = useSessionMessageSearch(messageQuery);
   const [daemonPickerOpen, setDaemonPickerOpen] = useState(false);
   const [renameTarget, setRenameTarget] = useState<AgentSession | null>(null);
   const visibleSessions = useMemo(() => {
@@ -155,6 +164,12 @@ function TaskDrawerContent({
   const sections = useMemo(
     () => taskState.data ? groupSessions(taskState.data.projects, visibleSessions) : [],
     [taskState.data, visibleSessions],
+  );
+  const messageRows = useMemo(
+    () => messageSearch.data
+      ? messageSearchRows(messageSearch.data, taskState.data?.sessions ?? [])
+      : [],
+    [messageSearch.data, taskState.data?.sessions],
   );
   const showNewTask = useCallback(() => {
     onClose();
@@ -248,11 +263,29 @@ function TaskDrawerContent({
             onSelect={() => showSession(item.session.id)}
           />
         )}
-        ListHeaderComponent={<ConnectionBanner />}
+        ListHeaderComponent={(
+          <>
+            <ConnectionBanner />
+            {messageRows.length ? (
+              <View style={styles.messageResults}>
+                <Text style={[styles.sectionTitle, { color: theme.textTertiary }]}>
+                  Messages
+                </Text>
+                {messageRows.map((row, index) => (
+                  <MessageResultRow
+                    key={`${row.session.id}:${index}`}
+                    onSelect={() => showSession(row.session.id)}
+                    row={row}
+                  />
+                ))}
+              </View>
+            ) : null}
+          </>
+        )}
         ListEmptyComponent={(
           <TaskListEmpty
             error={taskState.error}
-            searching={Boolean(search.trim())}
+            searching={Boolean(search.trim()) && !messageRows.length}
             onNewTask={showNewTask}
           />
         )}
@@ -334,6 +367,38 @@ function TaskDrawerContent({
         visible={daemonPickerOpen}
       />
     </View>
+  );
+}
+
+/** A transcript hit. The title is what you recognise; the snippet is the
+ * evidence, so both are shown and neither is truncated to one line only. */
+function MessageResultRow({
+  onSelect,
+  row,
+}: {
+  onSelect: () => void;
+  row: MessageSearchRow;
+}) {
+  const theme = useTheme();
+  return (
+    <Pressable
+      accessibilityLabel={`${displaySessionTitle(row.session)}: ${row.snippet}`}
+      accessibilityRole="button"
+      onPress={onSelect}
+      style={({ pressed }) => [
+        styles.messageRow,
+        { backgroundColor: pressed ? theme.surfaceMuted : 'transparent' },
+      ]}>
+      <View style={styles.messageHeading}>
+        <ProviderIcon color={theme.textTertiary} provider={row.session.provider} size={11} />
+        <Text numberOfLines={1} style={[styles.messageTitle, { color: theme.text }]}>
+          {displaySessionTitle(row.session)}
+        </Text>
+      </View>
+      <Text numberOfLines={2} style={[styles.messageSnippet, { color: theme.textSecondary }]}>
+        {row.snippet}
+      </Text>
+    </Pressable>
   );
 }
 
@@ -581,6 +646,17 @@ const styles = StyleSheet.create({
     paddingHorizontal: 18,
   },
   emptyActionText: { fontSize: 14, fontWeight: '700' },
+  messageResults: { marginBottom: 6 },
+  messageRow: {
+    borderRadius: 10,
+    gap: 2,
+    marginHorizontal: 12,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+  },
+  messageHeading: { alignItems: 'center', flexDirection: 'row', gap: 5 },
+  messageTitle: { flex: 1, fontSize: 14.5, fontWeight: '500' },
+  messageSnippet: { fontSize: 12.5, lineHeight: 17 },
   sessionMenu: { height: 62, marginHorizontal: 12 },
   sessionRow: {
     borderRadius: 10,

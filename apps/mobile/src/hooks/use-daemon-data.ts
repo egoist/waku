@@ -14,6 +14,7 @@ import {
   loadTaskState,
   loadUsageHistory,
   probeProvider,
+  searchSessionMessages,
   type TaskState,
 } from '@/lib/daemon-api';
 import { persistentStorageSync } from '@/lib/composer-preferences-store';
@@ -179,6 +180,20 @@ export function useProviderCatalog() {
     isPending: settings.isPending || queries.some((query) => query.isPending && query.fetchStatus !== 'idle'),
     error: settings.error,
   };
+}
+
+/** Message-body search against the daemon. Callers debounce the query: every
+ * keystroke would otherwise be a full transcript scan. */
+export function useSessionMessageSearch(query: string) {
+  const { activeProfile, client, phase } = useDaemon();
+  const normalized = query.trim();
+  return useQuery({
+    queryKey: daemonKeys.messageSearch(activeProfile?.id ?? 'disconnected', normalized),
+    queryFn: () => searchSessionMessages(requireClient(client), normalized),
+    enabled: phase === 'connected' && Boolean(activeProfile && client && normalized),
+    staleTime: 30_000,
+    placeholderData: (previous) => previous,
+  });
 }
 
 /** Providers whose CLI reports account-level plan limits; the rest answer
