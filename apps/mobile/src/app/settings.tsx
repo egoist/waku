@@ -1,8 +1,9 @@
 import type { ProviderKind } from '@waku/client';
-import { Stack } from 'expo-router';
+import { router, Stack } from 'expo-router';
 import { useState } from 'react';
 import {
   ActivityIndicator,
+  Pressable,
   ScrollView,
   StyleSheet,
   Switch,
@@ -10,6 +11,7 @@ import {
   View,
 } from 'react-native';
 
+import { AppSymbol } from '@/components/app-symbol';
 import { ProviderIcon } from '@/components/provider-icon';
 import { NativeTint, Radius, Spacing } from '@/constants/theme';
 import {
@@ -53,6 +55,24 @@ export default function SettingsScreen() {
       <ScrollView
         contentInsetAdjustmentBehavior="automatic"
         contentContainerStyle={styles.content}>
+        <Text style={[styles.sectionTitle, { color: theme.textTertiary }]}>Library</Text>
+        <View style={[styles.card, { backgroundColor: theme.surface, borderColor: theme.border }]}>
+          <Pressable
+            accessibilityRole="button"
+            onPress={() => router.push('/skills')}
+            style={({ pressed }) => [
+              styles.row,
+              pressed ? { backgroundColor: theme.surfaceMuted } : null,
+            ]}>
+            <Text style={[styles.rowLabel, { color: theme.text }]}>Skills</Text>
+            <AppSymbol
+              name={{ ios: 'chevron.right', android: 'chevron_right', web: 'chevron_right' }}
+              size={13}
+              tintColor={theme.textTertiary}
+            />
+          </Pressable>
+        </View>
+
         {!settings.data ? (
           <View style={styles.loading}>
             <ActivityIndicator color={theme.textTertiary} />

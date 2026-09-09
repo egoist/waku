@@ -18,9 +18,12 @@ import {
   hydrateSession,
   loadDaemonSettings,
   loadTaskState,
+  loadSkills,
   loadUsageHistory,
   probeProvider,
   searchSessionMessages,
+  setSkillsEnabled,
+  trashSkills,
   updateDaemonSettings,
   type TaskState,
 } from '@/lib/daemon-api';
@@ -190,6 +193,41 @@ export function useProviderCatalog() {
     isPending: settings.isPending || queries.some((query) => query.isPending && query.fetchStatus !== 'idle'),
     error: settings.error,
   };
+}
+
+/** The skill catalog, scanned on the daemon host. */
+export function useSkills(projects: Project[]) {
+  const { activeProfile, client, phase } = useDaemon();
+  return useQuery({
+    queryKey: daemonKeys.skills(activeProfile?.id ?? 'disconnected'),
+    queryFn: () => loadSkills(requireClient(client), projects),
+    enabled: phase === 'connected' && Boolean(activeProfile && client),
+    placeholderData: (previous) => previous,
+  });
+}
+
+/** Enable or disable every install of a skill at once. */
+export function useSetSkillsEnabled() {
+  const { activeProfile, client } = useDaemon();
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({ dirs, enabled }: { dirs: string[]; enabled: boolean }) =>
+      setSkillsEnabled(requireClient(client), dirs, enabled),
+    onSuccess: () => void queryClient.invalidateQueries({
+      queryKey: daemonKeys.skills(activeProfile?.id ?? 'disconnected'),
+    }),
+  });
+}
+
+export function useTrashSkills() {
+  const { activeProfile, client } = useDaemon();
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (dirs: string[]) => trashSkills(requireClient(client), dirs),
+    onSuccess: () => void queryClient.invalidateQueries({
+      queryKey: daemonKeys.skills(activeProfile?.id ?? 'disconnected'),
+    }),
+  });
 }
 
 /** Write daemon-wide settings. Disabling an agent also changes what the

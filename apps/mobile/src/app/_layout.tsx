@@ -176,6 +176,10 @@ function AppNavigator() {
           options={{ title: "Settings" }}
         />
         <Stack.Screen
+          name="skills"
+          options={{ title: "Skills" }}
+        />
+        <Stack.Screen
           name="session/[id]"
           options={{
             ...drawerHeader,

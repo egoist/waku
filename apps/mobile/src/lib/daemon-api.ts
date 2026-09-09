@@ -15,6 +15,7 @@ import type {
   ReviewDiffSource,
   RuntimeMode,
   SessionMessageMatch,
+  SkillsCatalog,
   SlashCommand,
   UsageHistory,
   UsageWindow,
@@ -41,6 +42,7 @@ export const daemonKeys = {
     'provider',
     provider,
   ] as const,
+  skills: (profileId: string) => ['daemon', profileId, 'skills'] as const,
   planUsage: (profileId: string, provider: ProviderKind) => [
     'daemon',
     profileId,
@@ -179,6 +181,36 @@ export async function fetchPlanUsage(
     'planUsage',
   );
   return response.usage;
+}
+
+/** Skills are discovered on the daemon host, across the user's shared
+ * directory and each project. */
+export async function loadSkills(
+  client: WakuClient,
+  projects: Project[],
+): Promise<SkillsCatalog> {
+  const response = expectResponse(
+    await client.request({
+      type: 'loadSkills',
+      projects: projects.map((project) => [project.name, project.path]),
+    }),
+    'skillsCatalog',
+  );
+  return response.catalog;
+}
+
+export async function setSkillsEnabled(
+  client: WakuClient,
+  dirs: string[],
+  enabled: boolean,
+): Promise<void> {
+  expectResponse(await client.request({ type: 'setSkillsEnabled', dirs, enabled }), 'ack');
+}
+
+/** Moves a skill's directory to the trash on the daemon host — recoverable
+ * there, but not from the phone, hence the confirm upstream. */
+export async function trashSkills(client: WakuClient, dirs: string[]): Promise<void> {
+  expectResponse(await client.request({ type: 'trashSkills', dirs }), 'ack');
 }
 
 /** Slash commands the project, user, and skills define for a provider, as
