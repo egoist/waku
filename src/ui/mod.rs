@@ -225,13 +225,11 @@ pub fn provider_mark(theme: &Theme, provider: ProviderKind, size: f32, color: Hs
         .child(icon(provider_icon(provider), size, color));
     match provider_badge(provider) {
         // The badge inherits the base's alpha so a dimmed row dims both layers.
-        Some(badge) => base.child(
-            div()
-                .absolute()
-                .top_0()
-                .left_0()
-                .child(icon(badge, size, theme.danger.opacity(color.a))),
-        ),
+        Some(badge) => base.child(div().absolute().top_0().left_0().child(icon(
+            badge,
+            size,
+            theme.danger.opacity(color.a),
+        ))),
         None => base,
     }
 }
@@ -331,8 +329,7 @@ impl MenuChip {
     /// over `icon(provider_icon(..), ..)`, which silently drops the badge.
     pub fn provider(mut self, theme: &Theme, provider: ProviderKind, color: Hsla) -> Self {
         self.icon = Some((provider_icon(provider), color));
-        self.badge =
-            provider_badge(provider).map(|badge| (badge, theme.danger.opacity(color.a)));
+        self.badge = provider_badge(provider).map(|badge| (badge, theme.danger.opacity(color.a)));
         self
     }
 
@@ -419,13 +416,11 @@ impl RenderOnce for MenuChip {
                             .h(sp(12.0))
                             .flex_none()
                             .child(mark)
-                            .child(
-                                div()
-                                    .absolute()
-                                    .top_0()
-                                    .left_0()
-                                    .child(icon(badge, 12.0, badge_color)),
-                            ),
+                            .child(div().absolute().top_0().left_0().child(icon(
+                                badge,
+                                12.0,
+                                badge_color,
+                            ))),
                     ),
                     None => element.child(mark),
                 }

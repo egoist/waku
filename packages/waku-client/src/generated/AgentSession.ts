@@ -33,9 +33,9 @@ workspace?: SessionWorkspace, provider: ProviderKind, model?: string | null, run
  */
 context_window?: string | null,
 /**
- * Provider-owned agent composition selected before the first turn.
- * Currently populated by DeepSeek Harness, which locks this value once
- * conversation history exists.
+ * Provider-owned agent composition for this session. DeepSeek Harness
+ * locks the value once conversation history exists; OpenCode applies it
+ * to every turn, so a started session can still change it.
  */
 agent_preset?: string | null, status: SessionStatus, created_at: number,
 /**

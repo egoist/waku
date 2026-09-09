@@ -872,7 +872,11 @@ mod discovery_smoke {
     #[ignore = "requires a running opencode2 background service"]
     fn discovers_models_from_the_adopted_service() {
         let (models, presets) = super::discover_catalog(std::path::Path::new("opencode2"));
-        println!("models={} presets={:?}", models.len(), presets.as_ref().map(Vec::len));
+        println!(
+            "models={} presets={:?}",
+            models.len(),
+            presets.as_ref().map(Vec::len)
+        );
         let with_efforts: Vec<_> = models
             .iter()
             .filter(|model| !model.reasoning_efforts.is_empty())

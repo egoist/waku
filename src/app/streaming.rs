@@ -313,8 +313,7 @@ impl Waku {
                     } else if matches!(
                         session.provider,
                         ProviderKind::Codex | ProviderKind::Claude | ProviderKind::OpenCode2
-                    )
-                    {
+                    ) {
                         // Some providers start turns on their own: Codex goal
                         // continuation pursues an active goal whenever the
                         // thread is idle, and Claude Code re-enters the model

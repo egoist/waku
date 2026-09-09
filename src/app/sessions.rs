@@ -1102,28 +1102,32 @@ impl Waku {
     }
 
     pub(super) fn set_agent_preset(&mut self, agent_preset: String, cx: &mut Context<Self>) {
-        let selectable = self
-            .provider_probe(ProviderKind::DeepSeek)
+        let provider = self
+            .selected_session()
+            .map(|session| session.provider)
+            .filter(|provider| provider.supports_agent_presets());
+        let selectable = provider
+            .and_then(|provider| self.provider_probe(provider))
             .is_some_and(|probe| {
                 probe
                     .agent_presets
                     .iter()
                     .any(|preset| preset.id == agent_preset)
-            });
+            })
+            && provider.is_some();
         if !selectable {
             return;
         }
         if let Some(session) = self.selected_session_mut()
-            && session.provider == ProviderKind::DeepSeek
-            && !session.has_started()
-            && !session.is_busy()
+            && session.can_choose_agent_preset()
             && session.agent_preset.as_deref() != Some(agent_preset.as_str())
         {
             let session_id = session.id;
             session.agent_preset = Some(agent_preset);
-            // A provider cursor makes a session started, so this is normally a
-            // no-op. It also closes the narrow race where a blank runtime was
-            // prepared but had not reported its native session yet.
+            // A provider that can switch a live agent restarts into the new
+            // one on the next turn; for the rest this only closes the narrow
+            // race where a blank runtime was prepared but had not reported its
+            // native session yet.
             self.reset_session_runtime(session_id);
             self.save();
             cx.notify();
