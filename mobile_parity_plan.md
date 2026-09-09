@@ -147,8 +147,12 @@ Skills page, goal, settings (`updateSettings`), and distribution
   provider queries, since a stale catalog would keep offering an agent the
   daemon just hid. Not exposed: provider binary overrides (absolute paths
   on the daemon host, no picker for one on a phone).
-- **Skills page: not started** — `loadSkills` / `setSkillsEnabled` exist on
-  the wire; needs a screen plus enable/delete.
+- **Skills page: implemented.** `app/skills.tsx` groups by project, toggles
+  every install of a skill at once, and long-presses to trash behind a
+  confirm. `lib/skill-presentation.ts` (8 tests) holds the source, scope,
+  size, and grouping rules. Reached from a Skills row at the top of
+  Settings. Not exposed: `allowedTools` editing and the skill body — both
+  are long text on a phone-sized screen.
 - **Goal: not started, and probably not worth it** — Codex-only, and mobile
   has no surface for a goal today.
 - **Distribution: not started** — see below; iOS is not buildable on this
