@@ -113,6 +113,27 @@ Protocol already has it: `rewindSessionToMessage { turnCount }` and
 - **Attachment preview**: `readAttachment` / `readBlob` are unused, so images
   never render; add to `transcript-rows.tsx` / `md-block-row.tsx`.
 - **Transcript search**: `searchSessionMessages`.
+- **Status: implemented.** All three, one commit each:
+  - `lib/attachments.ts` gained `readAttachmentImage` (plus `imageMimeType`
+    and `isPreviewableImage`), and `components/attachment-chip.tsx` renders
+    an image tile that opens full screen; SVG is excluded because RN cannot
+    rasterize it. The read keys off the attachment's fields, not the object,
+    since every stream commit deep-clones the session.
+  - `searchSessionMessages` + `useSessionMessageSearch` + a debounced query
+    in the task drawer, with `messageSearchRows` resolving matches against
+    known sessions and dropping ones that can no longer be opened.
+  - `lib/composer-commands.ts` (ported from web's `composer-autocomplete`,
+    20 tests) plus `discoverSlashCommands`, `useComposerCommands`, a
+    suggestion strip in `mobile-composer.tsx`, and resolution at both send
+    sites — a template command that is not expanded reaches the provider as
+    literal text and means nothing to it.
+- `available_commands` still starts empty on a locally created session:
+  the daemon fills it from the provider's `availableCommands` event, so the
+  picker shows only discovered commands until the first reply. Provider-
+  reported commands are merged in as soon as they arrive.
+- Not ported: the desktop's fuzzy ranker, `/goal` bridging, and the `/fast`
+  service-tier toggle — all Codex-specific niceties with no mobile surface.
+  `typecheck` clean, `bun test` 171 pass. Remaining: on-device run.
 
 ## Phase 5 — Later / optional
 
