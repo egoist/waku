@@ -1,5 +1,5 @@
 import { useQueries, useQuery, useQueryClient } from '@tanstack/react-query';
-import type { ProviderKind } from '@waku/client';
+import type { Project, ProviderKind, UsageWindow } from '@waku/client';
 import {
   PROVIDER_PROBE_CACHE_STALE_TIME,
   readProviderProbeCache,
@@ -8,9 +8,11 @@ import {
 
 import {
   daemonKeys,
+  fetchPlanUsage,
   hydrateSession,
   loadDaemonSettings,
   loadTaskState,
+  loadUsageHistory,
   probeProvider,
   type TaskState,
 } from '@/lib/daemon-api';
@@ -177,6 +179,51 @@ export function useProviderCatalog() {
     isPending: settings.isPending || queries.some((query) => query.isPending && query.fetchStatus !== 'idle'),
     error: settings.error,
   };
+}
+
+/** Providers whose CLI reports account-level plan limits; the rest answer
+ * `null` and are skipped rather than probed. */
+const PLAN_USAGE_PROVIDERS: ProviderKind[] = ['claude', 'codex', 'openCode', 'grok'];
+
+/** Spend and token history for one window. The daemon prices the transcripts,
+ * so a switch of window is the only thing that refetches. */
+export function useUsageHistory(window: UsageWindow, projects: Project[]) {
+  const { activeProfile, client, phase } = useDaemon();
+  return useQuery({
+    queryKey: daemonKeys.usage(activeProfile?.id ?? 'disconnected', window),
+    queryFn: () => loadUsageHistory(requireClient(client), window, projects),
+    enabled: phase === 'connected' && Boolean(activeProfile && client),
+    placeholderData: (previous) => previous,
+  });
+}
+
+/** Plan limits for the given providers. One query per provider, all disabled
+ * until settings land, so mounting the screen never fires a probe per agent. */
+export function usePlanUsages(providers: ProviderKind[]) {
+  const { activeProfile, client, phase } = useDaemon();
+  const settings = useDaemonSettings();
+  const queries = useQueries({
+    queries: providers.map((provider) => ({
+      queryKey: daemonKeys.planUsage(activeProfile?.id ?? 'disconnected', provider),
+      queryFn: () => fetchPlanUsage(requireClient(client), provider, settings.data!, null),
+      enabled: phase === 'connected' &&
+        Boolean(activeProfile && client && settings.data) &&
+        PLAN_USAGE_PROVIDERS.includes(provider),
+      staleTime: 30_000,
+    })),
+  });
+  return providers
+    .filter((provider) => PLAN_USAGE_PROVIDERS.includes(provider))
+    .map((provider) => {
+      const query = queries[providers.indexOf(provider)];
+      return {
+        provider,
+        plan: query?.data ?? null,
+        isFetching: Boolean(query?.isFetching),
+        isPending: Boolean(query?.isPending),
+        error: query?.error ?? null,
+      };
+    });
 }
 
 function requireClient(client: ReturnType<typeof useDaemon>['client']) {

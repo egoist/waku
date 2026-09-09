@@ -508,3 +508,38 @@ function shallowEqualRow(a: TranscriptRow, b: TranscriptRow): boolean {
   }
   return true;
 }
+
+/** One stop a rewind or a fork can land on: the last turn it keeps, and the
+ * text that identifies that turn. */
+export interface TurnOption {
+  turnCount: number;
+  label: string;
+}
+
+/**
+ * Turns a rewind or fork may keep, oldest first.
+ *
+ * A turn the provider has not answered yet is not a stable boundary — its
+ * checkpoint, workspace diff, and transcript rows are all still being written
+ * — so it is left out of the list entirely.
+ */
+export function turnOptionsForSession(
+  session: AgentSession | null | undefined,
+): TurnOption[] {
+  if (!session) return [];
+  return session.turns
+    .filter((turn) => turn.completed_at !== null)
+    .sort((a, b) => a.turn_count - b.turn_count)
+    .map((turn) => {
+      const prompt = session.messages.find(
+        (message) => message.turn_id === turn.id && message.role === 'user',
+      );
+      const text = (prompt?.display_content ?? prompt?.content ?? '').trim();
+      const snippet = text.length > 60 ? `${text.slice(0, 60)}…` : text;
+      const title = `Turn ${turn.turn_count}`;
+      return {
+        turnCount: turn.turn_count,
+        label: snippet ? `${title} · ${snippet}` : title,
+      };
+    });
+}

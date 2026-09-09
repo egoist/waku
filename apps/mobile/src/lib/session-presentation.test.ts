@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import type { AgentSession, AgentTurn, Project } from '@waku/client';
+import type { AgentSession, AgentTurn, Message, Project } from '@waku/client';
 import { activitiesForBlock } from '@waku/client/event-reducer';
 
 import { TranscriptMarkdownCache } from '../md/transcript-cache';
@@ -14,6 +14,7 @@ import {
   relativeSessionTime,
   sessionDateGroup,
   stabilizeTranscriptRows,
+  turnOptionsForSession,
 } from './session-presentation';
 
 describe('mobile session presentation', () => {
@@ -357,6 +358,68 @@ function session(overrides: Partial<AgentSession>): AgentSession {
     ...overrides,
   };
 }
+
+describe('turn options for rewind and fork', () => {
+  function message(overrides: Partial<Message> & Pick<Message, 'id' | 'turn_id'>) {
+    return {
+      role: 'user' as const,
+      content: '',
+      created_at: 1,
+      streaming: false,
+      ...overrides,
+    };
+  }
+
+  test('lists completed turns oldest first, labelled by their prompt', () => {
+    const options = turnOptionsForSession(session({
+      turns: [
+        turn({ id: 'turn-2', status: 'completed', turn_count: 2 }),
+        turn({ id: 'turn-1', status: 'completed', turn_count: 1 }),
+      ],
+      messages: [
+        message({ id: 'm1', turn_id: 'turn-1', content: 'first question' }),
+        message({ id: 'm2', turn_id: 'turn-2', content: 'second question' }),
+      ],
+    }));
+
+    expect(options.map((option) => option.turnCount)).toEqual([1, 2]);
+    expect(options[0]?.label).toBe('Turn 1 · first question');
+  });
+
+  test('leaves out a turn the provider has not answered yet', () => {
+    const options = turnOptionsForSession(session({
+      turns: [
+        turn({ id: 'turn-1', status: 'completed', turn_count: 1 }),
+        turn({ id: 'turn-2', status: 'running', turn_count: 2, completed_at: null }),
+      ],
+      messages: [message({ id: 'm1', turn_id: 'turn-1', content: 'first' })],
+    }));
+
+    expect(options.map((option) => option.turnCount)).toEqual([1]);
+  });
+
+  test('truncates a long prompt and falls back to the turn number', () => {
+    const long = 'a'.repeat(80);
+    const options = turnOptionsForSession(session({
+      turns: [
+        turn({ id: 'turn-1', status: 'completed', turn_count: 1 }),
+        turn({ id: 'turn-2', status: 'completed', turn_count: 2 }),
+      ],
+      messages: [
+        message({ id: 'm1', turn_id: 'turn-1', content: long }),
+        message({ id: 'm2', turn_id: 'turn-2' }),
+      ],
+    }));
+
+    expect(options[0]?.label).toBe(`Turn 1 · ${'a'.repeat(60)}…`);
+    expect(options[1]?.label).toBe('Turn 2');
+  });
+
+  test('has nothing to offer before the first turn settles', () => {
+    expect(turnOptionsForSession(null)).toEqual([]);
+    expect(turnOptionsForSession(session({ turns: [] }))).toEqual([]);
+  });
+});
 
 function epoch(year: number, month: number, day: number, hour: number) {
   return Math.floor(new Date(year, month, day, hour).getTime() / 1_000);

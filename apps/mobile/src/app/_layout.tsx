@@ -1,6 +1,7 @@
 import {
   DarkTheme,
   DefaultTheme,
+  router,
   Stack,
   ThemeProvider,
   type NativeStackNavigationOptions,
@@ -112,6 +113,22 @@ function AppNavigator() {
     ),
     unstable_headerLeftItems: () => nativeHeaderButtons([drawerAction]),
   }), [drawerAction]);
+  /** Usage is a screen you visit deliberately, so it hangs off the home and
+   * new-task bars rather than the drawer, which belongs to task history. */
+  const usageAction = useMemo<HeaderActionSpec>(() => ({
+    icon: { ios: "chart.bar", android: "bar_chart", web: "bar_chart" },
+    label: "Usage",
+    onPress: () => router.push("/usage"),
+  }), []);
+  const homeHeader = useMemo<NativeStackNavigationOptions>(() => ({
+    ...drawerHeader,
+    headerRight: () => (
+      <HeaderActionGroup>
+        <HeaderAction {...usageAction} />
+      </HeaderActionGroup>
+    ),
+    unstable_headerRightItems: () => nativeHeaderButtons([usageAction]),
+  }), [drawerHeader, usageAction]);
 
   useEffect(() => {
     if (phase !== "booting") void SplashScreen.hideAsync();
@@ -130,7 +147,7 @@ function AppNavigator() {
       <Stack.Screen
         name="index"
         options={daemonRoutesAvailable
-          ? { ...drawerHeader, title: "New Task" }
+          ? { ...homeHeader, title: "New Task" }
           : { headerShown: false, title: "Waku" }}
       />
       {/* Removing the final saved daemon also removes every daemon-backed
@@ -142,7 +159,11 @@ function AppNavigator() {
         />
         <Stack.Screen
           name="new-task"
-          options={{ ...drawerHeader, title: "New Task" }}
+          options={{ ...homeHeader, title: "New Task" }}
+        />
+        <Stack.Screen
+          name="usage"
+          options={{ title: "Usage" }}
         />
         <Stack.Screen
           name="session/[id]"

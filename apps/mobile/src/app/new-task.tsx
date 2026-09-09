@@ -28,6 +28,7 @@ import {
   SendButton,
 } from '@/components/mobile-composer';
 import { RemoteProjectPicker } from '@/components/remote-project-picker';
+import { ResumeSessionSheet } from '@/components/session-option-sheets';
 import { useScreenHeaderInset } from '@/components/screen-header';
 import {
   ModelPickerSheet,
@@ -83,6 +84,7 @@ export default function NewTaskScreen() {
   const [submitting, setSubmitting] = useState(false);
   const [openSheet, setOpenSheet] = useState<SheetKind | null>(null);
   const [projectPickerOpen, setProjectPickerOpen] = useState(false);
+  const [resumeOpen, setResumeOpen] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const installedProviders = useMemo(
     () => catalog.providers.filter((item) => item.installed).map((item) => item.id),
@@ -369,6 +371,15 @@ export default function NewTaskScreen() {
             onPress={() => setOpenSheet('branch')}
           />
         )}
+        <SelectorRow
+          icon={{ ios: 'arrow.uturn.down', android: 'restart_alt', web: 'restart_alt' }}
+          label="Resume external session"
+          value="From a CLI on the daemon"
+          onPress={() => {
+            void Haptics.selectionAsync();
+            setResumeOpen(true);
+          }}
+        />
       </View>
 
       <View style={[styles.composerShell, { paddingBottom: Math.max(insets.bottom, 10) }]}>
@@ -512,6 +523,17 @@ export default function NewTaskScreen() {
         visible={projectPickerOpen}
         onDismiss={() => setProjectPickerOpen(false)}
         onSelect={(project) => setProjectId(project.id)}
+      />
+
+      <ResumeSessionSheet
+        visible={resumeOpen}
+        onDismiss={() => setResumeOpen(false)}
+        onResume={(resumed) => {
+          setResumeOpen(false);
+          router.push({ pathname: '/session/[id]', params: { id: resumed.id } });
+        }}
+        installedProviders={installedProviders}
+        initialProvider={provider}
       />
     </KeyboardAvoidingView>
   );

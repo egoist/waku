@@ -17,6 +17,7 @@ export interface NewSessionOptions {
   reasoningEffort?: string | null;
   serviceTier?: string | null;
   contextWindow?: string | null;
+  agentPreset?: string | null;
   runtimeMode?: RuntimeMode;
   /** Base branch for an isolated worktree; null means the project default. */
   baseBranch?: string | null;
@@ -96,7 +97,7 @@ export function createSession(
     reasoning_effort: options.reasoningEffort ?? null,
     service_tier: options.serviceTier ?? null,
     context_window: options.contextWindow ?? null,
-    agent_preset: null,
+    agent_preset: options.agentPreset ?? null,
     status: 'idle',
     created_at: now,
     updated_at: now,
@@ -191,6 +192,7 @@ export interface SessionOptionChanges {
   reasoningEffort?: string | null;
   serviceTier?: string | null;
   contextWindow?: string | null;
+  agentPreset?: string | null;
   runtimeMode?: RuntimeMode;
 }
 
@@ -208,6 +210,8 @@ export function applySessionOptions(
       changes.serviceTier !== undefined ? changes.serviceTier : session.service_tier,
     context_window:
       changes.contextWindow !== undefined ? changes.contextWindow : session.context_window,
+    agent_preset:
+      changes.agentPreset !== undefined ? changes.agentPreset : session.agent_preset,
     runtime_mode: changes.runtimeMode ?? session.runtime_mode,
     updated_at: clock.nowSeconds(),
   };

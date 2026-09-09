@@ -29,9 +29,10 @@ import {
 import { ComposerTextInput } from './composer-text-input';
 import type { ComposerTextInputProps } from './composer-text-input.types';
 import { GlassSurface, liquidGlass } from './glass-surface';
-import { ModelSheet } from './session-option-sheets';
+import { AgentPresetSheet, ModelSheet } from './session-option-sheets';
 import { MonoFont, NativeTint, Radius } from '@/constants/theme';
 import { useSyncedComposerDraft } from '@/hooks/use-synced-composer-draft';
+import { useProviderModels } from '@/hooks/use-daemon-data';
 import { useTheme } from '@/hooks/use-theme';
 import {
   importLocalAttachment,
@@ -187,7 +188,20 @@ export function MobileComposer({
   const [submitting, setSubmitting] = useState(false);
   const [localError, setLocalError] = useState<string | null>(null);
   const [modelSheetOpen, setModelSheetOpen] = useState(false);
+  const [agentPresetSheetOpen, setAgentPresetSheetOpen] = useState(false);
   const busy = sessionBusy(session);
+  const sessionHasStarted =
+    session.turns.length > 0 || session.messages.length > 0 || !!session.provider_cursor;
+  const supportsAgentPreset =
+    !busy &&
+    !sessionHasStarted &&
+    (session.provider === 'deepSeek' || session.provider === 'openCode');
+  const agentPresetProbe = useProviderModels(supportsAgentPreset ? session.provider : null);
+  const agentPresets = agentPresetProbe.data?.agent_presets ?? [];
+  const selectedAgentPreset =
+    agentPresets.find((preset) => preset.id === session.agent_preset) ??
+    agentPresets.find((preset) => preset.is_default) ??
+    agentPresets[0];
   const liveRuntime = runtime.runtimes[session.id];
   const canSteer = busy && Boolean(liveRuntime?.supportsSteer) && session.status !== 'connecting';
   const permission = runtime.permissions[session.id];
@@ -504,6 +518,13 @@ export function MobileComposer({
         placeholder={placeholder}
         right={(
           <>
+            {supportsAgentPreset && agentPresets.length > 0 && (
+              <ComposerIconButton
+                icon={{ ios: 'person', android: 'person', web: 'person' }}
+                label="Agent"
+                onPress={() => setAgentPresetSheetOpen(true)}
+              />
+            )}
             <ComposerIconButton
               icon={{ ios: 'speedometer', android: 'speed', web: 'speed' }}
               label="Model"
@@ -565,6 +586,13 @@ export function MobileComposer({
         provider={session.provider}
         reasoningEffort={session.reasoning_effort ?? null}
         visible={modelSheetOpen}
+      />
+      <AgentPresetSheet
+        agentPreset={session.agent_preset ?? null}
+        onApply={(selection) => applyOptions(selection)}
+        onDismiss={() => setAgentPresetSheetOpen(false)}
+        provider={session.provider}
+        visible={agentPresetSheetOpen}
       />
     </View>
   );
