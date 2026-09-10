@@ -2881,10 +2881,8 @@ impl Waku {
                 .clone()
                 .or_else(|| snapshot.default_branch.clone())
                 .or_else(|| snapshot.display_branch().map(str::to_owned)),
-            SessionWorkspace::Worktree { branch, .. } => snapshot
-                .current
-                .clone()
-                .or_else(|| Some(branch.clone()))
+            SessionWorkspace::Worktree { branch, .. } => Some(branch.clone())
+                .or_else(|| snapshot.current.clone())
                 .or_else(|| snapshot.detached_head.clone()),
         }
         .unwrap_or_else(|| tr!("branches.detached_head"));

@@ -19,6 +19,7 @@ import {
   TextInput,
   View,
 } from 'react-native';
+import { useKeyboardHeight } from '@/lib/keyboard-offset';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { AppSymbol } from './app-symbol';
@@ -190,6 +191,7 @@ export function MobileComposer({
 }) {
   const theme = useTheme();
   const insets = useSafeAreaInsets();
+  const keyboardHeight = useKeyboardHeight();
   const daemon = useDaemon();
   const runtime = useRuntime();
   const [draft, setDraft] = useState('');
@@ -426,7 +428,7 @@ export function MobileComposer({
         : 'Message agent';
 
   return (
-    <View style={[styles.shell, { paddingBottom: Math.max(insets.bottom, 10) }]}>
+    <View style={[styles.shell, { paddingBottom: Math.max(insets.bottom, 10) + keyboardHeight }]}>
       {permission && !userInput && (
         <PermissionPanel
           permission={permission}

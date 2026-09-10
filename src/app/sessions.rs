@@ -171,6 +171,7 @@ impl Waku {
         if session_changed {
             self.capture_and_save_current_composer_draft(cx);
             self.store_selected_right_panel_state();
+            self.reset_branch_picker_state(cx);
         }
         self.state.selected_session = Some(session_id);
         self.task_switcher.record_access(session_id);

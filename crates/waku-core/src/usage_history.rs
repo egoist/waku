@@ -61,6 +61,8 @@ fn might_carry_usage(line: &str, provider: UsageProvider) -> bool {
     match provider {
         UsageProvider::Claude => line.contains("\"usage\""),
         UsageProvider::Codex => line.contains("\"token_count\""),
+        // OpenCode is collected through its database, not JSONL transcripts.
+        UsageProvider::OpenCode => false,
     }
 }
 
@@ -558,6 +560,27 @@ pub struct FileCacheEntry {
 
 pub type ScanCache = HashMap<PathBuf, FileCacheEntry>;
 
+/// Counters a [`UsageSource`] contributes back to the overall scan summary.
+#[derive(Default)]
+struct ScanContribution {
+    scanned_files: usize,
+    skipped_files: usize,
+    errors: Vec<String>,
+}
+
+/// One provider's usage backend. Each implementation owns its own scan,
+/// caching, and window filtering, so [`scan`] holds no per-provider branches:
+/// adding a provider means adding a source, never forking the scan loop.
+trait UsageSource {
+    fn collect(
+        &self,
+        aggregator: &mut Aggregator,
+        rates: &RateTable,
+        cache: &mut ScanCache,
+        window_start_ms: i64,
+    ) -> ScanContribution;
+}
+
 /// The transcript root scanned for one provider.
 fn provider_root(provider: UsageProvider) -> Option<PathBuf> {
     match provider {
@@ -569,6 +592,10 @@ fn provider_root(provider: UsageProvider) -> Option<PathBuf> {
             Some(dir) if !dir.is_empty() => Some(PathBuf::from(dir).join("sessions")),
             _ => dirs::home_dir().map(|home| home.join(".codex/sessions")),
         },
+        // OpenCode stores sessions in a single SQLite database, not JSONL
+        // transcripts, so it has no file tree to walk here — `scan` collects
+        // its usage through the `opencode db` CLI instead.
+        UsageProvider::OpenCode => None,
     }
 }
 
@@ -636,6 +663,11 @@ fn read_transcript_records(path: &Path, provider: UsageProvider) -> Option<Vec<U
             Err(_) => return None,
         }
         match provider {
+            UsageProvider::OpenCode => {
+                // OpenCode usage is read from its database, never JSONL; this
+                // path is only reached for Claude Code and Codex transcripts.
+                return Some(Vec::new());
+            }
             UsageProvider::Codex => {
                 // Codex carries the active model on `turn_context` lines that
                 // hold no usage of their own, so those still pass through the
@@ -672,6 +704,332 @@ fn read_transcript_records(path: &Path, provider: UsageProvider) -> Option<Vec<U
     Some(records)
 }
 
+/// OpenCode keeps sessions in a single SQLite database (the `session` and
+/// `message` tables, `message.data` a JSON blob carrying `tokens`/`cost`/`modelID`)
+/// rather than the JSONL transcripts Claude Code and Codex write. Read it through
+/// the `opencode db` CLI — the same surface Waku already uses to drive OpenCode —
+/// so we track only the stable query shape and degrade to nothing when the binary
+/// or database is unavailable.
+/// Read OpenCode usage records straight from its SQLite database via the
+/// `opencode db` CLI. Returns an empty list on any failure — OpenCode usage is
+/// best-effort and must never hard-fail the Usage page. Cost pricing happens
+/// later in the aggregator, so this only needs to produce raw records.
+fn collect_opencode_records(binary: &Path) -> Vec<UsageRecord> {
+    let sql = "SELECT m.id AS id, m.session_id AS session_id, m.time_created AS time_created, \
+               m.data AS data, s.directory AS directory \
+               FROM message m JOIN session s ON s.id = m.session_id";
+    let mut records = Vec::new();
+    for row in run_opencode_db(&binary, sql) {
+        let Some(id) = row.get("id").and_then(|value| value.as_str()) else {
+            continue;
+        };
+        let session_id = row
+            .get("session_id")
+            .and_then(|value| value.as_str())
+            .unwrap_or_default()
+            .to_owned();
+        let directory = row
+            .get("directory")
+            .and_then(|value| value.as_str())
+            .unwrap_or_default()
+            .to_owned();
+        let time_created = row
+            .get("time_created")
+            .and_then(|value| value.as_i64())
+            .unwrap_or(0);
+
+        // `opencode db --format json` returns JSON columns verbatim; `data` may
+        // arrive as a JSON string or already-parsed object depending on version.
+        let data = match row.get("data") {
+            Some(serde_json::Value::String(text)) => {
+                serde_json::from_str::<serde_json::Value>(text).ok()
+            }
+            Some(serde_json::Value::Object(_)) => row.get("data").cloned(),
+            _ => None,
+        };
+        let Some(data) = data else {
+            continue;
+        };
+
+        // Prefer the per-message `time.created` (milliseconds); fall back to the
+        // table column, normalizing seconds to milliseconds when it looks small.
+        let raw_ms = data
+            .get("time")
+            .and_then(|time| time.get("created"))
+            .and_then(|value| value.as_i64())
+            .filter(|ms| *ms > 0)
+            .unwrap_or(time_created);
+        let timestamp_ms = if raw_ms > 0 && raw_ms < 1_000_000_000_000 {
+            raw_ms * 1000
+        } else {
+            raw_ms
+        };
+        if timestamp_ms <= 0 {
+            continue;
+        }
+
+        let tokens = data.get("tokens");
+        let input = tokens
+            .and_then(|tokens| tokens.get("input"))
+            .and_then(|value| value.as_i64())
+            .unwrap_or(0) as u64;
+        let output = tokens
+            .and_then(|tokens| tokens.get("output"))
+            .and_then(|value| value.as_i64())
+            .unwrap_or(0) as u64;
+        let reasoning = tokens
+            .and_then(|tokens| tokens.get("reasoning"))
+            .and_then(|value| value.as_i64())
+            .unwrap_or(0) as u64;
+        let cache = tokens.and_then(|tokens| tokens.get("cache"));
+        let cached_input = cache
+            .and_then(|cache| cache.get("read"))
+            .and_then(|value| value.as_i64())
+            .unwrap_or(0) as u64;
+        let cache_creation = cache
+            .and_then(|cache| cache.get("write"))
+            .and_then(|value| value.as_i64())
+            .unwrap_or(0) as u64;
+
+        let model = data
+            .get("modelID")
+            .and_then(|value| value.as_str())
+            .unwrap_or_default()
+            .to_owned();
+        let reported_cost = data.get("cost").and_then(|value| value.as_f64());
+
+        // OpenCode records every message; only those with token or cost data
+        // carry usage worth attributing.
+        if input + output + reasoning + cached_input + cache_creation == 0
+            && reported_cost.is_none()
+        {
+            continue;
+        }
+
+        records.push(UsageRecord {
+            provider: UsageProvider::OpenCode,
+            timestamp_ms,
+            model,
+            session_id,
+            project: directory,
+            totals: TokenTotals {
+                uncached_input: input,
+                cached_input,
+                cache_creation,
+                output,
+                reasoning,
+            },
+            reported_cost_usd: reported_cost,
+            dedupe_key: Some(id.to_owned()),
+        });
+    }
+    records
+}
+
+/// Resolve OpenCode's SQLite database path via `opencode db path`. Used as the
+/// cache key so parsed usage is memoised by the database's mtime. Returns `None`
+/// when the binary or command is unavailable, in which case the source falls
+/// back to a best-effort read without caching rather than dropping OpenCode.
+fn opencode_db_path(binary: &Path) -> Option<PathBuf> {
+    let Ok(output) = std::process::Command::new(binary).args(["db", "path"]).output() else {
+        return None;
+    };
+    if !output.status.success() {
+        return None;
+    }
+    let path = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+    if path.is_empty() {
+        None
+    } else {
+        Some(PathBuf::from(path))
+    }
+}
+
+/// Resolve the `opencode` binary. An explicit `WAKU_OPENCODE_BIN` override lets
+/// the scanner target a specific install (and keeps tests hermetic); otherwise
+/// `Command` resolves `opencode` through `PATH` at spawn time.
+fn opencode_binary() -> Option<PathBuf> {
+    if let Ok(explicit) = std::env::var("WAKU_OPENCODE_BIN") {
+        if !explicit.is_empty() {
+            return Some(PathBuf::from(explicit));
+        }
+    }
+    Some(PathBuf::from("opencode"))
+}
+
+/// Run a read-only SQL query via `opencode db --format json` and return the rows
+/// as JSON objects. Any failure — binary missing, locked database, schema drift —
+/// yields an empty list: OpenCode usage is best-effort and must never hard-fail
+/// the Usage page.
+fn run_opencode_db(binary: &Path, sql: &str) -> Vec<HashMap<String, serde_json::Value>> {
+    let Ok(output) = std::process::Command::new(binary)
+        .args(["db", "--format", "json", sql])
+        .output()
+    else {
+        return Vec::new();
+    };
+    if !output.status.success() {
+        return Vec::new();
+    }
+    let Ok(parsed) = serde_json::from_slice::<serde_json::Value>(&output.stdout) else {
+        return Vec::new();
+    };
+    match parsed {
+        serde_json::Value::Array(rows) => rows
+            .into_iter()
+            .filter_map(|row| {
+                row.as_object().map(|object| {
+                    object
+                        .iter()
+                        .map(|(key, value)| (key.clone(), value.clone()))
+                        .collect()
+                })
+            })
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+/* ------------------------------------------------------------------------- */
+/* Provider sources                                                          */
+/* ------------------------------------------------------------------------- */
+
+/// Walks `.jsonl` transcripts under a provider's root directory and folds each
+/// parsed record into the aggregator, memoising per file by `(size, mtime)`.
+struct JsonlUsageSource {
+    provider: UsageProvider,
+}
+
+impl UsageSource for JsonlUsageSource {
+    fn collect(
+        &self,
+        aggregator: &mut Aggregator,
+        rates: &RateTable,
+        cache: &mut ScanCache,
+        window_start_ms: i64,
+    ) -> ScanContribution {
+        let Some(root) = provider_root(self.provider) else {
+            return ScanContribution::default();
+        };
+        if !root.is_dir() {
+            // Provider never used on this machine: zero usage, not an error.
+            return ScanContribution::default();
+        }
+        let mtime_cutoff_ms = window_start_ms - MTIME_SLACK.as_millis() as i64;
+        let mut files = Vec::new();
+        let skipped_files = list_transcript_files(&root, mtime_cutoff_ms, &mut files);
+        if files.is_empty() && std::fs::read_dir(&root).is_err() {
+            return ScanContribution {
+                scanned_files: 0,
+                skipped_files,
+                errors: vec![format!(
+                    "{} transcripts at {} could not be read.",
+                    self.provider.label(),
+                    root.display()
+                )],
+            };
+        }
+        let mut scanned_files = 0;
+        for (path, size, mtime_ms) in files {
+            scanned_files += 1;
+            // Provider is part of the cache identity: if two providers were ever
+            // pointed at one directory, a hit parsed by the other parser must
+            // not be reused.
+            let records = match cache.get(&path) {
+                Some(entry)
+                    if entry.size == size
+                        && entry.mtime_ms == mtime_ms
+                        && entry.provider == self.provider =>
+                {
+                    &entry.records
+                }
+                _ => match read_transcript_records(&path, self.provider) {
+                    Some(records) => &cache
+                        .entry(path)
+                        .insert_entry(FileCacheEntry {
+                            size,
+                            mtime_ms,
+                            provider: self.provider,
+                            records,
+                        })
+                        .into_mut()
+                        .records,
+                    // A read failure is not an empty transcript: caching it under
+                    // this (size, mtime) would silently drop the file's usage
+                    // until it changes.
+                    None => continue,
+                },
+            };
+            for record in records {
+                aggregator.add(record, rates);
+            }
+        }
+        ScanContribution {
+            scanned_files,
+            skipped_files,
+            errors: Vec::new(),
+        }
+    }
+}
+
+/// Reads OpenCode usage from its SQLite database. The parsed result is memoised
+/// under the database file's mtime (reusing the shared [`ScanCache`]), so a
+/// rescan only re-queries when the database has actually changed — parity with
+/// the JSONL sources instead of re-reading the whole table on every scan.
+struct OpenCodeDbSource;
+
+impl UsageSource for OpenCodeDbSource {
+    fn collect(
+        &self,
+        aggregator: &mut Aggregator,
+        rates: &RateTable,
+        cache: &mut ScanCache,
+        _window_start_ms: i64,
+    ) -> ScanContribution {
+        let Some(binary) = opencode_binary() else {
+            return ScanContribution::default();
+        };
+        // Resolve the database file so we can key the shared cache by its mtime.
+        let cache_key = opencode_db_path(&binary);
+        let mtime_ms = cache_key
+            .as_ref()
+            .and_then(|path| std::fs::metadata(path).ok())
+            .and_then(|metadata| metadata.modified().ok())
+            .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+            .map(|elapsed| elapsed.as_millis() as i64);
+
+        let records = match (cache_key.clone(), mtime_ms) {
+            (Some(key), Some(mtime)) => match cache.get(&key) {
+                Some(entry)
+                    if entry.mtime_ms == mtime && entry.provider == UsageProvider::OpenCode =>
+                {
+                    entry.records.clone()
+                }
+                _ => {
+                    let parsed = collect_opencode_records(&binary);
+                    cache.insert(
+                        key,
+                        FileCacheEntry {
+                            size: 0,
+                            mtime_ms: mtime,
+                            provider: UsageProvider::OpenCode,
+                            records: parsed.clone(),
+                        },
+                    );
+                    parsed
+                }
+            },
+            // No resolvable database path: best-effort read without caching.
+            _ => collect_opencode_records(&binary),
+        };
+
+        for record in &records {
+            aggregator.add(record, rates);
+        }
+        ScanContribution::default()
+    }
+}
+
 /* ------------------------------------------------------------------------- */
 /* Aggregation                                                               */
 /* ------------------------------------------------------------------------- */
@@ -698,7 +1056,7 @@ struct Bucket {
 struct ProjectAccumulator {
     cost_usd: f64,
     total_tokens: u64,
-    by_provider: [ProviderDay; 2],
+    by_provider: [ProviderDay; UsageProvider::ALL.len()],
     sessions: HashSet<(UsageProvider, String)>,
     /// Cost per model, for the row's "top models" caption.
     models: HashMap<String, f64>,
@@ -847,68 +1205,28 @@ pub fn scan(
         .and_then(|midnight| Local.from_local_datetime(&midnight).earliest())
         .map(|midnight| midnight.timestamp_millis())
         .unwrap_or_else(|| unix_time_ms() - (until_day - since_day).num_days().max(1) * 86_400_000);
-    let mtime_cutoff_ms = window_start_ms - MTIME_SLACK.as_millis() as i64;
-
     let mut aggregator = Aggregator::new(since_day, until_day, project_roots);
     let mut scanned_files = 0;
     let mut skipped_files = 0;
     let mut errors = Vec::new();
 
-    for provider in UsageProvider::ALL {
-        let Some(root) = provider_root(provider) else {
-            continue;
-        };
-        if !root.is_dir() {
-            // Provider never used on this machine; zero usage, not an error.
-            continue;
-        }
-        let mut files = Vec::new();
-        skipped_files += list_transcript_files(&root, mtime_cutoff_ms, &mut files);
-        if files.is_empty() && std::fs::read_dir(&root).is_err() {
-            errors.push(format!(
-                "{} transcripts at {} could not be read.",
-                provider.label(),
-                root.display()
-            ));
-            continue;
-        }
-        for (path, size, mtime_ms) in files {
-            scanned_files += 1;
-            let cached = cache.get(&path);
-            // Provider is part of the identity: if both providers were ever
-            // pointed at one directory, a hit parsed by the other parser must
-            // not be reused.
-            let records = match cached {
-                Some(entry)
-                    if entry.size == size
-                        && entry.mtime_ms == mtime_ms
-                        && entry.provider == provider =>
-                {
-                    &entry.records
-                }
-                _ => match read_transcript_records(&path, provider) {
-                    Some(records) => {
-                        &cache
-                            .entry(path)
-                            .insert_entry(FileCacheEntry {
-                                size,
-                                mtime_ms,
-                                provider,
-                                records,
-                            })
-                            .into_mut()
-                            .records
-                    }
-                    // A read failure is not an empty transcript: caching it
-                    // under this (size, mtime) would silently drop the file's
-                    // usage until it changes.
-                    None => continue,
-                },
-            };
-            for record in records {
-                aggregator.add(record, rates);
-            }
-        }
+    // Each provider owns its scan/cache/filter, so there is no per-provider
+    // branch here — adding a provider is adding a `UsageSource`, not editing
+    // this loop.
+    let sources: Vec<Box<dyn UsageSource>> = vec![
+        Box::new(JsonlUsageSource {
+            provider: UsageProvider::Claude,
+        }),
+        Box::new(JsonlUsageSource {
+            provider: UsageProvider::Codex,
+        }),
+        Box::new(OpenCodeDbSource),
+    ];
+    for source in &sources {
+        let contribution = source.collect(&mut aggregator, rates, cache, window_start_ms);
+        scanned_files += contribution.scanned_files;
+        skipped_files += contribution.skipped_files;
+        errors.extend(contribution.errors);
     }
 
     derive_history(
@@ -968,7 +1286,7 @@ fn derive_history(
             day: *day,
             cost_usd: 0.0,
             total_tokens: 0,
-            by_provider: [ProviderDay::default(); 2],
+            by_provider: [ProviderDay::default(); UsageProvider::ALL.len()],
         });
         day_entry.cost_usd += bucket.cost_usd;
         day_entry.total_tokens += tokens;
@@ -1024,11 +1342,11 @@ fn derive_history(
     for day in &day_slices {
         let month = months
             .entry(first_of_month(day.day))
-            .or_insert_with(|| MonthSlice {
+                .or_insert_with(|| MonthSlice {
                 first_day: first_of_month(day.day),
                 cost_usd: 0.0,
                 total_tokens: 0,
-                by_provider: [ProviderDay::default(); 2],
+                by_provider: [ProviderDay::default(); UsageProvider::ALL.len()],
                 sessions: 0,
                 active_days: 0,
                 top_models: Vec::new(),

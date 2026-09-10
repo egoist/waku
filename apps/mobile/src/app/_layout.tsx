@@ -23,6 +23,7 @@ import {
 import { TaskDrawerHost, useTaskDrawer } from "@/components/task-drawer";
 import { DaemonProvider, useDaemon } from "@/lib/daemon-context";
 import { RuntimeProvider } from "@/lib/runtime-context";
+import { KeyboardOffsetProvider } from "@/lib/keyboard-offset";
 
 /** Deep links and state restores keep the new-task home as the stack anchor. */
 export const unstable_settings = { anchor: "index" };
@@ -76,7 +77,8 @@ export default function RootLayout() {
         };
   return (
     <GestureHandlerRootView style={styles.root}>
-      <QueryClientProvider client={queryClient}>
+      <KeyboardOffsetProvider>
+        <QueryClientProvider client={queryClient}>
         <DaemonProvider>
           <RuntimeProvider>
             <ThemeProvider value={navigationTheme}>
@@ -88,6 +90,7 @@ export default function RootLayout() {
           </RuntimeProvider>
         </DaemonProvider>
       </QueryClientProvider>
+      </KeyboardOffsetProvider>
     </GestureHandlerRootView>
   );
 }

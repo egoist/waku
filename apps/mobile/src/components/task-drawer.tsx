@@ -42,6 +42,7 @@ import { NativeTint, Radius, Spacing } from '@/constants/theme';
 import { useSessionMessageSearch, useTaskState } from '@/hooks/use-daemon-data';
 import { useTheme } from '@/hooks/use-theme';
 import { useDaemon } from '@/lib/daemon-context';
+import { useKeyboardHeight } from '@/lib/keyboard-offset';
 import { sessionIsRunning } from '@/lib/mobile-runtime';
 import { useRuntime } from '@/lib/runtime-context';
 import {
@@ -155,6 +156,7 @@ function TaskDrawerContent({
 }) {
   const theme = useTheme();
   const insets = useSafeAreaInsets();
+  const keyboardHeight = useKeyboardHeight();
   const daemon = useDaemon();
   const runtime = useRuntime();
   const taskState = useTaskState();
@@ -329,7 +331,7 @@ function TaskDrawerContent({
           behavior={Platform.OS === 'ios' ? 'position' : undefined}
           keyboardVerticalOffset={SearchDockGap}
           pointerEvents="box-none"
-          style={[styles.searchDockAvoider, { bottom: insets.bottom + SearchDockGap }]}>
+          style={[styles.searchDockAvoider, { bottom: insets.bottom + SearchDockGap + keyboardHeight }]}>
           <View pointerEvents="box-none" style={styles.searchDock}>
             <GlassSurface interactive style={styles.searchCapsule}>
               <View style={styles.searchCapsuleInner}>
