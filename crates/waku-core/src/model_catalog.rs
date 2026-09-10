@@ -111,6 +111,35 @@ pub fn fallback_agent_presets(provider: ProviderKind) -> Vec<ProviderAgentPreset
     ]
 }
 
+/// Outcome of a provider catalog probe.
+///
+/// An empty result is ambiguous: a provider CLI may genuinely expose no models
+/// (for example, every configured provider was just removed) or it may simply
+/// have failed to run. Only a *successful* run that happens to enumerate
+/// nothing should be trusted to shrink the picker; a failed run must keep the
+/// last good on-disk cache so one bad CLI invocation can't wipe it.
+enum CatalogProbe {
+    /// The CLI ran and reported a catalog (possibly empty). Trust it: write it
+    /// to the cache even when empty, so a removal propagates instead of being
+    /// masked by the stale cache.
+    Authoritative(Vec<ProviderModel>),
+    /// The CLI could not run or exited unsuccessfully. Retain the prior cache.
+    Failed,
+}
+
+impl CatalogProbe {
+    /// Wraps a legacy `Vec` result. Empty stays `Failed` to preserve the old
+    /// "don't shrink the picker on an empty probe" behavior for providers whose
+    /// discovery does not yet distinguish success from failure.
+    fn legacy(models: Vec<ProviderModel>) -> CatalogProbe {
+        if models.is_empty() {
+            CatalogProbe::Failed
+        } else {
+            CatalogProbe::Authoritative(models)
+        }
+    }
+}
+
 /// Discovers both ordinary models and provider-owned agent compositions in
 /// one provider process. Harness serves both catalogs from the same resident
 /// Host, so querying them together avoids starting it twice during detection.
@@ -121,27 +150,38 @@ pub fn discover_catalog(
     let (discovered, discovered_presets) = match provider {
         // Amp exposes stable agent modes rather than a model inventory. Keep
         // the picker aligned with the modes advertised by the current CLI.
-        ProviderKind::Amp => (Vec::new(), None),
-        ProviderKind::Codex => (discover_codex_models(binary), None),
-        ProviderKind::Claude => (discover_claude_models(binary), None),
-        ProviderKind::Cursor => (discover_cursor_models(binary), None),
-        ProviderKind::DeepSeek => discover_deepseek_catalog(binary),
-        ProviderKind::Fx => (discover_fx_models(binary), None),
+        ProviderKind::Amp => (CatalogProbe::legacy(Vec::new()), None),
+        ProviderKind::Codex => (CatalogProbe::legacy(discover_codex_models(binary)), None),
+        ProviderKind::Claude => (CatalogProbe::legacy(discover_claude_models(binary)), None),
+        ProviderKind::Cursor => (CatalogProbe::legacy(discover_cursor_models(binary)), None),
+        ProviderKind::DeepSeek => {
+            let (models, presets) = discover_deepseek_catalog(binary);
+            (CatalogProbe::legacy(models), presets)
+        }
+        ProviderKind::Fx => (CatalogProbe::legacy(discover_fx_models(binary)), None),
         ProviderKind::OpenCode => discover_opencode_catalog(binary),
-        ProviderKind::OpenCode2 => crate::opencode2_session::discover_catalog(binary),
-        ProviderKind::Grok => (discover_grok_models(binary), None),
-        ProviderKind::Kimi => (discover_kimi_models(binary), None),
-        ProviderKind::Pi => (discover_pi_models(binary, PiDialect::Pi), None),
-        ProviderKind::OhMyPi => (discover_pi_models(binary, PiDialect::OhMyPi), None),
+        ProviderKind::OpenCode2 => {
+            let (models, presets) = crate::opencode2_session::discover_catalog(binary);
+            (CatalogProbe::legacy(models), presets)
+        }
+        ProviderKind::Grok => (CatalogProbe::legacy(discover_grok_models(binary)), None),
+        ProviderKind::Kimi => (CatalogProbe::legacy(discover_kimi_models(binary)), None),
+        ProviderKind::Pi => (CatalogProbe::legacy(discover_pi_models(binary, PiDialect::Pi)), None),
+        ProviderKind::OhMyPi => {
+            (CatalogProbe::legacy(discover_pi_models(binary, PiDialect::OhMyPi)), None)
+        }
     };
-    let models = if discovered.is_empty() {
-        // A failed or empty probe keeps the last successful discovery over
-        // the hardcoded catalog, so one bad CLI run can't shrink the picker.
-        cached_models(provider).unwrap_or_else(|| fallback_models(provider))
-    } else {
-        let models = deduplicate(discovered);
-        write_cached_models(provider, &models);
-        models
+    let models = match discovered {
+        CatalogProbe::Authoritative(models) => {
+            let models = deduplicate(models);
+            // Write even an empty catalog so a removal shrinks the picker; a
+            // stale cache would otherwise resurrect the deleted provider.
+            write_cached_models(provider, &models);
+            models
+        }
+        CatalogProbe::Failed => {
+            cached_models(provider).unwrap_or_else(|| fallback_models(provider))
+        }
     };
     let presets = discovered_presets.unwrap_or_else(|| fallback_agent_presets(provider));
     (models, presets)
@@ -343,7 +383,7 @@ fn parse_cursor_models(output: &str) -> Vec<ProviderModel> {
         .collect()
 }
 
-fn discover_opencode_models(binary: &Path) -> Vec<ProviderModel> {
+fn discover_opencode_models(binary: &Path) -> CatalogProbe {
     let mut command = crate::command_env::command(binary);
     // `--verbose` prints each model's full metadata as JSON, which is the only
     // place the CLI exposes `variants` — the reasoning-effort ladder. The bare
@@ -351,15 +391,26 @@ fn discover_opencode_models(binary: &Path) -> Vec<ProviderModel> {
     // effort control.
     let command = command.args(["models", "--verbose"]);
     let Ok(output) = crate::command_env::output(command) else {
-        return Vec::new();
+        // The CLI could not run at all; keep the last good cache rather than
+        // shrink the picker on a launch/transport failure.
+        return CatalogProbe::Failed;
     };
+    if !output.status.success() {
+        // A non-zero exit (e.g. opencode rejecting its own config) is a failed
+        // probe, not an authoritative empty catalog. Retain the cache.
+        return CatalogProbe::Failed;
+    }
     let stdout = String::from_utf8_lossy(&output.stdout);
     let verbose = parse_opencode_verbose_models(&stdout);
-    if verbose.is_empty() {
+    let models = if verbose.is_empty() {
         // An older CLI without `--verbose` still prints the plain listing.
-        return parse_opencode_models(&stdout);
-    }
-    verbose
+        parse_opencode_models(&stdout)
+    } else {
+        verbose
+    };
+    // The CLI ran successfully: trust whatever it enumerated, even when that is
+    // nothing, so removing a provider from opencode shrinks the picker.
+    CatalogProbe::Authoritative(models)
 }
 
 /// OpenCode's server is the authority on agents: builtins and every agent the
@@ -370,7 +421,7 @@ fn discover_opencode_models(binary: &Path) -> Vec<ProviderModel> {
 /// global.
 fn discover_opencode_catalog(
     binary: &Path,
-) -> (Vec<ProviderModel>, Option<Vec<ProviderAgentPreset>>) {
+) -> (CatalogProbe, Option<Vec<ProviderAgentPreset>>) {
     (
         discover_opencode_models(binary),
         discover_opencode_agent_presets(binary),
