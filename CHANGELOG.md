@@ -16,6 +16,13 @@ the original feature bullet instead of adding separate entries for them.
 
 ## [unreleased]
 
+## [0.1.19]
+
+- Render inline and block LaTeX math in Markdown, with a Copy Expression action and a setting to show the source
+- Fix OpenCode 2 context usage to reflect the latest request instead of cumulative session totals, and cap the meter at 100%
+- Clear model search when selecting a provider or Favorites tab
+- Make loading spinners smoother with animations at up to 60 FPS
+
 ## [0.1.18]
 
 - Fix Codex session forking

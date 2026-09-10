@@ -1,23 +1,18 @@
 [package]
 name = "waku"
-version = "0.1.18"
+version = "0.1.19"
 edition = "2024"
 description = "A fast, native control plane for local coding agents"
 license = "GPL-3.0-only"
 
 [workspace]
-members = [
-    "crates/waku-client",
-    "crates/waku-core",
-    "crates/waku-daemon",
-    "crates/waku-protocol",
-]
+members = ["crates/waku-client", "crates/waku-core", "crates/waku-daemon", "crates/waku-protocol"]
 default-members = [
-    ".",
-    "crates/waku-client",
-    "crates/waku-core",
-    "crates/waku-daemon",
-    "crates/waku-protocol",
+  ".",
+  "crates/waku-client",
+  "crates/waku-core",
+  "crates/waku-daemon",
+  "crates/waku-protocol",
 ]
 resolver = "2"
 
@@ -34,9 +29,9 @@ dirs = "6.0"
 # merges.
 gpui = { git = "https://github.com/egoist/zed", branch = "waku-webview" }
 gpui_platform = { git = "https://github.com/egoist/zed", branch = "waku-webview", features = [
-    "font-kit",
-    "wayland",
-    "x11",
+  "font-kit",
+  "wayland",
+  "x11",
 ] }
 parking_lot = "0.12"
 rquickjs = "0.12.2"
@@ -71,7 +66,7 @@ tokio = { version = "1", features = ["rt"] }
 # resize drew once per mouse-move event rather than once per displayed frame.
 [dev-dependencies]
 gpui = { git = "https://github.com/egoist/zed", branch = "waku-webview", features = [
-    "test-support",
+  "test-support",
 ] }
 
 [target.'cfg(unix)'.dependencies]
@@ -83,68 +78,69 @@ block2 = "0.6"
 # Matches the version GPUI itself renders with, so RenderImage frames are the
 # same `image` types.
 image = "0.25"
-objc2-core-graphics = { version = "0.3", default-features = false, features = [
-    "std",
-    "CGImage",
-] }
+objc2-core-graphics = { version = "0.3", default-features = false, features = ["std", "CGImage"] }
 objc2-web-kit = { version = "0.3.2", default-features = false, features = [
-    "std",
-    "block2",
-    "objc2-app-kit",
-    "WKWebView",
-    "WKSnapshotConfiguration",
+  "std",
+  "block2",
+  "objc2-app-kit",
+  "WKWebView",
+  "WKSnapshotConfiguration",
 ] }
 objc2 = "0.6"
 objc2-app-kit = { version = "0.3", default-features = false, features = [
-    "std",
-    "NSAccessibility",
-    "NSAppearance",
-    "NSApplication",
-    "NSBitmapImageRep",
-    "NSCell",
-    "NSColor",
-    "NSEvent",
-    "NSGraphics",
-    "NSGraphicsContext",
-    "NSImage",
-    "NSImageRep",
-    "NSMenu",
-    "NSMenuItem",
-    "NSResponder",
-    "NSRunningApplication",
-    "NSView",
-    "NSVisualEffectView",
-    "NSWindow",
-    "NSWorkspace",
-    "block2",
-    "objc2-core-graphics",
-    "objc2-quartz-core",
+  "std",
+  "NSAccessibility",
+  "NSAppearance",
+  "NSApplication",
+  "NSBitmapImageRep",
+  "NSCell",
+  "NSColor",
+  "NSEvent",
+  "NSGraphics",
+  "NSGraphicsContext",
+  "NSImage",
+  "NSImageRep",
+  "NSMenu",
+  "NSMenuItem",
+  "NSResponder",
+  "NSRunningApplication",
+  "NSView",
+  "NSVisualEffectView",
+  "NSWindow",
+  "NSWorkspace",
+  "block2",
+  "objc2-core-graphics",
+  "objc2-quartz-core",
 ] }
 objc2-foundation = { version = "0.3", default-features = false, features = [
-    "std",
-    "NSArray",
-    "NSBundle",
-    "NSData",
-    "NSDictionary",
-    "NSError",
-    "NSFileManager",
-    "NSGeometry",
-    "NSKeyValueObserving",
-    "NSLocale",
-    "NSProcessInfo",
-    "NSString",
-    "NSURL",
+  "std",
+  "NSArray",
+  "NSBundle",
+  "NSData",
+  "NSDictionary",
+  "NSError",
+  "NSFileManager",
+  "NSGeometry",
+  "NSKeyValueObserving",
+  "NSLocale",
+  "NSProcessInfo",
+  "NSString",
+  "NSURL",
 ] }
 objc2-user-notifications = { version = "0.3", default-features = false, features = [
-    "std",
-    "block2",
-    "UNNotificationContent",
-    "UNNotificationRequest",
-    "UNNotificationSound",
-    "UNNotificationTrigger",
-    "UNUserNotificationCenter",
+  "std",
+  "block2",
+  "UNNotificationContent",
+  "UNNotificationRequest",
+  "UNNotificationSound",
+  "UNNotificationTrigger",
+  "UNUserNotificationCenter",
 ] }
-objc2-quartz-core = { version = "0.3", default-features = false, features = ["std", "CALayer", "objc2-core-graphics"] }
+objc2-quartz-core = { version = "0.3", default-features = false, features = [
+  "std",
+  "CALayer",
+  "objc2-core-graphics",
+] }
 raw-window-handle = "0.6"
 
 [target.'cfg(target_os = "linux")'.dependencies]
@@ -172,19 +168,19 @@ webview2-com = "0.38"
 # hands straight to `SetRootVisualTarget` with no ABI bridging. `windows-sys`
 # stays for the plain Win32 calls that do not need COM.
 windows = { version = "0.61", features = [
-    "Win32_Foundation",
-    "Win32_Graphics_DirectComposition",
-    "Win32_System_Com",
-    "Win32_UI_WindowsAndMessaging",
+  "Win32_Foundation",
+  "Win32_Graphics_DirectComposition",
+  "Win32_System_Com",
+  "Win32_UI_WindowsAndMessaging",
 ] }
 windows-core = "0.61"
 # GPUI does not read the Windows animation preference, so Waku asks
 # `SystemParametersInfoW` itself. Same major version as the one already in the
 # graph through GPUI.
 windows-sys = { version = "0.61", features = [
-    "Win32_Foundation",
-    "Win32_UI_Input_KeyboardAndMouse",
-    "Win32_UI_WindowsAndMessaging",
+  "Win32_Foundation",
+  "Win32_UI_Input_KeyboardAndMouse",
+  "Win32_UI_WindowsAndMessaging",
 ] }
 # Verifies the EdDSA signatures `generate_appcast` writes, so the Windows
 # updater trusts the same key Sparkle does on macOS.
