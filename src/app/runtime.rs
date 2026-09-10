@@ -841,7 +841,10 @@ fn perform_response_fork(mut request: ResponseForkRequest) -> Result<PreparedRes
                     ));
                 };
                 let binary = request.binary.as_deref().ok_or_else(|| {
-                    anyhow::anyhow!(tr!("errors.provider_not_installed", provider = "OpenCode 2"))
+                    anyhow::anyhow!(tr!(
+                        "errors.provider_not_installed",
+                        provider = "OpenCode 2"
+                    ))
                 })?;
                 Ok((
                     request
@@ -2643,7 +2646,7 @@ impl Waku {
     }
 
     pub(super) fn agent_preset_for_session(&self, session: &AgentSession) -> Option<String> {
-        if session.provider != ProviderKind::DeepSeek {
+        if !session.provider.supports_agent_presets() {
             return None;
         }
         session.agent_preset.clone().or_else(|| {

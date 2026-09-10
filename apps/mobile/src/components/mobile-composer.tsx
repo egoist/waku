@@ -3,12 +3,13 @@ import type {
   MessageAttachment,
   PendingPermission,
   PendingUserInput,
+  SlashCommand,
   UserInputAnswer,
 } from '@waku/client';
 import * as DocumentPicker from 'expo-document-picker';
 import * as Haptics from 'expo-haptics';
 import * as ImagePicker from 'expo-image-picker';
-import { useEffect, useRef, useState, type ReactNode } from 'react';
+import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import {
   ActivityIndicator,
   Pressable,
@@ -18,9 +19,11 @@ import {
   TextInput,
   View,
 } from 'react-native';
+import { useKeyboardHeight } from '@/lib/keyboard-offset';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { AppSymbol } from './app-symbol';
+import { AttachmentChip } from './attachment-chip';
 import { ComposerAccessMenu } from './composer-access-menu';
 import {
   ComposerAttachmentMenu,
@@ -29,9 +32,18 @@ import {
 import { ComposerTextInput } from './composer-text-input';
 import type { ComposerTextInputProps } from './composer-text-input.types';
 import { GlassSurface, liquidGlass } from './glass-surface';
+import { AgentPresetMenu } from './agent-preset-menu';
 import { ModelSheet } from './session-option-sheets';
 import { MonoFont, NativeTint, Radius } from '@/constants/theme';
 import { useSyncedComposerDraft } from '@/hooks/use-synced-composer-draft';
+import { useComposerCommands, useProviderModels, useTaskState } from '@/hooks/use-daemon-data';
+import {
+  detectComposerTrigger,
+  filterComposerCommands,
+  mergeComposerCommands,
+  replaceComposerTrigger,
+  resolvedComposerSubmission,
+} from '@/lib/composer-commands';
 import { useTheme } from '@/hooks/use-theme';
 import {
   importLocalAttachment,
@@ -179,6 +191,7 @@ export function MobileComposer({
 }) {
   const theme = useTheme();
   const insets = useSafeAreaInsets();
+  const keyboardHeight = useKeyboardHeight();
   const daemon = useDaemon();
   const runtime = useRuntime();
   const [draft, setDraft] = useState('');
@@ -188,6 +201,32 @@ export function MobileComposer({
   const [localError, setLocalError] = useState<string | null>(null);
   const [modelSheetOpen, setModelSheetOpen] = useState(false);
   const busy = sessionBusy(session);
+  const sessionHasStarted =
+    session.turns.length > 0 || session.messages.length > 0 || !!session.provider_cursor;
+  // Mirrors desktop AgentSession::can_choose_agent_preset: presets are offered
+  // by DeepSeek | OpenCode | OpenCode2, and a started session still qualifies
+  // when the provider can switch a live agent (OpenCode | OpenCode2).
+  const supportsAgentPreset =
+    !busy
+    && (session.provider === 'deepSeek' || session.provider === 'openCode' || session.provider === 'openCode2')
+    && (!sessionHasStarted || session.provider === 'openCode' || session.provider === 'openCode2');
+  const agentPresetProbe = useProviderModels(supportsAgentPreset ? session.provider : null);
+  const taskState = useTaskState();
+  const projectPath = taskState.data?.projects.find(
+    (project) => project.id === session.project_id,
+  )?.path;
+  const discoveredCommands = useComposerCommands(session.provider, projectPath);
+  // Provider-reported commands ride along with the session; discovery adds the
+  // project, user, and skill commands defined on the daemon host.
+  const commands = useMemo(
+    () => mergeComposerCommands(discoveredCommands.data ?? [], session.available_commands ?? []),
+    [discoveredCommands.data, session.available_commands],
+  );
+  const agentPresets = agentPresetProbe.data?.agent_presets ?? [];
+  const selectedAgentPreset =
+    agentPresets.find((preset) => preset.id === session.agent_preset) ??
+    agentPresets.find((preset) => preset.is_default) ??
+    agentPresets[0];
   const liveRuntime = runtime.runtimes[session.id];
   const canSteer = busy && Boolean(liveRuntime?.supportsSteer) && session.status !== 'connecting';
   const permission = runtime.permissions[session.id];
@@ -200,6 +239,21 @@ export function MobileComposer({
     : runtimeError;
   const visibleError = visibleLocalError || visibleRuntimeError;
   const queued = session.queued_messages ?? [];
+
+  // The caret is assumed to sit at the end of the draft: single-line composer
+  // input, and the trigger dies at the first whitespace either way.
+  const trigger = useMemo(() => detectComposerTrigger(draft, draft.length), [draft]);
+  const suggestions = useMemo(
+    () => trigger ? filterComposerCommands(commands, trigger.query) : [],
+    [commands, trigger],
+  );
+
+  function applyCommand(command: SlashCommand) {
+    if (!trigger) return;
+    draftSync.markEdited();
+    setDraft(replaceComposerTrigger(draft, trigger, command).text);
+    void Haptics.selectionAsync();
+  }
 
   useEffect(() => setLocalError(null), [session.id]);
   useEffect(() => {
@@ -316,7 +370,10 @@ export function MobileComposer({
   }, [requestSignature]);
 
   async function submit() {
-    const prompt = draft.trim();
+    const typed = draft.trim();
+    // Template commands and skills have to become provider syntax here: the
+    // daemon sends the prompt through verbatim.
+    const prompt = resolvedComposerSubmission(session.provider, typed, commands) ?? typed;
     const submittedAttachments = attachments;
     if (
       (!prompt && submittedAttachments.length === 0)
@@ -371,7 +428,7 @@ export function MobileComposer({
         : 'Message agent';
 
   return (
-    <View style={[styles.shell, { paddingBottom: Math.max(insets.bottom, 10) }]}>
+    <View style={[styles.shell, { paddingBottom: Math.max(insets.bottom, 10) + keyboardHeight }]}>
       {permission && !userInput && (
         <PermissionPanel
           permission={permission}
@@ -439,54 +496,78 @@ export function MobileComposer({
 
       <ComposerCard
         accessibilityLabel="Message agent"
-        beforeInput={attachments.length || importingAttachments ? (
-          <ScrollView
-            horizontal
-            keyboardShouldPersistTaps="handled"
-            showsHorizontalScrollIndicator={false}
-            contentContainerStyle={styles.attachmentStrip}>
-            {attachments.map((attachment, index) => (
-              <Pressable
-                accessibilityLabel={`Remove ${attachment.name}`}
-                accessibilityRole="button"
-                disabled={submitting}
-                key={`${attachment.blob_reference ?? attachment.path}:${index}`}
-                onPress={() => {
-                  draftSync.markEdited();
-                  setAttachments((current) => current.filter((_, item) => item !== index));
-                }}
-                style={({ pressed }) => [
-                  styles.attachmentChip,
-                  { backgroundColor: theme.overlayStrong, opacity: pressed ? 0.6 : 1 },
-                ]}>
-                <AppSymbol
-                  name={{
-                    ios: attachment.is_image ? 'photo' : 'doc',
-                    android: attachment.is_image ? 'image' : 'description',
-                    web: 'description',
-                  }}
-                  size={13}
-                  tintColor={theme.textSecondary}
-                />
-                <Text
-                  numberOfLines={1}
-                  style={[styles.attachmentName, { color: theme.textSecondary }]}>
-                  {attachment.name}
-                </Text>
-                <AppSymbol
-                  name={{ ios: 'xmark', android: 'close', web: 'close' }}
-                  size={9}
-                  tintColor={theme.textTertiary}
-                />
-              </Pressable>
-            ))}
-            {importingAttachments && (
-              <View style={[styles.attachmentChip, { backgroundColor: theme.overlayStrong }]}>
-                <ActivityIndicator color={theme.textSecondary} size="small" />
-                <Text style={[styles.attachmentName, { color: theme.textSecondary }]}>Attaching…</Text>
-              </View>
-            )}
-          </ScrollView>
+        beforeInput={attachments.length || importingAttachments || suggestions.length ? (
+          <>
+          {suggestions.length ? (
+            <View style={styles.commandList}>
+              <ScrollView
+                keyboardShouldPersistTaps="handled"
+                nestedScrollEnabled
+                showsVerticalScrollIndicator={false}
+                style={styles.commandListScroll}
+                contentContainerStyle={styles.commandListContent}>
+                {suggestions.map((command) => (
+                  <Pressable
+                    accessibilityLabel={`Use command ${command.name}`}
+                    accessibilityRole="button"
+                    key={`${command.scope}:${command.name}`}
+                    onPress={() => applyCommand(command)}
+                    style={({ pressed }) => [
+                      styles.commandRow,
+                      { backgroundColor: theme.overlayStrong, opacity: pressed ? 0.6 : 1 },
+                    ]}>
+                    <Text numberOfLines={1} style={[styles.commandName, { color: theme.text }]}>
+                      /{command.name}
+                    </Text>
+                    {command.description ? (
+                      <Text
+                        numberOfLines={1}
+                        style={[styles.commandHint, { color: theme.textTertiary }]}>
+                        {command.description}
+                      </Text>
+                    ) : null}
+                  </Pressable>
+                ))}
+              </ScrollView>
+            </View>
+          ) : null}
+          {attachments.length || importingAttachments ? (
+            <View style={styles.attachmentStack}>
+              {attachments.map((attachment, index) => (
+                <View
+                  key={`${attachment.blob_reference ?? attachment.path}:${index}`}
+                  style={styles.attachmentItem}>
+                  <AttachmentChip attachment={attachment} />
+                  <Pressable
+                    accessibilityLabel={`Remove ${attachment.name}`}
+                    accessibilityRole="button"
+                    disabled={submitting}
+                    hitSlop={6}
+                    onPress={() => {
+                      draftSync.markEdited();
+                      setAttachments((current) => current.filter((_, item) => item !== index));
+                    }}
+                    style={({ pressed }) => [
+                      styles.attachmentRemove,
+                      { backgroundColor: theme.overlayStrong, opacity: pressed ? 0.6 : 1 },
+                    ]}>
+                    <AppSymbol
+                      name={{ ios: 'xmark', android: 'close', web: 'close' }}
+                      size={11}
+                      tintColor={theme.textSecondary}
+                    />
+                  </Pressable>
+                </View>
+              ))}
+              {importingAttachments && (
+                <View style={[styles.attachmentChip, { backgroundColor: theme.overlayStrong }]}>
+                  <ActivityIndicator color={theme.textSecondary} size="small" />
+                  <Text style={[styles.attachmentName, { color: theme.textSecondary }]}>Attaching…</Text>
+                </View>
+              )}
+            </View>
+          ) : null}
+          </>
         ) : undefined}
         editable={!disconnected && !submitting}
         left={(
@@ -504,6 +585,13 @@ export function MobileComposer({
         placeholder={placeholder}
         right={(
           <>
+            {supportsAgentPreset && agentPresets.length > 0 && (
+              <AgentPresetMenu
+                agentPreset={session.agent_preset ?? null}
+                onApply={(selection) => applyOptions(selection)}
+                provider={session.provider}
+              />
+            )}
             <ComposerIconButton
               icon={{ ios: 'speedometer', android: 'speed', web: 'speed' }}
               label="Model"
@@ -843,7 +931,24 @@ const styles = StyleSheet.create({
     paddingHorizontal: 6,
     paddingVertical: 8,
   },
-  attachmentStrip: { gap: 6, paddingHorizontal: 4, paddingTop: 4 },
+  attachmentStack: { flexDirection: 'row', flexWrap: 'wrap', gap: 8, paddingHorizontal: 4, paddingTop: 4 },
+  attachmentItem: { position: 'relative' },
+  attachmentRemove: {
+    alignItems: 'center',
+    borderRadius: 10,
+    height: 20,
+    justifyContent: 'center',
+    position: 'absolute',
+    right: -4,
+    top: -4,
+    width: 20,
+  },
+  commandList: { marginHorizontal: 4, marginTop: 4 },
+  commandListScroll: { maxHeight: 220 },
+  commandListContent: { gap: 4, paddingVertical: 4 },
+  commandRow: { borderRadius: Radius.small, paddingHorizontal: 11, paddingVertical: 7 },
+  commandName: { fontSize: 14, fontWeight: '600' },
+  commandHint: { fontSize: 11.5, marginTop: 1 },
   attachmentChip: {
     alignItems: 'center',
     borderRadius: Radius.small,

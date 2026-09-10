@@ -164,6 +164,24 @@ impl ProviderKind {
                 | Self::Pi
         )
     }
+
+    /// Providers a session can be composed of: their CLI publishes an agent
+    /// catalogue (`GET /agent` on OpenCode's server, `GET /api/agent` on
+    /// OpenCode 2) and accepts one of its ids for a session.
+    pub fn supports_agent_presets(self) -> bool {
+        matches!(self, Self::DeepSeek | Self::OpenCode | Self::OpenCode2)
+    }
+
+    /// Whether an already-started session can be given a different agent.
+    ///
+    /// OpenCode sends the agent on every prompt, steer and command body, and
+    /// OpenCode 2 adds `POST /api/session/{id}/agent` — "switch the agent used
+    /// by subsequent provider turns" — so both can change agent between turns.
+    /// DeepSeek Harness takes the preset once, at `session.create`, and never
+    /// re-applies it when resuming, so its choice is fixed once history exists.
+    pub fn supports_live_agent_switch(self) -> bool {
+        matches!(self, Self::OpenCode | Self::OpenCode2)
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
@@ -958,9 +976,9 @@ pub struct AgentSession {
     /// Selected context window, when the provider exposes more than one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_window: Option<String>,
-    /// Provider-owned agent composition selected before the first turn.
-    /// Currently populated by DeepSeek Harness, which locks this value once
-    /// conversation history exists.
+    /// Provider-owned agent composition for this session. DeepSeek Harness
+    /// locks the value once conversation history exists; OpenCode applies it
+    /// to every turn, so a started session can still change it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_preset: Option<String>,
     pub status: SessionStatus,
@@ -1203,6 +1221,19 @@ impl AgentSession {
 
     pub fn can_choose_model(&self, provider: ProviderKind) -> bool {
         !self.status.is_busy() && (self.messages.is_empty() || self.provider == provider)
+    }
+
+    /// Whether the agent chip may offer a different composition right now.
+    ///
+    /// One rule for both the chip's visibility and the selection it applies,
+    /// so the two cannot disagree. A busy session is off limits because
+    /// applying a new agent restarts the provider runtime, and a started
+    /// session only qualifies when its provider can switch a live agent —
+    /// see [`ProviderKind::supports_live_agent_switch`].
+    pub fn can_choose_agent_preset(&self) -> bool {
+        self.provider.supports_agent_presets()
+            && !self.is_busy()
+            && (!self.has_started() || self.provider.supports_live_agent_switch())
     }
 
     pub fn migrate_legacy_state(&mut self) {
@@ -4130,6 +4161,55 @@ mod tests {
         assert!(ProviderKind::OpenCode2.supports_model_discovery());
         assert!(ProviderKind::Grok.supports_model_discovery());
         assert!(ProviderKind::Pi.supports_model_discovery());
+    }
+
+    #[test]
+    fn only_composed_providers_publish_agent_presets() {
+        assert!(!ProviderKind::Codex.supports_agent_presets());
+        assert!(!ProviderKind::Claude.supports_agent_presets());
+        assert!(ProviderKind::DeepSeek.supports_agent_presets());
+        assert!(ProviderKind::OpenCode.supports_agent_presets());
+        assert!(ProviderKind::OpenCode2.supports_agent_presets());
+    }
+
+    #[test]
+    fn only_opencode_switches_the_agent_of_a_live_session() {
+        assert!(ProviderKind::OpenCode.supports_live_agent_switch());
+        assert!(ProviderKind::OpenCode2.supports_live_agent_switch());
+        assert!(!ProviderKind::DeepSeek.supports_live_agent_switch());
+        assert!(!ProviderKind::Codex.supports_live_agent_switch());
+    }
+
+    #[test]
+    fn agent_preset_stays_selectable_after_the_first_turn_on_opencode_only() {
+        let project = Project::from_path(PathBuf::from("/tmp/waku"));
+
+        let fresh = AgentSession::new(project.id, ProviderKind::OpenCode);
+        assert!(fresh.can_choose_agent_preset());
+
+        let mut started = AgentSession::new(project.id, ProviderKind::OpenCode);
+        started.provider_cursor = Some(ProviderResumeCursor::from_session_id(
+            ProviderKind::OpenCode,
+            "ses_1".into(),
+        ));
+        assert!(started.can_choose_agent_preset());
+
+        started.status = SessionStatus::Working;
+        assert!(!started.can_choose_agent_preset());
+        started.status = SessionStatus::Idle;
+
+        // DeepSeek bakes the composition into session creation, so a started
+        // session keeps the one it was created with.
+        let mut deepseek = AgentSession::new(project.id, ProviderKind::DeepSeek);
+        assert!(deepseek.can_choose_agent_preset());
+        deepseek.provider_cursor = Some(ProviderResumeCursor::from_session_id(
+            ProviderKind::DeepSeek,
+            "abc".into(),
+        ));
+        assert!(!deepseek.can_choose_agent_preset());
+
+        let codex = AgentSession::new(project.id, ProviderKind::Codex);
+        assert!(!codex.can_choose_agent_preset());
     }
 
     #[test]

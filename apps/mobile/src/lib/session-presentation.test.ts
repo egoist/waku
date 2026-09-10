@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import type { AgentSession, AgentTurn, Project } from '@waku/client';
+import type { AgentSession, AgentTurn, Message, Project } from '@waku/client';
 import { activitiesForBlock } from '@waku/client/event-reducer';
 
 import { TranscriptMarkdownCache } from '../md/transcript-cache';
@@ -11,9 +11,11 @@ import {
   expandTranscriptRows,
   findActivityBlock,
   groupSessions,
+  messageSearchRows,
   relativeSessionTime,
   sessionDateGroup,
   stabilizeTranscriptRows,
+  turnOptionsForSession,
 } from './session-presentation';
 
 describe('mobile session presentation', () => {
@@ -357,6 +359,97 @@ function session(overrides: Partial<AgentSession>): AgentSession {
     ...overrides,
   };
 }
+
+describe('turn options for rewind and fork', () => {
+  function message(overrides: Partial<Message> & Pick<Message, 'id' | 'turn_id'>) {
+    return {
+      role: 'user' as const,
+      content: '',
+      created_at: 1,
+      streaming: false,
+      ...overrides,
+    };
+  }
+
+  test('lists completed turns oldest first, labelled by their prompt', () => {
+    const options = turnOptionsForSession(session({
+      turns: [
+        turn({ id: 'turn-2', status: 'completed', turn_count: 2 }),
+        turn({ id: 'turn-1', status: 'completed', turn_count: 1 }),
+      ],
+      messages: [
+        message({ id: 'm1', turn_id: 'turn-1', content: 'first question' }),
+        message({ id: 'm2', turn_id: 'turn-2', content: 'second question' }),
+      ],
+    }));
+
+    expect(options.map((option) => option.turnCount)).toEqual([1, 2]);
+    expect(options[0]?.label).toBe('Turn 1 · first question');
+  });
+
+  test('leaves out a turn the provider has not answered yet', () => {
+    const options = turnOptionsForSession(session({
+      turns: [
+        turn({ id: 'turn-1', status: 'completed', turn_count: 1 }),
+        turn({ id: 'turn-2', status: 'running', turn_count: 2, completed_at: null }),
+      ],
+      messages: [message({ id: 'm1', turn_id: 'turn-1', content: 'first' })],
+    }));
+
+    expect(options.map((option) => option.turnCount)).toEqual([1]);
+  });
+
+  test('truncates a long prompt and falls back to the turn number', () => {
+    const long = 'a'.repeat(80);
+    const options = turnOptionsForSession(session({
+      turns: [
+        turn({ id: 'turn-1', status: 'completed', turn_count: 1 }),
+        turn({ id: 'turn-2', status: 'completed', turn_count: 2 }),
+      ],
+      messages: [
+        message({ id: 'm1', turn_id: 'turn-1', content: long }),
+        message({ id: 'm2', turn_id: 'turn-2' }),
+      ],
+    }));
+
+    expect(options[0]?.label).toBe(`Turn 1 · ${'a'.repeat(60)}…`);
+    expect(options[1]?.label).toBe('Turn 2');
+  });
+
+  test('has nothing to offer before the first turn settles', () => {
+    expect(turnOptionsForSession(null)).toEqual([]);
+    expect(turnOptionsForSession(session({ turns: [] }))).toEqual([]);
+  });
+});
+
+describe('message search rows', () => {
+  const sessions = [session({ id: 'known' }), session({ id: 'other' })];
+
+  test('resolves matches against known sessions in daemon order', () => {
+    const rows = messageSearchRows([
+      { session_id: 'other', source: 'assistant', snippet: 'second hit' },
+      { session_id: 'known', source: 'user', snippet: 'first hit' },
+    ], sessions);
+    expect(rows.map((row) => [row.session.id, row.snippet, row.role])).toEqual([
+      ['other', 'second hit', 'assistant'],
+      ['known', 'first hit', 'user'],
+    ]);
+  });
+
+  test('drops matches for sessions that are no longer openable', () => {
+    expect(messageSearchRows([{ session_id: 'gone', source: 'user', snippet: 'x' }], sessions))
+      .toEqual([]);
+  });
+
+  test('caps the list so a broad query cannot flood the drawer', () => {
+    const matches = Array.from({ length: 20 }, (_unused, index) => ({
+      session_id: 'known',
+      source: 'user' as const,
+      snippet: `hit ${index}`,
+    }));
+    expect(messageSearchRows(matches, sessions, 5)).toHaveLength(5);
+  });
+});
 
 function epoch(year: number, month: number, day: number, hour: number) {
   return Math.floor(new Date(year, month, day, hour).getTime() / 1_000);

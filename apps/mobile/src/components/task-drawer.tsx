@@ -3,16 +3,19 @@ import * as Haptics from 'expo-haptics';
 import { router, useGlobalSearchParams, usePathname } from 'expo-router';
 import {
   createContext,
+  memo,
   useCallback,
   useContext,
   useEffect,
   useMemo,
+  useRef,
   useState,
   type ReactNode,
 } from 'react';
 import {
   ActivityIndicator,
   Alert,
+  Keyboard,
   KeyboardAvoidingView,
   Platform,
   Pressable,
@@ -36,15 +39,18 @@ import { ProviderIcon } from '@/components/provider-icon';
 import { RenameDialog } from '@/components/rename-dialog';
 import { TaskRowMenu } from '@/components/task-row-menu';
 import { NativeTint, Radius, Spacing } from '@/constants/theme';
-import { useTaskState } from '@/hooks/use-daemon-data';
+import { useSessionMessageSearch, useTaskState } from '@/hooks/use-daemon-data';
 import { useTheme } from '@/hooks/use-theme';
 import { useDaemon } from '@/lib/daemon-context';
+import { useKeyboardHeight } from '@/lib/keyboard-offset';
 import { sessionIsRunning } from '@/lib/mobile-runtime';
 import { useRuntime } from '@/lib/runtime-context';
 import {
   displaySessionTitle,
   groupSessions,
+  messageSearchRows,
   providerLabel,
+  type MessageSearchRow,
   type SessionListItem,
 } from '@/lib/session-presentation';
 
@@ -64,6 +70,9 @@ export function TaskDrawerHost({ children }: { children: ReactNode }) {
   const params = useGlobalSearchParams<{ id?: string | string[] }>();
   const { width } = useWindowDimensions();
   const [open, setOpen] = useState(false);
+  // While the search field is focused the keyboard can swallow the first tap on
+  // the drawer overlay, leaving it uncloseable; this adds a one-tap catcher.
+  const [searchFocused, setSearchFocused] = useState(false);
   const drawerWidth = Math.max(0, Math.min(360, width - 44));
   const drawerEnabled = daemon.phase === 'booting' || daemon.profiles.length > 0;
   const openTaskDrawer = useCallback(() => {
@@ -83,31 +92,47 @@ export function TaskDrawerHost({ children }: { children: ReactNode }) {
 
   useEffect(() => setOpen(false), [drawerEnabled, pathname]);
 
+  const drawerScene = <View style={styles.drawerScene}>{children}</View>;
+
   return (
     <TaskDrawerContext.Provider value={controls}>
-      {drawerEnabled ? (
-        <Drawer
-          drawerStyle={{ backgroundColor: theme.background, width: drawerWidth }}
-          drawerType="back"
-          open={open}
-          overlayAccessibilityLabel="Close task history"
-          overlayStyle={{ backgroundColor: 'rgba(0, 0, 0, 0.18)' }}
-          renderDrawerContent={() => (
-            <TaskDrawerContent
-              drawerWidth={drawerWidth}
-              selectedSessionId={selectedSessionId}
-              onClose={closeTaskDrawer}
-            />
-          )}
-          swipeEdgeWidth={width}
-          swipeEnabled={swipeEnabled}
-          onClose={closeTaskDrawer}
-          onOpen={openTaskDrawer}>
-          {children}
-        </Drawer>
-      ) : (
-        <>{children}</>
-      )}
+      <View style={styles.drawerHost}>
+        {drawerEnabled ? (
+          <Drawer
+            drawerStyle={{ backgroundColor: theme.background, width: drawerWidth }}
+            drawerType="back"
+            open={open}
+            overlayAccessibilityLabel="Close task history"
+            overlayStyle={{ backgroundColor: 'rgba(0, 0, 0, 0.18)' }}
+            renderDrawerContent={() => (
+              <TaskDrawerContent
+                drawerWidth={drawerWidth}
+                selectedSessionId={selectedSessionId}
+                onClose={closeTaskDrawer}
+                onSearchFocus={setSearchFocused}
+              />
+            )}
+            swipeEdgeWidth={width}
+            swipeEnabled={swipeEnabled}
+            onClose={closeTaskDrawer}
+            onOpen={openTaskDrawer}>
+            {drawerScene}
+          </Drawer>
+        ) : (
+          drawerScene
+        )}
+        {open && searchFocused && (
+          <Pressable
+            accessibilityLabel="Close task history"
+            accessibilityRole="button"
+            onPress={() => {
+              Keyboard.dismiss();
+              closeTaskDrawer();
+            }}
+            style={[styles.drawerCloseCatcher, { left: drawerWidth }]}
+          />
+        )}
+      </View>
     </TaskDrawerContext.Provider>
   );
 }
@@ -122,18 +147,28 @@ function TaskDrawerContent({
   drawerWidth,
   selectedSessionId,
   onClose,
+  onSearchFocus,
 }: {
   drawerWidth: number;
   selectedSessionId: string | null;
   onClose: () => void;
+  onSearchFocus?: (focused: boolean) => void;
 }) {
   const theme = useTheme();
   const insets = useSafeAreaInsets();
+  const keyboardHeight = useKeyboardHeight();
   const daemon = useDaemon();
   const runtime = useRuntime();
   const taskState = useTaskState();
   const [search, setSearch] = useState('');
   const [refreshing, setRefreshing] = useState(false);
+  // Every keystroke would otherwise be a full transcript scan on the daemon.
+  const [messageQuery, setMessageQuery] = useState('');
+  useEffect(() => {
+    const timer = setTimeout(() => setMessageQuery(search.trim()), 180);
+    return () => clearTimeout(timer);
+  }, [search]);
+  const messageSearch = useSessionMessageSearch(messageQuery);
   const [daemonPickerOpen, setDaemonPickerOpen] = useState(false);
   const [renameTarget, setRenameTarget] = useState<AgentSession | null>(null);
   const visibleSessions = useMemo(() => {
@@ -156,6 +191,12 @@ function TaskDrawerContent({
     () => taskState.data ? groupSessions(taskState.data.projects, visibleSessions) : [],
     [taskState.data, visibleSessions],
   );
+  const messageRows = useMemo(
+    () => (messageQuery.trim() && messageSearch.data)
+      ? messageSearchRows(messageSearch.data, taskState.data?.sessions ?? [])
+      : [],
+    [messageQuery, messageSearch.data, taskState.data?.sessions],
+  );
   const showNewTask = useCallback(() => {
     onClose();
     router.dismissTo('/');
@@ -170,7 +211,14 @@ function TaskDrawerContent({
     }
   }, [onClose, selectedSessionId]);
 
-  function confirmDelete(session: AgentSession) {
+  // Streaming mutates `runtime` every tick, so capture it in a ref to keep the
+  // row callbacks stable. Without this, every visible row re-renders on each
+  // stream commit — the drawer list is the heaviest thing on screen.
+  const runtimeRef = useRef(runtime);
+  runtimeRef.current = runtime;
+  const handleSelect = useCallback((sessionId: string) => showSession(sessionId), [showSession]);
+  const handleRename = useCallback((session: AgentSession) => setRenameTarget(session), []);
+  const handleDelete = useCallback((session: AgentSession) => {
     Alert.alert(
       `Delete “${displaySessionTitle(session)}”?`,
       'This removes the task and its transcript from the daemon for every device.',
@@ -180,7 +228,7 @@ function TaskDrawerContent({
           text: 'Delete',
           style: 'destructive',
           onPress: () => {
-            void runtime.deleteSession(session.id)
+            void runtimeRef.current.deleteSession(session.id)
               .then(() => Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success))
               .catch((cause) => {
                 Alert.alert(
@@ -192,7 +240,7 @@ function TaskDrawerContent({
         },
       ],
     );
-  }
+  }, []);
 
   async function refreshTasks() {
     setRefreshing(true);
@@ -241,18 +289,36 @@ function TaskDrawerContent({
           <SessionRow
             drawerWidth={drawerWidth}
             item={item}
-            running={runtime.runtimes[item.session.id]?.running ?? sessionIsRunning(item.session)}
+            running={Boolean(runtime.runtimes[item.session.id]?.running ?? sessionIsRunning(item.session))}
             selected={item.session.id === selectedSessionId}
-            onDelete={() => confirmDelete(item.session)}
-            onRename={() => setRenameTarget(item.session)}
-            onSelect={() => showSession(item.session.id)}
+            onDelete={handleDelete}
+            onRename={handleRename}
+            onSelect={handleSelect}
           />
         )}
-        ListHeaderComponent={<ConnectionBanner />}
+        ListHeaderComponent={(
+          <>
+            <ConnectionBanner />
+            {messageRows.length ? (
+              <View style={styles.messageResults}>
+                <Text style={[styles.sectionTitle, { color: theme.textTertiary }]}>
+                  Messages
+                </Text>
+                {messageRows.map((row, index) => (
+                  <MessageResultRow
+                    key={`${row.session.id}:${index}`}
+                    onSelect={handleSelect}
+                    row={row}
+                  />
+                ))}
+              </View>
+            ) : null}
+          </>
+        )}
         ListEmptyComponent={(
           <TaskListEmpty
             error={taskState.error}
-            searching={Boolean(search.trim())}
+            searching={Boolean(search.trim()) && !messageRows.length}
             onNewTask={showNewTask}
           />
         )}
@@ -265,7 +331,7 @@ function TaskDrawerContent({
           behavior={Platform.OS === 'ios' ? 'position' : undefined}
           keyboardVerticalOffset={SearchDockGap}
           pointerEvents="box-none"
-          style={[styles.searchDockAvoider, { bottom: insets.bottom + SearchDockGap }]}>
+          style={[styles.searchDockAvoider, { bottom: insets.bottom + SearchDockGap + keyboardHeight }]}>
           <View pointerEvents="box-none" style={styles.searchDock}>
             <GlassSurface interactive style={styles.searchCapsule}>
               <View style={styles.searchCapsuleInner}>
@@ -284,6 +350,8 @@ function TaskDrawerContent({
                   style={[styles.searchInput, { color: theme.text }]}
                   value={search}
                   onChangeText={setSearch}
+                  onFocus={() => onSearchFocus?.(true)}
+                  onBlur={() => onSearchFocus?.(false)}
                 />
                 {search.length > 0 && (
                   <Pressable
@@ -336,6 +404,38 @@ function TaskDrawerContent({
     </View>
   );
 }
+
+/** A transcript hit. The title is what you recognise; the snippet is the
+ * evidence, so both are shown and neither is truncated to one line only. */
+const MessageResultRow = memo(function MessageResultRow({
+  onSelect,
+  row,
+}: {
+  onSelect: (sessionId: string) => void;
+  row: MessageSearchRow;
+}) {
+  const theme = useTheme();
+  return (
+    <Pressable
+      accessibilityLabel={`${displaySessionTitle(row.session)}: ${row.snippet}`}
+      accessibilityRole="button"
+      onPress={() => onSelect(row.session.id)}
+      style={({ pressed }) => [
+        styles.messageRow,
+        { backgroundColor: pressed ? theme.surfaceMuted : 'transparent' },
+      ]}>
+      <View style={styles.messageHeading}>
+        <ProviderIcon color={theme.textTertiary} provider={row.session.provider} size={11} />
+        <Text numberOfLines={1} style={[styles.messageTitle, { color: theme.text }]}>
+          {displaySessionTitle(row.session)}
+        </Text>
+      </View>
+      <Text numberOfLines={2} style={[styles.messageSnippet, { color: theme.textSecondary }]}>
+        {row.snippet}
+      </Text>
+    </Pressable>
+  );
+});
 
 function DaemonPill({ onPress }: { onPress: () => void }) {
   const theme = useTheme();
@@ -441,7 +541,7 @@ function TaskListEmpty({
   );
 }
 
-function SessionRow({
+const SessionRow = memo(function SessionRow({
   drawerWidth,
   item,
   running,
@@ -454,9 +554,9 @@ function SessionRow({
   item: SessionListItem;
   running: boolean;
   selected: boolean;
-  onDelete: () => void;
-  onRename: () => void;
-  onSelect: () => void;
+  onDelete: (session: AgentSession) => void;
+  onRename: (session: AgentSession) => void;
+  onSelect: (sessionId: string) => void;
 }) {
   const theme = useTheme();
   const rowWidth = Math.max(0, drawerWidth - 24);
@@ -464,9 +564,9 @@ function SessionRow({
   return (
     <TaskRowMenu
       accessibilityLabel={`${displaySessionTitle(session)}, ${providerLabel(session.provider)} in ${item.projectName}${running ? ', Running' : ''}`}
-      onDelete={onDelete}
-      onRename={onRename}
-      onSelect={onSelect}
+      onDelete={() => onDelete(session)}
+      onRename={() => onRename(session)}
+      onSelect={() => onSelect(session.id)}
       renderTrigger={(pressed) => (
         <View
           style={[
@@ -505,10 +605,21 @@ function SessionRow({
       style={[styles.sessionMenu, { width: rowWidth }]}
     />
   );
-}
+});
 
 const styles = StyleSheet.create({
   screen: { flex: 1 },
+  drawerHost: { flex: 1 },
+  drawerScene: { flex: 1 },
+  // Rendered above the drawer, covering only the strip of screen beside the
+  // drawer (where the dim overlay lives) so a single tap blurs search + closes.
+  drawerCloseCatcher: {
+    bottom: 0,
+    position: 'absolute',
+    right: 0,
+    top: 0,
+    zIndex: 1000,
+  },
   daemonFloat: {
     left: 12,
     position: 'absolute',
@@ -581,6 +692,17 @@ const styles = StyleSheet.create({
     paddingHorizontal: 18,
   },
   emptyActionText: { fontSize: 14, fontWeight: '700' },
+  messageResults: { marginBottom: 6 },
+  messageRow: {
+    borderRadius: 10,
+    gap: 2,
+    marginHorizontal: 12,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+  },
+  messageHeading: { alignItems: 'center', flexDirection: 'row', gap: 5 },
+  messageTitle: { flex: 1, fontSize: 14.5, fontWeight: '500' },
+  messageSnippet: { fontSize: 12.5, lineHeight: 17 },
   sessionMenu: { height: 62, marginHorizontal: 12 },
   sessionRow: {
     borderRadius: 10,

@@ -1,6 +1,7 @@
 import * as Clipboard from 'expo-clipboard';
 import * as Haptics from 'expo-haptics';
 import { MenuView, type MenuAction } from '@expo/ui/community/menu';
+
 import {
   router,
   Stack,
@@ -32,6 +33,7 @@ import {
   useScreenHeaderInset,
   type HeaderActionSpec,
 } from '@/components/screen-header';
+import { TurnSheet } from '@/components/session-option-sheets';
 import {
   TaskSurfaceSheet,
   type TaskSurface,
@@ -48,7 +50,10 @@ import { useTheme } from '@/hooks/use-theme';
 import { useDaemon } from '@/lib/daemon-context';
 import { sessionBusy } from '@/lib/mobile-runtime';
 import { useRuntime } from '@/lib/runtime-context';
-import { displaySessionTitle } from '@/lib/session-presentation';
+import {
+  displaySessionTitle,
+  turnOptionsForSession,
+} from '@/lib/session-presentation';
 
 const SURFACE_MENU_COMMANDS = [
   { id: 'terminal', title: 'Terminal', symbol: 'terminal' },
@@ -65,6 +70,18 @@ const TASK_MENU_COMMANDS = [
     destructive: false,
   },
   {
+    id: 'rewind',
+    title: 'Rewind to turn…',
+    symbol: 'clock.arrow.circlepath',
+    destructive: true,
+  },
+  {
+    id: 'fork',
+    title: 'Fork from turn…',
+    symbol: 'arrow.branch',
+    destructive: false,
+  },
+  {
     id: 'reload',
     title: 'Reload transcript',
     symbol: 'arrow.clockwise',
@@ -72,6 +89,8 @@ const TASK_MENU_COMMANDS = [
   },
   { id: 'delete', title: 'Delete task', symbol: 'trash', destructive: true },
 ] as const;
+
+
 
 export function SessionView({
   sessionId,
@@ -91,6 +110,7 @@ export function SessionView({
   const [taskSurface, setTaskSurface] = useState<TaskSurface | null>(null);
   const [taskSurfaceOpen, setTaskSurfaceOpen] = useState(false);
   const [renaming, setRenaming] = useState(false);
+  const [turnTarget, setTurnTarget] = useState<'rewind' | 'fork' | null>(null);
   const [underHeader, setUnderHeader] = useState(false);
   const [mountedTranscriptSessionId, setMountedTranscriptSessionId] = useState<string | null>(null);
   const running = Boolean(session && sessionBusy(session));
@@ -206,10 +226,83 @@ export function SessionView({
     );
   }, []);
 
+  const turnOptions = useMemo(() => turnOptionsForSession(session), [session]);
+
+  // Rewinding or forking rewrites history the daemon is still appending to, so
+  // both are refused while a turn is in flight rather than racing it.
+  const openTurnTarget = useCallback((mode: 'rewind' | 'fork') => {
+    const current = sessionRef.current;
+    if (!current) return;
+    if (sessionBusy(current)) {
+      Alert.alert(
+        'Task is busy',
+        'Let the current turn finish before changing this task’s history.',
+      );
+      return;
+    }
+    if (!turnOptionsForSession(current).length) {
+      Alert.alert('Nothing to rewind', 'This task has no completed turn yet.');
+      return;
+    }
+    setTurnTarget(mode);
+  }, []);
+
+  // The sheet only picks a target; the daemon call waits for this confirmation.
+  const applyTurnTarget = useCallback((turnCount: number) => {
+    const mode = turnTarget;
+    const current = sessionRef.current;
+    if (!mode || !current) return;
+    const rewind = mode === 'rewind';
+    Alert.alert(
+      rewind ? `Rewind to turn ${turnCount}?` : `Fork at turn ${turnCount}?`,
+      rewind
+        ? 'Every turn after it is removed for every device, and the workspace is restored to that point.'
+        : 'A copy of the task up to that turn is created. This task keeps its own history.',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: rewind ? 'Rewind' : 'Fork',
+          style: rewind ? 'destructive' : 'default',
+          onPress: () => {
+            const action = rewind
+              ? runtimeRef.current.rewindSession(current.id, turnCount)
+              : runtimeRef.current.forkSession(current.id, turnCount);
+            void action
+              .then(async (result) => {
+                await Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+                if (rewind) {
+                  if (result.warning) Alert.alert('Rewound', result.warning);
+                  return;
+                }
+                Alert.alert('Task forked', result.warning ?? 'It is in your task history.', [
+                  { text: 'Later' },
+                  {
+                    text: 'Open',
+                    onPress: () => router.replace({
+                      pathname: '/session/[id]',
+                      params: { id: result.session.id },
+                    }),
+                  },
+                ]);
+              })
+              .catch((cause) => {
+                Alert.alert(
+                  rewind ? 'Couldn’t rewind task' : 'Couldn’t fork task',
+                  cause instanceof Error ? cause.message : String(cause),
+                );
+              });
+          },
+        },
+      ],
+    );
+  }, [turnTarget]);
+
   const handleTaskMenuCommand = useCallback(
     (command: string) => {
       if (command === 'terminal' || command === 'files' || command === 'review') {
         openTaskSurface(command);
+      } else if (command === 'rewind' || command === 'fork') {
+        openTurnTarget(command);
       } else if (command === 'rename') {
         setRenaming(true);
       } else if (command === 'copy-last-response') {
@@ -220,7 +313,7 @@ export function SessionView({
         confirmDelete();
       }
     },
-    [confirmDelete, copyLastResponse, openTaskSurface],
+    [confirmDelete, copyLastResponse, openTaskSurface, openTurnTarget],
   );
 
   const taskState = useTaskState().data;
@@ -421,6 +514,16 @@ export function SessionView({
           visible={renaming}
         />
       )}
+      <TurnSheet
+        note={turnTarget === 'rewind'
+          ? 'Everything after the turn you pick is removed for every device.'
+          : 'The copy keeps the turns up to the one you pick.'}
+        onDismiss={() => setTurnTarget(null)}
+        onPick={applyTurnTarget}
+        title={turnTarget === 'rewind' ? 'Rewind to turn' : 'Fork from turn'}
+        turns={turnOptions}
+        visible={Boolean(turnTarget)}
+      />
     </KeyboardAvoidingView>
   );
 }

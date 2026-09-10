@@ -1,5 +1,10 @@
-import { useQueries, useQuery, useQueryClient } from '@tanstack/react-query';
-import type { ProviderKind } from '@waku/client';
+import {
+  useMutation,
+  useQueries,
+  useQuery,
+  useQueryClient,
+} from '@tanstack/react-query';
+import type { Project, ProviderKind, UsageWindow } from '@waku/client';
 import {
   PROVIDER_PROBE_CACHE_STALE_TIME,
   readProviderProbeCache,
@@ -8,17 +13,28 @@ import {
 
 import {
   daemonKeys,
+  discoverComposerCommands,
+  fetchPlanUsage,
   hydrateSession,
   loadDaemonSettings,
   loadTaskState,
+  loadSkills,
+  loadUsageHistory,
   probeProvider,
+  searchSessionMessages,
+  setSkillsEnabled,
+  trashSkills,
+  updateDaemonSettings,
   type TaskState,
 } from '@/lib/daemon-api';
 import { persistentStorageSync } from '@/lib/composer-preferences-store';
 import { useDaemon } from '@/lib/daemon-context';
 import { providerLabel } from '@/lib/session-presentation';
 
-const PROVIDERS: ProviderKind[] = [
+/** Every provider the client knows, whether or not the daemon has it
+ * installed or enabled. Screens that must show a disabled agent — settings —
+ * use this instead of the catalog, which hides them. */
+export const PROVIDERS: ProviderKind[] = [
   'codex',
   'claude',
   'cursor',
@@ -177,6 +193,146 @@ export function useProviderCatalog() {
     isPending: settings.isPending || queries.some((query) => query.isPending && query.fetchStatus !== 'idle'),
     error: settings.error,
   };
+}
+
+/** The skill catalog, scanned on the daemon host. */
+export function useSkills(projects: Project[]) {
+  const { activeProfile, client, phase } = useDaemon();
+  return useQuery({
+    queryKey: daemonKeys.skills(activeProfile?.id ?? 'disconnected'),
+    queryFn: () => loadSkills(requireClient(client), projects),
+    enabled: phase === 'connected' && Boolean(activeProfile && client),
+    placeholderData: (previous) => previous,
+  });
+}
+
+/** Enable or disable every install of a skill at once. */
+export function useSetSkillsEnabled() {
+  const { activeProfile, client } = useDaemon();
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({ dirs, enabled }: { dirs: string[]; enabled: boolean }) =>
+      setSkillsEnabled(requireClient(client), dirs, enabled),
+    onSuccess: () => void queryClient.invalidateQueries({
+      queryKey: daemonKeys.skills(activeProfile?.id ?? 'disconnected'),
+    }),
+  });
+}
+
+export function useTrashSkills() {
+  const { activeProfile, client } = useDaemon();
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (dirs: string[]) => trashSkills(requireClient(client), dirs),
+    onSuccess: () => void queryClient.invalidateQueries({
+      queryKey: daemonKeys.skills(activeProfile?.id ?? 'disconnected'),
+    }),
+  });
+}
+
+/** Write daemon-wide settings. Disabling an agent also changes what the
+ * provider catalog offers, so both queries are refetched — a stale catalog
+ * would keep showing an agent the daemon just hid. */
+export function useUpdateDaemonSettings() {
+  const { activeProfile, client } = useDaemon();
+  const queryClient = useQueryClient();
+  const profileId = activeProfile?.id ?? 'disconnected';
+  return useMutation({
+    mutationFn: (settings: Parameters<typeof updateDaemonSettings>[1]) =>
+      updateDaemonSettings(requireClient(client), settings),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: daemonKeys.settings(profileId) });
+      void queryClient.invalidateQueries({
+        queryKey: ['daemon', profileId, 'provider'],
+      });
+    },
+  });
+}
+
+/** Slash commands for a provider in a project. Discovery runs on the daemon
+ * host and never changes within a session, so it is fetched once. */
+export function useComposerCommands(provider: ProviderKind | null, cwd: string | undefined) {
+  const { activeProfile, client, phase } = useDaemon();
+  const settings = useDaemonSettings();
+  const binaryOverride = settings.data && provider
+    ? settings.data.provider_binary_overrides?.[provider] ?? null
+    : null;
+  return useQuery({
+    queryKey: daemonKeys.slashCommands(
+      activeProfile?.id ?? 'disconnected',
+      provider ?? 'codex',
+      cwd ?? 'none',
+      binaryOverride,
+    ),
+    queryFn: () => discoverComposerCommands(
+      requireClient(client),
+      provider!,
+      cwd!,
+      binaryOverride,
+    ),
+    enabled: phase === 'connected'
+      && Boolean(activeProfile && client && provider && cwd && settings.data),
+    staleTime: Number.POSITIVE_INFINITY,
+  });
+}
+
+/** Message-body search against the daemon. Callers debounce the query: every
+ * keystroke would otherwise be a full transcript scan. */
+export function useSessionMessageSearch(query: string) {
+  const { activeProfile, client, phase } = useDaemon();
+  const normalized = query.trim();
+  return useQuery({
+    queryKey: daemonKeys.messageSearch(activeProfile?.id ?? 'disconnected', normalized),
+    queryFn: () => searchSessionMessages(requireClient(client), normalized),
+    enabled: phase === 'connected' && Boolean(activeProfile && client && normalized),
+    staleTime: 30_000,
+    placeholderData: (previous) => previous,
+  });
+}
+
+/** Providers whose CLI reports account-level plan limits; the rest answer
+ * `null` and are skipped rather than probed. */
+const PLAN_USAGE_PROVIDERS: ProviderKind[] = ['claude', 'codex', 'openCode', 'grok'];
+
+/** Spend and token history for one window. The daemon prices the transcripts,
+ * so a switch of window is the only thing that refetches. */
+export function useUsageHistory(window: UsageWindow, projects: Project[]) {
+  const { activeProfile, client, phase } = useDaemon();
+  return useQuery({
+    queryKey: daemonKeys.usage(activeProfile?.id ?? 'disconnected', window),
+    queryFn: () => loadUsageHistory(requireClient(client), window, projects),
+    enabled: phase === 'connected' && Boolean(activeProfile && client),
+    placeholderData: (previous) => previous,
+  });
+}
+
+/** Plan limits for the given providers. One query per provider, all disabled
+ * until settings land, so mounting the screen never fires a probe per agent. */
+export function usePlanUsages(providers: ProviderKind[]) {
+  const { activeProfile, client, phase } = useDaemon();
+  const settings = useDaemonSettings();
+  const queries = useQueries({
+    queries: providers.map((provider) => ({
+      queryKey: daemonKeys.planUsage(activeProfile?.id ?? 'disconnected', provider),
+      queryFn: () => fetchPlanUsage(requireClient(client), provider, settings.data!, null),
+      enabled: phase === 'connected' &&
+        Boolean(activeProfile && client && settings.data) &&
+        PLAN_USAGE_PROVIDERS.includes(provider),
+      staleTime: 30_000,
+    })),
+  });
+  return providers
+    .filter((provider) => PLAN_USAGE_PROVIDERS.includes(provider))
+    .map((provider) => {
+      const query = queries[providers.indexOf(provider)];
+      return {
+        provider,
+        plan: query?.data ?? null,
+        isFetching: Boolean(query?.isFetching),
+        isPending: Boolean(query?.isPending),
+        error: query?.error ?? null,
+      };
+    });
 }
 
 function requireClient(client: ReturnType<typeof useDaemon>['client']) {

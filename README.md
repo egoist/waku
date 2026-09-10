@@ -115,6 +115,28 @@ Release maintainers should also read [RELEASING.md](RELEASING.md).
 
 You can support the project development via [GitHub Sponsors](https://github.com/sponsors/egoist).
 
+## Fork notice
+
+This repository is a fork of [egoist/waku](https://github.com/egoist/waku) and
+is licensed under the same terms — [GNU General Public License v3.0
+only](LICENSE). It is not affiliated with or endorsed by upstream.
+
+Modifications to the original work (GPLv3 §5a):
+
+- **2026-09-08** — `7bd92d1` Reconnect to a live local daemon after the client
+  socket drops (`crates/waku-client`).
+- **2026-09-09** — Mobile parity (branch `feat/mobile-parity`, uncommitted;
+  tracked in [mobile_parity_plan.md](mobile_parity_plan.md)): CI typecheck and
+  unit tests for `@waku/mobile`; rewind and fork; `/resume` for external
+  provider sessions; a usage screen for spend and plan limits — all under
+  `apps/mobile/`.
+- **2026-09-09** — Desktop work in progress (uncommitted): agent presets,
+  OpenCode 2 sessions, model catalog, and regenerated protocol bindings under
+  `crates/`, `src/`, and `packages/waku-client/src/generated/`.
+
+Bundled fonts under `assets/fonts/` are third-party and stay under their own
+license ([MIT](assets/fonts/LICENSE-nerd-fonts.txt)).
+
 ## License
 
 Waku is licensed under the [GNU General Public License v3.0 only](LICENSE).

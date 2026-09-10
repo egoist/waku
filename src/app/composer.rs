@@ -806,7 +806,12 @@ impl Waku {
                 .flex()
                 .items_center()
                 .gap(px(6.0))
-                .child(provider_mark(&theme, provider, 10.5, provider_color(&theme, provider).opacity(0.9)))
+                .child(provider_mark(
+                    &theme,
+                    provider,
+                    10.5,
+                    provider_color(&theme, provider).opacity(0.9),
+                ))
                 .child(
                     div()
                         .max_w(px(210.0))
@@ -937,7 +942,11 @@ impl Waku {
                 .label(tr!("models.no_providers"))
         } else {
             MenuChip::new("composer-provider-model")
-                .provider(&theme, provider, provider_color(&theme, provider).opacity(0.9))
+                .provider(
+                    &theme,
+                    provider,
+                    provider_color(&theme, provider).opacity(0.9),
+                )
                 .label(selected_model_name)
         };
 
@@ -1048,11 +1057,16 @@ impl Waku {
                                     },
                                 )
                             })
-                            .child(provider_mark(&theme, kind, 18.0, provider_color(&theme, kind).opacity(if selected {
+                            .child(provider_mark(
+                                &theme,
+                                kind,
+                                18.0,
+                                provider_color(&theme, kind).opacity(if selected {
                                     1.0
                                 } else {
                                     0.82
-                                }))),
+                                }),
+                            )),
                     );
                 }
 
@@ -1169,7 +1183,12 @@ impl Waku {
                                             .flex()
                                             .items_center()
                                             .gap(px(6.0))
-                                            .child(provider_mark(&theme, kind, 10.5, provider_color(&theme, kind).opacity(0.85)))
+                                            .child(provider_mark(
+                                                &theme,
+                                                kind,
+                                                10.5,
+                                                provider_color(&theme, kind).opacity(0.85),
+                                            ))
                                             .child(
                                                 div()
                                                     .truncate()
@@ -1669,12 +1688,15 @@ impl Waku {
     pub(super) fn render_agent_preset_control(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let session = self
             .selected_session()
-            .filter(|session| session.provider == ProviderKind::DeepSeek)?;
-        if session.has_started() || session.is_busy() {
-            return None;
-        }
+            .filter(|session| session.can_choose_agent_preset())?;
+        // `ProviderKind` copies out of the borrowed session; the menu-open
+        // closure below must not borrow `self` when it runs.
+        let provider = session.provider;
+        // The catalogue is the session's own provider's: OpenCode publishes
+        // its agents through its server, and only those ids are accepted when
+        // a session starts.
         let presets = self
-            .provider_probe(ProviderKind::DeepSeek)
+            .provider_probe(provider)
             .map(|probe| probe.agent_presets.clone())
             .unwrap_or_default();
         if presets.is_empty() {
@@ -1688,7 +1710,7 @@ impl Waku {
         let handle = self.menu_handle_with("agent-preset", cx, move |open, _, cx| {
             if open {
                 let _ = refresh_weak.update(cx, |this, _| {
-                    this.refresh_provider_model_discovery(ProviderKind::DeepSeek);
+                    this.refresh_provider_model_discovery(provider);
                 });
             }
         });
@@ -2859,10 +2881,8 @@ impl Waku {
                 .clone()
                 .or_else(|| snapshot.default_branch.clone())
                 .or_else(|| snapshot.display_branch().map(str::to_owned)),
-            SessionWorkspace::Worktree { branch, .. } => snapshot
-                .current
-                .clone()
-                .or_else(|| Some(branch.clone()))
+            SessionWorkspace::Worktree { branch, .. } => Some(branch.clone())
+                .or_else(|| snapshot.current.clone())
                 .or_else(|| snapshot.detached_head.clone()),
         }
         .unwrap_or_else(|| tr!("branches.detached_head"));

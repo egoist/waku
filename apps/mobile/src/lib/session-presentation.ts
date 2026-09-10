@@ -3,9 +3,11 @@ import type {
   AgentTurn,
   Checkpoint,
   Message,
+  MessageRole,
   Project,
   ProviderKind,
   RuntimeMode,
+  SessionMessageMatch,
   TranscriptBlock,
 } from '@waku/client';
 import { turnAnswerStart, turnFoldLabel } from '@waku/client/transcript-presentation';
@@ -25,6 +27,34 @@ export interface SessionGroup {
   id: SessionGroupId;
   title: string;
   data: SessionListItem[];
+}
+
+export interface MessageSearchRow {
+  session: AgentSession;
+  snippet: string;
+  role: MessageRole;
+}
+
+/**
+ * Daemon message matches resolved against the sessions this client knows.
+ * Matches for a session that is no longer in task state are dropped rather
+ * than shown as a row that cannot be opened, and the daemon's ordering
+ * (it ranks its own results) is preserved.
+ */
+export function messageSearchRows(
+  matches: SessionMessageMatch[],
+  sessions: AgentSession[],
+  limit = 12,
+): MessageSearchRow[] {
+  const known = new Map(sessions.map((session) => [session.id, session]));
+  const rows: MessageSearchRow[] = [];
+  for (const match of matches) {
+    const session = known.get(match.session_id);
+    if (!session) continue;
+    rows.push({ session, snippet: match.snippet, role: match.source });
+    if (rows.length >= limit) break;
+  }
+  return rows;
 }
 
 /**
@@ -507,4 +537,39 @@ function shallowEqualRow(a: TranscriptRow, b: TranscriptRow): boolean {
     if (left[key] !== right[key]) return false;
   }
   return true;
+}
+
+/** One stop a rewind or a fork can land on: the last turn it keeps, and the
+ * text that identifies that turn. */
+export interface TurnOption {
+  turnCount: number;
+  label: string;
+}
+
+/**
+ * Turns a rewind or fork may keep, oldest first.
+ *
+ * A turn the provider has not answered yet is not a stable boundary — its
+ * checkpoint, workspace diff, and transcript rows are all still being written
+ * — so it is left out of the list entirely.
+ */
+export function turnOptionsForSession(
+  session: AgentSession | null | undefined,
+): TurnOption[] {
+  if (!session) return [];
+  return session.turns
+    .filter((turn) => turn.completed_at !== null)
+    .sort((a, b) => a.turn_count - b.turn_count)
+    .map((turn) => {
+      const prompt = session.messages.find(
+        (message) => message.turn_id === turn.id && message.role === 'user',
+      );
+      const text = (prompt?.display_content ?? prompt?.content ?? '').trim();
+      const snippet = text.length > 60 ? `${text.slice(0, 60)}…` : text;
+      const title = `Turn ${turn.turn_count}`;
+      return {
+        turnCount: turn.turn_count,
+        label: snippet ? `${title} · ${snippet}` : title,
+      };
+    });
 }

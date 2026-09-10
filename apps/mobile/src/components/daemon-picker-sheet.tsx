@@ -3,8 +3,6 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
-  Animated,
-  Easing,
   Platform,
   Pressable,
   StyleSheet,
@@ -14,6 +12,15 @@ import {
   type ColorValue,
   useWindowDimensions,
 } from 'react-native';
+import Animated, {
+  cancelAnimation,
+  Easing,
+  interpolate,
+  useAnimatedStyle,
+  useSharedValue,
+  withTiming,
+} from 'react-native-reanimated';
+import { scheduleOnRN } from 'react-native-worklets';
 
 import { AppSymbol } from '@/components/app-symbol';
 import { DaemonList } from '@/components/daemon-list';
@@ -44,70 +51,65 @@ export function DaemonPickerSheet({
   const [editorTarget, setEditorTarget] = useState<EditorTarget>(undefined);
   const [editorProfile, setEditorProfile] = useState<DaemonProfile | undefined>(undefined);
   const [pageWidth, setPageWidth] = useState(Math.max(1, width - 16));
-  const pageProgress = useRef(new Animated.Value(0)).current;
-  const navigationAnimation = useRef<ReturnType<typeof Animated.timing> | null>(null);
+  const pageProgress = useSharedValue(0);
+  const slideStyle = useAnimatedStyle(() => ({
+    transform: [{ translateX: interpolate(pageProgress.value, [0, 1], [0, -pageWidth]) }],
+  }));
 
   useEffect(() => {
     if (!visible) return;
     const startsInEditor = daemon.profiles.length === 0;
-    navigationAnimation.current?.stop();
+    cancelAnimation(pageProgress);
     setEditorTarget(startsInEditor ? null : undefined);
     setEditorProfile(undefined);
-    pageProgress.setValue(startsInEditor ? 1 : 0);
+    pageProgress.value = startsInEditor ? 1 : 0;
   }, [visible]);
 
-  useEffect(() => () => navigationAnimation.current?.stop(), []);
-
   function pushEditor(target: string | null) {
-    navigationAnimation.current?.stop();
+    cancelAnimation(pageProgress);
     setEditorTarget(target);
     setEditorProfile(
       typeof target === 'string'
         ? daemon.profiles.find((item) => item.id === target)
         : undefined,
     );
-    pageProgress.setValue(0);
+    pageProgress.value = 0;
     if (reducedMotion) {
-      pageProgress.setValue(1);
+      pageProgress.value = 1;
       return;
     }
-    const next = Animated.timing(pageProgress, {
+    pageProgress.value = withTiming(1, {
       duration: 240,
-      easing: Easing.out(Easing.cubic),
-      toValue: 1,
-      useNativeDriver: true,
+      easing: Easing.bezier(0.32, 0.72, 0.25, 1),
     });
-    navigationAnimation.current = next;
-    next.start();
   }
 
   function popEditor() {
     if (editorTarget === undefined) return;
-    navigationAnimation.current?.stop();
+    cancelAnimation(pageProgress);
     if (reducedMotion) {
-      pageProgress.setValue(0);
+      pageProgress.value = 0;
       setEditorTarget(undefined);
       setEditorProfile(undefined);
       return;
     }
-    const next = Animated.timing(pageProgress, {
-      duration: 240,
-      easing: Easing.out(Easing.cubic),
-      toValue: 0,
-      useNativeDriver: true,
-    });
-    navigationAnimation.current = next;
-    next.start(({ finished }) => {
-      if (finished) {
-        setEditorTarget(undefined);
-        setEditorProfile(undefined);
-      }
-    });
+    pageProgress.value = withTiming(
+      0,
+      { duration: 240, easing: Easing.bezier(0.32, 0.72, 0.25, 1) },
+      (finished?: boolean) => {
+        if (finished) {
+          scheduleOnRN(() => {
+            setEditorTarget(undefined);
+            setEditorProfile(undefined);
+          });
+        }
+      },
+    );
   }
 
   function handleDismiss() {
-    navigationAnimation.current?.stop();
-    pageProgress.setValue(0);
+    cancelAnimation(pageProgress);
+    pageProgress.value = 0;
     setEditorTarget(undefined);
     setEditorProfile(undefined);
     onDismiss();
@@ -124,21 +126,13 @@ export function DaemonPickerSheet({
     });
   }
 
-  const translateX = pageProgress.interpolate({
-    inputRange: [0, 1],
-    outputRange: [0, -pageWidth],
-  });
-
   return (
     <Sheet onDismiss={handleDismiss} visible={visible}>
       <View
         onLayout={(event) => setPageWidth(Math.max(1, event.nativeEvent.layout.width))}
         style={styles.navigationViewport}>
-        <Animated.View
-          style={[
-            styles.navigationPages,
-            { transform: [{ translateX }], width: pageWidth * 2 },
-          ]}>
+          <Animated.View
+            style={[styles.navigationPages, slideStyle, { width: pageWidth * 2 }]}>
           <View
             accessibilityElementsHidden={editorTarget !== undefined}
             importantForAccessibility={editorTarget === undefined ? 'auto' : 'no-hide-descendants'}

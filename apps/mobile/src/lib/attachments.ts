@@ -53,6 +53,52 @@ export async function importLocalAttachment(
   };
 }
 
+/** Reads an attachment's bytes back from the daemon as a data URI. Blobs
+ * Waku stored itself live under `waku-blob:` and need no path; everything
+ * else is addressed by where the daemon put it. */
+export async function readAttachmentImage(
+  client: WakuClient,
+  attachment: MessageAttachment,
+): Promise<string> {
+  const reference = attachment.blob_reference;
+  if (!reference) throw new Error('This attachment has no daemon reference');
+  const command = reference.startsWith('waku-blob:')
+    ? ({ type: 'readBlob', reference } as const)
+    : ({ type: 'readAttachment', reference, path: attachment.path } as const);
+  const response = await client.request(command);
+  if (response.type !== 'blobData') {
+    throw new Error(`Expected blobData, received ${response.type}`);
+  }
+  return `data:${imageMimeType(attachment.name)};base64,${response.bytes}`;
+}
+
+/** Extension to MIME type for the images RN can decode. Unknown names fall
+ * back to PNG, which is what an unrecognized binary most often is here. */
+export function imageMimeType(name: string): string {
+  const extension = name.split('.').at(-1)?.toLowerCase();
+  return (
+    {
+      avif: 'image/avif',
+      gif: 'image/gif',
+      heic: 'image/heic',
+      jpeg: 'image/jpeg',
+      jpg: 'image/jpeg',
+      png: 'image/png',
+      svg: 'image/svg+xml',
+      webp: 'image/webp',
+    } as Record<string, string>
+  )[extension ?? ''] ?? 'image/png';
+}
+
+/** Whether this attachment can be shown inline. Needs a daemon reference to
+ * read back, and skips SVG, which RN's image decoder cannot rasterize — those
+ * keep the name chip instead of rendering an empty tile. */
+export function isPreviewableImage(attachment: MessageAttachment): boolean {
+  return attachment.is_image === true
+    && Boolean(attachment.blob_reference)
+    && !attachment.name.toLowerCase().endsWith('.svg');
+}
+
 export function localFileName(uri: string, fallback: string): string {
   const segment = uri.split('/').at(-1)?.split(/[?#]/u)[0];
   if (!segment) return fallback;

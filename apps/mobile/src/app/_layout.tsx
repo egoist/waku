@@ -1,6 +1,7 @@
 import {
   DarkTheme,
   DefaultTheme,
+  router,
   Stack,
   ThemeProvider,
   type NativeStackNavigationOptions,
@@ -22,6 +23,7 @@ import {
 import { TaskDrawerHost, useTaskDrawer } from "@/components/task-drawer";
 import { DaemonProvider, useDaemon } from "@/lib/daemon-context";
 import { RuntimeProvider } from "@/lib/runtime-context";
+import { KeyboardOffsetProvider } from "@/lib/keyboard-offset";
 
 /** Deep links and state restores keep the new-task home as the stack anchor. */
 export const unstable_settings = { anchor: "index" };
@@ -75,7 +77,8 @@ export default function RootLayout() {
         };
   return (
     <GestureHandlerRootView style={styles.root}>
-      <QueryClientProvider client={queryClient}>
+      <KeyboardOffsetProvider>
+        <QueryClientProvider client={queryClient}>
         <DaemonProvider>
           <RuntimeProvider>
             <ThemeProvider value={navigationTheme}>
@@ -87,12 +90,13 @@ export default function RootLayout() {
           </RuntimeProvider>
         </DaemonProvider>
       </QueryClientProvider>
+      </KeyboardOffsetProvider>
     </GestureHandlerRootView>
   );
 }
 
 function AppNavigator() {
-  const { phase, profiles } = useDaemon();
+  const { phase, profiles, booted } = useDaemon();
   const { openTaskDrawer } = useTaskDrawer();
   const colorScheme = useColorScheme();
   const theme = Colors[colorScheme === "dark" ? "dark" : "light"];
@@ -112,10 +116,34 @@ function AppNavigator() {
     ),
     unstable_headerLeftItems: () => nativeHeaderButtons([drawerAction]),
   }), [drawerAction]);
+  /** Usage is a screen you visit deliberately, so it hangs off the home and
+   * new-task bars rather than the drawer, which belongs to task history. */
+  const usageAction = useMemo<HeaderActionSpec>(() => ({
+    icon: { ios: "chart.bar", android: "bar_chart", web: "bar_chart" },
+    label: "Usage",
+    onPress: () => router.push("/usage"),
+  }), []);
+  const settingsAction = useMemo<HeaderActionSpec>(() => ({
+    icon: { ios: "gearshape", android: "settings", web: "settings" },
+    label: "Settings",
+    onPress: () => router.push("/settings"),
+  }), []);
+  const homeHeader = useMemo<NativeStackNavigationOptions>(() => ({
+    ...drawerHeader,
+    headerRight: () => (
+      <HeaderActionGroup>
+        <HeaderAction {...usageAction} />
+        <HeaderAction {...settingsAction} />
+      </HeaderActionGroup>
+    ),
+    unstable_headerRightItems: () => nativeHeaderButtons([usageAction, settingsAction]),
+  }), [drawerHeader, settingsAction, usageAction]);
 
   useEffect(() => {
-    if (phase !== "booting") void SplashScreen.hideAsync();
-  }, [phase]);
+    // Hide once bootstrap has settled (or the safety timeout fired) — not on the
+    // connection phase, which can stall and wedge the splash after a force-kill.
+    if (booted) void SplashScreen.hideAsync();
+  }, [booted]);
 
   return (
     <Stack
@@ -130,7 +158,7 @@ function AppNavigator() {
       <Stack.Screen
         name="index"
         options={daemonRoutesAvailable
-          ? { ...drawerHeader, title: "New Task" }
+          ? { ...homeHeader, title: "New Task" }
           : { headerShown: false, title: "Waku" }}
       />
       {/* Removing the final saved daemon also removes every daemon-backed
@@ -142,12 +170,29 @@ function AppNavigator() {
         />
         <Stack.Screen
           name="new-task"
-          options={{ ...drawerHeader, title: "New Task" }}
+          options={{ ...homeHeader, title: "New Task" }}
+        />
+        <Stack.Screen
+          name="usage"
+          options={{ title: "Usage" }}
+        />
+        <Stack.Screen
+          name="settings"
+          options={{ title: "Settings" }}
+        />
+        <Stack.Screen
+          name="skills"
+          options={{ title: "Skills" }}
         />
         <Stack.Screen
           name="session/[id]"
           options={{
             ...drawerHeader,
+            // Chat header must be a solid surface, not the floating glass
+            // treatment — content behind it is a live transcript, not a scroll
+            // view meant to bleed under the bar.
+            headerTransparent: false,
+            headerStyle: { backgroundColor: theme.background },
             animation: "none",
             headerTitleAlign: "left",
             title: "Task",
@@ -157,7 +202,10 @@ function AppNavigator() {
       <Stack.Screen
         name="daemon-editor"
         options={{
-          presentation: "pageSheet",
+          // Full-screen push, not a pageSheet modal: a modal steals the first
+          // tap after presentation (focus can't land on the address/token
+          // fields until a dismiss gesture is registered), so the form feels
+          // like its inputs need multiple taps.
           title: "Add Daemon",
         }}
       />

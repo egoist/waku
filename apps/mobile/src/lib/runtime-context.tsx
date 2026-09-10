@@ -5,6 +5,7 @@ import type {
   PendingPermission,
   PendingUserInput,
   ProviderKind,
+  ProviderSessionSummary,
   SequencedEvent,
   UserInputAnswer,
 } from '@waku/client';
@@ -23,14 +24,22 @@ import {
 
 import {
   attachDaemonSession,
+  createProject,
+  createResumedSession,
   daemonKeys,
+  forkSessionFromResponse,
   hydrateSession,
+  listProviderSessions,
   loadDaemonSettings,
+  loadProviderSessionHistory,
   loadTaskState,
   materializeWorktree,
+  persistProject,
   persistSession,
   probeProvider,
   removeDaemonSession,
+  rewindSessionToMessage,
+  sameProviderSession,
   type TaskState,
 } from './daemon-api';
 import { persistentStorageSync } from './composer-preferences-store';
@@ -122,6 +131,15 @@ interface RuntimeContextValue {
   renameSession: (sessionId: string, title: string) => Promise<void>;
   deleteSession: (sessionId: string) => Promise<void>;
   removeQueuedMessage: (sessionId: string, messageId: string) => Promise<void>;
+  rewindSession: (
+    sessionId: string,
+    turnCount: number,
+  ) => Promise<{ session: AgentSession; warning: string | null }>;
+  forkSession: (
+    sessionId: string,
+    turnCount: number,
+  ) => Promise<{ session: AgentSession; warning: string | null }>;
+  resumeProviderSession: (summary: ProviderSessionSummary) => Promise<AgentSession>;
   dismissError: (sessionId: string) => void;
 }
 
@@ -830,6 +848,93 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
     await persistOrdered(next);
   }, [cacheSession, daemon.activeProfile?.id, persistOrdered, queryClient]);
 
+  /** Rewinds a task to the end of `turnCount` turns.
+   *
+   * The daemon returns the truncated session, so the followed runtime — which
+   * is still attached to the transcript that no longer exists — is dropped and
+   * the cached session is replaced wholesale rather than patched.
+   */
+  const rewindSession = useCallback(async (sessionId: string, turnCount: number) => {
+    const client = daemon.client;
+    const profileId = daemon.activeProfile?.id;
+    if (!client || !profileId || daemon.phase !== 'connected') {
+      throw new Error('Waku daemon is disconnected');
+    }
+    const runtime = entries.current.get(sessionId);
+    const response = await rewindSessionToMessage(
+      client,
+      sessionId,
+      runtime?.runtimeId,
+      turnCount,
+    );
+    removeRuntime(sessionId);
+    cacheSession(response.session);
+    await queryClient.invalidateQueries({
+      queryKey: daemonKeys.session(profileId, sessionId),
+    });
+    void queryClient.invalidateQueries({ queryKey: daemonKeys.taskState(profileId) });
+    return { session: response.session, warning: response.cleanupWarning };
+  }, [
+    cacheSession,
+    daemon.activeProfile?.id,
+    daemon.client,
+    daemon.phase,
+    queryClient,
+    removeRuntime,
+  ]);
+
+  /** Copies a task up to `turnCount` turns into a new session. The new session
+   * is cached and returned so the caller can navigate to it; this task keeps
+   * its own history. */
+  const forkSession = useCallback(async (sessionId: string, turnCount: number) => {
+    const client = daemon.client;
+    const profileId = daemon.activeProfile?.id;
+    if (!client || !profileId || daemon.phase !== 'connected') {
+      throw new Error('Waku daemon is disconnected');
+    }
+    const runtime = entries.current.get(sessionId);
+    const response = await forkSessionFromResponse(
+      client,
+      sessionId,
+      runtime?.runtimeId,
+      turnCount,
+    );
+    cacheSession(response.session);
+    void queryClient.invalidateQueries({ queryKey: daemonKeys.taskState(profileId) });
+    return { session: response.session, warning: response.checkpointWarning };
+  }, [cacheSession, daemon.activeProfile?.id, daemon.client, daemon.phase, queryClient]);
+
+  // Adopts a provider session the agent CLI started on the daemon host. If one
+  // is already tracked it is returned as-is; otherwise the history is copied
+  // into a fresh task that replays from its provider cursor on the next turn.
+  const resumeProviderSession = useCallback(async (summary: ProviderSessionSummary) => {
+    const client = daemon.client;
+    const profileId = daemon.activeProfile?.id;
+    if (!client || !profileId || daemon.phase !== 'connected') {
+      throw new Error('Waku daemon is disconnected');
+    }
+    const state = await loadTaskState(client);
+    const existing = state.sessions.find((session) =>
+      session.provider_cursor
+        ? sameProviderSession(session.provider_cursor, summary.cursor)
+        : false);
+    if (existing) return existing;
+    const history = await loadProviderSessionHistory(client, summary);
+    const existingProject = state.projects.find((project) => project.path === summary.cwd);
+    let projectId: string;
+    if (existingProject) {
+      projectId = existingProject.id;
+    } else {
+      const project = createProject(summary.cwd, Crypto.randomUUID(), clock.nowSeconds());
+      await persistProject(client, project);
+      projectId = project.id;
+    }
+    const saved = await persistSession(client, createResumedSession(projectId, summary, history));
+    cacheSession(saved);
+    void queryClient.invalidateQueries({ queryKey: daemonKeys.taskState(profileId) });
+    return saved;
+  }, [cacheSession, daemon.activeProfile?.id, daemon.client, daemon.phase, queryClient]);
+
   const dismissError = useCallback((sessionId: string) => {
     setErrors((values) => removeKey(values, sessionId));
   }, []);
@@ -933,6 +1038,9 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
       renameSession,
       deleteSession,
       removeQueuedMessage,
+      rewindSession,
+      forkSession,
+      resumeProviderSession,
       dismissError,
     }}>
       {children}

@@ -9,6 +9,7 @@ use std::time::{Duration, Instant};
 use serde_json::{Value, json};
 
 use crate::model::{ProviderAgentPreset, ProviderKind, ProviderModel, ProviderModelOption};
+use crate::opencode_session::OpenCodeServer;
 
 const CODEX_RPC_TIMEOUT: Duration = Duration::from_secs(5);
 const PI_RPC_TIMEOUT: Duration = Duration::from_secs(10);
@@ -126,7 +127,7 @@ pub fn discover_catalog(
         ProviderKind::Cursor => (discover_cursor_models(binary), None),
         ProviderKind::DeepSeek => discover_deepseek_catalog(binary),
         ProviderKind::Fx => (discover_fx_models(binary), None),
-        ProviderKind::OpenCode => (discover_opencode_models(binary), None),
+        ProviderKind::OpenCode => discover_opencode_catalog(binary),
         ProviderKind::OpenCode2 => crate::opencode2_session::discover_catalog(binary),
         ProviderKind::Grok => (discover_grok_models(binary), None),
         ProviderKind::Kimi => (discover_kimi_models(binary), None),
@@ -359,6 +360,78 @@ fn discover_opencode_models(binary: &Path) -> Vec<ProviderModel> {
         return parse_opencode_models(&stdout);
     }
     verbose
+}
+
+/// OpenCode's server is the authority on agents: builtins and every agent the
+/// user configured resolve through its config pipeline, the same pipeline the
+/// prompt body's `agent` id dispatches against. Prefer an already-resident
+/// server; otherwise start a short-lived one in a neutral directory, because
+/// no project session exists yet at probe time and the agents listing is
+/// global.
+fn discover_opencode_catalog(
+    binary: &Path,
+) -> (Vec<ProviderModel>, Option<Vec<ProviderAgentPreset>>) {
+    (
+        discover_opencode_models(binary),
+        discover_opencode_agent_presets(binary),
+    )
+}
+
+fn discover_opencode_agent_presets(binary: &Path) -> Option<Vec<ProviderAgentPreset>> {
+    // The read is cwd-agnostic, so whatever server is already resident answers.
+    if let Some(resident) = crate::opencode_pool::any_live(binary) {
+        return read_opencode_agent_presets(&resident);
+    }
+    let probe_cwd = std::env::temp_dir().join("waku-opencode-agent-probe");
+    std::fs::create_dir_all(&probe_cwd).ok()?;
+    // A one-shot server this probe owns; dropping it shuts the process down.
+    let server = crate::opencode_session::OpenCodeServer::start(binary, &probe_cwd).ok()?;
+    read_opencode_agent_presets(&server)
+}
+
+fn read_opencode_agent_presets(server: &OpenCodeServer) -> Option<Vec<ProviderAgentPreset>> {
+    let payload = server.request("GET", "/agent", None).ok()?;
+    Some(parse_opencode_agent_presets(&payload))
+}
+
+/// Only agents a session can actually be STARTED as, the same policy the
+/// OpenCode 2 catalog applies: `subagent` entries are dispatch targets rather
+/// than session compositions, and hidden primaries are the server's own
+/// internal agents. An absent or unknown `mode` stays startable.
+fn parse_opencode_agent_presets(payload: &Value) -> Vec<ProviderAgentPreset> {
+    payload
+        .as_array()
+        .map(|agents| {
+            agents
+                .iter()
+                .filter_map(|agent| {
+                    let id = agent.get("name").and_then(Value::as_str)?.trim();
+                    if id.is_empty() {
+                        return None;
+                    }
+                    if agent.get("mode").and_then(Value::as_str) == Some("subagent") {
+                        return None;
+                    }
+                    if agent
+                        .get("hidden")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false)
+                    {
+                        return None;
+                    }
+                    let mut preset = ProviderAgentPreset::new(id, id);
+                    preset.is_default = id == "build";
+                    preset.description = agent
+                        .get("description")
+                        .and_then(Value::as_str)
+                        .map(str::trim)
+                        .filter(|description| !description.is_empty())
+                        .map(str::to_owned);
+                    Some(preset)
+                })
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// Reads the JSON blocks `opencode models --verbose` prints, one per model.
@@ -1539,11 +1612,19 @@ opencode/big-pickle
     /// parser must not turn that into an empty catalogue.
     #[test]
     fn opencode_verbose_parsing_ignores_a_plain_listing() {
-        assert!(parse_opencode_verbose_models("opencode-go/deepseek-v4-flash
-").is_empty());
+        assert!(
+            parse_opencode_verbose_models(
+                "opencode-go/deepseek-v4-flash
+"
+            )
+            .is_empty()
+        );
         assert_eq!(
-            parse_opencode_models("opencode-go/deepseek-v4-flash
-").len(),
+            parse_opencode_models(
+                "opencode-go/deepseek-v4-flash
+"
+            )
+            .len(),
             1
         );
     }
@@ -1680,6 +1761,50 @@ opencode/big-pickle
             presets[1].description.as_deref(),
             Some("A local composition")
         );
+    }
+
+    #[test]
+    fn parses_opencode_agents_into_the_startable_presets() {
+        let presets = parse_opencode_agent_presets(&json!([
+            {
+                "name": "build",
+                "mode": "primary",
+                "builtIn": true,
+                "description": "Build agent for editing files and running commands"
+            },
+            {
+                "name": "plan",
+                "mode": "primary",
+                "builtIn": true,
+                "description": "Planning agent for exploration"
+            },
+            {
+                "name": "reviewer",
+                "mode": "all",
+                "description": "  A custom reviewer composition  "
+            },
+            {"name": "general", "builtIn": true},
+            {"name": "librarian", "mode": "subagent", "builtIn": true},
+            {"name": "title", "mode": "primary", "hidden": true},
+            {"name": "   ", "mode": "primary"},
+            {"mode": "primary"}
+        ]));
+
+        assert_eq!(
+            presets
+                .iter()
+                .map(|preset| preset.id.as_str())
+                .collect::<Vec<_>>(),
+            ["build", "plan", "reviewer", "general"]
+        );
+        assert!(presets[0].is_default);
+        assert!(!presets[1].is_default);
+        assert_eq!(
+            presets[2].description.as_deref(),
+            Some("A custom reviewer composition")
+        );
+        // A missing description stays empty rather than a placeholder string.
+        assert_eq!(presets[3].description, None);
     }
 
     #[test]
@@ -2040,7 +2165,11 @@ mod opencode_effort_smoke {
             .iter()
             .filter(|model| !model.reasoning_efforts.is_empty())
             .collect();
-        println!("models={} with efforts={}", models.len(), with_efforts.len());
+        println!(
+            "models={} with efforts={}",
+            models.len(),
+            with_efforts.len()
+        );
         for model in with_efforts.iter().take(4) {
             println!(
                 "  {} -> {:?} (default {:?})",
@@ -2054,6 +2183,9 @@ mod opencode_effort_smoke {
             );
         }
         assert!(!models.is_empty(), "expected a catalogue");
-        assert!(!with_efforts.is_empty(), "expected some models to expose variants");
+        assert!(
+            !with_efforts.is_empty(),
+            "expected some models to expose variants"
+        );
     }
 }

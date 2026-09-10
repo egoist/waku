@@ -12,6 +12,7 @@ import { AppSymbol } from '@/components/app-symbol';
 import { liquidGlass } from '@/components/glass-surface';
 import { NativeTint, Radius, Spacing } from '@/constants/theme';
 import { useTheme } from '@/hooks/use-theme';
+import { useKeyboardHeight } from '@/lib/keyboard-offset';
 
 /**
  * Bottom sheet used for pickers and action menus, presented through the
@@ -35,6 +36,7 @@ export function Sheet({
 }) {
   const theme = useTheme();
   const insets = useSafeAreaInsets();
+  const keyboardHeight = useKeyboardHeight();
   const { height } = useWindowDimensions();
   const sheet = useRef<BottomSheetMethods>(null);
 
@@ -58,7 +60,7 @@ export function Sheet({
       enablePanDownToClose
       onDismiss={onDismiss}>
       <BottomSheetView
-        style={[styles.content, { paddingBottom: Math.max(insets.bottom, 14) }]}>
+        style={[styles.content, { paddingBottom: Math.max(insets.bottom, 14) + keyboardHeight }]}>
         {scrollable ? (
           <BottomSheetScrollView
             alwaysBounceVertical={false}

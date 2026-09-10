@@ -1,5 +1,11 @@
 import { BottomSheetFlatList } from '@expo/ui/community/bottom-sheet';
-import type { ProviderKind, ProviderModel, RuntimeMode } from '@waku/client';
+import type {
+  AgentSession,
+  ProviderKind,
+  ProviderModel,
+  ProviderSessionSummary,
+  RuntimeMode,
+} from '@waku/client';
 import * as Haptics from 'expo-haptics';
 import { useEffect, useMemo, useState } from 'react';
 import {
@@ -29,11 +35,71 @@ import {
   resolveModelTraitSelection,
   type ModelTraitSelection,
 } from '@/lib/model-traits';
-import { providerLabel, runtimeModeLabel } from '@/lib/session-presentation';
+import {
+  providerLabel,
+  runtimeModeLabel,
+  type TurnOption,
+} from '@/lib/session-presentation';
+import { listProviderSessions, providerSessionNativeId } from '@/lib/daemon-api';
+import { useDaemon } from '@/lib/daemon-context';
+import { useRuntime } from '@/lib/runtime-context';
 
 export interface ModelSelection {
   model: string | null;
   reasoningEffort: string | null;
+}
+
+export interface AgentPresetSelection {
+  agentPreset: string | null;
+}
+
+/** Picks how many turns a rewind or a fork keeps.
+ *
+ * Rewind and fork are destructive and irreversible, so the sheet only selects
+ * a target — the caller confirms before anything is sent to the daemon.
+ */
+export function TurnSheet({
+  visible,
+  onDismiss,
+  title,
+  note,
+  turns,
+  onPick,
+}: {
+  visible: boolean;
+  onDismiss: () => void;
+  title: string;
+  note?: string;
+  turns: TurnOption[];
+  onPick: (turnCount: number) => void;
+}) {
+  const theme = useTheme();
+
+  function pick(turnCount: number) {
+    void Haptics.selectionAsync();
+    onPick(turnCount);
+    onDismiss();
+  }
+
+  return (
+    <Sheet onDismiss={onDismiss} title={title} visible={visible}>
+      {note ? (
+        <Text style={[styles.note, { color: theme.textTertiary }]}>{note}</Text>
+      ) : null}
+      {turns.map((turn) => (
+        <SheetRow
+          key={turn.turnCount}
+          label={turn.label}
+          onPress={() => pick(turn.turnCount)}
+        />
+      ))}
+      {!turns.length && (
+        <Text style={[styles.note, { color: theme.textTertiary }]}>
+          This task has no completed turn to rewind to yet.
+        </Text>
+      )}
+    </Sheet>
+  );
 }
 
 export function modelDisplayName(
@@ -430,6 +496,62 @@ const ACCESS_MODES: Array<{ id: RuntimeMode; description: string }> = [
   { id: 'fullAccess', description: 'No approval prompts. The agent acts freely.' },
 ];
 
+/** Agent preset picker for providers that expose startable compositions
+ * (DeepSeek Harness, OpenCode v1). Mirrors the desktop agent chip. */
+export function AgentPresetSheet({
+  visible,
+  onDismiss,
+  provider,
+  agentPreset,
+  onApply,
+}: {
+  visible: boolean;
+  onDismiss: () => void;
+  provider: ProviderKind;
+  agentPreset: string | null;
+  onApply: (selection: AgentPresetSelection) => void;
+}) {
+  const theme = useTheme();
+  const probe = useProviderModels(visible ? provider : null);
+  const presets = probe.data?.agent_presets ?? [];
+  const fallback = presets.find((preset) => preset.is_default) ?? presets[0];
+
+  return (
+    <Sheet onDismiss={onDismiss} title={`${providerLabel(provider)} agent`} visible={visible}>
+      {probe.isPending ? (
+        <View style={styles.loading}>
+          <ActivityIndicator color={theme.textTertiary} />
+        </View>
+      ) : probe.error ? (
+        <Text style={[styles.note, { color: theme.danger }]}>
+          {probe.error instanceof Error ? probe.error.message : String(probe.error)}
+        </Text>
+      ) : (
+        <>
+          {presets.map((preset) => (
+            <SheetRow
+              description={preset.description ?? undefined}
+              key={preset.id}
+              label={preset.name}
+              onPress={() => {
+                void Haptics.selectionAsync();
+                onApply({ agentPreset: preset.id });
+                onDismiss();
+              }}
+              selected={agentPreset === preset.id || (!agentPreset && preset.id === fallback?.id)}
+            />
+          ))}
+          {!presets.length && (
+            <Text style={[styles.note, { color: theme.textTertiary }]}>
+              This agent doesn’t expose any startable presets.
+            </Text>
+          )}
+        </>
+      )}
+    </Sheet>
+  );
+}
+
 /** Access-mode picker mirroring the desktop composer's access control. */
 export function AccessSheet({
   visible,
@@ -464,6 +586,127 @@ export function AccessSheet({
 function optionDescription(description: string | null | undefined, isDefault: boolean) {
   if (description && isDefault) return `Default · ${description}`;
   return description ?? (isDefault ? 'Default' : undefined);
+}
+
+/** Adopts a session an agent CLI started on the daemon host as a Waku task.
+ *
+ * The sheet first lists installed providers, then the external sessions for
+ * the chosen one. Picking a session hands the imported task back through
+ * `onResume`; the caller navigates to it. */
+export function ResumeSessionSheet({
+  visible,
+  onDismiss,
+  onResume,
+  installedProviders,
+  initialProvider,
+}: {
+  visible: boolean;
+  onDismiss: () => void;
+  onResume: (session: AgentSession) => void;
+  installedProviders: ProviderKind[];
+  initialProvider: ProviderKind | null;
+}) {
+  const theme = useTheme();
+  const daemon = useDaemon();
+  const runtime = useRuntime();
+  const [provider, setProvider] = useState<ProviderKind | null>(initialProvider);
+  const [summaries, setSummaries] = useState<ProviderSessionSummary[]>([]);
+  const [pending, setPending] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [importing, setImporting] = useState<string | null>(null);
+
+  // Reset to the provider step each time the sheet opens.
+  useEffect(() => {
+    if (visible) {
+      setProvider(initialProvider);
+      setSummaries([]);
+      setError(null);
+      setImporting(null);
+    }
+  }, [visible, initialProvider]);
+
+  // Listing is keyed to the connection so a reconnect mid-pick refetches rather
+  // than leaving a stale empty list.
+  useEffect(() => {
+    if (!visible || !provider || !daemon.client || daemon.phase !== 'connected') return undefined;
+    let current = true;
+    setPending(true);
+    setError(null);
+    setSummaries([]);
+    void listProviderSessions(daemon.client, provider)
+      .then((sessions) => { if (current) setSummaries(sessions); })
+      .catch((cause) => {
+        if (current) setError(cause instanceof Error ? cause.message : String(cause));
+      })
+      .finally(() => { if (current) setPending(false); });
+    return () => { current = false; };
+  }, [visible, provider, daemon.client, daemon.phase]);
+
+  async function pick(summary: ProviderSessionSummary) {
+    if (importing) return;
+    setImporting(providerSessionNativeId(summary.cursor));
+    try {
+      const session = await runtime.resumeProviderSession(summary);
+      onResume(session);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+      setImporting(null);
+    }
+  }
+
+  return (
+    <Sheet visible={visible} onDismiss={onDismiss} title="Resume external session">
+      {provider === null ? (
+        installedProviders.map((candidate) => (
+          <SheetRow
+            key={candidate}
+            label={providerLabel(candidate)}
+            leading={<ProviderIcon provider={candidate} size={18} />}
+            onPress={() => setProvider(candidate)}
+          />
+        ))
+      ) : (
+        <>
+          <SheetRow
+            label="Change provider"
+            leading={(
+              <AppSymbol
+                name={{ ios: 'chevron.left', android: 'arrow_back', web: 'arrow_back' }}
+                size={16}
+                tintColor={theme.textSecondary}
+              />
+            )}
+            onPress={() => {
+              setProvider(null);
+              setSummaries([]);
+            }}
+          />
+          {pending ? (
+            <View style={styles.loading}>
+              <ActivityIndicator color={theme.textTertiary} />
+            </View>
+          ) : error ? (
+            <Text style={[styles.note, { color: theme.danger }]}>{error}</Text>
+          ) : summaries.length === 0 ? (
+            <Text style={[styles.note, { color: theme.textTertiary }]}>
+              No sessions from {providerLabel(provider)} to resume.
+            </Text>
+          ) : summaries.map((summary) => {
+            const id = providerSessionNativeId(summary.cursor);
+            return (
+              <SheetRow
+                key={`${summary.cursor.provider}:${id}`}
+                label={summary.title || 'Untitled session'}
+                description={`${providerLabel(summary.cursor.provider)} · ${summary.cwd}`}
+                disabled={Boolean(importing)}
+                onPress={() => void pick(summary)}
+              />
+            );
+          })}
+        </>
+      )}
+    </Sheet>
+  );
 }
 
 const styles = StyleSheet.create({

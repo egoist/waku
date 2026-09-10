@@ -28,6 +28,7 @@ import {
   SendButton,
 } from '@/components/mobile-composer';
 import { RemoteProjectPicker } from '@/components/remote-project-picker';
+import { ResumeSessionSheet } from '@/components/session-option-sheets';
 import { useScreenHeaderInset } from '@/components/screen-header';
 import {
   ModelPickerSheet,
@@ -36,7 +37,13 @@ import {
 } from '@/components/session-option-sheets';
 import { Sheet, SheetRow } from '@/components/sheet';
 import { Radius, Spacing } from '@/constants/theme';
-import { useAllProviderModels, useProviderCatalog, useTaskState } from '@/hooks/use-daemon-data';
+import {
+  useAllProviderModels,
+  useComposerCommands,
+  useProviderCatalog,
+  useTaskState,
+} from '@/hooks/use-daemon-data';
+import { resolvedComposerSubmission } from '@/lib/composer-commands';
 import { useSyncedComposerDraft } from '@/hooks/use-synced-composer-draft';
 import { useTheme } from '@/hooks/use-theme';
 import { daemonKeys, inspectBranches } from '@/lib/daemon-api';
@@ -83,6 +90,7 @@ export default function NewTaskScreen() {
   const [submitting, setSubmitting] = useState(false);
   const [openSheet, setOpenSheet] = useState<SheetKind | null>(null);
   const [projectPickerOpen, setProjectPickerOpen] = useState(false);
+  const [resumeOpen, setResumeOpen] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const installedProviders = useMemo(
     () => catalog.providers.filter((item) => item.installed).map((item) => item.id),
@@ -91,6 +99,9 @@ export default function NewTaskScreen() {
   const modelCatalog = useAllProviderModels(installedProviders);
   const projects = taskState.data?.projects ?? [];
   const selectedProject = projects.find((item) => item.id === projectId);
+  // Same resolution the session composer applies, so a command typed as the
+  // very first prompt reaches the provider in its native form too.
+  const commandCatalog = useComposerCommands(provider, selectedProject?.path);
   const projectless = selectedProject?.name === 'No project';
   const branches = useQuery({
     queryKey: daemonKeys.branches(
@@ -252,8 +263,11 @@ export default function NewTaskScreen() {
   }
 
   async function start() {
-    const value = prompt.trim();
-    if (!selectedProject || !provider || !value || submitting) return;
+    const typed = prompt.trim();
+    const value = provider
+      ? resolvedComposerSubmission(provider, typed, commandCatalog.data ?? []) ?? typed
+      : typed;
+    if (!selectedProject || !provider || !typed || submitting) return;
     setSubmitting(true);
     setError(null);
     try {
@@ -369,6 +383,15 @@ export default function NewTaskScreen() {
             onPress={() => setOpenSheet('branch')}
           />
         )}
+        <SelectorRow
+          icon={{ ios: 'arrow.uturn.down', android: 'restart_alt', web: 'restart_alt' }}
+          label="Resume external session"
+          value="From a CLI on the daemon"
+          onPress={() => {
+            void Haptics.selectionAsync();
+            setResumeOpen(true);
+          }}
+        />
       </View>
 
       <View style={[styles.composerShell, { paddingBottom: Math.max(insets.bottom, 10) }]}>
@@ -431,11 +454,11 @@ export default function NewTaskScreen() {
           />
         ))}
         <SheetRow
-          description="Pick any folder on the daemon host, or create an empty workspace"
-          label="Browse daemon host…"
+          description="Browse the daemon host, then add a folder or an empty workspace"
+          label="Add new project…"
           leading={(
             <AppSymbol
-              name={{ ios: 'externaldrive', android: 'hard_drive', web: 'hard_drive' }}
+              name={{ ios: 'folder.badge.plus', android: 'create_new_folder', web: 'create_new_folder' }}
               size={16}
               tintColor={theme.textSecondary}
             />
@@ -512,6 +535,17 @@ export default function NewTaskScreen() {
         visible={projectPickerOpen}
         onDismiss={() => setProjectPickerOpen(false)}
         onSelect={(project) => setProjectId(project.id)}
+      />
+
+      <ResumeSessionSheet
+        visible={resumeOpen}
+        onDismiss={() => setResumeOpen(false)}
+        onResume={(resumed) => {
+          setResumeOpen(false);
+          router.push({ pathname: '/session/[id]', params: { id: resumed.id } });
+        }}
+        installedProviders={installedProviders}
+        initialProvider={provider}
       />
     </KeyboardAvoidingView>
   );

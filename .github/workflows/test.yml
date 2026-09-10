@@ -74,3 +74,13 @@ jobs:
           bun run protocol:check
           bun run --filter @waku/client check
           bun run --filter @waku/client test
+
+      # Mobile has its own client code against the same generated protocol and
+      # is not covered by the Rust or @waku/client checks, so protocol changes
+      # can drift past it silently. Types and unit tests are enough to catch
+      # that without an emulator.
+      - name: Check mobile client
+        if: runner.os == 'Linux'
+        run: |
+          bun run --filter @waku/mobile typecheck
+          bun run --filter @waku/mobile test

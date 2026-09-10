@@ -190,7 +190,7 @@ impl OpenCodeDriver {
             reasoning_effort,
             service_tier: _,
             context_window: _,
-            agent_preset: _,
+            agent_preset,
             computer_use_enabled,
             provider_cursor,
         } = options;
@@ -232,7 +232,15 @@ impl OpenCodeDriver {
             crate::opencode_pool::acquire(&binary, &cwd)?
         };
 
-        let agent = "build";
+        // `build` is the server's default agent; an explicit selection rides
+        // the session create and every prompt, steer, and command body. Waku
+        // changes the model per prompt because the server has no session-level
+        // model setting, and the picker only ever asks before a task starts,
+        // so one resolved string covers the session's lifetime.
+        let agent = agent_preset
+            .map(|preset| preset.trim().to_owned())
+            .filter(|agent| !agent.is_empty())
+            .unwrap_or_else(|| "build".to_owned());
 
         // Reuse the native session when resuming so the conversation, and the
         // cursor already persisted for it, stay the same.
@@ -482,7 +490,7 @@ impl OpenCodeDriver {
                                 &command_names,
                                 model.as_deref(),
                                 variant.as_deref(),
-                                agent,
+                                agent.as_str(),
                             ) {
                                 if let Err(error) = start_native_command(
                                     worker_server.port,
@@ -506,8 +514,12 @@ impl OpenCodeDriver {
                                 "/session/{}/prompt_async",
                                 encode_path_segment(&worker_session)
                             );
-                            let body =
-                                prompt_body(&text, model.as_deref(), variant.as_deref(), agent);
+                            let body = prompt_body(
+                                &text,
+                                model.as_deref(),
+                                variant.as_deref(),
+                                agent.as_str(),
+                            );
                             if let Err(error) = worker_server.request("POST", &path, Some(&body)) {
                                 reject_prompt(error, &worker_events, &worker_turn);
                             }
@@ -537,7 +549,7 @@ impl OpenCodeDriver {
                                 &command_names,
                                 model.as_deref(),
                                 variant.as_deref(),
-                                agent,
+                                agent.as_str(),
                             ) {
                                 if let Err(error) = start_native_command(
                                     worker_server.port,
@@ -558,8 +570,12 @@ impl OpenCodeDriver {
                                 "/session/{}/prompt_async",
                                 encode_path_segment(&worker_session)
                             );
-                            let body =
-                                prompt_body(&text, model.as_deref(), variant.as_deref(), agent);
+                            let body = prompt_body(
+                                &text,
+                                model.as_deref(),
+                                variant.as_deref(),
+                                agent.as_str(),
+                            );
                             match worker_server.request("POST", &path, Some(&body)) {
                                 Ok(_) => {
                                     let _ = worker_events

@@ -7,6 +7,7 @@ import { ActivityIndicator, Pressable, StyleSheet, Text, View } from 'react-nati
 
 import { ActivityGroup } from '@/components/activity-group';
 import { AppSymbol } from '@/components/app-symbol';
+import { AttachmentChip } from '@/components/attachment-chip';
 import {
   MdBlockLive,
   MdBlockSettled,
@@ -164,22 +165,10 @@ function UserBubbleInner({ message }: { message: Message }) {
         {message.attachments?.length ? (
           <View style={styles.attachments}>
             {message.attachments.map((attachment) => (
-              <View
+              <AttachmentChip
+                attachment={attachment}
                 key={`${attachment.path}:${attachment.name}`}
-                style={[styles.attachment, { backgroundColor: theme.overlayStrong }]}>
-                <AppSymbol
-                  name={{
-                    ios: attachment.is_image ? 'photo' : 'doc',
-                    android: attachment.is_image ? 'image' : 'description',
-                    web: 'description',
-                  }}
-                  size={12}
-                  tintColor={theme.textSecondary}
-                />
-                <Text numberOfLines={1} style={[styles.attachmentText, { color: theme.textSecondary }]}>
-                  {attachment.name}
-                </Text>
-              </View>
+              />
             ))}
           </View>
         ) : null}
@@ -348,16 +337,6 @@ const styles = StyleSheet.create({
     textAlign: 'center',
   },
   attachments: { flexDirection: 'row', flexWrap: 'wrap', gap: 6, marginTop: 9 },
-  attachment: {
-    alignItems: 'center',
-    borderRadius: Radius.small,
-    flexDirection: 'row',
-    gap: 5,
-    maxWidth: 220,
-    paddingHorizontal: 8,
-    paddingVertical: 5,
-  },
-  attachmentText: { flexShrink: 1, fontSize: 11.5 },
   foldRow: {
     alignItems: 'center',
     flexDirection: 'row',

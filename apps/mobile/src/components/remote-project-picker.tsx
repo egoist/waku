@@ -29,6 +29,7 @@ import {
   type TaskState,
 } from '@/lib/daemon-api';
 import { useDaemon } from '@/lib/daemon-context';
+import { useKeyboardHeight } from '@/lib/keyboard-offset';
 
 export function RemoteProjectPicker({
   visible,
@@ -41,6 +42,7 @@ export function RemoteProjectPicker({
 }) {
   const theme = useTheme();
   const daemon = useDaemon();
+  const keyboardHeight = useKeyboardHeight();
   const queryClient = useQueryClient();
   const profileId = daemon.activeProfile?.id ?? 'disconnected';
   const [path, setPath] = useState<string | null>(null);
@@ -124,7 +126,7 @@ export function RemoteProjectPicker({
       visible={visible}>
       <KeyboardAvoidingView
         behavior={Platform.OS === 'ios' ? 'padding' : undefined}
-        style={[styles.screen, { backgroundColor: theme.background }]}>
+        style={[styles.screen, { backgroundColor: theme.background, paddingBottom: keyboardHeight }]}>
         <SafeAreaView edges={['top', 'bottom']} style={styles.screen}>
           <View style={[styles.header, { borderBottomColor: theme.separator }]}>
             <Pressable

@@ -16,6 +16,21 @@ impl Waku {
             .reset_with_uniform_height(rows.len(), px(BRANCH_PICKER_ROW_HEIGHT));
     }
 
+    /// Reset transient branch-picker UI state so it does not leak when the user
+    /// switches sessions. Two sessions can share a working-tree path (same
+    /// project folder), so the per-path Git snapshot cache alone does not isolate
+    /// them — without this the previous session's search text, highlight and
+    /// picker mode persist into the newly selected session.
+    pub(super) fn reset_branch_picker_state(&mut self, cx: &mut Context<Self>) {
+        self.branch_picker_mode = BranchPickerMode::Browse;
+        self.branch_picker_highlight = None;
+        self.branch_search.update(cx, |input, cx| input.clear(cx));
+        self.branch_create_input.update(cx, |input, cx| input.clear(cx));
+        self.branch_picker_row_cache.borrow_mut().clear();
+        self.branch_picker_list_state
+            .reset_with_uniform_height(0, px(BRANCH_PICKER_ROW_HEIGHT));
+    }
+
     /// Read the selected workspace's cached Git branches, starting one
     /// background fetch on a miss. The previous selected-path snapshot remains
     /// drawable while an invalidation is being refreshed.
@@ -177,6 +192,39 @@ impl Waku {
         else {
             return false;
         };
+
+        if matches!(session.workspace, SessionWorkspace::Local) {
+            // A `Local` session runs inside the project's single working tree.
+            // Checking out a different branch there would also move every other
+            // `Local` session sharing that project, and the shared
+            // `sidebar_branch_labels` cache would then show the wrong branch for
+            // both. Isolate this session in a worktree instead — the worktree and
+            // its branch are materialized when the first prompt is submitted.
+            let already_on = self
+                .visible_branch_snapshot
+                .as_ref()
+                .filter(|(snapshot_path, _)| snapshot_path == &path)
+                .and_then(|(_, snapshot)| snapshot.current.as_deref())
+                == Some(branch.as_str());
+            if !already_on {
+                let converted = self.selected_session_mut().is_some_and(|session| {
+                    if let SessionWorkspace::Local = session.workspace {
+                        session.workspace =
+                            SessionWorkspace::NewWorktree { base_branch: Some(branch) };
+                        true
+                    } else {
+                        false
+                    }
+                });
+                if converted {
+                    self.save();
+                    cx.notify();
+                }
+            }
+            return true;
+        }
+
+        // An existing worktree owns its own checkout, so switching is safe.
         if self
             .visible_branch_snapshot
             .as_ref()
@@ -238,6 +286,29 @@ impl Waku {
             .to_owned();
         if branch.is_empty() {
             return false;
+        }
+        if self
+            .selected_session()
+            .is_some_and(|session| matches!(session.workspace, SessionWorkspace::Local))
+        {
+            // Same isolation rule as checking out a branch: a `Local` session
+            // shares the project tree, so creating the branch there would also
+            // affect every other `Local` session on that project. Plan it as a
+            // worktree base branch instead; it is created on first submission.
+            let converted = self.selected_session_mut().is_some_and(|session| {
+                if let SessionWorkspace::Local = session.workspace {
+                    session.workspace =
+                        SessionWorkspace::NewWorktree { base_branch: Some(branch) };
+                    true
+                } else {
+                    false
+                }
+            });
+            if converted {
+                self.save();
+                cx.notify();
+            }
+            return true;
         }
         let Some(path) = self
             .selected_workspace_path()
