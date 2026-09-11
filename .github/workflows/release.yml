@@ -225,10 +225,11 @@ jobs:
       - uses: softprops/action-gh-release@v3
         with:
           draft: true
-          # A manual run has no tag yet; publishing the draft creates this one
-          # at the commit that was built.
+          # The tag is pushed before this workflow runs (the tag-triggered
+          # path) or must already exist for a manual run, so never re-point
+          # it: passing target_commitish for an existing tag makes the
+          # release API return 404.
           tag_name: ${{ needs.version.outputs.tag }}
-          target_commitish: ${{ github.sha }}
           name: ${{ needs.version.outputs.tag }}
           body_path: release-notes.md
           fail_on_unmatched_files: true
