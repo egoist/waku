@@ -2206,12 +2206,18 @@ done
 
 #[cfg(test)]
 mod opencode_effort_smoke {
+    use super::CatalogProbe;
+
     /// Proves against the real CLI that the effort ladder is populated, which
     /// canned JSON cannot.
     #[test]
     #[ignore = "requires an installed, authenticated opencode"]
     fn discovers_reasoning_efforts_from_the_installed_cli() {
-        let models = super::discover_opencode_models(std::path::Path::new("opencode"));
+        let CatalogProbe::Authoritative(models) =
+            super::discover_opencode_models(std::path::Path::new("opencode"))
+        else {
+            panic!("expected an authoritative probe from the installed CLI");
+        };
         let with_efforts: Vec<_> = models
             .iter()
             .filter(|model| !model.reasoning_efforts.is_empty())

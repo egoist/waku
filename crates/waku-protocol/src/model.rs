@@ -1153,6 +1153,45 @@ impl AgentSession {
         self.detail_loaded = false;
     }
 
+    /// Replaces the conversation transcript with a fresh provider-native
+    /// import while keeping Waku-owned state.
+    ///
+    /// Used when a session another surface (the provider CLI, a second client)
+    /// continued meanwhile is adopted again: the imported history is the
+    /// provider's truth, so messages and turns are replaced wholesale, while
+    /// everything Waku owns — titles, model selection, workspace, goal — and
+    /// the live-runtime state stay as they are.
+    ///
+    /// Returns whether anything changed, so callers can skip redundant
+    /// persistence. Callers must not run this while a turn is busy.
+    pub fn refresh_from_provider_history(&mut self, history: ProviderSessionHistory) -> bool {
+        let has_history = !history.messages.is_empty() || !history.turns.is_empty();
+        let newest = history
+            .turns
+            .iter()
+            .filter_map(|turn| turn.completed_at)
+            .chain(history.messages.iter().map(|message| message.created_at))
+            .max()
+            .unwrap_or(0);
+        // Nothing to adopt from an empty import. A same-length import whose
+        // newest turn is not newer than the last known reply is the stale
+        // snapshot echoed back — skip it rather than churn the transcript.
+        let count_grew = history.messages.len() > self.messages.len();
+        if !has_history || (!count_grew && newest <= self.last_reply_at.unwrap_or(0)) {
+            return false;
+        }
+
+        self.messages = history.messages;
+        self.turns = history.turns;
+        self.transcript_blocks.clear();
+        self.queued_messages.clear();
+        if newest > self.updated_at {
+            self.updated_at = newest;
+            self.last_reply_at = Some(newest);
+        }
+        true
+    }
+
     /// Identifier owned by the underlying agent CLI, once its native session
     /// has been established.
     pub fn provider_native_id(&self) -> Option<&str> {
@@ -4125,6 +4164,75 @@ mod tests {
         assert_eq!(ProviderKind::OpenCode2.command(), "opencode2");
         assert_eq!(ProviderKind::Grok.command(), "grok");
         assert_eq!(ProviderKind::Pi.command(), "pi");
+    }
+
+    fn import_turn(completed_at: u64) -> AgentTurn {
+        AgentTurn {
+            id: Uuid::new_v4(),
+            turn_count: 1,
+            status: TurnStatus::Completed,
+            provider_turn_started: true,
+            provider_resume_at: None,
+            started_at: completed_at.saturating_sub(30),
+            completed_at: Some(completed_at),
+            checkpoint: None,
+        }
+    }
+
+    fn import_history(count: usize, newest_completed_at: u64) -> ProviderSessionHistory {
+        let mut history = ProviderSessionHistory::default();
+        for offset in 0..count {
+            let completed_at = newest_completed_at - (count - 1 - offset) as u64;
+            let mut message = Message::new(MessageRole::User, format!("turn {offset}"));
+            message.created_at = completed_at;
+            history.messages.push(message);
+            history.turns.push(import_turn(completed_at));
+        }
+        history
+    }
+
+    #[test]
+    fn provider_refresh_replaces_transcript_but_keeps_waku_state() {
+        let project = Project::from_path(PathBuf::from("/tmp/waku"));
+        let mut session = AgentSession::new(project.id, ProviderKind::OpenCode);
+        session.begin_turn("tracked in Waku");
+        session.set_title("My title");
+        session.queued_messages.push(QueuedMessage::new("queued"));
+
+        let mut history = import_history(2, unix_time() + 10);
+        history.messages.push(Message::new(
+            MessageRole::Assistant,
+            "written by the CLI meanwhile",
+        ));
+
+        assert!(session.refresh_from_provider_history(history));
+        assert_eq!(session.messages.len(), 3);
+        assert_eq!(session.turns.len(), 2);
+        assert!(session.transcript_blocks.is_empty());
+        assert_eq!(session.title, "My title");
+        assert_eq!(session.model, None);
+    }
+
+    #[test]
+    fn provider_refresh_skips_an_empty_or_stale_import() {
+        let project = Project::from_path(PathBuf::from("/tmp/waku"));
+        let mut session = AgentSession::new(project.id, ProviderKind::OpenCode);
+        session.begin_turn("tracked in Waku");
+        let before_updated = session.updated_at;
+
+        assert!(!session.refresh_from_provider_history(
+            ProviderSessionHistory::default()));
+        assert_eq!(session.updated_at, before_updated);
+
+        // The stale snapshot echoed back: no growth, nothing newer.
+        let stale = import_history(1, before_updated);
+        assert!(!session.refresh_from_provider_history(stale));
+        assert_eq!(session.messages.len(), 1);
+
+        // Growth with an equal timestamp is still an external continuation.
+        let grew = import_history(3, before_updated);
+        assert!(session.refresh_from_provider_history(grew));
+        assert_eq!(session.messages.len(), 3);
     }
 
     #[test]

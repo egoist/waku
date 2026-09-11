@@ -596,9 +596,20 @@ impl Backend for WakuBackend {
                             VISIBLE_TURN_LIMIT,
                         )?
                     }
+                    // OpenCode's ACP endpoint advertises `loadSession` but
+                    // fails on real sessions, so its transcript comes from the
+                    // pooled server's own message route.
+                    ProviderResumeCursor::OpenCode { session_id } => {
+                        let binary = self.provider_binary(ProviderKind::OpenCode)?;
+                        crate::opencode_session::provider_session_history(
+                            &binary,
+                            &cwd,
+                            session_id,
+                            VISIBLE_TURN_LIMIT,
+                        )?
+                    }
                     ProviderResumeCursor::Cursor { session_id, .. }
                     | ProviderResumeCursor::Fx { session_id }
-                    | ProviderResumeCursor::OpenCode { session_id }
                     | ProviderResumeCursor::Grok { session_id }
                     | ProviderResumeCursor::Kimi { session_id } => {
                         let provider = cursor.provider();

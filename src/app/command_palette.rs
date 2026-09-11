@@ -1378,21 +1378,34 @@ impl Waku {
         &mut self,
         summary: ProviderSessionSummary,
         history: ProviderSessionHistory,
+        tracked_session_id: Option<Uuid>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if let Some(session_id) = self
-            .state
-            .sessions
-            .iter()
-            .find(|session| {
-                session
-                    .provider_cursor
-                    .as_ref()
-                    .is_some_and(|cursor| same_provider_session(cursor, &summary.cursor))
-            })
-            .map(|session| session.id)
-        {
+        // A session Waku tracks gets the fresh import merged into its stored
+        // state instead of a duplicate task; the provider side is the truth
+        // about the conversation, Waku-owned fields stay untouched.
+        if let Some(session_id) = tracked_session_id.or_else(|| {
+            self.state
+                .sessions
+                .iter()
+                .find(|session| {
+                    session
+                        .provider_cursor
+                        .as_ref()
+                        .is_some_and(|cursor| same_provider_session(cursor, &summary.cursor))
+                })
+                .map(|session| session.id)
+        }) {
+            let refreshed = self
+                .state
+                .session_mut(session_id)
+                .is_some_and(|session| !session.is_busy() && {
+                    session.refresh_from_provider_history(history)
+                });
+            if refreshed {
+                self.save();
+            }
             self.close_command_palette(window, cx);
             self.settings_page = None;
             self.select_session(session_id, cx);
@@ -1456,7 +1469,12 @@ impl Waku {
         if self.command_palette.provider_session_import.is_some() {
             return;
         }
-        if let Some(session_id) = self
+        // A session Waku already tracks is still re-imported when the provider
+        // moved: the CLI or another client may have continued it since the
+        // last fetch, and the stored snapshot predates those turns. When the
+        // catalog reports nothing newer than the last known reply, the stored
+        // snapshot is current and the fetch is skipped entirely.
+        let tracked_session_id = self
             .state
             .sessions
             .iter()
@@ -1466,7 +1484,15 @@ impl Waku {
                     .as_ref()
                     .is_some_and(|cursor| same_provider_session(cursor, &summary.cursor))
             })
-            .map(|session| session.id)
+            .map(|session| session.id);
+        if let Some(session_id) = tracked_session_id
+            && let Some(session) = self
+                .state
+                .sessions
+                .iter()
+                .find(|session| session.id == session_id)
+            && !session.is_busy()
+            && summary.updated_at <= session.last_reply_at.unwrap_or(0)
         {
             self.close_command_palette(window, cx);
             self.settings_page = None;
@@ -1525,7 +1551,13 @@ impl Waku {
                         && waku.command_palette.view == CommandPaletteView::Resume
                         && waku.command_palette.provider_session_generation == generation
                     {
-                        waku.import_provider_session(summary, history, window, cx);
+                        waku.import_provider_session(
+                            summary,
+                            history,
+                            tracked_session_id,
+                            window,
+                            cx,
+                        );
                     }
                 });
             });

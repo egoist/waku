@@ -581,6 +581,35 @@ export function sameProviderSession(
     && providerSessionNativeId(left) === providerSessionNativeId(right);
 }
 
+/** Merges a fresh provider-native import into a tracked task. The provider CLI
+ * or another client may have continued the conversation since the snapshot was
+ * stored, so messages and turns are replaced wholesale while Waku-owned fields
+ * (title, model, workspace) stay untouched. Returns the same session object
+ * when the import adds nothing. Mirrors `AgentSession::refresh_from_provider_history`. */
+export function refreshTrackedSession(
+  session: AgentSession,
+  history: ProviderSessionHistory,
+): AgentSession {
+  const hasHistory = history.messages.length > 0 || history.turns.length > 0;
+  if (!hasHistory) return session;
+  const newest = Math.max(
+    ...history.turns.map((turn) => turn.completed_at ?? 0),
+    ...history.messages.map((message) => message.created_at),
+  );
+  const countGrew = history.messages.length > session.messages.length;
+  if (!countGrew && newest <= (session.last_reply_at ?? 0)) return session;
+
+  return {
+    ...session,
+    messages: history.messages,
+    turns: history.turns,
+    transcript_blocks: [],
+    queued_messages: [],
+    updated_at: Math.max(session.updated_at, newest),
+    last_reply_at: newest > 0 ? Math.max(session.last_reply_at ?? 0, newest) : session.last_reply_at,
+  };
+}
+
 /** Builds the task Waku opens for an adopted provider session. The history is
  * copied verbatim; the daemon replays it from `provider_cursor` on the next
  * turn rather than re-running the CLI conversation. */
