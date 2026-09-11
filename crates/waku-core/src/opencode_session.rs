@@ -1,5 +1,6 @@
 //! OpenCode server lifecycle and native-session helpers.
 
+use std::collections::HashSet;
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Stdio};
@@ -10,7 +11,11 @@ use anyhow::{Context as _, anyhow, bail};
 use parking_lot::Mutex;
 use serde_json::{Value, json};
 
-use crate::model::{ProviderKind, ProviderResumeCursor, ProviderSessionSummary};
+use crate::model::{
+    AgentTurn, Message, MessageRole, ProviderKind, ProviderResumeCursor,
+    ProviderSessionHistory, ProviderSessionSummary, TurnStatus,
+};
+use uuid::Uuid;
 
 const SERVER_START_TIMEOUT: Duration = Duration::from_secs(10);
 const HTTP_TIMEOUT: Duration = Duration::from_secs(10);
@@ -93,6 +98,127 @@ fn session_summary(session: &Value) -> Option<ProviderSessionSummary> {
 /// OpenCode stamps sessions in Unix milliseconds; the catalog sorts in seconds.
 fn unix_seconds(value: Option<&Value>) -> u64 {
     value.and_then(Value::as_u64).unwrap_or_default() / 1000
+}
+
+/// Loads one session's user-visible transcript through OpenCode's own HTTP
+/// API instead of an ACP `session/load` replay.
+///
+/// The ACP route advertises `loadSession` but fails with an internal service
+/// error on real sessions (observed on OpenCode 1.18.30), so the resume picker
+/// cannot replay through it. The message list the fork path already reads is
+/// the same transcript, fetched from the resident server.
+pub fn provider_session_history(
+    binary: &Path,
+    cwd: &Path,
+    session_id: &str,
+    visible_turn_limit: usize,
+) -> anyhow::Result<ProviderSessionHistory> {
+    if session_id.trim().is_empty() || visible_turn_limit == 0 {
+        return Ok(ProviderSessionHistory::default());
+    }
+    let server = crate::opencode_pool::acquire(binary, cwd)?;
+    let path = format!("/session/{}/message", encode_path_segment(session_id));
+    let messages = server
+        .request_with_timeout("GET", &path, None, FORK_HTTP_TIMEOUT)
+        .with_context(|| format!("OpenCode could not export session {session_id}"))?;
+    let entries = messages
+        .as_array()
+        .ok_or_else(|| anyhow!("OpenCode returned an invalid message list"))?;
+    let mut history = history_from_native_messages(entries);
+    retain_recent_turns(&mut history, visible_turn_limit);
+    Ok(history)
+}
+
+/// Converts OpenCode's native `{info, parts}` entries into Waku's transcript
+/// model. Each non-synthetic user text part opens a turn; the assistant reply
+/// folds into it until the next user turn. Tool and reasoning parts are
+/// dropped: `ProviderSessionHistory` carries messages and turns only, the
+/// same shape every other import path produces.
+fn history_from_native_messages(entries: &[Value]) -> ProviderSessionHistory {
+    let mut history = ProviderSessionHistory::default();
+    for entry in entries {
+        let info = entry.get("info").unwrap_or(&Value::Null);
+        let role = info.get("role").and_then(Value::as_str).unwrap_or_default();
+        let completed_at = unix_seconds(info.pointer("/time/created"));
+        let parts = entry.get("parts").and_then(Value::as_array);
+        let Some(parts) = parts else { continue };
+
+        if role == "user" {
+            // Synthetic prompts (compaction summaries, queued system text)
+            // are provider plumbing, not user turns.
+            let text = parts
+                .iter()
+                .filter(|part| {
+                    part.get("type").and_then(Value::as_str) == Some("text")
+                        && part.get("synthetic").and_then(Value::as_bool) != Some(true)
+                })
+                .filter_map(|part| part.get("text").and_then(Value::as_str))
+                .collect::<Vec<_>>()
+                .join("\n");
+            if text.is_empty() {
+                continue;
+            }
+            let turn_id = Uuid::new_v4();
+            history.turns.push(AgentTurn {
+                id: turn_id,
+                turn_count: history.turns.len() + 1,
+                status: TurnStatus::Completed,
+                provider_turn_started: true,
+                provider_resume_at: None,
+                started_at: completed_at,
+                completed_at: Some(completed_at),
+                checkpoint: None,
+            });
+            let mut message = Message::new_for_turn(MessageRole::User, text, turn_id);
+            message.created_at = completed_at;
+            history.messages.push(message);
+            continue;
+        }
+
+        if role != "assistant" {
+            continue;
+        }
+        let Some(turn_id) = history.turns.last().map(|turn| turn.id) else {
+            continue;
+        };
+        for part in parts {
+            let part_type = part.get("type").and_then(Value::as_str).unwrap_or_default();
+            if part_type != "text" {
+                continue;
+            }
+            let Some(text) = part
+                .get("text")
+                .and_then(Value::as_str)
+                .filter(|text| !text.trim().is_empty())
+            else {
+                continue;
+            };
+            if let Some(message) = history.messages.last_mut().filter(|message| {
+                message.role == MessageRole::Assistant && message.turn_id == Some(turn_id)
+            }) {
+                message.content.push('\n');
+                message.content.push_str(text);
+            } else {
+                let mut message = Message::new_for_turn(MessageRole::Assistant, text, turn_id);
+                message.created_at = completed_at;
+                history.messages.push(message);
+            }
+        }
+    }
+    history
+}
+
+fn retain_recent_turns(history: &mut ProviderSessionHistory, limit: usize) {
+    let retained = history
+        .turns
+        .iter()
+        .rev()
+        .take(limit)
+        .map(|turn| turn.id)
+        .collect::<HashSet<_>>();
+    history
+        .messages
+        .retain(|message| message.turn_id.is_some_and(|id| retained.contains(&id)));
 }
 
 pub fn fork_session_at_turn(
@@ -408,6 +534,64 @@ mod tests {
             "info": {"role": "user"},
             "parts": [{"type": "text", "text": "continue", "synthetic": true}]
         })));
+    }
+
+    #[test]
+    fn native_messages_import_into_user_and_assistant_turns() {
+        let entries = vec![
+            json!({
+                "info": {"role": "user", "time": {"created": 1_000_000}},
+                "parts": [{"type": "text", "text": "fix the bug"}]
+            }),
+            json!({
+                "info": {"role": "assistant", "time": {"created": 1_000_050}},
+                "parts": [
+                    {"type": "reasoning", "text": "looking"},
+                    {"type": "tool", "tool": "edit", "state": {"status": "completed", "title": "main.rs"}},
+                    {"type": "text", "text": "fixed it"}
+                ]
+            }),
+            // Synthetic provider plumbing must not open a turn.
+            json!({
+                "info": {"role": "user", "time": {"created": 1_000_060}},
+                "parts": [{"type": "text", "text": "compaction", "synthetic": true}]
+            }),
+            json!({
+                "info": {"role": "user", "time": {"created": 1_000_100}},
+                "parts": [{"type": "text", "text": "now add tests"}]
+            }),
+            json!({
+                "info": {"role": "assistant", "time": {"created": 1_000_200}},
+                "parts": [{"type": "text", "text": "done"}]
+            }),
+        ];
+
+        let history = history_from_native_messages(&entries);
+        assert_eq!(history.turns.len(), 2);
+        assert_eq!(history.messages.len(), 4);
+        assert_eq!(history.messages[0].role, MessageRole::User);
+        assert_eq!(history.messages[0].content, "fix the bug");
+        assert_eq!(history.messages[1].role, MessageRole::Assistant);
+        assert_eq!(history.messages[1].content, "fixed it");
+        assert_eq!(history.messages[2].role, MessageRole::User);
+        assert_eq!(history.messages[2].content, "now add tests");
+        assert_eq!(history.messages[3].content, "done");
+        // Each assistant reply attaches to its own turn.
+        assert_eq!(history.messages[1].turn_id, Some(history.turns[0].id));
+        assert_eq!(history.messages[3].turn_id, Some(history.turns[1].id));
+        // Timestamps come from the native payload in seconds.
+        assert_eq!(history.turns[0].completed_at, Some(1_000));
+    }
+
+    #[test]
+    fn assistant_text_before_any_user_turn_is_dropped() {
+        let entries = vec![json!({
+            "info": {"role": "assistant", "time": {"created": 5}},
+            "parts": [{"type": "text", "text": "orphan"}]
+        })];
+        let history = history_from_native_messages(&entries);
+        assert!(history.turns.is_empty());
+        assert!(history.messages.is_empty());
     }
 
     #[cfg(unix)]

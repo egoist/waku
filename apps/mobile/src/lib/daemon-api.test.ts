@@ -15,6 +15,7 @@ import {
   persistProject,
   providerSessionNativeId,
   sameProviderSession,
+  refreshTrackedSession,
 } from './daemon-api';
 
 describe('mobile daemon API', () => {
@@ -158,5 +159,43 @@ describe('provider session resume', () => {
     expect(resumed.turns).toEqual(history.turns);
     expect(resumed.status).toBe('idle');
     expect(resumed.last_reply_at).not.toBeNull();
+  });
+
+  test('refreshes a tracked task from a newer provider import', () => {
+    const tracked = createResumedSession('project', summary('codex', 'thread-1'), {
+      messages: [{ id: 'm1', turn_id: 't1', role: 'user', content: 'old', created_at: 100, streaming: false }],
+      turns: [{
+        id: 't1', turn_count: 1, status: 'completed', provider_turn_started: true,
+        provider_resume_at: null, started_at: 99, completed_at: 100, checkpoint: null,
+      }],
+    } as unknown as ProviderSessionHistory);
+    tracked.title = 'My title';
+    tracked.last_reply_at = 100;
+
+    const newer = {
+      messages: [
+        { id: 'm1', turn_id: 't1', role: 'user', content: 'old', created_at: 100, streaming: false },
+        { id: 'm2', turn_id: 't2', role: 'assistant', content: 'written in the CLI', created_at: 200, streaming: false },
+      ],
+      turns: [
+        { id: 't1', turn_count: 1, status: 'completed', provider_turn_started: true, provider_resume_at: null, started_at: 99, completed_at: 100, checkpoint: null },
+        { id: 't2', turn_count: 2, status: 'completed', provider_turn_started: true, provider_resume_at: null, started_at: 199, completed_at: 200, checkpoint: null },
+      ],
+    } as unknown as ProviderSessionHistory;
+
+    const refreshed = refreshTrackedSession(tracked, newer);
+    expect(refreshed).not.toBe(tracked);
+    expect(refreshed.messages).toEqual(newer.messages);
+    expect(refreshed.turns).toEqual(newer.turns);
+    expect(refreshed.title).toBe('My title');
+    expect(refreshed.last_reply_at).toBe(200);
+    expect(refreshed.transcript_blocks).toEqual([]);
+
+    // A same-length import with nothing newer is the stale snapshot echoed
+    // back — no churn, same object identity.
+    expect(refreshTrackedSession(refreshed, newer)).toBe(refreshed);
+
+    // An empty import never changes anything.
+    expect(refreshTrackedSession(refreshed, { messages: [], turns: [] })).toBe(refreshed);
   });
 });

@@ -40,6 +40,7 @@ import {
   removeDaemonSession,
   rewindSessionToMessage,
   sameProviderSession,
+  refreshTrackedSession,
   type TaskState,
 } from './daemon-api';
 import { persistentStorageSync } from './composer-preferences-store';
@@ -904,9 +905,11 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
     return { session: response.session, warning: response.checkpointWarning };
   }, [cacheSession, daemon.activeProfile?.id, daemon.client, daemon.phase, queryClient]);
 
-  // Adopts a provider session the agent CLI started on the daemon host. If one
-  // is already tracked it is returned as-is; otherwise the history is copied
-  // into a fresh task that replays from its provider cursor on the next turn.
+  // Adopts a provider session the agent CLI started on the daemon host. A
+  // tracked task is re-imported first — the CLI or another client may have
+  // continued it since the snapshot was stored — then returned; otherwise the
+  // history is copied into a fresh task that replays from its provider cursor
+  // on the next turn.
   const resumeProviderSession = useCallback(async (summary: ProviderSessionSummary) => {
     const client = daemon.client;
     const profileId = daemon.activeProfile?.id;
@@ -918,7 +921,20 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
       session.provider_cursor
         ? sameProviderSession(session.provider_cursor, summary.cursor)
         : false);
-    if (existing) return existing;
+    if (existing) {
+      // The catalog's updated_at is the provider's own freshness stamp. When
+      // it reports nothing newer than the last known reply, the stored
+      // snapshot is current and the history fetch is skipped entirely.
+      if (existing.status !== 'idle') return existing;
+      if (summary.updated_at <= (existing.last_reply_at ?? 0)) return existing;
+      const history = await loadProviderSessionHistory(client, summary);
+      const refreshed = refreshTrackedSession(existing, history);
+      if (refreshed === existing) return existing;
+      const saved = await persistSession(client, refreshed);
+      cacheSession(saved);
+      void queryClient.invalidateQueries({ queryKey: daemonKeys.taskState(profileId) });
+      return saved;
+    }
     const history = await loadProviderSessionHistory(client, summary);
     const existingProject = state.projects.find((project) => project.path === summary.cwd);
     let projectId: string;
