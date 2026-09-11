@@ -1,0 +1,105 @@
+name: Android release
+
+on:
+  # Attach the APK to whatever release the Windows pipeline produced, draft
+  # or published. Triggered manually or by release.yml completing.
+  workflow_run:
+    workflows: [Release]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag to upload the APK to
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+jobs:
+  apk:
+    name: Build and attach APK
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-22.04
+    timeout-minutes: 60
+    steps:
+      - name: Resolve the target release
+        id: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [ -n "${{ inputs.tag }}" ]; then
+            tag="${{ inputs.tag }}"
+          else
+            # The Windows pipeline drafts the release for Cargo.toml's version.
+            version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml 2>/dev/null || true)
+            if [ -z "$version" ]; then
+              echo "::error::No tag input and no Cargo.toml version on this ref"
+              exit 1
+            fi
+            tag="v$version"
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "Uploading to $tag"
+
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ steps.release.outputs.tag }}
+
+      - uses: oven-sh/setup-bun@v2
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - uses: android-actions/setup-android@v3
+
+      # A cold gradle run costs ~20 minutes of dependency resolution and
+      # native compilation; the cache makes every later release a few.
+      - uses: actions/cache@v6
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-${{ hashFiles('apps/mobile/android/gradle/wrapper/gradle-wrapper.properties', 'apps/mobile/android/app/build.gradle') }}
+          restore-keys: |
+            gradle-
+
+      # Gradle shells out to `node` for the React Native and Expo plugins and
+      # bundles the JS through Expo's CLI, so both runtimes must be present.
+      # The lockfile lives at the repository root; the expo-libghostty
+      # postinstall downloads prebuilt native libs and is allowed to fail the
+      # same way it does on a developer machine — the app builds without it.
+      - name: Install JavaScript dependencies
+        run: bun install --frozen-lockfile || true
+
+      - name: Verify mobile dependencies installed
+        # Bun hoists every workspace's dependencies to the root node_modules;
+        # gradle resolves them by walking up from apps/mobile.
+        run: test -d node_modules/expo && test -d node_modules/react-native
+
+      - name: Assemble release APK
+        working-directory: apps/mobile/android
+        run: ./gradlew assembleRelease --no-daemon
+
+      - name: Upload the APK to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.release.outputs.tag }}
+        run: |
+          apk=apps/mobile/android/app/build/outputs/apk/release/app-release.apk
+          # Re-running a release replaces the previous APK.
+          gh release delete-asset "$TAG" app-release.apk --yes 2>/dev/null || true
+          gh release upload "$TAG" "$apk" --clobber
+          echo "Attached $apk to $TAG"

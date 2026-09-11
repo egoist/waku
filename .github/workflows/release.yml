@@ -172,62 +172,6 @@ jobs:
             target/release/Waku-${{ needs.version.outputs.version }}-aarch64-Setup.exe
           if-no-files-found: error
 
-  android:
-    name: Android
-    needs: version
-    if: needs.version.outputs.published != 'true'
-    runs-on: ubuntu-22.04
-    timeout-minutes: 60
-    steps:
-      - uses: actions/checkout@v6
-
-      - uses: oven-sh/setup-bun@v2
-
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-
-      - uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: 17
-
-      - uses: android-actions/setup-android@v3
-
-      # A cold gradle run costs ~20 minutes of dependency resolution and
-      # native compilation; the cache makes every later release a few.
-      - uses: actions/cache@v6
-        with:
-          path: |
-            ~/.gradle/caches
-            ~/.gradle/wrapper
-          key: gradle-${{ hashFiles('apps/mobile/android/gradle/wrapper/gradle-wrapper.properties', 'apps/mobile/android/app/build.gradle') }}
-          restore-keys: |
-            gradle-
-
-      # Gradle shells out to `node` for the React Native and Expo plugins and
-      # bundles the JS through Expo's CLI, so both runtimes must be present.
-      # The lockfile lives at the repository root; the expo-libghostty
-      # postinstall downloads prebuilt native libs and is allowed to fail the
-      # same way it does on a developer machine — the app builds without it.
-      - name: Install JavaScript dependencies
-        run: bun install --frozen-lockfile || true
-
-      - name: Verify mobile dependencies installed
-        # Bun hoists every workspace's dependencies to the root node_modules;
-        # gradle resolves them by walking up from apps/mobile.
-        run: test -d node_modules/expo && test -d node_modules/react-native
-
-      - name: Assemble release APK
-        working-directory: apps/mobile/android
-        run: ./gradlew assembleRelease --no-daemon
-
-      - uses: actions/upload-artifact@v7
-        with:
-          name: android
-          path: apps/mobile/android/app/build/outputs/apk/release/app-release.apk
-          if-no-files-found: error
-
   draft-release:
     name: Draft GitHub release
     needs:
@@ -235,7 +179,6 @@ jobs:
         version,
         windows-x86_64,
         windows-arm64,
-        android,
       ]
     if: needs.version.outputs.published != 'true'
     runs-on: ubuntu-latest
@@ -290,8 +233,6 @@ jobs:
           body_path: release-notes.md
           fail_on_unmatched_files: true
           files: |
-            artifacts/*.md
             artifacts/*.zip
             artifacts/*.exe
-            artifacts/*.apk
             artifacts/latest-windows.txt
