@@ -14,7 +14,13 @@ Write release notes for the final product users receive, not the development
 history. When a feature is still unreleased, fold its fixes and refinements into
 the original feature bullet instead of adding separate entries for them.
 
-## [unreleased]
+## [0.1.19]
+
+- Refresh a resumed session from its provider transcript: a session continued
+  in the OpenCode CLI or in another client now shows those turns when it is
+  resumed, instead of the stored snapshot
+- Read OpenCode's session history from its own server instead of an ACP
+  replay, which failed on real sessions
 
 ## [0.1.18]
 
