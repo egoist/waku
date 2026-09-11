@@ -29,6 +29,11 @@ jobs:
     runs-on: ubuntu-22.04
     timeout-minutes: 60
     steps:
+      # Checkout first: the automatic path has no tag input, so the tag is
+      # resolved from Cargo.toml on the default branch before re-checking out
+      # the tagged commit.
+      - uses: actions/checkout@v6
+
       - name: Resolve the target release
         id: release
         env:
@@ -51,6 +56,7 @@ jobs:
       - uses: actions/checkout@v6
         with:
           ref: ${{ steps.release.outputs.tag }}
+          clean: false
 
       - uses: oven-sh/setup-bun@v2
 
