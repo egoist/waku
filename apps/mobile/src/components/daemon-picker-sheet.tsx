@@ -19,7 +19,6 @@ import Animated, {
   useSharedValue,
   withTiming,
 } from 'react-native-reanimated';
-import { scheduleOnRN } from 'react-native-worklets';
 
 import { AppPressable } from '@/components/app-pressable';
 
@@ -94,15 +93,18 @@ export function DaemonPickerSheet({
       setEditorProfile(undefined);
       return;
     }
+    // The completion callback runs on the UI runtime. React state setters
+    // are host functions, so they can be called directly — hopping back
+    // through scheduleOnRN with an inline closure is rejected by worklets
+    // ("locally defined function") and was never needed here.
     pageProgress.value = withTiming(
       0,
       { duration: 240, easing: Easing.bezier(0.32, 0.72, 0.25, 1) },
       (finished?: boolean) => {
+        'worklet';
         if (finished) {
-          scheduleOnRN(() => {
-            setEditorTarget(undefined);
-            setEditorProfile(undefined);
-          });
+          setEditorTarget(undefined);
+          setEditorProfile(undefined);
         }
       },
     );
