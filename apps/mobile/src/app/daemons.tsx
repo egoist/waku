@@ -5,6 +5,7 @@ import { AppPressable } from '@/components/app-pressable';
 import { navigateBack } from '@/components/screen-header';
 import { useState } from 'react';
 import {
+  Platform,
   ScrollView,
   StyleSheet,
   Text,
@@ -58,13 +59,13 @@ export default function DaemonsScreen() {
               />
             </AppPressable>
           ),
-          unstable_headerRightItems: () => [{
+          unstable_headerRightItems: Platform.OS === 'ios' ? () => [{
             type: 'button',
             accessibilityLabel: 'Add daemon',
             icon: { type: 'sfSymbol', name: 'plus' },
             label: 'Add daemon',
             onPress: () => router.push('/daemon-editor'),
-          }],
+          }] : undefined,
         }}
       />
       <ScrollView

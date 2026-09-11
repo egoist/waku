@@ -433,7 +433,9 @@ export function SessionView({
             </HeaderActionGroup>
           )
         : undefined,
-      unstable_headerRightItems: nativeItems.length
+      // Native bar items are iOS-only; on Android the MenuView trigger in
+      // headerRight above carries the same actions.
+      unstable_headerRightItems: Platform.OS === 'ios' && nativeItems.length
         ? () => nativeItems
         : undefined,
       unstable_headerLeftItems: Platform.OS === 'ios'

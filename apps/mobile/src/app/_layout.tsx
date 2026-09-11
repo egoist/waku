@@ -10,7 +10,7 @@ import * as SplashScreen from "expo-splash-screen";
 import { StatusBar } from "expo-status-bar";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { useEffect, useMemo } from "react";
-import { StyleSheet, useColorScheme } from "react-native";
+import { Platform, StyleSheet, useColorScheme } from "react-native";
 import { GestureHandlerRootView } from "react-native-gesture-handler";
 
 import { Colors } from "@/constants/theme";
@@ -114,7 +114,9 @@ function AppNavigator() {
         <HeaderAction {...drawerAction} />
       </HeaderActionGroup>
     ),
-    unstable_headerLeftItems: () => nativeHeaderButtons([drawerAction]),
+    unstable_headerLeftItems: Platform.OS === "ios"
+      ? () => nativeHeaderButtons([drawerAction])
+      : undefined,
   }), [drawerAction]);
   /** Usage is a screen you visit deliberately, so it hangs off the home and
    * new-task bars rather than the drawer, which belongs to task history. */
@@ -136,7 +138,14 @@ function AppNavigator() {
         <HeaderAction {...settingsAction} />
       </HeaderActionGroup>
     ),
-    unstable_headerRightItems: () => nativeHeaderButtons([usageAction, settingsAction]),
+    // Native bar items are iOS-only: react-native-screens gates
+    // headerLeft/RightBarButtonItems on `Platform.OS === 'ios'`, and
+    // expo-router's Android toolbar bridge expects StackToolbar JSX children
+    // rather than these plain items, so passing them there renders nothing
+    // where the JS glass pill below already carries the same actions.
+    unstable_headerRightItems: Platform.OS === "ios"
+      ? () => nativeHeaderButtons([usageAction, settingsAction])
+      : undefined,
   }), [drawerHeader, settingsAction, usageAction]);
 
   useEffect(() => {

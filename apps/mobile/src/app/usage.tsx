@@ -3,6 +3,7 @@ import { Stack } from 'expo-router';
 import { useMemo, useState } from 'react';
 import {
   ActivityIndicator,
+  Platform,
   ScrollView,
   StyleSheet,
   Text,
@@ -79,13 +80,13 @@ export default function UsageScreen() {
               />
             </AppPressable>
           ),
-          unstable_headerRightItems: () => [{
+          unstable_headerRightItems: Platform.OS === 'ios' ? () => [{
             type: 'button',
             accessibilityLabel: 'Rescan usage',
             icon: { type: 'sfSymbol', name: 'arrow.clockwise' },
             label: 'Rescan',
             onPress: rescan,
-          }],
+          }] : undefined,
         }}
       />
       <ScrollView
