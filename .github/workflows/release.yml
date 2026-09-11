@@ -203,7 +203,9 @@ jobs:
         run: bun install --frozen-lockfile || true
 
       - name: Verify mobile dependencies installed
-        run: test -d node_modules/expo && test -d apps/mobile/node_modules/react-native
+        # Bun hoists every workspace's dependencies to the root node_modules;
+        # gradle resolves them by walking up from apps/mobile.
+        run: test -d node_modules/expo && test -d node_modules/react-native
 
       - name: Assemble release APK
         working-directory: apps/mobile/android
