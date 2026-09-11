@@ -194,6 +194,17 @@ jobs:
 
       - uses: android-actions/setup-android@v3
 
+      # A cold gradle run costs ~20 minutes of dependency resolution and
+      # native compilation; the cache makes every later release a few.
+      - uses: actions/cache@v6
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-${{ hashFiles('apps/mobile/android/gradle/wrapper/gradle-wrapper.properties', 'apps/mobile/android/app/build.gradle') }}
+          restore-keys: |
+            gradle-
+
       # Gradle shells out to `node` for the React Native and Expo plugins and
       # bundles the JS through Expo's CLI, so both runtimes must be present.
       # The lockfile lives at the repository root; the expo-libghostty
@@ -248,21 +259,8 @@ jobs:
           # What the website's Windows download resolves "latest" to.
           echo "$VERSION" > artifacts/latest-windows.txt
 
-      # Signed here rather than on platform runners: this is the only job that
-      # holds every native artifact, and the signing key stays in one place.
-      - name: Sign the Windows update feed
-        env:
-          VERSION: ${{ needs.version.outputs.version }}
-          SPARKLE_PRIVATE_KEY: ${{ secrets.SPARKLE_PRIVATE_KEY }}
-        run: |
-          # Merge into the live feed so previously published releases keep
-          # their entries; a first run simply starts from nothing.
-          for arch in x86_64 aarch64; do
-            curl -fsSL --max-time 30 \
-              "https://releases.waku.sh/appcast-windows-$arch.xml" \
-              -o "artifacts/appcast-windows-$arch.xml" || true
-          done
-          bun scripts/appcast-windows.ts artifacts "$VERSION"
+      # No update feed: this fork ships no auto-updater, so nothing to sign.
+      # Installers are trusted by distribution, not by an appcast signature.
 
       - name: Write release notes
         env:
@@ -296,5 +294,4 @@ jobs:
             artifacts/*.zip
             artifacts/*.exe
             artifacts/*.apk
-            artifacts/appcast-windows-*.xml
             artifacts/latest-windows.txt
