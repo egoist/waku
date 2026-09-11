@@ -38,4 +38,5 @@ yarn-error.*
 
 # generated native folders
 /ios
-/android
+
+# The android project is committed: CI assembles the release APK from it.
