@@ -118,9 +118,20 @@ Releases are cut from GitHub Actions on a `v*` tag, or manually from the
 update feed or artifact upload to any bucket. See [RELEASING.md](RELEASING.md)
 for what is still upstream's and what this fork replaced.
 
-## Sponsorship
+## Upstream
 
-You can support the project development via [GitHub Sponsors](https://github.com/sponsors/egoist).
+This fork is Windows and Android only. The project it came from,
+[egoist/waku](https://github.com/egoist/waku), is the one that ships builds
+for **macOS, Linux, and Windows** — if you are on macOS or Linux, use that
+release instead:
+
+- [Upstream releases](https://github.com/egoist/waku/releases/latest)
+- [waku.sh](https://waku.sh) — signed macOS `.dmg`, and `curl -fsSL https://waku.sh/install.sh | sh` on Linux
+
+All credit for Waku goes to [egoist](https://github.com/egoist), who wrote it
+and continues to develop it. Nothing here is monetized; if you want to support
+the work, support upstream via
+[GitHub Sponsors](https://github.com/sponsors/egoist).
 
 ## Fork notice
 
