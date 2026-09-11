@@ -16,6 +16,56 @@ use crate::ui::{icon, tooltip::Tooltip};
 
 const CLIENT_FRAME_INSET: f32 = 10.0;
 const CLIENT_FRAME_ROUNDING: f32 = 10.0;
+const CLIENT_FRAME_BORDER: f32 = 1.0;
+/// The frame's border sits outside the content it wraps, so a surface that
+/// reaches a window corner has to round one border tighter to stay concentric
+/// with the arc the frame draws.
+const CLIENT_CONTENT_ROUNDING: f32 = CLIENT_FRAME_ROUNDING - CLIENT_FRAME_BORDER;
+
+/// The pair of window corners a surface is responsible for rounding.
+#[derive(Clone, Copy)]
+pub(super) enum ClientCorners {
+    Left,
+    Right,
+    Both,
+}
+
+/// Round whichever window corners this surface covers.
+///
+/// GPUI masks content with a rectangle, so the `overflow_hidden` on the client
+/// frame clips its children to the frame's box and not to its radius. A child
+/// that paints an opaque background into a corner therefore has to round
+/// itself, or its square fill shows through outside the frame's border arc.
+/// Server-decorated windows round nothing, because the compositor owns the
+/// corners there.
+pub(super) trait ClientCornersExt: Styled + Sized {
+    fn rounded_client_corners(mut self, corners: ClientCorners, window: &Window) -> Self {
+        let Decorations::Client { tiling } = window.window_decorations() else {
+            return self;
+        };
+        let radius = px(CLIENT_CONTENT_ROUNDING);
+        let (left, right) = match corners {
+            ClientCorners::Left => (true, false),
+            ClientCorners::Right => (false, true),
+            ClientCorners::Both => (true, true),
+        };
+        if left && !(tiling.top || tiling.left) {
+            self = self.rounded_tl(radius);
+        }
+        if right && !(tiling.top || tiling.right) {
+            self = self.rounded_tr(radius);
+        }
+        if left && !(tiling.bottom || tiling.left) {
+            self = self.rounded_bl(radius);
+        }
+        if right && !(tiling.bottom || tiling.right) {
+            self = self.rounded_br(radius);
+        }
+        self
+    }
+}
+
+impl<T: Styled + Sized> ClientCornersExt for T {}
 
 #[derive(Clone, Copy)]
 pub(super) enum WindowControlSide {
@@ -40,7 +90,7 @@ impl Waku {
 
         let inset = px(CLIENT_FRAME_INSET);
         let rounding = px(CLIENT_FRAME_ROUNDING);
-        let border = px(1.0);
+        let border = px(CLIENT_FRAME_BORDER);
         let theme = Theme::current(cx);
         window.set_client_inset(inset);
 

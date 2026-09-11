@@ -1,4 +1,5 @@
 use super::composer::next_picker_highlight;
+use super::window_chrome::{ClientCorners, ClientCornersExt};
 use super::*;
 
 const SETTINGS_CONTENT_MAX_WIDTH: f32 = 760.0;
@@ -111,6 +112,7 @@ impl Waku {
             .size_full()
             .flex()
             .bg(theme.canvas)
+            .rounded_client_corners(ClientCorners::Both, window)
             .text_color(theme.text)
             .font_family(".SystemUIFont")
             .child(self.render_settings_sidebar(window, cx))
@@ -180,6 +182,7 @@ impl Waku {
             .flex()
             .flex_col()
             .bg(theme.sidebar)
+            .rounded_client_corners(ClientCorners::Left, window)
             .child(self.render_settings_sidebar_titlebar(window, cx))
             .child(
                 div().px(px(12.0)).child(
@@ -310,6 +313,7 @@ impl Waku {
                 .border_l_1()
                 .border_color(theme.sidebar_border)
                 .bg(theme.surface)
+                .rounded_client_corners(ClientCorners::Right, window)
                 .children(right_window_controls.map(|controls| {
                     self.render_settings_drag_region("settings-skills-titlebar", cx)
                         .flex()
@@ -383,6 +387,7 @@ impl Waku {
             .border_l_1()
             .border_color(theme.sidebar_border)
             .bg(theme.surface)
+            .rounded_client_corners(ClientCorners::Right, window)
             .child(
                 self.render_settings_drag_region("settings-content-titlebar", cx)
                     .flex()
