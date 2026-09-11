@@ -12,7 +12,6 @@ import {
   ActivityIndicator,
   KeyboardAvoidingView,
   Platform,
-  ScrollView,
   StyleSheet,
   Text,
   View,
@@ -48,6 +47,7 @@ import {
 import { resolvedComposerSubmission } from '@/lib/composer-commands';
 import { useSyncedComposerDraft } from '@/hooks/use-synced-composer-draft';
 import { useTheme } from '@/hooks/use-theme';
+import { useKeyboardHeight } from '@/lib/keyboard-offset';
 import { daemonKeys, inspectBranches } from '@/lib/daemon-api';
 import {
   loadComposerPreferences,
@@ -74,6 +74,7 @@ type SheetKind =
 export default function NewTaskScreen() {
   const theme = useTheme();
   const insets = useSafeAreaInsets();
+  const keyboardHeight = useKeyboardHeight();
   const headerInset = useScreenHeaderInset();
   const daemon = useDaemon();
   const runtime = useRuntime();
@@ -344,14 +345,8 @@ export default function NewTaskScreen() {
       <View style={{ height: headerInset }} />
       <View style={styles.spacer} />
 
-      {/* The prompt is the point of this screen; context picks ride the same
-       * row as chips and stay one tap away without stealing vertical space. */}
-      <ScrollView
-        horizontal
-        contentContainerStyle={styles.chipRow}
-        keyboardShouldPersistTaps="handled"
-        showsHorizontalScrollIndicator={false}>
-        <ContextChip
+      <View style={styles.rows}>
+        <SelectorRow
           icon={{ ios: 'laptopcomputer', android: 'laptop_mac', web: 'laptop_mac' }}
           label="Daemon"
           loading={
@@ -362,28 +357,28 @@ export default function NewTaskScreen() {
           value={daemon.activeProfile?.name ?? 'Add a daemon'}
           onPress={() => setOpenSheet('daemon')}
         />
-        <ContextChip
+        <SelectorRow
           icon={{ ios: 'folder', android: 'folder', web: 'folder' }}
           label="Project"
           loading={taskState.isPending}
           value={selectedProject?.name ?? 'Choose a project'}
           onPress={() => setOpenSheet('project')}
         />
-        <ContextChip
+        <SelectorRow
           icon={{ ios: 'sparkle', android: 'auto_awesome', web: 'auto_awesome' }}
           label="Model"
           loading={catalog.isPending}
           value={modelLabel}
           onPress={() => setOpenSheet('model')}
         />
-        <ContextChip
+        <SelectorRow
           icon={{ ios: 'laptopcomputer', android: 'laptop_mac', web: 'laptop_mac' }}
           label="Workspace"
           value={isolated ? 'Isolated worktree' : 'Work locally'}
           onPress={() => setOpenSheet('workspace')}
         />
         {isolated && (
-          <ContextChip
+          <SelectorRow
             icon={{ ios: 'arrow.triangle.branch', android: 'account_tree', web: 'account_tree' }}
             label="Base branch"
             loading={branches.isPending && branches.fetchStatus !== 'idle'}
@@ -391,7 +386,7 @@ export default function NewTaskScreen() {
             onPress={() => setOpenSheet('branch')}
           />
         )}
-        <ContextChip
+        <SelectorRow
           icon={{ ios: 'arrow.uturn.down', android: 'restart_alt', web: 'restart_alt' }}
           label="Resume external session"
           value="Resume from CLI"
@@ -400,9 +395,9 @@ export default function NewTaskScreen() {
             setResumeOpen(true);
           }}
         />
-      </ScrollView>
+      </View>
 
-      <View style={[styles.composerShell, { paddingBottom: Math.max(insets.bottom, 10) }]}>
+      <View style={[styles.composerShell, { paddingBottom: Math.max(insets.bottom, 10) + keyboardHeight + 8 }]}>
         {error && (
           <View
             accessibilityLiveRegion="polite"
@@ -559,11 +554,11 @@ export default function NewTaskScreen() {
   );
 }
 
-/** Material 3 assist chip: 32dp tall, 8dp corners, hairline outline. The
- * label never shows — the value is what changes and what you recognise — but
- * it stays on the accessibility node, and the sheet it opens is titled with
- * it. 32dp + AppPressable's 8dp hitSlop lands on Material's 48dp target. */
-function ContextChip({
+/** Full-width context row: icon, current value, unfold affordance. The label
+ * never shows — the value is what changes and what you recognise — but it
+ * stays on the accessibility node, and the sheet it opens is titled with it.
+ * 52dp tall, so the target clears Material's 48dp minimum on its own. */
+function SelectorRow({
   icon,
   label,
   value,
@@ -583,21 +578,18 @@ function ContextChip({
       accessibilityRole="button"
       disabled={loading}
       onPress={onPress}
-      style={[
-        styles.chip,
-        { backgroundColor: theme.surface, borderColor: theme.border },
-      ]}>
-      <AppSymbol name={icon} size={15} tintColor={theme.textSecondary} />
+      style={[styles.row, { backgroundColor: theme.surface }]}>
+      <AppSymbol name={icon} size={19} tintColor={theme.textSecondary} />
       {loading ? (
         <ActivityIndicator color={theme.textTertiary} size="small" />
       ) : (
-        <Text numberOfLines={1} style={[styles.chipValue, { color: theme.text }]}>
+        <Text numberOfLines={1} style={[styles.rowValue, { color: theme.text }]}>
           {value}
         </Text>
       )}
       <AppSymbol
         name={{ ios: 'chevron.up.chevron.down', android: 'unfold_more', web: 'unfold_more' }}
-        size={12}
+        size={13}
         tintColor={theme.textTertiary}
       />
     </AppPressable>
@@ -607,17 +599,16 @@ function ContextChip({
 const styles = StyleSheet.create({
   screen: { flex: 1 },
   spacer: { flex: 1 },
-  chipRow: { gap: 8, paddingHorizontal: Spacing.three, paddingVertical: 10 },
-  chip: {
+  rows: { gap: 2, paddingBottom: 8, paddingHorizontal: Spacing.three },
+  row: {
     alignItems: 'center',
-    borderRadius: 8,
-    borderWidth: StyleSheet.hairlineWidth,
+    borderRadius: Radius.medium,
     flexDirection: 'row',
-    gap: 7,
-    height: 32,
-    paddingHorizontal: 12,
+    gap: 14,
+    minHeight: 52,
+    paddingHorizontal: 6,
   },
-  chipValue: { flexShrink: 1, fontSize: 13.5, fontWeight: '500' },
+  rowValue: { flexShrink: 1, fontSize: 16.5, fontWeight: '500' },
   composerShell: { paddingHorizontal: 12 },
   error: { borderRadius: Radius.medium, marginBottom: 8, padding: 11 },
   errorText: { fontSize: 12.5, fontWeight: '600', lineHeight: 17 },

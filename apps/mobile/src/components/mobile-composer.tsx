@@ -430,7 +430,7 @@ export function MobileComposer({
         : 'Message agent';
 
   return (
-    <View style={[styles.shell, { paddingBottom: Math.max(insets.bottom, 10) + keyboardHeight }]}>
+    <View style={[styles.shell, { paddingBottom: Math.max(insets.bottom, 10) + keyboardHeight + 8 }]}>
       {permission && !userInput && (
         <PermissionPanel
           permission={permission}
