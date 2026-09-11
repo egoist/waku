@@ -5,8 +5,10 @@ import {
   type BottomSheetMethods,
 } from '@expo/ui/community/bottom-sheet';
 import { useEffect, useRef, type ReactNode } from 'react';
-import { Pressable, StyleSheet, Text, View, useWindowDimensions } from 'react-native';
+import { StyleSheet, Text, View, useWindowDimensions } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
+
+import { AppPressable } from '@/components/app-pressable';
 
 import { AppSymbol } from '@/components/app-symbol';
 import { liquidGlass } from '@/components/glass-surface';
@@ -96,7 +98,7 @@ export function SheetRow({
 }) {
   const theme = useTheme();
   return (
-    <Pressable
+    <AppPressable
       accessibilityRole="button"
       accessibilityState={{ selected, disabled }}
       disabled={disabled}
@@ -128,7 +130,7 @@ export function SheetRow({
           tintColor={NativeTint}
         />
       )}
-    </Pressable>
+    </AppPressable>
   );
 }
 

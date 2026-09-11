@@ -9,7 +9,6 @@ import {
   KeyboardAvoidingView,
   Modal,
   Platform,
-  Pressable,
   StyleSheet,
   Text,
   TextInput,
@@ -18,6 +17,8 @@ import {
 import { SafeAreaView } from 'react-native-safe-area-context';
 
 import { AppSymbol } from './app-symbol';
+import { AppPressable } from '@/components/app-pressable';
+
 import { Radius, Spacing } from '@/constants/theme';
 import { useTheme } from '@/hooks/use-theme';
 import {
@@ -129,16 +130,16 @@ export function RemoteProjectPicker({
         style={[styles.screen, { backgroundColor: theme.background, paddingBottom: keyboardHeight }]}>
         <SafeAreaView edges={['top', 'bottom']} style={styles.screen}>
           <View style={[styles.header, { borderBottomColor: theme.separator }]}>
-            <Pressable
+            <AppPressable
               accessibilityRole="button"
               disabled={Boolean(submitting)}
               hitSlop={8}
               onPress={onDismiss}
               style={({ pressed }) => [styles.headerButton, { opacity: pressed ? 0.5 : 1 }]}>
               <Text style={[styles.headerButtonText, { color: theme.accent }]}>Cancel</Text>
-            </Pressable>
+            </AppPressable>
             <Text style={[styles.title, { color: theme.text }]}>Choose Project</Text>
-            <Pressable
+            <AppPressable
               accessibilityLabel="Add current folder"
               accessibilityRole="button"
               disabled={!directory.data?.path || Boolean(submitting)}
@@ -148,7 +149,7 @@ export function RemoteProjectPicker({
               {submitting === 'folder'
                 ? <ActivityIndicator color={theme.accent} size="small" />
                 : <Text style={[styles.headerButtonText, { color: directory.data?.path ? theme.accent : theme.textTertiary }]}>Add</Text>}
-            </Pressable>
+            </AppPressable>
           </View>
 
           <View style={styles.pathArea}>
@@ -172,7 +173,7 @@ export function RemoteProjectPicker({
                 style={[styles.pathInput, { color: theme.text }]}
                 value={pathDraft}
               />
-              <Pressable
+              <AppPressable
                 accessibilityLabel="Open entered path"
                 accessibilityRole="button"
                 disabled={!pathDraft.trim() || Boolean(submitting)}
@@ -184,7 +185,7 @@ export function RemoteProjectPicker({
                   size={22}
                   tintColor={pathDraft.trim() ? theme.accent : theme.textTertiary}
                 />
-              </Pressable>
+              </AppPressable>
             </View>
             <View style={styles.locations}>
               <LocationButton
@@ -228,7 +229,7 @@ export function RemoteProjectPicker({
           />
 
           <View style={[styles.footer, { borderTopColor: theme.separator }]}>
-            <Pressable
+            <AppPressable
               accessibilityHint="Creates a private workspace on the daemon host"
               accessibilityRole="button"
               disabled={Boolean(submitting)}
@@ -236,7 +237,7 @@ export function RemoteProjectPicker({
               style={({ pressed }) => [styles.emptyWorkspaceButton, { opacity: pressed ? 0.5 : 1 }]}>
               {submitting === 'empty' && <ActivityIndicator color={theme.textSecondary} size="small" />}
               <Text style={[styles.emptyWorkspaceText, { color: theme.textSecondary }]}>New empty workspace</Text>
-            </Pressable>
+            </AppPressable>
             <Text numberOfLines={1} style={[styles.footerPath, { color: theme.textTertiary }]}>
               {directory.data?.path ?? 'Loading folder…'}
             </Text>
@@ -260,7 +261,7 @@ function LocationButton({
 }) {
   const theme = useTheme();
   return (
-    <Pressable
+    <AppPressable
       accessibilityRole="button"
       disabled={disabled}
       onPress={onPress}
@@ -270,14 +271,14 @@ function LocationButton({
       ]}>
       <AppSymbol name={icon} size={13} tintColor={theme.textSecondary} />
       <Text style={[styles.locationText, { color: theme.textSecondary }]}>{label}</Text>
-    </Pressable>
+    </AppPressable>
   );
 }
 
 function FolderRow({ entry, onOpen }: { entry: WorkingTreeEntry; onOpen: () => void }) {
   const theme = useTheme();
   return (
-    <Pressable
+    <AppPressable
       accessibilityHint="Opens this folder"
       accessibilityRole="button"
       onPress={onOpen}
@@ -298,7 +299,7 @@ function FolderRow({ entry, onOpen }: { entry: WorkingTreeEntry; onOpen: () => v
         size={14}
         tintColor={theme.textTertiary}
       />
-    </Pressable>
+    </AppPressable>
   );
 }
 

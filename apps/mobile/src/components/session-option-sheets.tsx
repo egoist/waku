@@ -10,7 +10,6 @@ import * as Haptics from 'expo-haptics';
 import { useEffect, useMemo, useState } from 'react';
 import {
   ActivityIndicator,
-  Pressable,
   StyleSheet,
   Text,
   TextInput,
@@ -28,6 +27,8 @@ import Animated, {
 import { AppSymbol } from './app-symbol';
 import { ProviderIcon } from './provider-icon';
 import { Sheet, SheetRow } from './sheet';
+import { AppPressable } from '@/components/app-pressable';
+
 import { NativeTint, Radius } from '@/constants/theme';
 import { useAllProviderModels, useProviderModels } from '@/hooks/use-daemon-data';
 import { useTheme } from '@/hooks/use-theme';
@@ -405,7 +406,7 @@ export function ModelPickerSheet({
             />
           </View>
           <View style={styles.page}>
-            <Pressable
+            <AppPressable
               accessibilityHint="Shows all providers"
               accessibilityLabel={browsing ? providerLabel(browsing) : 'Provider'}
               accessibilityRole="button"
@@ -419,7 +420,7 @@ export function ModelPickerSheet({
               <Text style={[styles.backLabel, { color: NativeTint }]}>
                 {browsing ? providerLabel(browsing) : 'Provider'}
               </Text>
-            </Pressable>
+            </AppPressable>
             <View style={[styles.searchField, { backgroundColor: theme.overlayStrong }]}>
               <AppSymbol
                 name={{ ios: 'magnifyingglass', android: 'search', web: 'search' }}
@@ -438,7 +439,7 @@ export function ModelPickerSheet({
                 onChangeText={setSearch}
               />
               {search.length > 0 && (
-                <Pressable
+                <AppPressable
                   accessibilityLabel="Clear search"
                   accessibilityRole="button"
                   hitSlop={8}
@@ -449,7 +450,7 @@ export function ModelPickerSheet({
                     size={15}
                     tintColor={theme.textTertiary}
                   />
-                </Pressable>
+                </AppPressable>
               )}
             </View>
             {entry?.isPending ? (

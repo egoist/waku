@@ -4,7 +4,6 @@ import {
   ActivityIndicator,
   Alert,
   Platform,
-  Pressable,
   StyleSheet,
   Text,
   TextInput,
@@ -21,6 +20,8 @@ import Animated, {
   withTiming,
 } from 'react-native-reanimated';
 import { scheduleOnRN } from 'react-native-worklets';
+
+import { AppPressable } from '@/components/app-pressable';
 
 import { AppSymbol } from '@/components/app-symbol';
 import { DaemonList } from '@/components/daemon-list';
@@ -344,7 +345,7 @@ function DaemonEditor({
             style={[styles.rowInput, styles.tokenInput, { color: theme.text }]}
             value={token}
           />
-          <Pressable
+          <AppPressable
             accessibilityLabel={revealed ? 'Hide token' : 'Reveal token'}
             accessibilityRole="button"
             accessibilityState={{ selected: revealed }}
@@ -358,7 +359,7 @@ function DaemonEditor({
               size={18}
               tintColor={theme.textSecondary}
             />
-          </Pressable>
+          </AppPressable>
         </View>
       </View>
 
@@ -376,7 +377,7 @@ function DaemonEditor({
       )}
 
       <View style={styles.editorButtons}>
-        <Pressable
+        <AppPressable
           accessibilityRole="button"
           accessibilityState={{ disabled: !canSave }}
           disabled={!canSave}
@@ -389,11 +390,11 @@ function DaemonEditor({
           <Text style={[styles.editorButtonText, styles.saveButtonText]}>
             {saving ? 'Saving…' : profile ? 'Save' : 'Add'}
           </Text>
-        </Pressable>
+        </AppPressable>
       </View>
 
       {profile && (
-        <Pressable
+        <AppPressable
           accessibilityRole="button"
           disabled={saving || removing}
           onPress={confirmRemove}
@@ -402,7 +403,7 @@ function DaemonEditor({
           <Text style={[styles.removeText, { color: theme.danger }]}>
             {removing ? 'Removing…' : 'Remove Daemon'}
           </Text>
-        </Pressable>
+        </AppPressable>
       )}
     </View>
   );
@@ -421,7 +422,7 @@ function SheetPageHeader({
   return (
     <View style={styles.pageHeader}>
       {onBack ? (
-        <Pressable
+        <AppPressable
           accessibilityLabel="Back to daemons"
           accessibilityRole="button"
           accessibilityState={{ disabled: backDisabled }}
@@ -437,7 +438,7 @@ function SheetPageHeader({
             size={20}
             tintColor={NativeTint}
           />
-        </Pressable>
+        </AppPressable>
       ) : (
         <View style={styles.headerSide} />
       )}

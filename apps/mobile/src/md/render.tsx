@@ -20,7 +20,6 @@ import type { ReactNode } from 'react';
 import {
   Image,
   Linking,
-  Pressable,
   ScrollView,
   Text,
   View,
@@ -28,6 +27,7 @@ import {
   type TextStyle,
   type ViewStyle,
 } from 'react-native';
+import { AppPressable } from '@/components/app-pressable';
 
 import { applyAlpha } from './color';
 import { PENDING_LINK_URL } from './mend';
@@ -318,9 +318,9 @@ function MarkdownImage({
   );
   if (!href || href === PENDING_LINK_URL) return image;
   return (
-    <Pressable accessibilityRole="link" onPress={() => onOpenLink(href)}>
+    <AppPressable accessibilityRole="link" onPress={() => onOpenLink(href)}>
       {image}
-    </Pressable>
+    </AppPressable>
   );
 }
 

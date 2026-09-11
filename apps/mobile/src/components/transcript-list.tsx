@@ -12,7 +12,6 @@ import {
 import {
   Animated,
   Keyboard,
-  Pressable,
   ScrollView,
   StyleSheet,
   View,
@@ -21,6 +20,8 @@ import {
   type NativeSyntheticEvent,
 } from 'react-native';
 import { ScrollViewMarker } from 'react-native-screens/experimental';
+
+import { AppPressable } from '@/components/app-pressable';
 
 import { AppSymbol } from '@/components/app-symbol';
 import { GlassSurface } from '@/components/glass-surface';
@@ -504,7 +505,7 @@ export function TranscriptList({
         pointerEvents={jump ? 'auto' : 'none'}
         style={[styles.jumpFrame, { opacity: jumpOpacity }]}>
         <GlassSurface fallbackColor={theme.surface} interactive style={styles.jumpButton}>
-          <Pressable
+          <AppPressable
             accessibilityHint={unseen ? 'New content arrived below' : undefined}
             accessibilityLabel="Scroll to latest"
             accessibilityRole="button"
@@ -516,7 +517,7 @@ export function TranscriptList({
               tintColor={theme.textSecondary}
             />
             {unseen && <View style={[styles.unseenDot, { backgroundColor: theme.accent, borderColor: theme.surface }]} />}
-          </Pressable>
+          </AppPressable>
         </GlassSurface>
       </Animated.View>
     </View>

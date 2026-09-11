@@ -1,9 +1,11 @@
 import { useState } from 'react';
-import { Pressable, StyleSheet, Text, View } from 'react-native';
+import { StyleSheet, Text, View } from 'react-native';
 
 import { AppSymbol } from './app-symbol';
 import type { AgentPresetMenuProps } from './agent-preset-menu.types';
 import { AgentPresetSheet } from './session-option-sheets';
+import { AppPressable } from '@/components/app-pressable';
+
 import { Radius } from '@/constants/theme';
 import { useProviderModels } from '@/hooks/use-daemon-data';
 import { useTheme } from '@/hooks/use-theme';
@@ -24,7 +26,7 @@ export function AgentPresetMenu({ provider, agentPreset, onApply }: AgentPresetM
 
   return (
     <>
-      <Pressable
+      <AppPressable
         accessibilityLabel={`Agent preset, ${label}`}
         accessibilityRole="button"
         onPress={() => setOpen(true)}
@@ -39,7 +41,7 @@ export function AgentPresetMenu({ provider, agentPreset, onApply }: AgentPresetM
         <Text style={[styles.label, { color: theme.textSecondary }]} numberOfLines={1}>
           {label}
         </Text>
-      </Pressable>
+      </AppPressable>
       <AgentPresetSheet
         agentPreset={agentPreset}
         onApply={(selection) => {

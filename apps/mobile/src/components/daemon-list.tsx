@@ -1,4 +1,6 @@
-import { ActivityIndicator, Pressable, StyleSheet, Text, View } from 'react-native';
+import { ActivityIndicator, StyleSheet, Text, View } from 'react-native';
+
+import { AppPressable } from '@/components/app-pressable';
 
 import { AppSymbol } from '@/components/app-symbol';
 import { ConnectionStatus, connectionPhaseLabel } from '@/components/connection-status';
@@ -31,7 +33,7 @@ export function DaemonList({
         return (
           <View key={profile.id}>
             <View style={styles.row}>
-              <Pressable
+              <AppPressable
                 accessibilityHint="Switches to this daemon"
                 accessibilityLabel={`${profile.name}, ${displayHost(profile.address)}, ${
                   active ? connectionPhaseLabel(daemon.phase) : 'saved daemon'
@@ -64,12 +66,12 @@ export function DaemonList({
                     tintColor={NativeTint}
                   />
                 ) : null}
-              </Pressable>
+              </AppPressable>
               {onEdit && (
-                <Pressable
+                <AppPressable
                   accessibilityLabel={`Edit ${profile.name}`}
                   accessibilityRole="button"
-                  hitSlop={6}
+                  hitSlop={8}
                   onPress={() => onEdit(profile)}
                   style={({ pressed }) => [styles.infoButton, { opacity: pressed ? 0.45 : 1 }]}>
                   <AppSymbol
@@ -77,7 +79,7 @@ export function DaemonList({
                     size={20}
                     tintColor={NativeTint}
                   />
-                </Pressable>
+                </AppPressable>
               )}
             </View>
             {index < daemon.profiles.length - 1 && (

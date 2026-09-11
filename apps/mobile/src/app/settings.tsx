@@ -3,13 +3,14 @@ import { router, Stack } from 'expo-router';
 import { useState } from 'react';
 import {
   ActivityIndicator,
-  Pressable,
   ScrollView,
   StyleSheet,
   Switch,
   Text,
   View,
 } from 'react-native';
+
+import { AppPressable } from '@/components/app-pressable';
 
 import { AppSymbol } from '@/components/app-symbol';
 import { ProviderIcon } from '@/components/provider-icon';
@@ -57,7 +58,7 @@ export default function SettingsScreen() {
         contentContainerStyle={styles.content}>
         <Text style={[styles.sectionTitle, { color: theme.textTertiary }]}>Library</Text>
         <View style={[styles.card, { backgroundColor: theme.surface, borderColor: theme.border }]}>
-          <Pressable
+          <AppPressable
             accessibilityRole="button"
             onPress={() => router.push('/skills')}
             style={({ pressed }) => [
@@ -70,7 +71,7 @@ export default function SettingsScreen() {
               size={13}
               tintColor={theme.textTertiary}
             />
-          </Pressable>
+          </AppPressable>
         </View>
 
         {!settings.data ? (

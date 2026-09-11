@@ -1,4 +1,6 @@
-import { Image, Pressable, StyleSheet, Text, View } from 'react-native';
+import { Image, StyleSheet, Text, View } from 'react-native';
+
+import { AppPressable } from '@/components/app-pressable';
 
 import { AppSymbol } from '@/components/app-symbol';
 import { Radius } from '@/constants/theme';
@@ -18,7 +20,7 @@ export function DaemonOnboarding({ onAddDaemon }: { onAddDaemon: () => void }) {
         Connect to Waku running on your Mac, workstation, or private server. Add more than one and
         switch whenever you need.
       </Text>
-      <Pressable
+      <AppPressable
         accessibilityLabel="Add a daemon"
         accessibilityRole="button"
         onPress={onAddDaemon}
@@ -32,7 +34,7 @@ export function DaemonOnboarding({ onAddDaemon }: { onAddDaemon: () => void }) {
           tintColor={theme.onInverse}
         />
         <Text style={[styles.primaryButtonText, { color: theme.onInverse }]}>Add a daemon</Text>
-      </Pressable>
+      </AppPressable>
       <View style={styles.securityNote}>
         <AppSymbol
           name={{ ios: 'lock.shield', android: 'shield_lock', web: 'lock' }}

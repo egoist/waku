@@ -8,7 +8,6 @@ import {
   Alert,
   Platform,
   PlatformColor,
-  Pressable,
   ScrollView,
   StyleSheet,
   Text,
@@ -17,6 +16,7 @@ import {
   type ColorValue,
 } from "react-native";
 
+import { AppPressable } from "@/components/app-pressable";
 import { AppSymbol } from "@/components/app-symbol";
 import { Radius } from "@/constants/theme";
 import { useTheme } from "@/hooks/use-theme";
@@ -267,7 +267,7 @@ export default function DaemonEditorScreen() {
               value={token}
               onSubmitEditing={() => void save()}
             />
-            <Pressable
+            <AppPressable
               accessibilityLabel={revealed ? "Hide token" : "Reveal token"}
               accessibilityRole="button"
               accessibilityState={{ selected: revealed }}
@@ -291,7 +291,7 @@ export default function DaemonEditorScreen() {
                 size={18}
                 tintColor={colors.secondaryText}
               />
-            </Pressable>
+            </AppPressable>
           </View>
         </View>
 
@@ -328,7 +328,7 @@ export default function DaemonEditorScreen() {
             <View
               style={[styles.formGroup, { backgroundColor: colors.surface }]}
             >
-              <Pressable
+              <AppPressable
                 accessibilityRole="button"
                 disabled={removing || saving}
                 onPress={confirmRemove}
@@ -343,7 +343,7 @@ export default function DaemonEditorScreen() {
                 <Text style={[styles.removeText, { color: colors.danger }]}>
                   {removing ? "Removing…" : "Remove Daemon"}
                 </Text>
-              </Pressable>
+              </AppPressable>
             </View>
             <Text
               style={[styles.actionFootnote, { color: colors.secondaryText }]}
@@ -430,7 +430,7 @@ function HeaderButton({
 }) {
   const colors = useNativeFormColors();
   return (
-    <Pressable
+    <AppPressable
       accessibilityRole="button"
       accessibilityState={{ disabled }}
       disabled={disabled}
@@ -450,7 +450,7 @@ function HeaderButton({
       >
         {label}
       </Text>
-    </Pressable>
+    </AppPressable>
   );
 }
 

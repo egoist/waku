@@ -5,13 +5,14 @@ import { useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
-  Pressable,
   ScrollView,
   StyleSheet,
   Switch,
   Text,
   View,
 } from 'react-native';
+
+import { AppPressable } from '@/components/app-pressable';
 
 import { NativeTint, Radius, Spacing } from '@/constants/theme';
 import {
@@ -96,7 +97,7 @@ export default function SkillsScreen() {
                   { backgroundColor: theme.surface, borderColor: theme.border },
                 ]}>
                 {group.skills.map((entry, index) => (
-                  <Pressable
+                  <AppPressable
                     accessibilityHint="Long press to move to the trash"
                     delayLongPress={400}
                     key={`${entry.name}:${entry.rowKey}`}
@@ -141,7 +142,7 @@ export default function SkillsScreen() {
                       value={skillEnabled(entry)}
                       onValueChange={(enabled) => void toggle(entry, enabled)}
                     />
-                  </Pressable>
+                  </AppPressable>
                 ))}
               </View>
             </View>

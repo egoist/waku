@@ -12,13 +12,14 @@ import * as ImagePicker from 'expo-image-picker';
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import {
   ActivityIndicator,
-  Pressable,
   ScrollView,
   StyleSheet,
   Text,
   TextInput,
   View,
 } from 'react-native';
+import { AppPressable } from '@/components/app-pressable';
+
 import { useKeyboardHeight } from '@/lib/keyboard-offset';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
@@ -114,12 +115,13 @@ export function ComposerIconButton({
 }) {
   const theme = useTheme();
   return (
-    <Pressable
+    <AppPressable
       accessibilityLabel={label}
       accessibilityRole="button"
       accessibilityState={{ disabled, selected: active }}
+      borderless
       disabled={disabled}
-      hitSlop={4}
+      hitSlop={8}
       onPress={onPress}
       style={({ pressed }) => [
         styles.iconButton,
@@ -129,7 +131,7 @@ export function ComposerIconButton({
         },
       ]}>
       <AppSymbol name={icon} size={19} tintColor={active ? NativeTint : theme.textSecondary} />
-    </Pressable>
+    </AppPressable>
   );
 }
 
@@ -150,11 +152,11 @@ export function SendButton({
 }) {
   const theme = useTheme();
   return (
-    <Pressable
+    <AppPressable
       accessibilityLabel={label}
       accessibilityRole="button"
       disabled={disabled}
-      hitSlop={4}
+      hitSlop={8}
       onPress={onPress}
       style={({ pressed }) => [
         styles.sendButton,
@@ -176,7 +178,7 @@ export function SendButton({
           tintColor={disabled ? theme.textTertiary : steering ? '#ffffff' : theme.onInverse}
         />
       )}
-    </Pressable>
+    </AppPressable>
   );
 }
 
@@ -448,7 +450,7 @@ export function MobileComposer({
           <Text style={[styles.errorText, { color: theme.danger }]}>
             {visibleError}
           </Text>
-          <Pressable
+          <AppPressable
             accessibilityLabel="Dismiss error"
             accessibilityRole="button"
             hitSlop={8}
@@ -462,7 +464,7 @@ export function MobileComposer({
               size={12}
               tintColor={theme.danger}
             />
-          </Pressable>
+          </AppPressable>
         </View>
       )}
       {queued.map((message) => (
@@ -479,7 +481,7 @@ export function MobileComposer({
               || message.attachments?.map((attachment) => attachment.name).join(', ')
               || message.content}
           </Text>
-          <Pressable
+          <AppPressable
             accessibilityLabel="Remove queued message"
             accessibilityRole="button"
             hitSlop={8}
@@ -490,7 +492,7 @@ export function MobileComposer({
               size={11}
               tintColor={theme.textTertiary}
             />
-          </Pressable>
+          </AppPressable>
         </View>
       ))}
 
@@ -507,7 +509,7 @@ export function MobileComposer({
                 style={styles.commandListScroll}
                 contentContainerStyle={styles.commandListContent}>
                 {suggestions.map((command) => (
-                  <Pressable
+                  <AppPressable
                     accessibilityLabel={`Use command ${command.name}`}
                     accessibilityRole="button"
                     key={`${command.scope}:${command.name}`}
@@ -526,7 +528,7 @@ export function MobileComposer({
                         {command.description}
                       </Text>
                     ) : null}
-                  </Pressable>
+                  </AppPressable>
                 ))}
               </ScrollView>
             </View>
@@ -538,11 +540,11 @@ export function MobileComposer({
                   key={`${attachment.blob_reference ?? attachment.path}:${index}`}
                   style={styles.attachmentItem}>
                   <AttachmentChip attachment={attachment} />
-                  <Pressable
+                  <AppPressable
                     accessibilityLabel={`Remove ${attachment.name}`}
                     accessibilityRole="button"
                     disabled={submitting}
-                    hitSlop={6}
+                    hitSlop={8}
                     onPress={() => {
                       draftSync.markEdited();
                       setAttachments((current) => current.filter((_, item) => item !== index));
@@ -556,7 +558,7 @@ export function MobileComposer({
                       size={11}
                       tintColor={theme.textSecondary}
                     />
-                  </Pressable>
+                  </AppPressable>
                 </View>
               ))}
               {importingAttachments && (
@@ -598,10 +600,10 @@ export function MobileComposer({
               onPress={() => setModelSheetOpen(true)}
             />
             {busy && (
-              <Pressable
+              <AppPressable
                 accessibilityLabel="Stop agent"
                 accessibilityRole="button"
-                hitSlop={4}
+                hitSlop={8}
                 onPress={() => void stop()}
                 style={({ pressed }) => [
                   styles.sendButton,
@@ -612,7 +614,7 @@ export function MobileComposer({
                   size={14}
                   tintColor={theme.danger}
                 />
-              </Pressable>
+              </AppPressable>
             )}
             <SendButton
               busy={submitting}
@@ -707,7 +709,7 @@ function PermissionPanel({
       {error && <Text style={[styles.panelError, { color: theme.danger }]}>{error}</Text>}
       <View style={styles.optionActions}>
         {permission.options.map((option) => (
-          <Pressable
+          <AppPressable
             accessibilityRole="button"
             disabled={Boolean(responding)}
             key={option.id}
@@ -737,7 +739,7 @@ function PermissionPanel({
               styles.optionButtonText,
               { color: option.allow ? theme.onInverse : theme.text },
             ]}>{option.label}</Text>
-          </Pressable>
+          </AppPressable>
         ))}
       </View>
     </RequestPanel>
@@ -826,7 +828,7 @@ function UserInputPanel({
         {question.options.map((option) => {
           const checked = selected.includes(option.label);
           return (
-            <Pressable
+            <AppPressable
               accessibilityRole={question.multiSelect ? 'checkbox' : 'radio'}
               accessibilityState={{ checked }}
               key={option.label}
@@ -854,7 +856,7 @@ function UserInputPanel({
                   tintColor={NativeTint}
                 />
               )}
-            </Pressable>
+            </AppPressable>
           );
         })}
         <TextInput
@@ -881,14 +883,14 @@ function UserInputPanel({
       {error && <Text style={[styles.panelError, { color: theme.danger }]}>{error}</Text>}
       <View style={styles.questionActions}>
         {index > 0 ? (
-          <Pressable
+          <AppPressable
             accessibilityRole="button"
             onPress={() => setIndex((value) => value - 1)}
             style={styles.backButton}>
             <Text style={[styles.backButtonText, { color: theme.textSecondary }]}>Back</Text>
-          </Pressable>
+          </AppPressable>
         ) : <View />}
-        <Pressable
+        <AppPressable
           accessibilityRole="button"
           disabled={!canContinue || submitting}
           onPress={() => void advance()}
@@ -900,7 +902,7 @@ function UserInputPanel({
           <Text style={[styles.nextButtonText, { color: theme.onInverse }]}>
             {last ? 'Submit' : 'Next'}
           </Text>
-        </Pressable>
+        </AppPressable>
       </View>
     </RequestPanel>
   );
@@ -962,6 +964,9 @@ const styles = StyleSheet.create({
   toolbar: { alignItems: 'center', flexDirection: 'row', marginTop: 2 },
   toolbarSpacer: { flex: 1 },
   cluster: { alignItems: 'center', flexDirection: 'row', gap: 2 },
+  // Material's minimum touch target is 48dp; these render at 36dp visually
+  // (AppPressable adds the padding back via hitSlop) so the toolbar stays
+  // dense without dropping below the reachable minimum.
   iconButton: {
     alignItems: 'center',
     borderRadius: Radius.pill,

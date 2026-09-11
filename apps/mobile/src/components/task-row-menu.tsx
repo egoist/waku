@@ -1,5 +1,6 @@
 import { MenuView, type MenuAction } from '@expo/ui/community/menu';
-import { Pressable } from 'react-native';
+
+import { AppPressable } from '@/components/app-pressable';
 
 import type { TaskRowMenuProps } from '@/components/task-row-menu.types';
 
@@ -31,14 +32,14 @@ export function TaskRowMenu({
       }}
       shouldOpenOnLongPress
       style={style}>
-      <Pressable
+      <AppPressable
         accessibilityHint="Long press for actions"
         accessibilityLabel={accessibilityLabel}
         accessibilityRole="button"
         accessibilityState={{ selected }}
         onPress={onSelect}>
         {({ pressed }) => renderTrigger(pressed)}
-      </Pressable>
+      </AppPressable>
     </MenuView>
   );
 }

@@ -3,7 +3,9 @@ import { formatMessageTime } from '@waku/client/transcript-presentation';
 import * as Clipboard from 'expo-clipboard';
 import * as Haptics from 'expo-haptics';
 import { memo, useEffect, useState } from 'react';
-import { ActivityIndicator, Pressable, StyleSheet, Text, View } from 'react-native';
+import { ActivityIndicator, StyleSheet, Text, View } from 'react-native';
+
+import { AppPressable } from '@/components/app-pressable';
 
 import { ActivityGroup } from '@/components/activity-group';
 import { AppSymbol } from '@/components/app-symbol';
@@ -110,7 +112,7 @@ function FoldRow({
   const theme = useTheme();
   const keepTop = useRowAnchor();
   return (
-    <Pressable
+    <AppPressable
       accessibilityHint={expanded ? 'Collapses the agent’s work' : 'Shows the agent’s work'}
       accessibilityLabel={label}
       accessibilityRole="button"
@@ -130,7 +132,7 @@ function FoldRow({
         tintColor={theme.textGhost}
       />
       <View style={[styles.foldLine, { backgroundColor: theme.border }]} />
-    </Pressable>
+    </AppPressable>
   );
 }
 
@@ -154,7 +156,7 @@ function UserBubbleInner({ message }: { message: Message }) {
 
   return (
     <View style={styles.userFrame}>
-      <Pressable
+      <AppPressable
         accessibilityHint="Long press to copy"
         delayLongPress={350}
         onLongPress={() => void copy()}
@@ -172,7 +174,7 @@ function UserBubbleInner({ message }: { message: Message }) {
             ))}
           </View>
         ) : null}
-      </Pressable>
+      </AppPressable>
     </View>
   );
 }
@@ -183,7 +185,7 @@ function ChangedFilesCard({ checkpoint }: { checkpoint: Checkpoint }) {
   const [open, setOpen] = useState(false);
   return (
     <View style={[styles.changedCard, { backgroundColor: theme.surface, borderColor: theme.border }]}>
-      <Pressable
+      <AppPressable
         accessibilityRole="button"
         accessibilityState={{ expanded: open }}
         onPress={() => keepTop(() => setOpen((value) => !value))}
@@ -208,7 +210,7 @@ function ChangedFilesCard({ checkpoint }: { checkpoint: Checkpoint }) {
           size={11}
           tintColor={theme.textGhost}
         />
-      </Pressable>
+      </AppPressable>
       {open && (
         <View style={[styles.changedFiles, { borderTopColor: theme.border }]}>
           {checkpoint.files.map((file) => (

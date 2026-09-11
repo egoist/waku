@@ -1,8 +1,10 @@
 import type { MessageAttachment } from '@waku/client';
 import { useEffect, useState } from 'react';
-import { Image, Modal, Pressable, StyleSheet, Text, View } from 'react-native';
+import { Image, Modal, StyleSheet, Text, View } from 'react-native';
 
 import { AppSymbol } from './app-symbol';
+import { AppPressable } from '@/components/app-pressable';
+
 import { Radius } from '@/constants/theme';
 import { useTheme } from '@/hooks/use-theme';
 import { isPreviewableImage, readAttachmentImage } from '@/lib/attachments';
@@ -48,7 +50,7 @@ export function AttachmentChip({ attachment }: { attachment: MessageAttachment }
   if (source) {
     return (
       <>
-        <Pressable
+        <AppPressable
           accessibilityLabel={`Preview ${attachment.name}`}
           accessibilityRole="button"
           onPress={() => setPreviewing(true)}
@@ -58,7 +60,7 @@ export function AttachmentChip({ attachment }: { attachment: MessageAttachment }
             source={{ uri: source }}
             style={[styles.image, { backgroundColor: theme.inset }]}
           />
-        </Pressable>
+        </AppPressable>
         <Modal
           animationType="fade"
           onRequestClose={() => setPreviewing(false)}
@@ -70,7 +72,7 @@ export function AttachmentChip({ attachment }: { attachment: MessageAttachment }
               source={{ uri: source }}
               style={styles.viewerImage}
             />
-            <Pressable
+            <AppPressable
               accessibilityLabel="Close preview"
               accessibilityRole="button"
               hitSlop={8}
@@ -81,7 +83,7 @@ export function AttachmentChip({ attachment }: { attachment: MessageAttachment }
                 size={15}
                 tintColor={theme.text}
               />
-            </Pressable>
+            </AppPressable>
           </View>
         </Modal>
       </>

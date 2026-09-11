@@ -12,12 +12,13 @@ import {
   ActivityIndicator,
   KeyboardAvoidingView,
   Platform,
-  Pressable,
   StyleSheet,
   Text,
   View,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
+
+import { AppPressable } from '@/components/app-pressable';
 
 import { AppSymbol } from '@/components/app-symbol';
 import { ComposerAccessMenu } from '@/components/composer-access-menu';
@@ -566,7 +567,7 @@ function SelectorRow({
 }) {
   const theme = useTheme();
   return (
-    <Pressable
+    <AppPressable
       accessibilityLabel={`${label}: ${value}`}
       accessibilityRole="button"
       disabled={loading}
@@ -588,7 +589,7 @@ function SelectorRow({
         size={13}
         tintColor={theme.textTertiary}
       />
-    </Pressable>
+    </AppPressable>
   );
 }
 

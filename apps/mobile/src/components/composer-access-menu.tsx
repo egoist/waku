@@ -1,9 +1,11 @@
 import { useState } from 'react';
-import { Pressable, StyleSheet } from 'react-native';
+import { StyleSheet } from 'react-native';
 
 import { AppSymbol } from './app-symbol';
 import type { ComposerAccessMenuProps } from './composer-access-menu.types';
 import { AccessSheet } from './session-option-sheets';
+import { AppPressable } from '@/components/app-pressable';
+
 import { Radius } from '@/constants/theme';
 import { useTheme } from '@/hooks/use-theme';
 import { runtimeModeLabel } from '@/lib/session-presentation';
@@ -22,13 +24,13 @@ export function ComposerAccessMenu({ mode, onApply }: ComposerAccessMenuProps) {
 
   return (
     <>
-      <Pressable
+      <AppPressable
         accessibilityLabel={`Agent access, ${runtimeModeLabel(mode)}`}
         accessibilityRole="button"
         onPress={() => setOpen(true)}
         style={({ pressed }) => [styles.trigger, { opacity: pressed ? 0.55 : 1 }]}>
         <AppSymbol name={MODE_ICONS[mode]} size={19} tintColor={theme.textSecondary} />
-      </Pressable>
+      </AppPressable>
       <AccessSheet
         mode={mode}
         onApply={onApply}

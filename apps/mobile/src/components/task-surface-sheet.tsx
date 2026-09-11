@@ -27,7 +27,6 @@ import {
 import {
   ActivityIndicator,
   Platform,
-  Pressable,
   StyleSheet,
   Text,
   View,
@@ -35,6 +34,7 @@ import {
 } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 
+import { AppPressable } from "@/components/app-pressable";
 import { AppSymbol } from "@/components/app-symbol";
 import { DiffView } from "@/components/diff-view";
 import { liquidGlass } from "@/components/glass-surface";
@@ -400,7 +400,7 @@ function FilesSurface({ root }: { root: string | null }) {
           subtitle={selectedPath}
           surface="files"
         />
-        <Pressable
+        <AppPressable
           accessibilityHint="Returns to the workspace file list"
           accessibilityRole="button"
           onPress={() => setSelectedPath(null)}
@@ -419,7 +419,7 @@ function FilesSurface({ root }: { root: string | null }) {
             tintColor={NativeTint}
           />
           <Text style={[styles.backLabel, { color: NativeTint }]}>Files</Text>
-        </Pressable>
+        </AppPressable>
         {file.isPending ? (
           <LoadingMessage />
         ) : file.error ? (
@@ -483,7 +483,7 @@ function FilesSurface({ root }: { root: string | null }) {
             />
           }
           renderItem={({ item }) => (
-            <Pressable
+            <AppPressable
               accessibilityHint={
                 item.isDir
                   ? item.expanded
@@ -537,7 +537,7 @@ function FilesSurface({ root }: { root: string | null }) {
               >
                 {item.name}
               </Text>
-            </Pressable>
+            </AppPressable>
           )}
         />
       )}
@@ -762,9 +762,9 @@ function HeaderTextButton({
   onPress: () => void;
 }) {
   return (
-    <Pressable
+    <AppPressable
       accessibilityRole="button"
-      hitSlop={6}
+      hitSlop={8}
       onPress={onPress}
       style={({ pressed }) => [
         styles.textButton,
@@ -774,7 +774,7 @@ function HeaderTextButton({
       <Text style={[styles.textButtonLabel, { color: NativeTint }]}>
         {label}
       </Text>
-    </Pressable>
+    </AppPressable>
   );
 }
 

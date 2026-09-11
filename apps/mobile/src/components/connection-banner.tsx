@@ -3,11 +3,12 @@ import { useEffect, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Animated,
-  Pressable,
   StyleSheet,
   Text,
   View,
 } from 'react-native';
+
+import { AppPressable } from '@/components/app-pressable';
 
 import { AppSymbol } from '@/components/app-symbol';
 import { NativeTint, Radius, Spacing } from '@/constants/theme';
@@ -230,7 +231,7 @@ function BannerAction({
   onPress: () => void;
 }) {
   return (
-    <Pressable
+    <AppPressable
       accessibilityLabel={accessibilityLabel}
       accessibilityRole="button"
       accessibilityState={{ disabled }}
@@ -239,7 +240,7 @@ function BannerAction({
       onPress={onPress}
       style={({ pressed }) => [styles.action, { opacity: pressed || disabled ? 0.45 : 1 }]}>
       <Text style={[styles.actionText, { color: NativeTint }]}>{label}</Text>
-    </Pressable>
+    </AppPressable>
   );
 }
 

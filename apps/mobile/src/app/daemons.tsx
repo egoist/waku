@@ -1,9 +1,10 @@
 import * as Haptics from 'expo-haptics';
 import { router, Stack } from 'expo-router';
+import { AppPressable } from '@/components/app-pressable';
+
 import { navigateBack } from '@/components/screen-header';
 import { useState } from 'react';
 import {
-  Pressable,
   ScrollView,
   StyleSheet,
   Text,
@@ -45,7 +46,7 @@ export default function DaemonsScreen() {
       <Stack.Screen
         options={{
           headerRight: () => (
-            <Pressable
+            <AppPressable
               accessibilityLabel="Add daemon"
               accessibilityRole="button"
               hitSlop={10}
@@ -55,7 +56,7 @@ export default function DaemonsScreen() {
                 size={21}
                 tintColor={NativeTint}
               />
-            </Pressable>
+            </AppPressable>
           ),
           unstable_headerRightItems: () => [{
             type: 'button',

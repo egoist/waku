@@ -24,7 +24,7 @@ import {
   useState,
   type ReactNode,
 } from 'react';
-import { Image, Platform, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
+import { Image, Platform, ScrollView, StyleSheet, Text, View } from 'react-native';
 import Animated, {
   Easing,
   useAnimatedStyle,
@@ -37,6 +37,8 @@ import { ACTIVITY_ICONS } from './activity-icons';
 import { AppSymbol } from './app-symbol';
 import { DiffView } from './diff-view';
 import { liquidGlass } from './glass-surface';
+import { AppPressable } from '@/components/app-pressable';
+
 import { MonoFont, NativeTint, Radius, Spacing } from '@/constants/theme';
 import { useReducedMotion } from '@/hooks/use-reduced-motion';
 import { useTheme } from '@/hooks/use-theme';
@@ -161,7 +163,7 @@ export function ActivitySheetHost({
                 <View style={styles.page}>
                   {selected ? (
                     <>
-                      <Pressable
+                      <AppPressable
                         accessibilityHint="Shows the whole group"
                         accessibilityRole="button"
                         onPress={() => slideTo(0)}
@@ -172,7 +174,7 @@ export function ActivitySheetHost({
                           tintColor={NativeTint}
                         />
                         <Text style={[styles.backLabel, { color: NativeTint }]}>Back</Text>
-                      </Pressable>
+                      </AppPressable>
                       <ActivityDetail activity={selected} />
                     </>
                   ) : null}
@@ -217,7 +219,7 @@ function GroupRow({ activity, onPress }: { activity: ActivityItem; onPress: () =
   const detail = activityRowDetail(activity) || preview;
   const stats = activityFileChangeStats(activity);
   return (
-    <Pressable
+    <AppPressable
       accessibilityHint={hasDetail ? 'Opens the details' : undefined}
       accessibilityRole={hasDetail ? 'button' : 'text'}
       disabled={!hasDetail}
@@ -247,7 +249,7 @@ function GroupRow({ activity, onPress }: { activity: ActivityItem; onPress: () =
         </Text>
       )}
       <RowState activity={activity} hasDetail={hasDetail} />
-    </Pressable>
+    </AppPressable>
   );
 }
 

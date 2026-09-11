@@ -2,10 +2,12 @@ import type { TranscriptBlock } from '@waku/client';
 import { activitiesForBlock } from '@waku/client/event-reducer';
 import { activityHeaderTitle } from '@waku/client/transcript-presentation';
 import { memo } from 'react';
-import { Pressable, StyleSheet, Text } from 'react-native';
+import { StyleSheet, Text } from 'react-native';
 
 import { useActivitySheet } from './activity-sheet';
 import { AppSymbol } from './app-symbol';
+import { AppPressable } from '@/components/app-pressable';
+
 import { useTheme } from '@/hooks/use-theme';
 
 /**
@@ -30,7 +32,7 @@ export const ActivityGroup = memo(function ActivityGroup({
   const activities = activitiesForBlock(block);
   if (!activities.length) return null;
   return (
-    <Pressable
+    <AppPressable
       accessibilityHint="Opens the activity list"
       accessibilityRole="button"
       hitSlop={{ top: 6, bottom: 6 }}
@@ -48,7 +50,7 @@ export const ActivityGroup = memo(function ActivityGroup({
         size={10}
         tintColor={theme.textGhost}
       />
-    </Pressable>
+    </AppPressable>
   );
 });
 

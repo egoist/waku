@@ -3,7 +3,6 @@ import { router, type NativeStackHeaderItem } from "expo-router";
 import { useHeaderHeight } from "expo-router/build/react-navigation/elements";
 import type { ReactNode } from "react";
 import {
-  Pressable,
   StyleSheet,
   Text,
   View,
@@ -11,6 +10,7 @@ import {
   useWindowDimensions,
 } from "react-native";
 
+import { AppPressable } from "./app-pressable";
 import { AppSymbol } from "./app-symbol";
 import { GlassSurface } from "./glass-surface";
 import { Radius } from "@/constants/theme";
@@ -137,15 +137,15 @@ export function HeaderActionGroup({ children }: { children: ReactNode }) {
 export function HeaderAction({ icon, label, onPress }: HeaderActionSpec) {
   const theme = useTheme();
   return (
-    <Pressable
+    <AppPressable
       accessibilityLabel={label}
       accessibilityRole="button"
-      hitSlop={4}
+      hitSlop={8}
       onPress={onPress}
       style={({ pressed }) => [styles.action, { opacity: pressed ? 0.5 : 1 }]}
     >
       <AppSymbol name={icon} size={17} tintColor={theme.text} />
-    </Pressable>
+    </AppPressable>
   );
 }
 

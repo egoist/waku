@@ -18,7 +18,6 @@ import {
   Keyboard,
   KeyboardAvoidingView,
   Platform,
-  Pressable,
   RefreshControl,
   SectionList,
   StyleSheet,
@@ -29,6 +28,8 @@ import {
 } from 'react-native';
 import { Drawer } from 'react-native-drawer-layout';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
+
+import { AppPressable } from '@/components/app-pressable';
 
 import { AppSymbol } from '@/components/app-symbol';
 import { ConnectionBanner, useConnectionNotice } from '@/components/connection-banner';
@@ -122,7 +123,7 @@ export function TaskDrawerHost({ children }: { children: ReactNode }) {
           drawerScene
         )}
         {open && searchFocused && (
-          <Pressable
+          <AppPressable
             accessibilityLabel="Close task history"
             accessibilityRole="button"
             onPress={() => {
@@ -354,7 +355,7 @@ function TaskDrawerContent({
                   onBlur={() => onSearchFocus?.(false)}
                 />
                 {search.length > 0 && (
-                  <Pressable
+                  <AppPressable
                     accessibilityLabel="Clear search"
                     accessibilityRole="button"
                     hitSlop={8}
@@ -365,16 +366,16 @@ function TaskDrawerContent({
                       size={16}
                       tintColor={theme.textTertiary}
                     />
-                  </Pressable>
+                  </AppPressable>
                 )}
               </View>
             </GlassSurface>
             {daemon.phase === 'connected' && (
               <GlassSurface interactive style={styles.composeButton}>
-                <Pressable
+                <AppPressable
                   accessibilityLabel="New task"
                   accessibilityRole="button"
-                  hitSlop={6}
+                  hitSlop={8}
                   onPress={showNewTask}
                   style={({ pressed }) => [styles.roundInner, { opacity: pressed ? 0.5 : 1 }]}>
                   <AppSymbol
@@ -382,7 +383,7 @@ function TaskDrawerContent({
                     size={20}
                     tintColor={theme.text}
                   />
-                </Pressable>
+                </AppPressable>
               </GlassSurface>
             )}
           </View>
@@ -416,7 +417,7 @@ const MessageResultRow = memo(function MessageResultRow({
 }) {
   const theme = useTheme();
   return (
-    <Pressable
+    <AppPressable
       accessibilityLabel={`${displaySessionTitle(row.session)}: ${row.snippet}`}
       accessibilityRole="button"
       onPress={() => onSelect(row.session.id)}
@@ -433,7 +434,7 @@ const MessageResultRow = memo(function MessageResultRow({
       <Text numberOfLines={2} style={[styles.messageSnippet, { color: theme.textSecondary }]}>
         {row.snippet}
       </Text>
-    </Pressable>
+    </AppPressable>
   );
 });
 
@@ -442,7 +443,7 @@ function DaemonPill({ onPress }: { onPress: () => void }) {
   const daemon = useDaemon();
   return (
     <GlassSurface interactive style={styles.daemonButton}>
-      <Pressable
+      <AppPressable
         accessibilityHint="Opens the daemon switcher"
         accessibilityLabel={daemon.activeProfile
           ? `${connectionPhaseLabel(daemon.phase)}: ${daemon.activeProfile.name}`
@@ -466,7 +467,7 @@ function DaemonPill({ onPress }: { onPress: () => void }) {
           size={12}
           tintColor={theme.textTertiary}
         />
-      </Pressable>
+      </AppPressable>
     </GlassSurface>
   );
 }
@@ -527,7 +528,7 @@ function TaskListEmpty({
         Start an agent on anything — a bug, a feature, a question about the code.
       </Text>
       {phase === 'connected' && (
-        <Pressable
+        <AppPressable
           accessibilityRole="button"
           onPress={onNewTask}
           style={({ pressed }) => [
@@ -535,7 +536,7 @@ function TaskListEmpty({
             { backgroundColor: theme.inverse, opacity: pressed ? 0.7 : 1 },
           ]}>
           <Text style={[styles.emptyActionText, { color: theme.onInverse }]}>New task</Text>
-        </Pressable>
+        </AppPressable>
       )}
     </View>
   );
