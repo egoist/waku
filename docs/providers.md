@@ -658,9 +658,17 @@ or not the account can currently serve a request.
 | `session_info_update` | `AutoTitleUpdated` when it carries a `title` |
 | `user_message_chunk` | ignored — Waku's own prompt echoed back |
 
-Everything outside `session/update` on that channel is agent-private control
-traffic (Grok emits a stream of `_x.ai/*` notifications) and never reaches the
-transcript.
+Grok Build never sends `usage_update`. Live occupancy rides on
+`session/update` `_meta.totalTokens` — a latest-wins snapshot of how full the
+window is right now, matching `signals.json`'s `contextTokensUsed`. The
+window size comes from Grok's `models_cache.json` (`info.context_window`) and,
+when a compact starts, from `_x.ai/session/update` `auto_compact_started`.
+`turn_completed.usage.totalTokens` is the turn's billed sum across model
+calls, not occupancy, and is ignored.
+
+Everything else outside `session/update` on that channel is agent-private
+control traffic (Grok emits a stream of `_x.ai/*` notifications) and never
+reaches the transcript.
 
 Fx emits its context-limit and skill-discovery diagnostics as ordinary
 `agent_message_chunk` updates before the model starts. Their reserved
