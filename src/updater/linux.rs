@@ -36,11 +36,10 @@ const MAX_ERROR_BYTES: u64 = 16 * 1024;
 
 static TEMPORARY_NONCE: AtomicU64 = AtomicU64::new(0);
 
-#[cfg(target_arch = "aarch64")]
-const FEED_URL: Option<&str> = Some("https://releases.waku.sh/appcast-linux-aarch64.xml");
-#[cfg(target_arch = "x86_64")]
-const FEED_URL: Option<&str> = Some("https://releases.waku.sh/appcast-linux-x86_64.xml");
-#[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
+/// One feed per architecture. This fork ships no update feed: builds install
+/// from GitHub releases, and a live URL here would silently steer every
+/// install back to upstream's feed. Restore a `Some(...)` value once this
+/// fork serves its own signed appcast.
 const FEED_URL: Option<&str> = None;
 
 #[derive(Clone, Debug)]
@@ -387,7 +386,8 @@ impl Updater {
 }
 
 fn fetch_and_stage(layout: &InstallLayout) -> anyhow::Result<Option<StagedUpdate>> {
-    let document = http_get(FEED_URL.expect("supported Linux architecture has a feed"))?;
+    let feed_url = FEED_URL.ok_or_else(|| anyhow::anyhow!("this build ships no update feed"))?;
+    let document = http_get(feed_url)?;
     let Some(item) = feed::newest_item(&document) else {
         anyhow::bail!("the update feed has no signed release");
     };

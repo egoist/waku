@@ -993,10 +993,15 @@ mod windows {
     /// One feed per architecture. A Sparkle appcast has no way to say which
     /// binary an item is for, and guessing from the enclosure filename would
     /// be a contract hiding in a string.
+    ///
+    /// This fork ships no update feed: builds install by downloading a
+    /// release from GitHub, and a live URL here would silently steer every
+    /// install back to upstream's feed. Restore a `Some(...)` value once this
+    /// fork serves its own signed appcast.
     #[cfg(target_arch = "aarch64")]
-    const FEED_URL: &str = "https://releases.waku.sh/appcast-windows-aarch64.xml";
+    const FEED_URL: Option<&str> = None;
     #[cfg(not(target_arch = "aarch64"))]
-    const FEED_URL: &str = "https://releases.waku.sh/appcast-windows-x86_64.xml";
+    const FEED_URL: Option<&str> = None;
 
     /// Read out of `resources/Info.plist` by the build script, so macOS and
     /// Windows cannot end up trusting different keys.
@@ -1062,7 +1067,7 @@ mod windows {
 
             // Sparkle arms a scheduled checker on macOS; here one silent
             // check per launch is the whole schedule.
-            if updater.automatically_checks_for_updates() {
+            if FEED_URL.is_some() && updater.automatically_checks_for_updates() {
                 updater.start_check(false);
             }
             Some(updater)
@@ -1238,7 +1243,10 @@ mod windows {
 
     /// Resolve the feed, and stage the installer when it names a newer build.
     fn fetch_and_stage() -> anyhow::Result<Option<PathBuf>> {
-        let document = http_get(FEED_URL)?;
+        let Some(feed_url) = FEED_URL else {
+            anyhow::bail!("this build ships no update feed");
+        };
+        let document = http_get(feed_url)?;
         let Some(item) = feed::newest_item(&document) else {
             anyhow::bail!("the update feed has no signed release");
         };
