@@ -97,6 +97,13 @@ fn launch_for(provider: ProviderKind, reasoning_effort: Option<&str>) -> anyhow:
             args: vec!["acp".into()],
             env: Vec::new(),
         }),
+        // Droid documents its ACP transport as `droid exec --output-format
+        // acp`; CLI flags such as --model and --auto are ignored in this mode
+        // because sessions are configured over the protocol instead.
+        ProviderKind::Droid => Ok(AcpLaunch {
+            args: vec!["exec".into(), "--output-format".into(), "acp".into()],
+            env: Vec::new(),
+        }),
         ProviderKind::OpenCode => Ok(AcpLaunch {
             args: vec!["acp".into()],
             env: Vec::new(),
@@ -202,7 +209,10 @@ impl AcpDriver {
 
         Ok(Self {
             commands,
-            supports_steer: provider != ProviderKind::Fx,
+            // Droid's behavior under a concurrent session/prompt is
+            // unverified, so steering stays off until a live session proves
+            // it queues or interleaves safely.
+            supports_steer: provider != ProviderKind::Fx && provider != ProviderKind::Droid,
             mode,
             computer_use,
         })
@@ -735,7 +745,23 @@ fn desired_access_mode(
     mode: RuntimeMode,
 ) -> Option<SessionModeId> {
     let modes = modes?;
-    let desired = if provider == ProviderKind::Fx {
+    let desired = if provider == ProviderKind::Droid {
+        // Droid's autonomy modes are its access modes: every Waku mode maps
+        // onto one advertised autonomy level instead of only rescuing a
+        // legacy plan state.
+        let desired = match mode {
+            RuntimeMode::Ask => "normal",
+            RuntimeMode::AutoAcceptEdits => "auto-low",
+            RuntimeMode::Auto => "auto-medium",
+            RuntimeMode::FullAccess => "auto-high",
+        };
+        modes
+            .available_modes
+            .iter()
+            .find(|available| available.id.to_string().eq_ignore_ascii_case(desired))?
+            .id
+            .clone()
+    } else if provider == ProviderKind::Fx {
         let desired = if mode == RuntimeMode::Ask {
             "ask"
         } else {
@@ -773,12 +799,14 @@ fn desired_access_mode(
 }
 
 /// Which session config option carries reasoning effort. ACP leaves the id to
-/// the agent: Kimi Code exposes it as its `thinking` level, while the other
-/// agents Waku drives keep it on `mode`. Grok does not use this path: its
-/// effort rides on `session/set_model` as `_meta.reasoningEffort`.
+/// the agent: Kimi Code exposes it as its `thinking` level, Droid as its
+/// `reasoning_effort` level, while the other agents Waku drives keep it on
+/// `mode`. Grok does not use this path: its effort rides on `session/set_model`
+/// as `_meta.reasoningEffort`.
 fn reasoning_effort_config_id(provider: ProviderKind) -> &'static str {
     match provider {
         ProviderKind::Kimi => "thinking",
+        ProviderKind::Droid => "reasoning_effort",
         _ => "mode",
     }
 }
@@ -2253,6 +2281,58 @@ mod tests {
     }
 
     #[test]
+    fn droid_launches_its_documented_acp_subcommand() {
+        let launch = launch_for(ProviderKind::Droid, None).unwrap();
+        assert_eq!(launch.args, ["exec", "--output-format", "acp"]);
+        assert!(launch.env.is_empty());
+    }
+
+    /// Droid's autonomy modes are its access modes: every Waku mode maps onto
+    /// one advertised level. The mode ids are captured from a live
+    /// `session/new` on droid 0.217.0.
+    #[test]
+    fn droid_access_mode_maps_every_waku_mode_onto_the_autonomy_ladder() {
+        let modes = |current| {
+            SessionModeState::new(
+                current,
+                vec![
+                    SessionMode::new("normal", "Auto-approves only read operations"),
+                    SessionMode::new("spec", "Build feature specs (read-only)"),
+                    SessionMode::new("auto-low", "Auto-approves file edits and low-risk actions"),
+                    SessionMode::new("auto-medium", "Auto-approves medium-risk actions"),
+                    SessionMode::new("auto-high", "Auto-approves all actions"),
+                ],
+            )
+        };
+        let expected = [
+            (RuntimeMode::Ask, "normal"),
+            (RuntimeMode::AutoAcceptEdits, "auto-low"),
+            (RuntimeMode::Auto, "auto-medium"),
+            (RuntimeMode::FullAccess, "auto-high"),
+        ];
+        for (mode, id) in expected {
+            assert_eq!(
+                desired_access_mode(ProviderKind::Droid, Some(&modes("spec")), mode)
+                    .map(|selected| selected.to_string()),
+                Some(id.to_owned())
+            );
+        }
+        // A session already sitting on the mapped mode is left untouched.
+        assert!(
+            desired_access_mode(ProviderKind::Droid, Some(&modes("normal")), RuntimeMode::Ask)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn droid_reasoning_effort_rides_its_advertised_config_option() {
+        assert_eq!(
+            reasoning_effort_config_id(ProviderKind::Droid),
+            "reasoning_effort"
+        );
+    }
+
+    #[test]
     fn fx_model_option_ignores_provider_selector_in_same_category() {
         let provider = select_config_option(
             "provider",
@@ -2763,6 +2843,75 @@ mod tests {
             match event {
                 DriverEvent::Connected {
                     provider_cursor: Some(ProviderResumeCursor::Kimi { .. }),
+                } => break,
+                DriverEvent::Error(error) => panic!("the agent reported: {error}"),
+                _ => {}
+            }
+        }
+        driver.prompt("Say hi in three words.".into());
+
+        let mut produced_content = false;
+        let mut reported_error = None;
+        let mut finished = None;
+        while let Ok(event) = event_rx.recv_timeout(Duration::from_secs(120)) {
+            match event {
+                DriverEvent::TextDelta(_) | DriverEvent::ReasoningDelta(_) => {
+                    produced_content = true;
+                }
+                DriverEvent::Error(error) => reported_error = Some(error),
+                DriverEvent::TurnFinished { success, .. } => {
+                    finished = Some(success);
+                    break;
+                }
+                _ => {}
+            }
+        }
+
+        match finished.expect("the turn should settle") {
+            true => assert!(
+                produced_content,
+                "the turn was reported successful without producing anything"
+            ),
+            false => assert!(
+                reported_error.is_some_and(|error| !error.trim().is_empty()),
+                "the turn failed without naming a reason"
+            ),
+        }
+    }
+
+    /// Droid reports turn failures as JSON-RPC errors on `session/prompt` or a
+    /// `refusal` stop reason, never as a lying clean end-turn, so the same
+    /// success-means-content invariant applies.
+    #[test]
+    #[ignore = "requires an installed, authenticated droid"]
+    fn droid_prompt_response_from_the_sdk_finishes_the_turn() {
+        let binary = crate::command_env::find_executable("droid").expect("droid is not installed");
+        let (events, event_rx) = crate::driver::test_event_channel();
+        let driver = AcpDriver::start(
+            ProviderKind::Droid,
+            DriverStartOptions {
+                binary,
+                cwd: std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")),
+                mode: RuntimeMode::FullAccess,
+                model: None,
+                reasoning_effort: None,
+                service_tier: None,
+                context_window: None,
+                agent_preset: None,
+                computer_use_enabled: false,
+                provider_cursor: None,
+            },
+            events,
+        )
+        .expect("the ACP session should open");
+
+        loop {
+            let event = event_rx
+                .recv_timeout(Duration::from_secs(60))
+                .expect("the agent should report its session");
+            match event {
+                DriverEvent::Connected {
+                    provider_cursor: Some(ProviderResumeCursor::Droid { .. }),
                 } => break,
                 DriverEvent::Error(error) => panic!("the agent reported: {error}"),
                 _ => {}
