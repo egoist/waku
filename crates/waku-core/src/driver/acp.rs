@@ -413,6 +413,7 @@ async fn run_sdk_connection(
     let pending_user_inputs: PendingAcpUserInputs = Arc::new(Mutex::new(HashMap::new()));
     let prompt_requests = Arc::new(Mutex::new(PendingPrompts::default()));
     let title_refresh = super::title_refresh::NativeTitleRefresh::default();
+    let first_prompt = Arc::new(Mutex::new(None::<String>));
     let auto_approve = mode != RuntimeMode::Ask;
 
     Client
@@ -423,6 +424,7 @@ async fn run_sdk_connection(
                 let events = events.clone();
                 let suppress_session_updates = suppress_session_updates.clone();
                 let stream_state = stream_state.clone();
+                let first_prompt = first_prompt.clone();
                 async move |notification: SessionNotification, _connection| {
                     if !suppress_session_updates.load(Ordering::Acquire) {
                         handle_session_update(
@@ -430,6 +432,7 @@ async fn run_sdk_connection(
                             notification,
                             &events,
                             &mut stream_state.lock(),
+                            first_prompt.lock().as_deref(),
                         )?;
                     }
                     Ok(())
@@ -443,6 +446,7 @@ async fn run_sdk_connection(
                 let prompt_requests = prompt_requests.clone();
                 let grok_title_home = grok_title_home.clone();
                 let title_refresh = title_refresh.clone();
+                let first_prompt = first_prompt.clone();
                 async move |notification: UntypedMessage, _connection| {
                     if notification.method() == "_x.ai/session/prompt_complete" {
                         if let Some(session_id) = finish_xai_prompt_complete(
@@ -456,6 +460,17 @@ async fn run_sdk_connection(
                                 &title_refresh,
                                 events.clone(),
                             );
+                        }
+                    }
+                    if let Some(title) = crate::devin_session::title_from_notification(
+                        notification.method(),
+                        notification.params(),
+                    ) {
+                        if !crate::devin_session::is_placeholder_title(
+                            &title,
+                            first_prompt.lock().as_deref(),
+                        ) {
+                            let _ = events.send(DriverEvent::AutoTitleUpdated(Some(title)));
                         }
                     }
                     Ok(())
@@ -579,6 +594,9 @@ async fn run_sdk_connection(
                     native_session_id.clone(),
                 )),
             });
+            if provider == ProviderKind::Devin && resume_session_id.is_some() {
+                start_devin_title_refresh(&native_session_id, None, &title_refresh, events.clone());
+            }
 
             let mut current_model = model;
             let mut current_effort = reasoning_effort;
@@ -607,6 +625,21 @@ async fn run_sdk_connection(
                                 crate::cursor_session::prompt_with_fork_context(&context, &text)
                             })
                             .unwrap_or(text);
+                        let title_placeholder = if provider == ProviderKind::Devin {
+                            let mut first = first_prompt.lock();
+                            if first.is_none() {
+                                *first = Some(text.clone());
+                                start_devin_title_refresh(
+                                    &native_session_id,
+                                    first.clone(),
+                                    &title_refresh,
+                                    events.clone(),
+                                );
+                            }
+                            first.clone()
+                        } else {
+                            None
+                        };
                         let _ = events.send(DriverEvent::TurnStarted);
                         if let Err(error) = send_prompt(
                             &connection,
@@ -617,6 +650,7 @@ async fn run_sdk_connection(
                             provider,
                             &native_session_id,
                             grok_title_home.clone(),
+                            title_placeholder,
                             title_refresh.clone(),
                             stream_state.clone(),
                         ) {
@@ -647,6 +681,7 @@ async fn run_sdk_connection(
                             provider,
                             &native_session_id,
                             grok_title_home.clone(),
+                            first_prompt.lock().clone(),
                             title_refresh.clone(),
                             stream_state.clone(),
                         ) {
@@ -1492,6 +1527,7 @@ fn send_prompt(
     provider: ProviderKind,
     native_session_id: &str,
     grok_title_home: Option<std::path::PathBuf>,
+    title_placeholder: Option<String>,
     title_refresh: super::title_refresh::NativeTitleRefresh,
     stream_state: Arc<Mutex<AcpStreamState>>,
 ) -> agent_client_protocol::Result<()> {
@@ -1531,10 +1567,17 @@ fn send_prompt(
                 .filter(|_| !stream_state.lock().produced_content)
                 .and_then(|offset| crate::kimi_session::turn_failure(&native_session_id, offset));
             let success = finish_prompt(result, native_failure, &callback_events);
-            if provider == ProviderKind::Grok && success {
+            if success && provider == ProviderKind::Grok {
                 start_grok_title_refresh(
                     grok_title_home.as_deref(),
                     &native_session_id,
+                    &title_refresh,
+                    callback_events,
+                );
+            } else if success && provider == ProviderKind::Devin {
+                start_devin_title_refresh(
+                    &native_session_id,
+                    title_placeholder,
                     &title_refresh,
                     callback_events,
                 );
@@ -1603,6 +1646,33 @@ fn start_grok_title_refresh(
             Some(home) => crate::grok_session::generated_title_in(home, &native_session_id),
             None => crate::grok_session::generated_title(&native_session_id),
         },
+    );
+}
+
+fn start_devin_title_refresh(
+    native_session_id: &str,
+    placeholder: Option<String>,
+    title_refresh: &super::title_refresh::NativeTitleRefresh,
+    events: DriverEventSender,
+) {
+    let native_session_id = native_session_id.to_owned();
+    // Devin's generator runs after session/prompt returns (~300ms when it
+    // succeeds) and writes the CLI sqlite store. It also stores the first
+    // prompt immediately; that is a placeholder, filtered in the lookup.
+    title_refresh.start(
+        "waku-devin-title",
+        vec![
+            Duration::ZERO,
+            Duration::from_millis(250),
+            Duration::from_millis(750),
+            Duration::from_millis(1_500),
+            Duration::from_secs(3),
+            Duration::from_secs(5),
+            Duration::from_millis(7_500),
+            Duration::from_secs(10),
+        ],
+        events,
+        move || crate::devin_session::generated_title(&native_session_id, placeholder.as_deref()),
     );
 }
 
@@ -1994,6 +2064,7 @@ fn handle_session_update(
     notification: SessionNotification,
     events: &impl DriverEventSink,
     state: &mut AcpStreamState,
+    title_placeholder: Option<&str>,
 ) -> agent_client_protocol::Result<()> {
     let update = serde_json::to_value(notification.update)?;
     let kind = update.get("sessionUpdate").and_then(Value::as_str);
@@ -2078,7 +2149,13 @@ fn handle_session_update(
                     .get("title")
                     .and_then(Value::as_str)
                     .map(str::to_owned);
-                let _ = events.send(DriverEvent::AutoTitleUpdated(title));
+                let skip_placeholder = provider == ProviderKind::Devin
+                    && title.as_deref().is_some_and(|title| {
+                        crate::devin_session::is_placeholder_title(title, title_placeholder)
+                    });
+                if !skip_placeholder {
+                    let _ = events.send(DriverEvent::AutoTitleUpdated(title));
+                }
             }
         }
         Some("usage_update") => {
@@ -2837,6 +2914,7 @@ mod tests {
                 SessionNotification::new("s", update),
                 &events,
                 &mut state,
+                None,
             )
             .unwrap();
         }
@@ -2879,6 +2957,7 @@ mod tests {
                 SessionNotification::new("s", update),
                 &events,
                 &mut state,
+                None,
             )
             .unwrap();
         }
@@ -2888,6 +2967,50 @@ mod tests {
         assert!(matches!(&seen[0], DriverEvent::TextDelta(text) if text == "Hi! How can I help?"));
         assert!(matches!(&seen[1], DriverEvent::TextDelta(text) if text.starts_with("[context]")));
         assert!(state.produced_content);
+    }
+
+    #[test]
+    fn session_info_update_forwards_a_generated_title() {
+        let (events, event_rx) = crossbeam_channel::unbounded();
+        let mut state = AcpStreamState::default();
+        let update = serde_json::from_value(json!({
+            "sessionUpdate": "session_info_update",
+            "title": "  Polish the native agent interface  "
+        }))
+        .unwrap();
+        handle_session_update(
+            ProviderKind::Devin,
+            SessionNotification::new("s", update),
+            &events,
+            &mut state,
+            Some("build a really polished local agent interface for rust"),
+        )
+        .unwrap();
+        assert!(matches!(
+            event_rx.try_recv().unwrap(),
+            DriverEvent::AutoTitleUpdated(Some(title))
+                if title.trim() == "Polish the native agent interface"
+        ));
+    }
+
+    #[test]
+    fn session_info_update_skips_devins_first_prompt_placeholder() {
+        let (events, event_rx) = crossbeam_channel::unbounded();
+        let mut state = AcpStreamState::default();
+        let update = serde_json::from_value(json!({
+            "sessionUpdate": "session_info_update",
+            "title": "hi"
+        }))
+        .unwrap();
+        handle_session_update(
+            ProviderKind::Devin,
+            SessionNotification::new("s", update),
+            &events,
+            &mut state,
+            Some("hi"),
+        )
+        .unwrap();
+        assert!(event_rx.try_recv().is_err());
     }
 
     #[test]

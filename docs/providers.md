@@ -660,7 +660,7 @@ or not the account can currently serve a request.
 | `plan` | a plan activity |
 | `usage_update` | `UsageUpdated` — the context gauge, not transcript content |
 | `available_commands_update` | `AvailableCommands` — the composer's slash-command list |
-| `session_info_update` | `AutoTitleUpdated` when it carries a `title` |
+| `session_info_update` | `AutoTitleUpdated` when it carries a `title`. Devin's live first turn does not send one; the driver polls `sessions.db` instead. |
 | `user_message_chunk` | ignored — Waku's own prompt echoed back |
 
 Everything outside `session/update` on that channel is agent-private control
