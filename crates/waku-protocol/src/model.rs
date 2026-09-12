@@ -16,6 +16,7 @@ pub enum ProviderKind {
     Codex,
     Cursor,
     DeepSeek,
+    Devin,
     Fx,
     OpenCode,
     OpenCode2,
@@ -26,12 +27,13 @@ pub enum ProviderKind {
 }
 
 impl ProviderKind {
-    pub const ALL: [Self; 12] = [
+    pub const ALL: [Self; 13] = [
         Self::Amp,
         Self::Claude,
         Self::Codex,
         Self::Cursor,
         Self::DeepSeek,
+        Self::Devin,
         Self::Fx,
         Self::OpenCode,
         Self::OpenCode2,
@@ -48,6 +50,7 @@ impl ProviderKind {
             Self::Codex => "codex",
             Self::Cursor => "cursor",
             Self::DeepSeek => "deepseek",
+            Self::Devin => "devin",
             Self::Fx => "fx",
             Self::OpenCode => "opencode",
             Self::OpenCode2 => "opencode2",
@@ -65,6 +68,7 @@ impl ProviderKind {
             Self::Codex => "Codex CLI",
             Self::Cursor => "Cursor CLI",
             Self::DeepSeek => "DeepSeek Harness",
+            Self::Devin => "Devin CLI",
             Self::Fx => "Fx",
             Self::OpenCode => "OpenCode",
             Self::OpenCode2 => "OpenCode 2",
@@ -82,6 +86,7 @@ impl ProviderKind {
             Self::Codex => "Codex",
             Self::Cursor => "Cursor",
             Self::DeepSeek => "DeepSeek",
+            Self::Devin => "Devin",
             Self::Fx => "Fx",
             Self::OpenCode => "OpenCode",
             Self::OpenCode2 => "OpenCode 2",
@@ -101,6 +106,7 @@ impl ProviderKind {
             // shared by other CLIs. The backward-compatible alias is unambiguous.
             Self::Cursor => "cursor-agent",
             Self::DeepSeek => "dsh",
+            Self::Devin => "devin",
             Self::Fx => "fx",
             Self::OpenCode => "opencode",
             Self::OpenCode2 => "opencode2",
@@ -111,11 +117,11 @@ impl ProviderKind {
         }
     }
 
-    /// Kimi Code and Fx are deliberately absent from this list and from
+    /// Kimi Code, Fx, and Devin are deliberately absent from this list and from
     /// [`Self::supports_conversation_fork`]. Kimi's ACP `session/fork` copies a
-    /// whole session and takes no turn count, while Fx exposes no turn-aware
-    /// fork or truncation method. Neither can reproduce Waku's "drop the last N
-    /// turns" semantics without corrupting history.
+    /// whole session and takes no turn count, while Fx and Devin expose no
+    /// turn-aware fork or truncation method. None of them can reproduce Waku's
+    /// "drop the last N turns" semantics without corrupting history.
     pub fn supports_conversation_rollback(self) -> bool {
         matches!(
             self,
@@ -155,6 +161,7 @@ impl ProviderKind {
                 | Self::Codex
                 | Self::Cursor
                 | Self::DeepSeek
+                | Self::Devin
                 | Self::Fx
                 | Self::OpenCode
                 | Self::OpenCode2
@@ -202,6 +209,9 @@ pub enum ProviderResumeCursor {
     DeepSeek {
         session_id: String,
     },
+    Devin {
+        session_id: String,
+    },
     Fx {
         session_id: String,
     },
@@ -240,6 +250,7 @@ impl ProviderResumeCursor {
                 fork_context: None,
             },
             ProviderKind::DeepSeek => Self::DeepSeek { session_id: id },
+            ProviderKind::Devin => Self::Devin { session_id: id },
             ProviderKind::Fx => Self::Fx { session_id: id },
             ProviderKind::OpenCode => Self::OpenCode { session_id: id },
             ProviderKind::OpenCode2 => Self::OpenCode2 {
@@ -266,6 +277,7 @@ impl ProviderResumeCursor {
             Self::Codex { .. } => ProviderKind::Codex,
             Self::Cursor { .. } => ProviderKind::Cursor,
             Self::DeepSeek { .. } => ProviderKind::DeepSeek,
+            Self::Devin { .. } => ProviderKind::Devin,
             Self::Fx { .. } => ProviderKind::Fx,
             Self::OpenCode { .. } => ProviderKind::OpenCode,
             Self::OpenCode2 { .. } => ProviderKind::OpenCode2,
@@ -282,6 +294,7 @@ impl ProviderResumeCursor {
             Self::Claude { session_id, .. }
             | Self::Cursor { session_id, .. }
             | Self::DeepSeek { session_id }
+            | Self::Devin { session_id }
             | Self::Fx { session_id }
             | Self::OpenCode { session_id }
             | Self::OpenCode2 { session_id, .. }
@@ -4149,6 +4162,9 @@ mod tests {
         assert_eq!(ProviderKind::Codex.command(), "codex");
         assert_eq!(ProviderKind::Cursor.command(), "cursor-agent");
         assert_eq!(ProviderKind::DeepSeek.command(), "dsh");
+        assert_eq!(ProviderKind::Devin.id(), "devin");
+        assert_eq!(ProviderKind::Devin.command(), "devin");
+        assert_eq!(ProviderKind::Devin.display_name(), "Devin CLI");
         assert_eq!(ProviderKind::Fx.command(), "fx");
         assert_eq!(ProviderKind::OpenCode.command(), "opencode");
         assert_eq!(ProviderKind::OpenCode2.id(), "opencode2");
@@ -4159,23 +4175,13 @@ mod tests {
 
     #[test]
     fn native_conversation_actions_include_every_provider() {
-        for provider in [
-            ProviderKind::Amp,
-            ProviderKind::Claude,
-            ProviderKind::Codex,
-            ProviderKind::Cursor,
-            ProviderKind::DeepSeek,
-            ProviderKind::OpenCode,
-            ProviderKind::OpenCode2,
-            ProviderKind::Grok,
-            ProviderKind::Pi,
-        ] {
-            assert!(provider.supports_conversation_fork());
-            assert!(provider.supports_conversation_rollback());
-        }
-        for provider in [ProviderKind::Fx, ProviderKind::Kimi] {
-            assert!(!provider.supports_conversation_fork());
-            assert!(!provider.supports_conversation_rollback());
+        for provider in ProviderKind::ALL {
+            let supported = !matches!(
+                provider,
+                ProviderKind::Devin | ProviderKind::Fx | ProviderKind::Kimi
+            );
+            assert_eq!(provider.supports_conversation_fork(), supported);
+            assert_eq!(provider.supports_conversation_rollback(), supported);
         }
     }
 
@@ -4186,11 +4192,28 @@ mod tests {
         assert!(ProviderKind::Codex.supports_model_discovery());
         assert!(ProviderKind::Cursor.supports_model_discovery());
         assert!(ProviderKind::DeepSeek.supports_model_discovery());
+        assert!(ProviderKind::Devin.supports_model_discovery());
         assert!(ProviderKind::Fx.supports_model_discovery());
         assert!(ProviderKind::OpenCode.supports_model_discovery());
         assert!(ProviderKind::OpenCode2.supports_model_discovery());
         assert!(ProviderKind::Grok.supports_model_discovery());
+        assert!(ProviderKind::Kimi.supports_model_discovery());
+        assert!(ProviderKind::OhMyPi.supports_model_discovery());
         assert!(ProviderKind::Pi.supports_model_discovery());
+    }
+
+    #[test]
+    fn devin_cursor_round_trips_with_its_wire_tag() {
+        let cursor = ProviderResumeCursor::from_session_id(ProviderKind::Devin, "ses_dev".into());
+        let json = serde_json::to_string(&cursor).unwrap();
+        assert!(json.contains("\"provider\":\"devin\""), "{json}");
+        assert!(json.contains("\"sessionId\":\"ses_dev\""), "{json}");
+        assert_eq!(cursor.provider(), ProviderKind::Devin);
+        assert_eq!(cursor.native_id(), "ses_dev");
+        assert_eq!(
+            serde_json::to_value(ProviderKind::Devin).unwrap(),
+            serde_json::json!("devin")
+        );
     }
 
     #[test]
@@ -4224,7 +4247,7 @@ mod tests {
 
     #[test]
     fn all_contains_every_provider_kind() {
-        assert_eq!(ProviderKind::ALL.len(), 12);
+        assert_eq!(ProviderKind::ALL.len(), 13);
         let ids: std::collections::HashSet<_> =
             ProviderKind::ALL.iter().map(|kind| kind.id()).collect();
         assert_eq!(

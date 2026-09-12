@@ -1,5 +1,6 @@
 //! Provider model and agent-preset discovery.
 
+use std::collections::HashSet;
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -77,6 +78,9 @@ pub fn fallback_models(provider: ProviderKind) -> Vec<ProviderModel> {
         ProviderKind::Cursor => {
             vec![ProviderModel::new("auto", tr!("model_option.auto")).default()]
         }
+        // Devin's ACP session advertises the models it will accept. An invented
+        // Adaptive fallback would be selectable and then rejected.
+        ProviderKind::Devin => Vec::new(),
         // Harness reports its account/configuration-specific catalog from its
         // Host. An invented fallback would make unavailable routes selectable.
         ProviderKind::DeepSeek => Vec::new(),
@@ -130,6 +134,7 @@ pub fn discover_catalog(
         ProviderKind::Claude => (discover_claude_models(binary), None),
         ProviderKind::Cursor => (discover_cursor_models(binary), None),
         ProviderKind::DeepSeek => discover_deepseek_catalog(binary),
+        ProviderKind::Devin => (discover_devin_models(binary), None),
         ProviderKind::Fx => (discover_fx_models(binary), None),
         ProviderKind::OpenCode => (discover_opencode_models(binary), None),
         ProviderKind::OpenCode2 => crate::opencode2_session::discover_catalog(binary),
@@ -895,6 +900,207 @@ fn parse_fx_models(catalog: &Value, default_model: Option<&str>) -> Vec<Provider
             model
         })
         .collect()
+}
+
+/// Devin's ACP session advertises the models it will accept. The CLI listing
+/// is a fallback for agents that do not return a model config option.
+fn discover_devin_models(binary: &Path) -> Vec<ProviderModel> {
+    let discovered = crate::driver::discover_devin_models_via_acp(binary);
+    if !discovered.is_empty() {
+        return discovered;
+    }
+    let mut command = crate::command_env::command(binary);
+    let command = command.args(["models", "list", "--format", "json"]);
+    let Ok(output) = crate::command_env::output(command) else {
+        return Vec::new();
+    };
+    let Ok(catalog) = serde_json::from_slice::<Value>(&output.stdout) else {
+        return Vec::new();
+    };
+    parse_devin_models(&catalog)
+}
+
+fn parse_devin_models(catalog: &Value) -> Vec<ProviderModel> {
+    let default_id = devin_default_model_id(catalog);
+    let mut models = Vec::new();
+    let mut seen = HashSet::new();
+    let mut push = |mut model: ProviderModel| {
+        if model.id.is_empty() || !seen.insert(model.id.clone()) {
+            return;
+        }
+        if default_id.as_deref() == Some(model.id.as_str()) {
+            model.is_default = true;
+        }
+        models.push(model);
+    };
+    if let Some(families) = catalog.get("families").and_then(Value::as_array) {
+        for family in families {
+            let family_name = ["family_label", "name"].into_iter().find_map(|key| {
+                family
+                    .get(key)
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|name| !name.is_empty())
+            });
+            let variants = family
+                .get("variants")
+                .or_else(|| family.get("models"))
+                .and_then(Value::as_array)
+                .map(Vec::as_slice)
+                .unwrap_or(&[]);
+            for variant in variants {
+                let Some(mut model) = parse_devin_model(variant) else {
+                    continue;
+                };
+                if model.sub_provider.is_none()
+                    && let Some(family_name) = family_name
+                {
+                    model = model.sub_provider(family_name);
+                }
+                push(model);
+            }
+        }
+    }
+    for value in collect_devin_model_values(catalog) {
+        if let Some(model) = parse_devin_model(value) {
+            push(model);
+        }
+    }
+    if !models.iter().any(|model| model.is_default) {
+        if let Some(adaptive) = models.iter_mut().find(|model| {
+            model.id.eq_ignore_ascii_case("adaptive") || model.name.eq_ignore_ascii_case("adaptive")
+        }) {
+            adaptive.is_default = true;
+        } else if let Some(first) = models.first_mut() {
+            first.is_default = true;
+        }
+    }
+    models
+}
+
+fn devin_default_model_id(catalog: &Value) -> Option<String> {
+    ["default", "defaultModel", "default_model"]
+        .into_iter()
+        .find_map(|key| {
+            catalog.get(key).and_then(|value| {
+                value
+                    .as_str()
+                    .map(str::trim)
+                    .filter(|id| !id.is_empty())
+                    .map(str::to_owned)
+                    .or_else(|| parse_devin_model(value).map(|model| model.id))
+            })
+        })
+}
+
+fn collect_devin_model_values(catalog: &Value) -> Vec<&Value> {
+    let mut values = Vec::new();
+    match catalog {
+        Value::Array(items) => values.extend(items.iter()),
+        Value::Object(object) => {
+            if let Some(models) = object.get("models") {
+                match models {
+                    Value::Array(items) => values.extend(items.iter()),
+                    Value::Object(by_id) => values.extend(by_id.values()),
+                    other => values.push(other),
+                }
+            }
+            if let Some(Value::Array(families)) = object.get("families") {
+                for family in families {
+                    if let Some(models) = family.get("models").and_then(Value::as_array) {
+                        values.extend(models.iter());
+                    }
+                }
+            }
+            if values.is_empty() {
+                for key in ["available", "items", "data"] {
+                    if let Some(Value::Array(items)) = object.get(key) {
+                        values.extend(items.iter());
+                        break;
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+    values
+}
+
+fn parse_devin_model(value: &Value) -> Option<ProviderModel> {
+    if let Some(id) = value.as_str().map(str::trim).filter(|id| !id.is_empty()) {
+        return Some(ProviderModel::new(id, display_name_from_slug(id)));
+    }
+    let object = value.as_object()?;
+    let id = ["model_uid", "id", "slug", "model", "value"]
+        .into_iter()
+        .find_map(|key| {
+            object
+                .get(key)
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|id| !id.is_empty())
+        })?;
+    let name = ["displayName", "name", "title", "label"]
+        .into_iter()
+        .find_map(|key| {
+            object
+                .get(key)
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|name| !name.is_empty())
+                .map(str::to_owned)
+        })
+        .unwrap_or_else(|| display_name_from_slug(id));
+    let mut model = ProviderModel::new(id, name);
+    let family = ["family", "provider", "group"].into_iter().find_map(|key| {
+        object
+            .get(key)
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|family| !family.is_empty())
+    });
+    if let Some(family) = family {
+        model = model.sub_provider(display_name_from_slug(family));
+    }
+    model.is_default = ["isDefault", "default", "is_default"]
+        .into_iter()
+        .any(|key| object.get(key).and_then(Value::as_bool) == Some(true));
+    let efforts = [
+        "thinkingLevels",
+        "reasoningEfforts",
+        "supportEfforts",
+        "thinking_levels",
+    ]
+    .into_iter()
+    .find_map(|key| object.get(key).and_then(Value::as_array));
+    if let Some(efforts) = efforts {
+        model.reasoning_efforts = efforts
+            .iter()
+            .filter_map(Value::as_str)
+            .map(str::trim)
+            .filter(|effort| !effort.is_empty())
+            .map(|effort| ProviderModelOption::new(effort, reasoning_effort_label(effort)))
+            .collect();
+        if !model.reasoning_efforts.is_empty() {
+            model.default_reasoning_effort =
+                ["defaultEffort", "defaultThinkingLevel", "default_effort"]
+                    .into_iter()
+                    .find_map(|key| {
+                        object
+                            .get(key)
+                            .and_then(Value::as_str)
+                            .map(str::trim)
+                            .filter(|effort| {
+                                model
+                                    .reasoning_efforts
+                                    .iter()
+                                    .any(|option| option.id == *effort)
+                            })
+                            .map(str::to_owned)
+                    });
+        }
+    }
+    Some(model)
 }
 
 fn parse_opencode_models(output: &str) -> Vec<ProviderModel> {
@@ -2233,6 +2439,128 @@ opencode/big-pickle
         // A fabricated fallback would offer a model the CLI rejects, so
         // discovery is authoritative and the pre-discovery picker is empty.
         assert!(fallback_models(ProviderKind::Grok).is_empty());
+    }
+
+    #[test]
+    fn parses_devin_models_list_json() {
+        let catalog = json!({
+            "default": "adaptive",
+            "models": [
+                {
+                    "id": "adaptive",
+                    "name": "Adaptive",
+                    "family": "Cognition"
+                },
+                {
+                    "id": "opus",
+                    "displayName": "Claude Opus",
+                    "family": "Anthropic",
+                    "thinkingLevels": ["low", "medium", "high"],
+                    "defaultEffort": "medium"
+                },
+                {
+                    "id": "swe-1-6",
+                    "name": "SWE-1.6"
+                }
+            ]
+        });
+        let models = parse_devin_models(&catalog);
+        assert_eq!(models.len(), 3);
+        assert_eq!(models[0].id, "adaptive");
+        assert!(models[0].is_default);
+        assert_eq!(models[0].sub_provider.as_deref(), Some("Cognition"));
+        assert_eq!(models[1].id, "opus");
+        assert_eq!(models[1].name, "Claude Opus");
+        assert_eq!(
+            models[1]
+                .reasoning_efforts
+                .iter()
+                .map(|option| option.id.as_str())
+                .collect::<Vec<_>>(),
+            ["low", "medium", "high"]
+        );
+        assert_eq!(
+            models[1].default_reasoning_effort.as_deref(),
+            Some("medium")
+        );
+        assert_eq!(models[2].id, "swe-1-6");
+        assert!(!models[2].is_default);
+    }
+
+    #[test]
+    fn parses_devin_family_variant_listing() {
+        let catalog = json!({
+            "families": [
+                {
+                    "family_label": "SWE-1.6 Slow",
+                    "family_uid": "swe-1.6-slow",
+                    "slug": "swe-1.6-slow",
+                    "aliases": [],
+                    "variants": [
+                        {
+                            "model_uid": "swe-1-6-slow",
+                            "label": "SWE-1.6 Slow"
+                        }
+                    ]
+                },
+                {
+                    "family_label": "Adaptive",
+                    "family_uid": "adaptive",
+                    "slug": "adaptive",
+                    "variants": [
+                        {
+                            "model_uid": "adaptive",
+                            "label": "Adaptive",
+                            "description": "Automatically balances quality and cost"
+                        }
+                    ]
+                }
+            ]
+        });
+        let models = parse_devin_models(&catalog);
+        assert_eq!(models.len(), 2);
+        assert_eq!(models[0].id, "swe-1-6-slow");
+        assert_eq!(models[0].name, "SWE-1.6 Slow");
+        assert_eq!(models[0].sub_provider.as_deref(), Some("SWE-1.6 Slow"));
+        assert_eq!(models[1].id, "adaptive");
+        assert!(models[1].is_default);
+    }
+
+    #[test]
+    fn devin_fallback_catalog_is_empty() {
+        assert!(fallback_models(ProviderKind::Devin).is_empty());
+    }
+
+    #[test]
+    #[ignore = "requires an installed Devin CLI"]
+    fn installed_devin_reports_models_and_a_default() {
+        let binary =
+            crate::command_env::find_executable("devin").expect("Devin CLI is not installed");
+        let models = discover_devin_models(&binary);
+        assert!(
+            !models.is_empty(),
+            "the installed Devin CLI reported no models"
+        );
+        assert!(
+            models.iter().any(|model| model.is_default),
+            "no Devin model was marked as the configured default"
+        );
+    }
+
+    #[test]
+    #[ignore = "requires an installed, authenticated Devin CLI"]
+    fn installed_devin_acp_catalog_matches_the_session_option() {
+        let binary =
+            crate::command_env::find_executable("devin").expect("Devin CLI is not installed");
+        let models = crate::driver::discover_devin_models_via_acp(&binary);
+        assert!(
+            !models.is_empty(),
+            "Devin ACP advertised no model config option"
+        );
+        assert!(
+            models.iter().any(|model| model.is_default),
+            "no advertised Devin model was marked as the session default"
+        );
     }
 
     #[test]
