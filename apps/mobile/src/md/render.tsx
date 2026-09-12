@@ -20,13 +20,13 @@ import type { ReactNode } from 'react';
 import {
   Image,
   Linking,
-  ScrollView,
   Text,
   View,
   type ImageStyle,
   type TextStyle,
   type ViewStyle,
 } from 'react-native';
+import { ScrollView as GestureScrollView } from 'react-native-gesture-handler';
 import { AppPressable } from '@/components/app-pressable';
 
 import { applyAlpha } from './color';
@@ -324,6 +324,13 @@ function MarkdownImage({
   );
 }
 
+/** Horizontal scroller host for wide blocks (code, tables) inside the
+ * inverted transcript. gesture-handler's ScrollView routes touches through
+ * the app's gesture orchestrator, which keeps horizontal pans working inside
+ * the transformed (scaleY -1) scroll tree on Android; nestedScrollEnabled
+ * lets the vertical list take over when the content ends. */
+const scrollContentStyle = { minWidth: '100%' } as const;
+
 function renderCode(
   value: string,
   language: string | null,
@@ -346,8 +353,11 @@ function renderCode(
           <Text style={styles.codeHeaderText}>{language}</Text>
         </View>
       ) : null}
-      <ScrollView horizontal showsHorizontalScrollIndicator={false}>
-        <View style={styles.codeContent}>
+      <GestureScrollView
+        horizontal
+        nestedScrollEnabled
+        showsHorizontalScrollIndicator={false}>
+        <View style={[styles.codeContent, scrollContentStyle]}>
           {lines.map((line, index) => {
             const pieces = renderLeaf(line, ictx);
             // The '\n' separating lines is part of the flattened text.
@@ -359,7 +369,7 @@ function renderCode(
             );
           })}
         </View>
-      </ScrollView>
+      </GestureScrollView>
     </View>
   );
 }
@@ -420,12 +430,15 @@ function renderTable(
   );
   return (
     <View key={key} style={styles.table}>
-      <ScrollView horizontal showsHorizontalScrollIndicator={false}>
-        <View>
+      <GestureScrollView
+        horizontal
+        nestedScrollEnabled
+        showsHorizontalScrollIndicator={false}>
+        <View style={scrollContentStyle}>
           {head && renderRow(head, 'head', true)}
           {rows.map((row, index) => renderRow(row, index, false))}
         </View>
-      </ScrollView>
+      </GestureScrollView>
     </View>
   );
 }

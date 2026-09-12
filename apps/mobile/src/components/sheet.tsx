@@ -14,7 +14,6 @@ import { AppSymbol } from '@/components/app-symbol';
 import { liquidGlass } from '@/components/glass-surface';
 import { NativeTint, Radius, Spacing } from '@/constants/theme';
 import { useTheme } from '@/hooks/use-theme';
-import { useKeyboardHeight } from '@/lib/keyboard-offset';
 
 /**
  * Bottom sheet used for pickers and action menus, presented through the
@@ -38,7 +37,6 @@ export function Sheet({
 }) {
   const theme = useTheme();
   const insets = useSafeAreaInsets();
-  const keyboardHeight = useKeyboardHeight();
   const { height } = useWindowDimensions();
   const sheet = useRef<BottomSheetMethods>(null);
 
@@ -61,8 +59,11 @@ export function Sheet({
       backgroundStyle={liquidGlass ? undefined : { backgroundColor: theme.surface }}
       enablePanDownToClose
       onDismiss={onDismiss}>
+      {/* The native sheet (Material 3 on Android) manages IME insets itself;
+          adding keyboard height here double-compensates and shifts the content
+          under the user's finger while a field is gaining focus. */}
       <BottomSheetView
-        style={[styles.content, { paddingBottom: Math.max(insets.bottom, 14) + keyboardHeight }]}>
+        style={[styles.content, { paddingBottom: Math.max(insets.bottom, 14) }]}>
         {scrollable ? (
           <BottomSheetScrollView
             alwaysBounceVertical={false}

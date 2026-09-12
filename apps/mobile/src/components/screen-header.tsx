@@ -125,10 +125,11 @@ export function nativeHeaderButtons(
 }
 
 /** Pill grouping trailing header actions for platforms without native bar
- * button items, like the reference's [compose | …]. */
+ * button items, like the reference's [compose | …]. Transparent fill on
+ * platforms without Liquid Glass — the icons float directly on the header. */
 export function HeaderActionGroup({ children }: { children: ReactNode }) {
   return (
-    <GlassSurface interactive style={styles.actionGroup}>
+    <GlassSurface interactive fallbackColor="transparent" style={styles.actionGroup}>
       {children}
     </GlassSurface>
   );

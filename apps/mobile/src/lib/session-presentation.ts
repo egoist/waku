@@ -17,6 +17,15 @@ import { TranscriptMarkdownCache } from '../md/transcript-cache';
 
 export type SessionGroupId = 'today' | 'yesterday' | 'week' | 'month' | 'year' | 'more';
 
+/** Mirrors the desktop's sidebar preferences (SidebarGrouping/SidebarOrdering). */
+export type SessionGrouping = 'updated' | 'project';
+export type SessionOrdering = 'newest' | 'oldest';
+
+export interface SessionGroupOptions {
+  grouping?: SessionGrouping;
+  ordering?: SessionOrdering;
+}
+
 export interface SessionListItem {
   session: AgentSession;
   projectName: string;
@@ -24,7 +33,7 @@ export interface SessionListItem {
 }
 
 export interface SessionGroup {
-  id: SessionGroupId;
+  id: string;
   title: string;
   data: SessionListItem[];
 }
@@ -144,12 +153,43 @@ export function groupSessions(
   projects: Project[],
   sessions: AgentSession[],
   now = new Date(),
+  options: SessionGroupOptions = {},
 ): SessionGroup[] {
   const projectNames = new Map(projects.map((project) => [project.id, project.name]));
+  const ordering = options.ordering ?? 'newest';
+  const sorted = sessions
+    .filter(sessionHasStarted)
+    .sort((a, b) => {
+      const delta = sessionTimestamp(b) - sessionTimestamp(a);
+      return ordering === 'newest' ? delta : -delta;
+    });
+
+  if ((options.grouping ?? 'updated') === 'project') {
+    // Groups appear in first-occurrence order of the sorted list, mirroring
+    // the desktop: the most (or least, oldest-first) recently active project
+    // leads. Unknown projects share one bucket.
+    const groups: SessionGroup[] = [];
+    const indexes = new Map<string, number>();
+    for (const session of sorted) {
+      const name = projectNames.get(session.project_id) ?? 'Unknown project';
+      const id = session.project_id || 'unknown';
+      let index = indexes.get(id);
+      if (index === undefined) {
+        index = groups.length;
+        indexes.set(id, index);
+        groups.push({ id, title: name, data: [] });
+      }
+      groups[index]!.data.push({
+        session,
+        projectName: name,
+        timestamp: sessionTimestamp(session),
+      });
+    }
+    return groups;
+  }
+
   const grouped = new Map<SessionGroupId, SessionListItem[]>();
-  for (const session of sessions.filter(sessionHasStarted).sort((a, b) => (
-    sessionTimestamp(b) - sessionTimestamp(a)
-  ))) {
+  for (const session of sorted) {
     const id = sessionDateGroup(sessionTimestamp(session), now);
     const items = grouped.get(id) ?? [];
     items.push({
@@ -159,7 +199,8 @@ export function groupSessions(
     });
     grouped.set(id, items);
   }
-  return GROUPS.flatMap((group) => {
+  const order = ordering === 'newest' ? GROUPS : [...GROUPS].reverse();
+  return order.flatMap((group) => {
     const data = grouped.get(group.id);
     return data?.length ? [{ ...group, data }] : [];
   });

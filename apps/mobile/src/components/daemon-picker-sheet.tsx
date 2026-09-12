@@ -28,6 +28,8 @@ import { Sheet, SheetRow } from '@/components/sheet';
 import { NativeTint, Radius } from '@/constants/theme';
 import { useReducedMotion } from '@/hooks/use-reduced-motion';
 import { useTheme } from '@/hooks/use-theme';
+import { scheduleOnRN } from 'react-native-worklets';
+
 import { useDaemon } from '@/lib/daemon-context';
 import {
   isPrivateDaemonAddress,
@@ -84,6 +86,11 @@ export function DaemonPickerSheet({
     });
   }
 
+  function finishPop() {
+    setEditorTarget(undefined);
+    setEditorProfile(undefined);
+  }
+
   function popEditor() {
     if (editorTarget === undefined) return;
     cancelAnimation(pageProgress);
@@ -93,19 +100,16 @@ export function DaemonPickerSheet({
       setEditorProfile(undefined);
       return;
     }
-    // The completion callback runs on the UI runtime. React state setters
-    // are host functions, so they can be called directly — hopping back
-    // through scheduleOnRN with an inline closure is rejected by worklets
-    // ("locally defined function") and was never needed here.
+    // The completion callback runs on the UI runtime, where React state
+    // setters are remote functions and a synchronous call crashes. The hop
+    // back to the JS thread must target a named component-scope function —
+    // an inline closure is not serializable by the worklets runtime.
     pageProgress.value = withTiming(
       0,
       { duration: 240, easing: Easing.bezier(0.32, 0.72, 0.25, 1) },
       (finished?: boolean) => {
         'worklet';
-        if (finished) {
-          setEditorTarget(undefined);
-          setEditorProfile(undefined);
-        }
+        if (finished) scheduleOnRN(finishPop);
       },
     );
   }

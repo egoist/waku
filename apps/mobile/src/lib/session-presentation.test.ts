@@ -42,6 +42,56 @@ describe('mobile session presentation', () => {
     ]);
   });
 
+  test('orders updated groups and members oldest first when requested', () => {
+    const now = new Date(2026, 7, 31, 12);
+    const current = session({ id: 'new', last_reply_at: epoch(2026, 7, 31, 11) });
+    const newerToday = session({ id: 'newer', last_reply_at: epoch(2026, 7, 31, 12) });
+    const earlier = session({ id: 'earlier', last_reply_at: epoch(2026, 7, 20, 20) });
+    expect(groupSessions(
+      [],
+      [earlier, current, newerToday],
+      now,
+      { ordering: 'oldest' },
+    ).map((group) => ({
+      id: group.id,
+      sessions: group.data.map((item) => item.session.id),
+    }))).toEqual([
+      { id: 'month', sessions: ['earlier'] },
+      { id: 'today', sessions: ['new', 'newer'] },
+    ]);
+  });
+
+  test('groups by project in first-occurrence order, honoring the ordering', () => {
+    const now = new Date(2026, 7, 31, 12);
+    const projects: Project[] = [
+      { id: 'project', name: 'Waku', path: '/waku', created_at: 1 },
+      { id: 'other', name: 'T3', path: '/t3', created_at: 1 },
+    ];
+    const newest = session({ id: 'a', project_id: 'project', last_reply_at: epoch(2026, 7, 31, 12) });
+    const second = session({ id: 'b', project_id: 'other', last_reply_at: epoch(2026, 7, 30, 12) });
+    const older = session({ id: 'c', project_id: 'project', last_reply_at: epoch(2026, 7, 20, 12) });
+    const orphan = session({ id: 'd', project_id: 'ghost', last_reply_at: epoch(2026, 7, 1, 12) });
+    const shape = (groups: ReturnType<typeof groupSessions>) => groups.map((group) => ({
+      title: group.title,
+      sessions: group.data.map((item) => item.session.id),
+    }));
+    expect(shape(groupSessions(projects, [older, second, orphan, newest], now, {
+      grouping: 'project',
+    }))).toEqual([
+      { title: 'Waku', sessions: ['a', 'c'] },
+      { title: 'T3', sessions: ['b'] },
+      { title: 'Unknown project', sessions: ['d'] },
+    ]);
+    expect(shape(groupSessions(projects, [older, second, orphan, newest], now, {
+      grouping: 'project',
+      ordering: 'oldest',
+    }))).toEqual([
+      { title: 'Unknown project', sessions: ['d'] },
+      { title: 'Waku', sessions: ['c', 'a'] },
+      { title: 'T3', sessions: ['b'] },
+    ]);
+  });
+
   test('formats compact recency labels', () => {
     expect(relativeSessionTime(1_000, 1_030_000)).toBe('Now');
     expect(relativeSessionTime(1_000, 1_300_000)).toBe('5m');
