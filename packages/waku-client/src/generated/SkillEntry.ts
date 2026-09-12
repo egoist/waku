@@ -2,4 +2,4 @@
 import type { SkillInstall } from "./SkillInstall";
 import type { SkillScope } from "./SkillScope";
 
-export type SkillEntry = { name: string, description: string, scope: SkillScope, project: string | null, installs: Array<SkillInstall>, enabled: boolean, allowedTools: string | null, body: string, supportingFiles: number, totalBytes: number, modifiedAt: number | null, duplicates: number, rowKey: number, };
+export type SkillEntry = { name: string, description: string, scope: SkillScope, project: string | null, plugin: string | null, installs: Array<SkillInstall>, enabled: boolean, allowedTools: string | null, body: string, supportingFiles: number, totalBytes: number, modifiedAt: number | null, duplicates: number, rowKey: number, };
