@@ -93,7 +93,7 @@ the transport absorbed the change or wants to be restarted:
 
 | Change | Codex | Pi | ACP | OpenCode | Claude | Amp |
 | --- | --- | --- | --- | --- | --- | --- |
-| Model, reasoning effort, service tier | in session — they ride on every `turn/start` | in session — `set_model`, `set_thinking_level` | in session — `session/set_model`, Cursor's parameterized `configOptions`, or Fx's advertised `model` option | in session — the model rides on each prompt | in session — a `set_model` control request | restart — all three are launch arguments |
+| Model, reasoning effort, service tier | in session — they ride on every `turn/start` | in session — `set_model`, `set_thinking_level` | in session — `session/set_model`, Cursor's parameterized `configOptions`, Fx's advertised `model` option, or Devin's `session/set_config_option` | in session — the model rides on each prompt | in session — a `set_model` control request | restart — all three are launch arguments |
 | Access mode | restart | restart | restart | restart | restart | restart |
 | Provider | restart | restart | restart | restart | restart | restart |
 
@@ -721,9 +721,10 @@ the default id to Kimi would silently set nothing, or worse, move the permission
 mode. The call is non-fatal either way, since an agent may expose no effort at
 all. Grok is the exception: effort rides on `session/set_model` as
 `_meta.reasoningEffort` (and as `--reasoning-effort` at launch), not as a
-session config option.
+session config option. Devin is skipped on that path too: its `mode` option is
+a permission mode, not effort.
 
-Cursor is the other exception. Its parameterized picker exposes effort, fast
+Cursor is another exception. Its parameterized picker exposes effort, fast
 mode, thinking, and context as per-model `configOptions` rather than a single
 well-known id. Discovery reads those options from `cursor/list_available_models`;
 the live session applies them with `session/set_config_option` after selecting
@@ -748,8 +749,12 @@ field — hence two probes
 
 Devin's catalog comes from `devin models list --format json`. Adaptive is the
 provider-owned default and the fallback when that listing is empty. Model
-selection stays in-session via `session/set_model`; Waku does not pass
-`--model` at `devin acp` launch.
+selection stays in-session via `session/set_config_option` on the advertised
+model option (id `model`/`models`, or the first `category: model` option that
+is not a provider switch). Waku falls back to the older `session/set_model`
+only when that method is missing, and treats a method-not-found reply as
+unsupported rather than a user-facing failure — Devin never implemented
+`session/set_model`. Waku does not pass `--model` at `devin acp` launch.
 
 **Cancel** — `session/cancel`, a notification; the open `session/prompt` reports
 the cancellation.

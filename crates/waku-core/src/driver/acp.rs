@@ -779,7 +779,9 @@ fn desired_access_mode(
 /// Which session config option carries reasoning effort. ACP leaves the id to
 /// the agent: Kimi Code exposes it as its `thinking` level, while the other
 /// agents Waku drives keep it on `mode`. Grok does not use this path: its
-/// effort rides on `session/set_model` as `_meta.reasoningEffort`.
+/// effort rides on `session/set_model` as `_meta.reasoningEffort`. Devin is
+/// excluded from the generic call because its `mode` option is a permission
+/// mode, not effort.
 fn reasoning_effort_config_id(provider: ProviderKind) -> &'static str {
     match provider {
         ProviderKind::Kimi => "thinking",
@@ -1095,6 +1097,51 @@ fn fx_model_option(config_options: &[SessionConfigOption]) -> Option<&SessionCon
     })
 }
 
+/// The advertised model selector for agents that speak session config options
+/// rather than `session/set_model`. Prefers an option whose id is `model` or
+/// `models` (category optional), then the first `category: model` option that
+/// is not a provider/account switch.
+fn advertised_model_option(config_options: &[SessionConfigOption]) -> Option<&SessionConfigOption> {
+    config_options
+        .iter()
+        .find(|option| {
+            let id = option.id.to_string();
+            id.eq_ignore_ascii_case("model") || id.eq_ignore_ascii_case("models")
+        })
+        .or_else(|| {
+            config_options.iter().find(|option| {
+                option.category == Some(SessionConfigOptionCategory::Model)
+                    && !option.id.to_string().eq_ignore_ascii_case("provider")
+            })
+        })
+        .or_else(|| {
+            config_options
+                .iter()
+                .find(|option| option.name.eq_ignore_ascii_case("model"))
+        })
+}
+
+fn advertised_model_config_id(config_options: &[SessionConfigOption]) -> String {
+    advertised_model_option(config_options)
+        .map(|option| option.id.to_string())
+        .unwrap_or_else(|| "model".to_owned())
+}
+
+/// Devin (and some other ACP agents) reject the removed `session/set_model`
+/// method with JSON-RPC `-32601`, or with `-32002` carrying a "method not
+/// found" message. Either means the method is absent, not that the chosen
+/// model is invalid.
+fn is_missing_acp_method(error: &agent_client_protocol::Error) -> bool {
+    if error.code == agent_client_protocol::ErrorCode::MethodNotFound {
+        return true;
+    }
+    let message = error.message.to_ascii_lowercase();
+    message.contains("method not found")
+        || message.contains("unknown method")
+        || message.contains("method not supported")
+        || message.contains("unsupported method")
+}
+
 fn fx_model_provider_switch<'a>(
     config_options: &'a [SessionConfigOption],
     model: &str,
@@ -1247,9 +1294,32 @@ async fn apply_model(
         return;
     }
 
+    if provider == ProviderKind::Devin {
+        match connection
+            .send_request(SetSessionConfigOptionRequest::new(
+                session_id.clone(),
+                advertised_model_config_id(config_options.unwrap_or_default()),
+                model,
+            ))
+            .block_task()
+            .await
+        {
+            Ok(_) => return,
+            Err(error) if is_missing_acp_method(&error) => {}
+            Err(error) => {
+                let _ = events.send(DriverEvent::Error(tr!(
+                    "errors.select_model",
+                    error = error
+                )));
+                return;
+            }
+        }
+    }
+
     // Grok, Kimi, OpenCode, and Cursor agents that do not advertise a model
-    // config option retain the legacy request unchanged. Fx intentionally
-    // stays on session/set_config_option, its documented model API.
+    // config option retain the legacy request unchanged. Devin prefers
+    // session/set_config_option above and only reaches this fallback when
+    // that method is itself missing. Fx stays on session/set_config_option.
     let request = match UntypedMessage::new(
         "session/set_model",
         set_model_params(session_id, model, reasoning_effort, provider),
@@ -1264,13 +1334,16 @@ async fn apply_model(
         }
     };
     if let Err(error) = connection.send_request(request).block_task().await {
-        let _ = events.send(DriverEvent::Error(tr!(
-            "errors.select_model",
-            error = error
-        )));
+        if !is_missing_acp_method(&error) {
+            let _ = events.send(DriverEvent::Error(tr!(
+                "errors.select_model",
+                error = error
+            )));
+        }
         return;
     }
     if provider != ProviderKind::Grok
+        && provider != ProviderKind::Devin
         && let Some(effort) = reasoning_effort
     {
         // Reasoning effort is an optional config extension and is deliberately
@@ -2261,6 +2334,68 @@ mod tests {
         let launch = launch_for(ProviderKind::Devin, None).unwrap();
         assert_eq!(launch.args, ["acp"]);
         assert!(launch.env.is_empty());
+    }
+
+    #[test]
+    fn advertised_model_option_prefers_model_id_over_provider_switch() {
+        let provider = select_config_option(
+            "provider",
+            SessionConfigOptionCategory::Model,
+            "gateway",
+            &["gateway", "codex"],
+        );
+        let model = select_config_option(
+            "model",
+            SessionConfigOptionCategory::Model,
+            "adaptive",
+            &["adaptive", "claude-opus-4-6-thinking"],
+        );
+
+        assert_eq!(
+            advertised_model_option(&[provider, model]).map(|option| option.id.to_string()),
+            Some("model".to_owned())
+        );
+    }
+
+    #[test]
+    fn advertised_model_option_accepts_category_less_models_id() {
+        let option = SessionConfigOption::select(
+            "models".to_owned(),
+            "Model".to_owned(),
+            "adaptive".to_owned(),
+            vec![SessionConfigSelectOption::new(
+                "adaptive".to_owned(),
+                "adaptive",
+            )],
+        );
+
+        assert_eq!(
+            advertised_model_option(&[option]).map(|option| option.id.to_string()),
+            Some("models".to_owned())
+        );
+    }
+
+    #[test]
+    fn advertised_model_config_id_falls_back_to_model() {
+        assert_eq!(advertised_model_config_id(&[]), "model");
+    }
+
+    #[test]
+    fn missing_acp_method_matches_standard_and_devin_error_shapes() {
+        assert!(is_missing_acp_method(
+            &agent_client_protocol::Error::method_not_found()
+        ));
+        assert!(is_missing_acp_method(&agent_client_protocol::Error::new(
+            -32002,
+            "Method not found"
+        )));
+        assert!(!is_missing_acp_method(
+            &agent_client_protocol::Error::invalid_params()
+        ));
+        assert!(!is_missing_acp_method(&agent_client_protocol::Error::new(
+            -32602,
+            "unknown model"
+        )));
     }
 
     #[test]
