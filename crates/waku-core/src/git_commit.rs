@@ -286,6 +286,18 @@ fn agent_arguments(
             push(&mut args, "--profile");
             push(&mut args, "headless");
         }
+        ProviderKind::Droid => {
+            // `droid exec` is the one-shot stdout client, and its default
+            // read-only autonomy is exactly right for a commit message. The
+            // commit prompt is what forbids tools.
+            push(&mut args, "exec");
+            push(&mut args, "--output-format");
+            push(&mut args, "text");
+            if let Some(model) = model {
+                push(&mut args, "--model");
+                push(&mut args, model);
+            }
+        }
         ProviderKind::Fx => {
             push(&mut args, "ask");
             push(&mut args, "--no-save");
@@ -791,6 +803,11 @@ mod tests {
                 }
                 ProviderKind::DeepSeek => {
                     assert!(has_pair(&args, "--profile", "headless"));
+                }
+                ProviderKind::Droid => {
+                    assert_eq!(args.first().and_then(|arg| arg.to_str()), Some("exec"));
+                    assert!(has_pair(&args, "--output-format", "text"));
+                    assert!(has_pair(&args, "--model", "model"));
                 }
                 ProviderKind::Fx => {
                     assert_eq!(args.first().and_then(|arg| arg.to_str()), Some("ask"));

@@ -149,20 +149,20 @@ OpenCode server itself, whose driver kills it explicitly on drop.
 
 ## At a glance
 
-| | Codex CLI | Pi | Oh My Pi | Claude Code | Amp | Cursor CLI | Fx | OpenCode | Grok Build | Kimi Code |
-| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| Binary | `codex` | `pi` | `omp` | `claude` | `amp` | `cursor-agent` | `fx` | `opencode` | `grok` | `kimi` |
-| Wire protocol | JSON-RPC over stdio | NDJSON RPC over stdio | NDJSON RPC over stdio | stream-json over stdio | stream-json over stdio | ACP over stdio | ACP over stdio | HTTP + SSE | ACP over stdio | ACP over stdio |
-| Process spans the whole session | yes | yes | yes | yes | yes | yes | yes | yes | yes | yes |
-| Process spawned per turn | no | no | no | no | no | no | no | no | no | no |
-| Bidirectional | yes | yes | yes | yes | yes | yes | yes | yes | yes | yes |
-| Reasoning stream | yes | yes | yes | yes | yes | yes | yes | yes | yes | yes |
-| Interactive approvals | yes | no | no (has them; Waku runs `--yolo`) | yes | no | yes | yes | yes | yes | yes |
-| Mid-turn steering | yes | yes | yes | yes | yes | yes | **no** | yes | yes | yes (transport) |
-| Model discovery | yes | yes | yes | no (fixed) | no (modes) | yes | yes | yes | yes | yes |
-| Computer Use | yes | yes | no (ships its own) | no | no | no | no | yes | yes | no |
-| Restricted to Full access | no | yes | yes | no | yes | no | no | no | no | no |
-| Rewind and branch at a turn | yes | yes | yes | yes | yes | yes | **no** | yes | yes | **no** |
+| | Codex CLI | Pi | Oh My Pi | Claude Code | Amp | Cursor CLI | Fx | OpenCode | Grok Build | Kimi Code | Droid |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| Binary | `codex` | `pi` | `omp` | `claude` | `amp` | `cursor-agent` | `fx` | `opencode` | `grok` | `kimi` | `droid` |
+| Wire protocol | JSON-RPC over stdio | NDJSON RPC over stdio | NDJSON RPC over stdio | stream-json over stdio | stream-json over stdio | ACP over stdio | ACP over stdio | HTTP + SSE | ACP over stdio | ACP over stdio | ACP over stdio |
+| Process spans the whole session | yes | yes | yes | yes | yes | yes | yes | yes | yes | yes | yes |
+| Process spawned per turn | no | no | no | no | no | no | no | no | no | no | no |
+| Bidirectional | yes | yes | yes | yes | yes | yes | yes | yes | yes | yes | yes |
+| Reasoning stream | yes | yes | yes | yes | yes | yes | yes | yes | yes | yes | yes |
+| Interactive approvals | yes | no | no (has them; Waku runs `--yolo`) | yes | no | yes | yes | yes | yes | yes | yes |
+| Mid-turn steering | yes | yes | yes | yes | yes | yes | **no** | yes | yes | yes (transport) | **no** |
+| Model discovery | yes | yes | yes | no (fixed) | no (modes) | yes | yes | yes | yes | yes | yes |
+| Computer Use | yes | yes | no (ships its own) | no | no | no | no | yes | yes | no | no |
+| Restricted to Full access | no | yes | yes | no | yes | no | no | no | no | no | no |
+| Rewind and branch at a turn | yes | yes | yes | yes | yes | yes | **no** | yes | yes | **no** | **no** |
 
 Kimi Code's steering is the transport's, not a probed policy: the ACP driver
 sends the second `session/prompt` for every agent it drives, but Kimi's
@@ -575,7 +575,8 @@ received them.
 
 ## Agent Client Protocol
 
-**Launch** — `cursor-agent acp`, `fx acp`, `grok agent [--reasoning-effort E] stdio`, `kimi acp`
+**Launch** — `cursor-agent acp`, `fx acp`, `grok agent [--reasoning-effort E] stdio`, `kimi acp`,
+`droid exec --output-format acp`
 ([driver/acp.rs](../crates/waku-core/src/driver/acp.rs)).
 
 **Protocol** — newline-delimited JSON-RPC over stdio, bidirectional. One agent
@@ -617,6 +618,34 @@ Waku first selects Fx's `gateway` provider option and reads the refreshed model
 option from that response. Waku then targets the exact `model` id with
 `session/set_config_option`; falling back to the older `session/set_model`
 extension would not change Fx's model.
+
+Droid ignores `--model` and `--auto` in ACP mode on purpose: sessions are
+configured over the protocol. Its `session/new` answers with the account's full
+model catalog (`models.availableModels`, Factory-router `auto` first and
+default), its autonomy ladder as session modes (`normal`, `spec`, `auto-low`,
+`auto-medium`, `auto-high`), and select config options whose ids Waku already
+serves: `model`, `autonomy_level`, and `reasoning_effort`. Waku sets the model
+with the legacy `session/set_model` request, maps every Waku access mode onto
+the autonomy ladder, and applies effort through `reasoning_effort` — a write
+Droid accepts for any value and clamps to the model's own default, so it is
+deliberately the non-fatal config write every other agent gets too. The
+per-model effort menus come from Droid itself: `session/resume` re-answers with
+config options reflecting the selected model, so discovery walks the catalog,
+sets each model on a local-only session (a client-generated
+`_meta.sessionId` makes Droid skip the Factory-side record), and records each
+model's provider-named effort choices and starting value; a model whose answer
+is a single choice — the `auto` route answers a lone "None" — gets no selector
+at all. Nothing is
+hardcoded, so new releases and BYOK routes get their menus the day they appear.
+Model discovery needs a session (there is no sessionless model surface), and
+the enriched catalog is cached to keep the walk rare. Three quirks are
+load-bearing: turn failures arrive as JSON-RPC errors on `session/prompt` (or a
+`refusal` stop reason), never as a lying clean end-turn; `session/list` is
+filtered to the requested `cwd` and paged 50 at a time, which matches the
+Resume picker's per-workspace view; and `session/load` replays the transcript
+including `user_message_chunk` notifications that Waku ignores, so an imported
+history keeps the agent's side only. Steering stays off until a live session
+proves how Droid treats a concurrent `session/prompt`.
 
 **Per turn** — `session/prompt`, whose response stays open until the turn ends.
 It is tracked apart from the blocking request table precisely so the writer stays
@@ -793,12 +822,12 @@ which its `--print` transport did not emit at all.
 Waku's `RuntimeMode` (Supervised / Auto-accept edits / Auto / Full access)
 maps into each CLI's own vocabulary.
 
-| Waku | Codex (`approvalPolicy` / `sandbox` / reviewer) | Claude `--permission-mode` | Cursor | Fx | OpenCode | Grok | Kimi Code |
-| --- | --- | --- | --- | --- | --- | --- | --- |
-| Supervised | `untrusted` / `read-only` / `user` | `default` + `can_use_tool` reaches the user | `session/request_permission` reaches the user | `session/set_mode` → `ask` | permission requests reach the user | `session/request_permission` reaches the user | `session/request_permission` reaches the user |
-| Auto-accept edits | `on-request` / `workspace-write` / `user` | `acceptEdits` | auto-answered | `session/set_mode` → `code` | auto-answered (`always`) | auto-answered | auto-answered |
-| Auto | `on-request` / `workspace-write` / `auto_review` | `auto` | auto-answered | `session/set_mode` → `code` | auto-answered (`always`) | auto-answered | auto-answered |
-| Full access | `never` / `danger-full-access` / `user` | `bypassPermissions` + `--dangerously-skip-permissions` | auto-answered | `session/set_mode` → `code` | auto-answered (`always`) | auto-answered | auto-answered |
+| Waku | Codex (`approvalPolicy` / `sandbox` / reviewer) | Claude `--permission-mode` | Cursor | Fx | OpenCode | Grok | Kimi Code | Droid |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| Supervised | `untrusted` / `read-only` / `user` | `default` + `can_use_tool` reaches the user | `session/request_permission` reaches the user | `session/set_mode` → `ask` | permission requests reach the user | `session/request_permission` reaches the user | `session/request_permission` reaches the user | `session/set_mode` → `normal` |
+| Auto-accept edits | `on-request` / `workspace-write` / `user` | `acceptEdits` | auto-answered | `session/set_mode` → `code` | auto-answered (`always`) | auto-answered | auto-answered | `session/set_mode` → `auto-low` |
+| Auto | `on-request` / `workspace-write` / `auto_review` | `auto` | auto-answered | `session/set_mode` → `code` | auto-answered (`always`) | auto-answered | auto-answered | `session/set_mode` → `auto-medium` |
+| Full access | `never` / `danger-full-access` / `user` | `bypassPermissions` + `--dangerously-skip-permissions` | auto-answered | `session/set_mode` → `code` | auto-answered (`always`) | auto-answered | auto-answered | `session/set_mode` → `auto-high` |
 
 Amp, Pi, and Oh My Pi accept Full access only and always run wide open
 (`--dangerously-allow-all`, `--approve`, `--yolo`).
@@ -828,6 +857,7 @@ persisted with the session and is what makes a Waku task outlive its process:
 | OpenCode | `session_id` | `--session` / server fork |
 | Grok | `session_id` | `--resume` / ACP fork |
 | Kimi Code | `session_id` | `session/resume`; no fork, see above |
+| Droid | `session_id` | `session/resume` (no replay) or `session/load`; no fork, see above |
 
 A cursor from the wrong provider is rejected at driver start rather than
 silently ignored.

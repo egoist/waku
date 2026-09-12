@@ -17,6 +17,7 @@ use waku_protocol::model_catalog::normalize_cursor_reasoning_effort;
 const CODEX_RPC_TIMEOUT: Duration = Duration::from_secs(5);
 const PI_RPC_TIMEOUT: Duration = Duration::from_secs(10);
 const CURSOR_ACP_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(15);
+const DROID_ACP_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(20);
 
 pub fn fallback_models(provider: ProviderKind) -> Vec<ProviderModel> {
     match provider {
@@ -77,6 +78,12 @@ pub fn fallback_models(provider: ProviderKind) -> Vec<ProviderModel> {
         ProviderKind::Cursor => {
             vec![ProviderModel::new("auto", tr!("model_option.auto")).default()]
         }
+        // Droid's catalog is account-specific (BYOK routes and open models
+        // come and go), so only the Factory-router default stands in before
+        // discovery answers; `auto` is valid on every account.
+        ProviderKind::Droid => {
+            vec![ProviderModel::new("auto", tr!("model_option.auto")).default()]
+        }
         // Harness reports its account/configuration-specific catalog from its
         // Host. An invented fallback would make unavailable routes selectable.
         ProviderKind::DeepSeek => Vec::new(),
@@ -130,6 +137,7 @@ pub fn discover_catalog(
         ProviderKind::Claude => (discover_claude_models(binary), None),
         ProviderKind::Cursor => (discover_cursor_models(binary), None),
         ProviderKind::DeepSeek => discover_deepseek_catalog(binary),
+        ProviderKind::Droid => (discover_droid_models(binary), None),
         ProviderKind::Fx => (discover_fx_models(binary), None),
         ProviderKind::OpenCode => (discover_opencode_models(binary), None),
         ProviderKind::OpenCode2 => crate::opencode2_session::discover_catalog(binary),
@@ -845,6 +853,213 @@ fn parse_deepseek_model_catalog(catalog: &Value) -> Vec<ProviderModel> {
                         Some(model)
                     })
                 })
+        })
+        .collect()
+}
+
+/// Droid serves its catalog only inside a session, and its per-model effort
+/// ladders live in the session's config options, which change with the
+/// selected model. Discovery therefore opens one local-only session (a
+/// client-generated `_meta.sessionId` makes Droid skip the Factory-side
+/// record), then for every advertised model sets it and re-reads the session's
+/// `reasoning_effort` option through `session/resume`. The agent is the only
+/// source of these ladders — new releases and BYOK routes are covered the day
+/// they appear — and the whole enriched catalog is cached to keep the loop
+/// rare. Any failed step aborts so a degraded catalog is never cached.
+fn discover_droid_models(binary: &Path) -> Vec<ProviderModel> {
+    let Ok(cwd) = crate::acp_session::catalog_working_directory() else {
+        return Vec::new();
+    };
+    let Ok(agent) = crate::driver::catalog_agent(ProviderKind::Droid, binary, &cwd) else {
+        return Vec::new();
+    };
+    let request = Client
+        .builder()
+        .name("waku-droid-model-discovery")
+        .connect_with(agent, async move |connection: ConnectionTo<Agent>| {
+            connection
+                .send_request(
+                    InitializeRequest::new(ProtocolVersion::V1)
+                        .client_capabilities(ClientCapabilities::new().terminal(false))
+                        .client_info(Implementation::new("waku", env!("CARGO_PKG_VERSION"))),
+                )
+                .block_task()
+                .await?;
+            let session = connection
+                .send_request(UntypedMessage::new(
+                    "session/new",
+                    json!({
+                        "cwd": cwd.to_string_lossy(),
+                        "mcpServers": [],
+                        "_meta": { "sessionId": uuid::Uuid::new_v4().to_string() },
+                    }),
+                )?)
+                .block_task()
+                .await?;
+            let session_id = session
+                .get("sessionId")
+                .and_then(Value::as_str)
+                .filter(|id| !id.is_empty())
+                .ok_or_else(|| anyhow::anyhow!("Droid answered session/new without a session id"))?
+                .to_owned();
+            let default_model = session
+                .pointer("/models/currentModelId")
+                .and_then(Value::as_str)
+                .unwrap_or("auto");
+            let entries = session
+                .pointer("/models/availableModels")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default();
+            let mut catalog = Vec::with_capacity(entries.len());
+            for entry in &entries {
+                let Some(id) = entry
+                    .get("modelId")
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|id| !id.is_empty())
+                else {
+                    continue;
+                };
+                connection
+                    .send_request(UntypedMessage::new(
+                        "session/set_config_option",
+                        json!({
+                            "sessionId": session_id,
+                            "configId": "model",
+                            "value": id,
+                        }),
+                    )?)
+                    .block_task()
+                    .await?;
+                let refreshed = connection
+                    .send_request(UntypedMessage::new(
+                        "session/resume",
+                        json!({ "sessionId": session_id }),
+                    )?)
+                    .block_task()
+                    .await?;
+                catalog.push(json!({
+                    "modelId": id,
+                    "name": entry.get("name").and_then(Value::as_str).unwrap_or(id),
+                    "isDefault": id == default_model,
+                    "efforts": droid_effort_state(&refreshed),
+                }));
+            }
+            Ok(Value::Array(catalog))
+        });
+    let response = smol::block_on(smol::future::race(
+        async move { request.await.map_err(|_| ()) },
+        async move {
+            smol::Timer::after(DROID_ACP_DISCOVERY_TIMEOUT).await;
+            Err(())
+        },
+    ));
+    response
+        .ok()
+        .and_then(|value| value.as_array().cloned())
+        .map(|entries| parse_droid_models(&entries))
+        .unwrap_or_default()
+}
+
+/// The `reasoning_effort` session option of a refreshed `session/resume`
+/// answer: its provider-named choices and the value the selected model starts
+/// on. `Value::Null` when the session carries no such option, which leaves the
+/// model without an effort menu.
+fn droid_effort_state(session: &Value) -> Value {
+    let effort = session
+        .get("configOptions")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .find(|option| {
+            option.get("id").and_then(Value::as_str) == Some("reasoning_effort")
+                || option.get("category").and_then(Value::as_str) == Some("thought_level")
+        });
+    let Some(effort) = effort else {
+        return Value::Null;
+    };
+    let options = effort
+        .get("options")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|choice| {
+            let id = choice.get("value").and_then(Value::as_str)?;
+            let label = choice
+                .get("name")
+                .and_then(Value::as_str)
+                .filter(|name| !name.is_empty())
+                .unwrap_or(id);
+            Some(json!({ "id": id, "label": label }))
+        })
+        .collect::<Vec<_>>();
+    if options.is_empty() {
+        return Value::Null;
+    }
+    let current = effort
+        .get("currentValue")
+        .and_then(Value::as_str)
+        .filter(|current| options.iter().any(|option| option["id"] == *current))
+        .map(str::to_owned)
+        .or_else(|| {
+            options
+                .first()
+                .and_then(|option| option["id"].as_str())
+                .map(str::to_owned)
+        });
+    json!({ "options": options, "default": current })
+}
+
+fn parse_droid_models(entries: &[Value]) -> Vec<ProviderModel> {
+    entries
+        .iter()
+        .filter_map(|entry| {
+            let id = entry
+                .get("modelId")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|id| !id.is_empty())?;
+            let name = entry
+                .get("name")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|name| !name.is_empty())
+                .unwrap_or(id);
+            let mut model = ProviderModel::new(id, name);
+            if entry.get("isDefault").and_then(Value::as_bool) == Some(true) {
+                model = model.default();
+            }
+            let efforts = entry.get("efforts").filter(|efforts| !efforts.is_null());
+            let options = efforts
+                .and_then(|efforts| efforts.get("options"))
+                .and_then(Value::as_array);
+            let default = efforts
+                .and_then(|efforts| efforts.get("default"))
+                .and_then(Value::as_str);
+            if let Some(options) = options
+                // A menu of one is not a choice: Droid answers a lone "None"
+                // for models with no effort control, such as the Factory-router
+                // `auto`, and offering it would only let users pick the value
+                // the model already has.
+                .filter(|options| options.len() >= 2)
+                .filter(|options| {
+                    default.is_some_and(|default| {
+                        options.iter().any(|option| option["id"] == *default)
+                    })
+                })
+            {
+                model = model.reasoning(
+                    options.iter().map(|option| {
+                        ProviderModelOption::new(
+                            option["id"].as_str().unwrap_or_default(),
+                            option["label"].as_str().unwrap_or_default(),
+                        )
+                    }),
+                    default.unwrap_or_default(),
+                );
+            }
+            Some(model)
         })
         .collect()
 }
@@ -1925,6 +2140,89 @@ opencode/big-pickle
         let models = discover_catalog(ProviderKind::Fx, &binary).0;
         assert!(!models.is_empty(), "the installed Fx reported no models");
         assert!(models.iter().any(|model| model.is_default));
+    }
+
+    /// Entry shapes captured from a live discovery: every model carries the
+    /// effort state Droid answered for it. Models the agent gave no
+    /// `reasoning_effort` option for, or answered with a lone choice (the
+    /// Factory-router `auto` answers a single "None"), get no menu.
+    #[test]
+    fn parses_droid_catalog_with_per_model_effort_ladders() {
+        let models = parse_droid_models(&[
+            json!({
+                "modelId": "auto",
+                "name": "Auto Model",
+                "isDefault": true,
+                "efforts": {
+                    "default": "none",
+                    "options": [ { "id": "none", "label": "None" } ]
+                },
+            }),
+            json!({
+                "modelId": "claude-sonnet-5",
+                "name": "Sonnet 5",
+                "isDefault": false,
+                "efforts": {
+                    "default": "high",
+                    "options": [
+                        { "id": "off", "label": "Off" },
+                        { "id": "low", "label": "Low" },
+                        { "id": "medium", "label": "Medium" },
+                        { "id": "high", "label": "High" },
+                        { "id": "xhigh", "label": "Extra High" },
+                        { "id": "max", "label": "Maximum" }
+                    ]
+                },
+            }),
+            json!({
+                "modelId": "glm-5.3",
+                "name": "GLM-5.3",
+                "isDefault": false,
+                "efforts": {
+                    "default": "max",
+                    "options": [
+                        { "id": "low", "label": "Low" },
+                        { "id": "high", "label": "High" },
+                        { "id": "max", "label": "Maximum" }
+                    ]
+                },
+            }),
+            // A model whose effort answer lacks its default among the choices
+            // is left menu-less rather than offered a dead rung.
+            json!({
+                "modelId": "byok-route",
+                "name": "My Route",
+                "isDefault": false,
+                "efforts": {
+                    "default": "medium",
+                    "options": [ { "id": "high", "label": "High" } ]
+                },
+            }),
+        ]);
+
+        assert_eq!(models.len(), 4);
+        assert!(models[0].is_default);
+        assert!(models[0].reasoning_efforts.is_empty());
+        let sonnet = &models[1];
+        assert_eq!(
+            sonnet
+                .reasoning_efforts
+                .iter()
+                .map(|option| option.id.as_str())
+                .collect::<Vec<_>>(),
+            ["off", "low", "medium", "high", "xhigh", "max"]
+        );
+        assert_eq!(sonnet.default_reasoning_effort.as_deref(), Some("high"));
+        assert_eq!(
+            sonnet
+                .reasoning_efforts
+                .iter()
+                .find(|option| option.id == "xhigh")
+                .map(|option| option.label.as_str()),
+            Some("Extra High")
+        );
+        assert_eq!(models[2].default_reasoning_effort.as_deref(), Some("max"));
+        assert!(models[3].reasoning_efforts.is_empty());
     }
 
     #[test]
