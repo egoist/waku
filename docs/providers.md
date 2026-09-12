@@ -747,14 +747,18 @@ JSON omits the configured default, so the plain-text listing supplies that one
 field — hence two probes
 ([model_catalog.rs](../crates/waku-core/src/model_catalog.rs)).
 
-Devin's catalog comes from `devin models list --format json`. Adaptive is the
-provider-owned default and the fallback when that listing is empty. Model
-selection stays in-session via `session/set_config_option` on the advertised
-model option (id `model`/`models`, or the first `category: model` option that
-is not a provider switch). Waku falls back to the older `session/set_model`
-only when that method is missing, and treats a method-not-found reply as
-unsupported rather than a user-facing failure — Devin never implemented
-`session/set_model`. Waku does not pass `--model` at `devin acp` launch.
+Devin's catalog comes from the ACP session's advertised model
+`configOptions`. That is the list `session/set_config_option` will accept —
+on a typical account it may be a single id such as `swe-1-6-slow`, not the
+interactive `devin models list` catalog (which includes `adaptive` and
+hundreds of CLI variants this agent rejects). Discovery opens a short-lived
+ACP session, reads that option, and deletes the session. If ACP discovery
+is empty, Waku falls back to parsing `devin models list --format json`
+(`families[].variants[].model_uid`). There is no invented Adaptive fallback:
+an id the session does not advertise would toast `Model not found` on every
+send. Model selection stays in-session via `session/set_config_option`;
+`adaptive` / `auto` map to the advertised current value when they are not
+themselves advertised. Waku does not pass `--model` at `devin acp` launch.
 
 **Cancel** — `session/cancel`, a notification; the open `session/prompt` reports
 the cancellation.

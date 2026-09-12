@@ -58,10 +58,8 @@ pub fn fallback_models(provider: ProviderKind) -> Vec<ProviderModel> {
         ProviderKind::Cursor => {
             vec![ProviderModel::new("auto", tr!("model_option.auto")).default()]
         }
-        ProviderKind::Devin => {
-            vec![ProviderModel::new("adaptive", "Adaptive").default()]
-        }
-        ProviderKind::DeepSeek
+        ProviderKind::Devin
+        | ProviderKind::DeepSeek
         | ProviderKind::Fx
         | ProviderKind::Grok
         | ProviderKind::Kimi

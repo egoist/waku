@@ -4,7 +4,7 @@
 //! unknown-method errors, stdio lifetime, and protocol type validation. Waku
 //! only adapts typed ACP messages to its provider-neutral [`DriverEvent`]s.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -13,13 +13,14 @@ use std::time::Duration;
 
 use agent_client_protocol::schema::ProtocolVersion;
 use agent_client_protocol::schema::v1::{
-    CancelNotification, ClientCapabilities, ContentBlock, Implementation, InitializeRequest,
-    InitializeResponse, LoadSessionRequest, NewSessionRequest, PermissionOptionKind, PromptRequest,
-    PromptResponse, RequestId, RequestPermissionOutcome, RequestPermissionRequest,
-    RequestPermissionResponse, ResumeSessionRequest, SelectedPermissionOutcome, SessionConfigKind,
-    SessionConfigOption, SessionConfigOptionCategory, SessionConfigOptionValue,
-    SessionConfigSelectOptions, SessionId, SessionModeId, SessionModeState, SessionNotification,
-    SetSessionConfigOptionRequest, SetSessionModeRequest, StopReason, TextContent,
+    CancelNotification, ClientCapabilities, ContentBlock, DeleteSessionRequest, Implementation,
+    InitializeRequest, InitializeResponse, LoadSessionRequest, NewSessionRequest,
+    PermissionOptionKind, PromptRequest, PromptResponse, RequestId, RequestPermissionOutcome,
+    RequestPermissionRequest, RequestPermissionResponse, ResumeSessionRequest,
+    SelectedPermissionOutcome, SessionConfigKind, SessionConfigOption, SessionConfigOptionCategory,
+    SessionConfigOptionValue, SessionConfigSelectOptions, SessionId, SessionModeId,
+    SessionModeState, SessionNotification, SetSessionConfigOptionRequest, SetSessionModeRequest,
+    StopReason, TextContent,
 };
 use agent_client_protocol::{
     AcpAgent, AcpAgentConfig, Agent, Client, ConnectionTo, Handled, LineDirection, Responder,
@@ -34,8 +35,8 @@ use crate::driver::{
     DriverControl, DriverEventSender, DriverEventSink, DriverStartOptions, SessionOptions,
 };
 use crate::model::{
-    ActivityKind, DriverEvent, PermissionOption, ProviderKind, ProviderResumeCursor, RuntimeMode,
-    UserInputAnswer, UserInputOption, UserInputQuestion,
+    ActivityKind, DriverEvent, PermissionOption, ProviderKind, ProviderModel, ProviderResumeCursor,
+    RuntimeMode, UserInputAnswer, UserInputOption, UserInputQuestion,
 };
 use waku_protocol::model_catalog::{
     CursorModelSelection, cursor_suffix_has, normalize_cursor_reasoning_effort,
@@ -274,6 +275,54 @@ pub(crate) fn catalog_agent(
 ) -> anyhow::Result<AcpAgent> {
     let launch = launch_for(provider, None)?;
     sdk_agent(binary, cwd, launch, None, Arc::new(Mutex::new(Vec::new())))
+}
+
+const DEVIN_ACP_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// Devin's ACP session advertises the models it will actually accept. The CLI
+/// `devin models list` catalog is the interactive product list and includes
+/// ids such as `adaptive` that this agent rejects with "Model not found".
+pub(crate) fn discover_devin_models_via_acp(binary: &Path) -> Vec<ProviderModel> {
+    let Ok(cwd) = crate::acp_session::catalog_working_directory() else {
+        return Vec::new();
+    };
+    let Ok(agent) = catalog_agent(ProviderKind::Devin, binary, &cwd) else {
+        return Vec::new();
+    };
+    let request = Client
+        .builder()
+        .name("waku-devin-model-discovery")
+        .connect_with(agent, async move |connection: ConnectionTo<Agent>| {
+            connection
+                .send_request(
+                    InitializeRequest::new(ProtocolVersion::V1)
+                        .client_capabilities(ClientCapabilities::new().terminal(false))
+                        .client_info(Implementation::new("waku", env!("CARGO_PKG_VERSION"))),
+                )
+                .block_task()
+                .await?;
+            let response = connection
+                .send_request(NewSessionRequest::new(cwd.clone()))
+                .block_task()
+                .await?;
+            let models = models_from_session_config_options(
+                response.config_options.as_deref().unwrap_or_default(),
+            );
+            let _ = connection
+                .send_request(DeleteSessionRequest::new(response.session_id))
+                .block_task()
+                .await;
+            Ok(models)
+        });
+    smol::block_on(smol::future::race(
+        async move { request.await.map_err(|_| ()) },
+        async move {
+            smol::Timer::after(DEVIN_ACP_DISCOVERY_TIMEOUT).await;
+            Err(())
+        },
+    ))
+    .ok()
+    .unwrap_or_default()
 }
 
 type PermissionResponder = Responder<RequestPermissionResponse>;
@@ -789,22 +838,29 @@ fn reasoning_effort_config_id(provider: ProviderKind) -> &'static str {
     }
 }
 
-fn session_config_select_values(option: &SessionConfigOption) -> Vec<&str> {
+fn session_config_select_entries(option: &SessionConfigOption) -> Vec<(&str, &str)> {
     let SessionConfigKind::Select(select) = &option.kind else {
         return Vec::new();
     };
     match &select.options {
         SessionConfigSelectOptions::Ungrouped(options) => options
             .iter()
-            .map(|option| option.value.0.as_ref())
+            .map(|option| (option.value.0.as_ref(), option.name.as_str()))
             .collect(),
         SessionConfigSelectOptions::Grouped(groups) => groups
             .iter()
             .flat_map(|group| group.options.iter())
-            .map(|option| option.value.0.as_ref())
+            .map(|option| (option.value.0.as_ref(), option.name.as_str()))
             .collect(),
         _ => Vec::new(),
     }
+}
+
+fn session_config_select_values(option: &SessionConfigOption) -> Vec<&str> {
+    session_config_select_entries(option)
+        .into_iter()
+        .map(|(value, _)| value)
+        .collect()
 }
 
 fn cursor_model_selection(
@@ -1127,6 +1183,58 @@ fn advertised_model_config_id(config_options: &[SessionConfigOption]) -> String 
         .unwrap_or_else(|| "model".to_owned())
 }
 
+fn models_from_session_config_options(
+    config_options: &[SessionConfigOption],
+) -> Vec<ProviderModel> {
+    let Some(option) = advertised_model_option(config_options) else {
+        return Vec::new();
+    };
+    let current = session_config_current_value(option);
+    let mut models = Vec::new();
+    let mut seen = HashSet::new();
+    for (id, name) in session_config_select_entries(option) {
+        if !seen.insert(id) {
+            continue;
+        }
+        let mut model = ProviderModel::new(id, name);
+        if current == Some(id) {
+            model = model.default();
+        }
+        models.push(model);
+    }
+    if !models.iter().any(|model| model.is_default)
+        && let Some(first) = models.first_mut()
+    {
+        first.is_default = true;
+    }
+    models
+}
+
+fn is_devin_auto_model(requested: &str) -> bool {
+    requested.eq_ignore_ascii_case("adaptive")
+        || requested.eq_ignore_ascii_case("auto")
+        || requested.eq_ignore_ascii_case("default")
+}
+
+fn resolve_devin_model(option: Option<&SessionConfigOption>, requested: &str) -> Option<String> {
+    let Some(option) = option else {
+        return (!is_devin_auto_model(requested)).then(|| requested.to_owned());
+    };
+    let values = session_config_select_values(option);
+    if let Some(value) = values
+        .iter()
+        .find(|value| value.eq_ignore_ascii_case(requested))
+    {
+        return Some((*value).to_owned());
+    }
+    if is_devin_auto_model(requested) {
+        return session_config_current_value(option)
+            .map(str::to_owned)
+            .or_else(|| values.first().map(|value| (*value).to_owned()));
+    }
+    None
+}
+
 /// Devin (and some other ACP agents) reject the removed `session/set_model`
 /// method with JSON-RPC `-32601`, or with `-32002` carrying a "method not
 /// found" message. Either means the method is absent, not that the chosen
@@ -1295,24 +1403,39 @@ async fn apply_model(
     }
 
     if provider == ProviderKind::Devin {
-        match connection
-            .send_request(SetSessionConfigOptionRequest::new(
-                session_id.clone(),
-                advertised_model_config_id(config_options.unwrap_or_default()),
-                model,
-            ))
-            .block_task()
-            .await
-        {
-            Ok(_) => return,
-            Err(error) if is_missing_acp_method(&error) => {}
-            Err(error) => {
-                let _ = events.send(DriverEvent::Error(tr!(
-                    "errors.select_model",
-                    error = error
-                )));
+        let options = config_options.unwrap_or_default();
+        let option = advertised_model_option(options);
+        if let Some(resolved) = resolve_devin_model(option, model) {
+            if option.and_then(session_config_current_value) == Some(resolved.as_str()) {
                 return;
             }
+            match connection
+                .send_request(SetSessionConfigOptionRequest::new(
+                    session_id.clone(),
+                    advertised_model_config_id(options),
+                    resolved.as_str(),
+                ))
+                .block_task()
+                .await
+            {
+                Ok(_) => return,
+                Err(error) if is_missing_acp_method(&error) => {}
+                Err(error) => {
+                    let _ = events.send(DriverEvent::Error(tr!(
+                        "errors.select_model",
+                        error = error
+                    )));
+                    return;
+                }
+            }
+        } else {
+            if option.is_some() && !is_devin_auto_model(model) {
+                let _ = events.send(DriverEvent::Error(tr!(
+                    "errors.select_model",
+                    error = format!("Devin did not advertise model {model}")
+                )));
+            }
+            return;
         }
     }
 
@@ -2396,6 +2519,51 @@ mod tests {
             -32602,
             "unknown model"
         )));
+    }
+
+    #[test]
+    fn devin_catalog_uses_the_advertised_model_option() {
+        let mode = select_config_option(
+            "mode",
+            SessionConfigOptionCategory::Mode,
+            "accept-edits",
+            &["accept-edits", "ask"],
+        );
+        let model = select_config_option(
+            "model",
+            SessionConfigOptionCategory::Model,
+            "swe-1-6-slow",
+            &["swe-1-6-slow"],
+        );
+        let models = models_from_session_config_options(&[mode, model]);
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0].id, "swe-1-6-slow");
+        assert_eq!(models[0].name, "swe-1-6-slow");
+        assert!(models[0].is_default);
+    }
+
+    #[test]
+    fn devin_maps_adaptive_to_the_advertised_current_model() {
+        let option = select_config_option(
+            "model",
+            SessionConfigOptionCategory::Model,
+            "swe-1-6-slow",
+            &["swe-1-6-slow", "swe-1-6"],
+        );
+        assert_eq!(
+            resolve_devin_model(Some(&option), "adaptive").as_deref(),
+            Some("swe-1-6-slow")
+        );
+        assert_eq!(
+            resolve_devin_model(Some(&option), "swe-1-6").as_deref(),
+            Some("swe-1-6")
+        );
+        assert_eq!(resolve_devin_model(Some(&option), "opus"), None);
+        assert_eq!(resolve_devin_model(None, "adaptive"), None);
+        assert_eq!(
+            resolve_devin_model(None, "swe-1-6-slow").as_deref(),
+            Some("swe-1-6-slow")
+        );
     }
 
     #[test]

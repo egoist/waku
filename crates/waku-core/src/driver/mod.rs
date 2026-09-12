@@ -14,7 +14,7 @@ mod pi;
 mod support;
 mod title_refresh;
 
-pub(crate) use acp::catalog_agent;
+pub(crate) use acp::{catalog_agent, discover_devin_models_via_acp};
 
 use std::path::PathBuf;
 use std::sync::Arc;

@@ -78,11 +78,9 @@ pub fn fallback_models(provider: ProviderKind) -> Vec<ProviderModel> {
         ProviderKind::Cursor => {
             vec![ProviderModel::new("auto", tr!("model_option.auto")).default()]
         }
-        // Adaptive is Devin's provider-owned default and keeps the picker
-        // selectable if `devin models list` is unavailable.
-        ProviderKind::Devin => {
-            vec![ProviderModel::new("adaptive", "Adaptive").default()]
-        }
+        // Devin's ACP session advertises the models it will accept. An invented
+        // Adaptive fallback would be selectable and then rejected.
+        ProviderKind::Devin => Vec::new(),
         // Harness reports its account/configuration-specific catalog from its
         // Host. An invented fallback would make unavailable routes selectable.
         ProviderKind::DeepSeek => Vec::new(),
@@ -904,9 +902,13 @@ fn parse_fx_models(catalog: &Value, default_model: Option<&str>) -> Vec<Provider
         .collect()
 }
 
-/// Devin CLI's account catalog. `--format json` is the structured listing;
-/// Adaptive is the provider-owned default when the payload does not mark one.
+/// Devin's ACP session advertises the models it will accept. The CLI listing
+/// is a fallback for agents that do not return a model config option.
 fn discover_devin_models(binary: &Path) -> Vec<ProviderModel> {
+    let discovered = crate::driver::discover_devin_models_via_acp(binary);
+    if !discovered.is_empty() {
+        return discovered;
+    }
     let mut command = crate::command_env::command(binary);
     let command = command.args(["models", "list", "--format", "json"]);
     let Ok(output) = crate::command_env::output(command) else {
@@ -922,17 +924,47 @@ fn parse_devin_models(catalog: &Value) -> Vec<ProviderModel> {
     let default_id = devin_default_model_id(catalog);
     let mut models = Vec::new();
     let mut seen = HashSet::new();
-    for value in collect_devin_model_values(catalog) {
-        let Some(mut model) = parse_devin_model(value) else {
-            continue;
-        };
-        if !seen.insert(model.id.clone()) {
-            continue;
+    let mut push = |mut model: ProviderModel| {
+        if model.id.is_empty() || !seen.insert(model.id.clone()) {
+            return;
         }
         if default_id.as_deref() == Some(model.id.as_str()) {
             model.is_default = true;
         }
         models.push(model);
+    };
+    if let Some(families) = catalog.get("families").and_then(Value::as_array) {
+        for family in families {
+            let family_name = ["family_label", "name"].into_iter().find_map(|key| {
+                family
+                    .get(key)
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|name| !name.is_empty())
+            });
+            let variants = family
+                .get("variants")
+                .or_else(|| family.get("models"))
+                .and_then(Value::as_array)
+                .map(Vec::as_slice)
+                .unwrap_or(&[]);
+            for variant in variants {
+                let Some(mut model) = parse_devin_model(variant) else {
+                    continue;
+                };
+                if model.sub_provider.is_none()
+                    && let Some(family_name) = family_name
+                {
+                    model = model.sub_provider(family_name);
+                }
+                push(model);
+            }
+        }
+    }
+    for value in collect_devin_model_values(catalog) {
+        if let Some(model) = parse_devin_model(value) {
+            push(model);
+        }
     }
     if !models.iter().any(|model| model.is_default) {
         if let Some(adaptive) = models.iter_mut().find(|model| {
@@ -999,7 +1031,7 @@ fn parse_devin_model(value: &Value) -> Option<ProviderModel> {
         return Some(ProviderModel::new(id, display_name_from_slug(id)));
     }
     let object = value.as_object()?;
-    let id = ["id", "slug", "model", "value"]
+    let id = ["model_uid", "id", "slug", "model", "value"]
         .into_iter()
         .find_map(|key| {
             object
@@ -2456,11 +2488,47 @@ opencode/big-pickle
     }
 
     #[test]
-    fn devin_fallback_keeps_adaptive_selectable() {
-        let models = fallback_models(ProviderKind::Devin);
-        assert_eq!(models.len(), 1);
-        assert_eq!(models[0].id, "adaptive");
-        assert!(models[0].is_default);
+    fn parses_devin_family_variant_listing() {
+        let catalog = json!({
+            "families": [
+                {
+                    "family_label": "SWE-1.6 Slow",
+                    "family_uid": "swe-1.6-slow",
+                    "slug": "swe-1.6-slow",
+                    "aliases": [],
+                    "variants": [
+                        {
+                            "model_uid": "swe-1-6-slow",
+                            "label": "SWE-1.6 Slow"
+                        }
+                    ]
+                },
+                {
+                    "family_label": "Adaptive",
+                    "family_uid": "adaptive",
+                    "slug": "adaptive",
+                    "variants": [
+                        {
+                            "model_uid": "adaptive",
+                            "label": "Adaptive",
+                            "description": "Automatically balances quality and cost"
+                        }
+                    ]
+                }
+            ]
+        });
+        let models = parse_devin_models(&catalog);
+        assert_eq!(models.len(), 2);
+        assert_eq!(models[0].id, "swe-1-6-slow");
+        assert_eq!(models[0].name, "SWE-1.6 Slow");
+        assert_eq!(models[0].sub_provider.as_deref(), Some("SWE-1.6 Slow"));
+        assert_eq!(models[1].id, "adaptive");
+        assert!(models[1].is_default);
+    }
+
+    #[test]
+    fn devin_fallback_catalog_is_empty() {
+        assert!(fallback_models(ProviderKind::Devin).is_empty());
     }
 
     #[test]
@@ -2476,6 +2544,22 @@ opencode/big-pickle
         assert!(
             models.iter().any(|model| model.is_default),
             "no Devin model was marked as the configured default"
+        );
+    }
+
+    #[test]
+    #[ignore = "requires an installed, authenticated Devin CLI"]
+    fn installed_devin_acp_catalog_matches_the_session_option() {
+        let binary =
+            crate::command_env::find_executable("devin").expect("Devin CLI is not installed");
+        let models = crate::driver::discover_devin_models_via_acp(&binary);
+        assert!(
+            !models.is_empty(),
+            "Devin ACP advertised no model config option"
+        );
+        assert!(
+            models.iter().any(|model| model.is_default),
+            "no advertised Devin model was marked as the session default"
         );
     }
 
