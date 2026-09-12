@@ -36,6 +36,8 @@ jobs:
       - name: Install Linux dependencies
         if: runner.os == 'Linux'
         run: |
+          # Google's Chrome apt mirror intermittently fails its hash check and takes apt-get update down; nothing here needs it.
+          sudo rm -f /etc/apt/sources.list.d/google-chrome*
           sudo apt-get update
           sudo apt-get install --yes \
             clang \
