@@ -89,6 +89,10 @@ fn launch_for(provider: ProviderKind, reasoning_effort: Option<&str>) -> anyhow:
                 env: vec![("GROK_OAUTH2_REFERRER".into(), "waku".into())],
             })
         }
+        ProviderKind::Devin => Ok(AcpLaunch {
+            args: vec!["acp".into()],
+            env: Vec::new(),
+        }),
         ProviderKind::Fx => Ok(AcpLaunch {
             args: vec!["acp".into()],
             env: Vec::new(),
@@ -2248,6 +2252,13 @@ mod tests {
     #[test]
     fn fx_launches_its_documented_acp_subcommand() {
         let launch = launch_for(ProviderKind::Fx, None).unwrap();
+        assert_eq!(launch.args, ["acp"]);
+        assert!(launch.env.is_empty());
+    }
+
+    #[test]
+    fn devin_launches_its_documented_acp_subcommand() {
+        let launch = launch_for(ProviderKind::Devin, None).unwrap();
         assert_eq!(launch.args, ["acp"]);
         assert!(launch.env.is_empty());
     }

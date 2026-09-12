@@ -83,7 +83,8 @@ title near when the provider writes it, and long enough to survive a slow start.
 | Pi | Pi | NDJSON stream | connect, `session_info_changed` | [pi.rs:472](../crates/waku-core/src/driver/pi.rs#L472), [pi.rs:1214](../crates/waku-core/src/driver/pi.rs#L1214) |
 | Oh My Pi | Oh My Pi | NDJSON stream | connect, `session_info_update` | [pi.rs:472](../crates/waku-core/src/driver/pi.rs#L472), [pi.rs:1214](../crates/waku-core/src/driver/pi.rs#L1214) |
 | DeepSeek | Harness | stream + projections | `session/title`, projection replay | [deepseek.rs:782](../crates/waku-core/src/driver/deepseek.rs#L782), [deepseek.rs:1139](../crates/waku-core/src/driver/deepseek.rs#L1139) |
-| Kimi Code | Kimi (placeholder) | ACP stream | `session_info_update` | [acp.rs:1305](../crates/waku-core/src/driver/acp.rs#L1305) |
+| Devin CLI | — | ACP stream | `session_info_update` | [acp.rs:1879](../crates/waku-core/src/driver/acp.rs#L1879) |
+| Kimi Code | Kimi (placeholder) | ACP stream | `session_info_update` | [acp.rs:1879](../crates/waku-core/src/driver/acp.rs#L1879) |
 | Cursor CLI | — | — | — | none; fallback only |
 
 ### Claude Code
@@ -210,11 +211,18 @@ All three push titles on their own streams, so there is nothing to schedule.
   replayed from history at connect, so a reattached session gets its title
   without waiting for a new one.
 
+### Devin CLI
+
+Devin shares the ACP `session_info_update` handler
+([acp.rs:1879](../crates/waku-core/src/driver/acp.rs#L1879)). No live title has
+been observed yet, so a new session keeps the truncated-prompt fallback until
+the agent sends one.
+
 ### Kimi Code
 
 Kimi is the first provider to actually exercise the generic ACP
 `session_info_update` handler
-([acp.rs:1305](../crates/waku-core/src/driver/acp.rs#L1305)): it emits one at
+([acp.rs:1879](../crates/waku-core/src/driver/acp.rs#L1879)): it emits one at
 the start of the first turn and Waku forwards the `title` as `AutoTitleUpdated`,
 no polling and no extra process.
 
