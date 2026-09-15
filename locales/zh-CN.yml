@@ -1055,3 +1055,9 @@ usage_error.curl_did_not_finish: curl 未能完成请求
 usage_error.curl_failed: "curl 失败：%{error}"
 usage_error.unknown_error: 未知错误
 usage_error.curl_no_status: curl 未返回 HTTP 状态行
+
+models.discovery_auth: 需要登录认证。请运行 `%{command} login` 后重试。
+models.discovery_failed: 无法加载模型。请确认提供方 CLI 能正常运行，然后重试。
+models.discovery_empty: 提供方未返回模型。请检查配置后重试。
+models.discovery_cached: 当前显示上次缓存的模型列表，可能已过期。
+models.discovery_fallback: 当前显示回退模型，并非账号的完整模型列表。

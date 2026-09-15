@@ -2181,3 +2181,14 @@ usage_error.unknown_error:
   en: unknown error
 usage_error.curl_no_status:
   en: curl returned no HTTP status line
+
+models.discovery_auth:
+  en: "Authentication required. Run `%{command} login`, then retry."
+models.discovery_failed:
+  en: Could not load models. Check that the provider CLI works, then retry.
+models.discovery_empty:
+  en: The provider returned no models. Check its configuration, then retry.
+models.discovery_cached:
+  en: Showing the last cached catalog; it may be out of date.
+models.discovery_fallback:
+  en: Showing fallback models, not the account catalog.

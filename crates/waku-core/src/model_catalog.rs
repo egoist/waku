@@ -11,7 +11,10 @@ use agent_client_protocol::schema::v1::{ClientCapabilities, Implementation, Init
 use agent_client_protocol::{Agent, Client, ConnectionTo, UntypedMessage};
 use serde_json::{Map, Value, json};
 
-use crate::model::{ProviderAgentPreset, ProviderKind, ProviderModel, ProviderModelOption};
+use crate::model::{
+    ModelCatalogSource, ModelDiscovery, ModelDiscoveryError, ProviderAgentPreset, ProviderKind,
+    ProviderModel, ProviderModelOption,
+};
 use waku_protocol::model_catalog::normalize_cursor_reasoning_effort;
 
 const CODEX_RPC_TIMEOUT: Duration = Duration::from_secs(5);
@@ -124,14 +127,21 @@ pub fn fallback_agent_presets(provider: ProviderKind) -> Vec<ProviderAgentPreset
 pub fn discover_catalog(
     provider: ProviderKind,
     binary: &Path,
-) -> (Vec<ProviderModel>, Vec<ProviderAgentPreset>) {
+) -> (Vec<ProviderModel>, Vec<ProviderAgentPreset>, ModelDiscovery) {
+    let mut error = None;
     let (discovered, discovered_presets) = match provider {
         // Amp exposes stable agent modes rather than a model inventory. Keep
         // the picker aligned with the modes advertised by the current CLI.
         ProviderKind::Amp => (Vec::new(), None),
         ProviderKind::Codex => (discover_codex_models(binary), None),
         ProviderKind::Claude => (discover_claude_models(binary), None),
-        ProviderKind::Cursor => (discover_cursor_models(binary), None),
+        ProviderKind::Cursor => match discover_cursor_models(binary) {
+            Ok(models) => (models, None),
+            Err(reason) => {
+                error = Some(reason);
+                (Vec::new(), None)
+            }
+        },
         ProviderKind::DeepSeek => discover_deepseek_catalog(binary),
         ProviderKind::Fx => (discover_fx_models(binary), None),
         ProviderKind::OpenCode => (discover_opencode_models(binary), None),
@@ -141,17 +151,48 @@ pub fn discover_catalog(
         ProviderKind::Pi => (discover_pi_models(binary, PiDialect::Pi), None),
         ProviderKind::OhMyPi => (discover_pi_models(binary, PiDialect::OhMyPi), None),
     };
-    let models = if discovered.is_empty() {
-        // A failed or empty probe keeps the last successful discovery over
-        // the hardcoded catalog, so one bad CLI run can't shrink the picker.
-        cached_models(provider).unwrap_or_else(|| fallback_models(provider))
-    } else {
-        let models = deduplicate(discovered);
-        write_cached_models(provider, &models);
-        models
-    };
+    let (models, discovery) =
+        resolve_discovered_models(provider, discovered, error, &model_cache_path(provider));
     let presets = discovered_presets.unwrap_or_else(|| fallback_agent_presets(provider));
-    (models, presets)
+    (models, presets, discovery)
+}
+
+fn resolve_discovered_models(
+    provider: ProviderKind,
+    discovered: Vec<ProviderModel>,
+    error: Option<ModelDiscoveryError>,
+    cache_path: &Path,
+) -> (Vec<ProviderModel>, ModelDiscovery) {
+    if !discovered.is_empty() {
+        let models = deduplicate(discovered);
+        // Best-effort persistence; a failed write only costs the next launch its cache.
+        let _ = write_models_file(cache_path, &models);
+        return (
+            models,
+            ModelDiscovery {
+                source: ModelCatalogSource::Live,
+                error: None,
+            },
+        );
+    }
+    retained_catalog(provider, read_models_file(cache_path), error)
+}
+
+fn retained_catalog(
+    provider: ProviderKind,
+    cached: Option<Vec<ProviderModel>>,
+    error: Option<ModelDiscoveryError>,
+) -> (Vec<ProviderModel>, ModelDiscovery) {
+    let (models, source) = match cached.filter(|models| !models.is_empty()) {
+        Some(models) => (models, ModelCatalogSource::Cached),
+        None => (fallback_models(provider), ModelCatalogSource::Fallback),
+    };
+    let error = if provider.supports_model_discovery() {
+        Some(error.unwrap_or(ModelDiscoveryError::Empty))
+    } else {
+        None
+    };
+    (models, ModelDiscovery { source, error })
 }
 
 /// Where a provider's last discovered catalog is cached. Debug builds keep it
@@ -183,12 +224,6 @@ fn read_models_file(path: &Path) -> Option<Vec<ProviderModel>> {
     let contents = std::fs::read(path).ok()?;
     let models = serde_json::from_slice::<Vec<ProviderModel>>(&contents).ok()?;
     (!models.is_empty()).then_some(models)
-}
-
-/// Best-effort: a cache that fails to write only costs the next launch its
-/// head start.
-fn write_cached_models(provider: ProviderKind, models: &[ProviderModel]) {
-    let _ = write_models_file(&model_cache_path(provider), models);
 }
 
 fn write_models_file(path: &Path, models: &[ProviderModel]) -> std::io::Result<()> {
@@ -285,22 +320,44 @@ fn parse_claude_models(value: &Value) -> Vec<ProviderModel> {
         .collect()
 }
 
-fn discover_cursor_models(binary: &Path) -> Vec<ProviderModel> {
+fn discover_cursor_models(binary: &Path) -> Result<Vec<ProviderModel>, ModelDiscoveryError> {
     let discovered = discover_cursor_models_via_acp(binary);
     if !discovered.is_empty() {
-        return discovered;
+        return Ok(discovered);
     }
     let mut command = crate::command_env::command(binary);
     let command = command.arg("models");
-    let Ok(output) = crate::command_env::output(command) else {
-        return Vec::new();
-    };
+    let output = crate::command_env::output(command).map_err(|_| ModelDiscoveryError::Failed)?;
+    cursor_cli_models(&output)
+}
+
+fn cursor_cli_models(
+    output: &std::process::Output,
+) -> Result<Vec<ProviderModel>, ModelDiscoveryError> {
     let combined = format!(
         "{}\n{}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
-    parse_cursor_models(&combined)
+    if !output.status.success() {
+        let lower = strip_ansi(&combined).to_ascii_lowercase();
+        return Err(
+            if lower.contains("authentication required")
+                || lower.contains("not authenticated")
+                || lower.contains("not logged in")
+            {
+                ModelDiscoveryError::AuthenticationRequired
+            } else {
+                ModelDiscoveryError::Failed
+            },
+        );
+    }
+    let models = parse_cursor_models(&combined);
+    if models.is_empty() {
+        Err(ModelDiscoveryError::Empty)
+    } else {
+        Ok(models)
+    }
 }
 
 /// Cursor's parameterized picker is an ACP extension: `cursor-agent models`
@@ -1656,6 +1713,120 @@ fn deduplicate(models: Vec<ProviderModel>) -> Vec<ProviderModel> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn successful_retry_clears_failure_and_refreshes_the_retained_catalog() {
+        let directory =
+            std::env::temp_dir().join(format!("waku-discovery-retry-{}", uuid::Uuid::new_v4()));
+        let path = directory.join("cursor.json");
+        let failure = Some(ModelDiscoveryError::AuthenticationRequired);
+        let (fallback, status) =
+            resolve_discovered_models(ProviderKind::Cursor, Vec::new(), failure, &path);
+        assert_eq!(fallback[0].id, "auto");
+        assert_eq!(status.source, ModelCatalogSource::Fallback);
+        assert!(!path.exists());
+
+        let live = vec![ProviderModel::new("account-model", "Account model")];
+        let (models, status) =
+            resolve_discovered_models(ProviderKind::Cursor, live.clone(), None, &path);
+        assert_eq!(status.source, ModelCatalogSource::Live);
+        assert_eq!(status.error, None);
+        assert_eq!(models, live);
+
+        let (retained, status) =
+            resolve_discovered_models(ProviderKind::Cursor, Vec::new(), failure, &path);
+        assert_eq!(retained, live);
+        assert_eq!(status.source, ModelCatalogSource::Cached);
+        assert_eq!(status.error, failure);
+        assert_eq!(read_models_file(&path), Some(live));
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn failed_discovery_retains_cache_and_reason() {
+        let cached = vec![ProviderModel::new("account-model", "Account model")];
+        let (models, status) = retained_catalog(
+            ProviderKind::Cursor,
+            Some(cached),
+            Some(ModelDiscoveryError::AuthenticationRequired),
+        );
+        assert_eq!(models[0].id, "account-model");
+        assert_eq!(status.source, ModelCatalogSource::Cached);
+        assert_eq!(
+            status.error,
+            Some(ModelDiscoveryError::AuthenticationRequired)
+        );
+    }
+
+    #[test]
+    fn failed_discovery_labels_auto_as_fallback() {
+        let (models, status) = retained_catalog(
+            ProviderKind::Cursor,
+            None,
+            Some(ModelDiscoveryError::AuthenticationRequired),
+        );
+        assert_eq!(models[0].id, "auto");
+        assert_eq!(status.source, ModelCatalogSource::Fallback);
+        assert_eq!(
+            status.error,
+            Some(ModelDiscoveryError::AuthenticationRequired)
+        );
+    }
+
+    #[test]
+    fn empty_discovery_is_distinct_from_static_provider_modes() {
+        let (_, cursor) = retained_catalog(ProviderKind::Cursor, Some(Vec::new()), None);
+        assert_eq!(cursor.source, ModelCatalogSource::Fallback);
+        assert_eq!(cursor.error, Some(ModelDiscoveryError::Empty));
+        let (_, amp) = retained_catalog(ProviderKind::Amp, None, None);
+        assert_eq!(amp.error, None);
+    }
+
+    fn cursor_output(success: bool, stdout: &str, stderr: &str) -> std::process::Output {
+        #[cfg(unix)]
+        use std::os::unix::process::ExitStatusExt;
+        #[cfg(windows)]
+        use std::os::windows::process::ExitStatusExt;
+        std::process::Output {
+            status: std::process::ExitStatus::from_raw(if success { 0 } else { 256 }),
+            stdout: stdout.as_bytes().to_vec(),
+            stderr: stderr.as_bytes().to_vec(),
+        }
+    }
+
+    #[test]
+    fn cursor_auth_failure_is_classified_without_exposing_output() {
+        let output = cursor_output(
+            false,
+            "auto - Auto",
+            "Error: Authentication required. secret-test-value",
+        );
+        assert_eq!(
+            cursor_cli_models(&output).unwrap_err(),
+            ModelDiscoveryError::AuthenticationRequired
+        );
+    }
+
+    #[test]
+    fn cursor_failed_exit_never_becomes_a_valid_catalog() {
+        let output = cursor_output(false, "auto - Auto", "connection refused");
+        assert_eq!(
+            cursor_cli_models(&output).unwrap_err(),
+            ModelDiscoveryError::Failed
+        );
+    }
+
+    #[test]
+    fn cursor_successful_auto_only_catalog_is_not_a_failure() {
+        let output = cursor_output(true, "auto - Auto (default)", "");
+        let models = cursor_cli_models(&output).unwrap();
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0].id, "auto");
+        assert_eq!(
+            cursor_cli_models(&cursor_output(true, "", "")).unwrap_err(),
+            ModelDiscoveryError::Empty
+        );
+    }
 
     #[cfg(unix)]
     fn write_fake_model_cli(name: &str, contents: &str) -> PathBuf {
