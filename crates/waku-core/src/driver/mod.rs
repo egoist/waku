@@ -225,9 +225,7 @@ pub(crate) fn start_local(
         | ProviderKind::Fx
         | ProviderKind::Grok
         | ProviderKind::Kimi
-        | ProviderKind::Droid => {
-            Arc::new(acp::AcpDriver::start(provider, options, events)?)
-        }
+        | ProviderKind::Droid => Arc::new(acp::AcpDriver::start(provider, options, events)?),
         ProviderKind::DeepSeek => Arc::new(deepseek::DeepSeekDriver::start(options, events)?),
         // OpenCode's own server is its real API, and it is what exposes
         // interactive permission requests.

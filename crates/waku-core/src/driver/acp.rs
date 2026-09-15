@@ -2319,8 +2319,12 @@ mod tests {
         }
         // A session already sitting on the mapped mode is left untouched.
         assert!(
-            desired_access_mode(ProviderKind::Droid, Some(&modes("normal")), RuntimeMode::Ask)
-                .is_none()
+            desired_access_mode(
+                ProviderKind::Droid,
+                Some(&modes("normal")),
+                RuntimeMode::Ask
+            )
+            .is_none()
         );
     }
 

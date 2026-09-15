@@ -862,7 +862,9 @@ fn parse_deepseek_model_catalog(catalog: &Value) -> Vec<ProviderModel> {
 /// selected model. Discovery therefore opens one local-only session (a
 /// client-generated `_meta.sessionId` makes Droid skip the Factory-side
 /// record), then for every advertised model sets it and re-reads the session's
-/// `reasoning_effort` option through `session/resume`. The agent is the only
+/// `reasoning_effort` option through `session/resume` — the
+/// `set_config_option` answer carries no refreshed `configOptions`, so the
+/// re-read needs its own round-trip. The agent is the only
 /// source of these ladders — new releases and BYOK routes are covered the day
 /// they appear — and the whole enriched catalog is cached to keep the loop
 /// rare. Any failed step aborts so a degraded catalog is never cached.
@@ -935,7 +937,10 @@ fn discover_droid_models(binary: &Path) -> Vec<ProviderModel> {
                 let refreshed = connection
                     .send_request(UntypedMessage::new(
                         "session/resume",
-                        json!({ "sessionId": session_id }),
+                        json!({
+                            "sessionId": session_id,
+                            "cwd": cwd.to_string_lossy(),
+                        }),
                     )?)
                     .block_task()
                     .await?;
@@ -945,6 +950,15 @@ fn discover_droid_models(binary: &Path) -> Vec<ProviderModel> {
                     "isDefault": id == default_model,
                     "efforts": droid_effort_state(&refreshed),
                 }));
+            }
+            // Hedge for `_meta.sessionId` losing its local-only meaning: a
+            // best-effort close reaps the session the day Droid implements
+            // `session/close` (0.219.0 answers "Method not found"), and any
+            // failure here must not degrade an already-collected catalog.
+            if let Ok(close) =
+                UntypedMessage::new("session/close", json!({ "sessionId": session_id }))
+            {
+                let _ = connection.send_request(close).block_task().await;
             }
             Ok(Value::Array(catalog))
         });
