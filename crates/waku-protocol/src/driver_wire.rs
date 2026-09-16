@@ -2,6 +2,7 @@ use anyhow::{Context as _, anyhow, bail};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use uuid::Uuid;
 
 use crate::WireDriverEvent;
 use crate::computer_use::{ComputerTarget, ComputerUsePhase, ComputerUseState};
@@ -35,6 +36,7 @@ pub fn event_to_wire(event: DriverEvent) -> anyhow::Result<WireDriverEvent> {
             ("availableCommands", serde_json::to_value(commands)?)
         }
         DriverEvent::TurnStarted => ("turnStarted", Value::Null),
+        DriverEvent::TurnParked => ("turnParked", Value::Null),
         DriverEvent::TextDelta(text) => ("textDelta", Value::String(text)),
         DriverEvent::ReasoningDelta(text) => ("reasoningDelta", Value::String(text)),
         DriverEvent::Activity {
@@ -88,6 +90,14 @@ pub fn event_to_wire(event: DriverEvent) -> anyhow::Result<WireDriverEvent> {
                 image_url: state.image_url,
             })?,
         ),
+        DriverEvent::PromptSubmitted {
+            message,
+            turn_id,
+            message_id,
+        } => (
+            "promptSubmitted",
+            json!({ "message": message, "turnId": turn_id, "messageId": message_id }),
+        ),
         DriverEvent::SteerAccepted { message } => ("steerAccepted", json!({ "message": message })),
         DriverEvent::SteerRejected { message, reason } => (
             "steerRejected",
@@ -125,6 +135,7 @@ pub fn event_from_wire(event: WireDriverEvent) -> anyhow::Result<DriverEvent> {
         "autoTitleUpdated" => DriverEvent::AutoTitleUpdated(serde_json::from_value(payload)?),
         "availableCommands" => DriverEvent::AvailableCommands(serde_json::from_value(payload)?),
         "turnStarted" => DriverEvent::TurnStarted,
+        "turnParked" => DriverEvent::TurnParked,
         "textDelta" => DriverEvent::TextDelta(serde_json::from_value(payload)?),
         "reasoningDelta" => DriverEvent::ReasoningDelta(serde_json::from_value(payload)?),
         "activity" => {
@@ -164,6 +175,14 @@ pub fn event_from_wire(event: WireDriverEvent) -> anyhow::Result<DriverEvent> {
                 image_url: state.image_url,
             })
         }
+        "promptSubmitted" => {
+            let submitted: SubmittedPromptWire = serde_json::from_value(payload)?;
+            DriverEvent::PromptSubmitted {
+                message: submitted.message,
+                turn_id: submitted.turn_id,
+                message_id: submitted.message_id,
+            }
+        }
         "steerAccepted" => {
             let steer: AcceptedSteerWire = serde_json::from_value(payload)?;
             DriverEvent::SteerAccepted {
@@ -197,6 +216,14 @@ pub fn event_from_wire(event: WireDriverEvent) -> anyhow::Result<DriverEvent> {
         "processExited" => DriverEvent::ProcessExited,
         kind => bail!("daemon sent an unsupported driver event {kind:?}"),
     })
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SubmittedPromptWire {
+    message: String,
+    turn_id: Uuid,
+    message_id: Uuid,
 }
 
 #[derive(Deserialize)]

@@ -144,6 +144,7 @@ fn collect_image_urls(value: &Value, urls: &mut Vec<String>) {
                     .get("imageUrl")
                     .or_else(|| object.get("image_url"))
                     .or_else(|| object.get("url"))
+                    .or_else(|| object.get("uri"))
                     .and_then(Value::as_str)
                 {
                     urls.push(url.to_owned());

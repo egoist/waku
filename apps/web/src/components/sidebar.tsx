@@ -452,6 +452,9 @@ function SessionStatus({ status, t }: { status: AgentSession['status']; t: Trans
   if (status === 'working' || status === 'connecting') {
     return <WakuIcon label={t('sidebar.status_working')} className="size-3 text-[var(--success)] motion-safe:animate-spin" name="loaderCircle" />
   }
+  if (status === 'background') {
+    return <WakuIcon label={t('sidebar.status_background')} className="size-3 text-[var(--text-secondary)]" name="hourglass" />
+  }
   if (status === 'waiting') {
     return <WakuIcon label={t('sidebar.status_waiting')} className="size-3 text-[var(--warning)]" name="alert" />
   }

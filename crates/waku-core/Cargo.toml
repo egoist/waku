@@ -41,5 +41,8 @@ objc2-foundation = { version = "0.3", default-features = false, features = [
     "NSString",
 ] }
 
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Threading"] }
+
 [dev-dependencies]
 waku-client = { path = "../waku-client" }

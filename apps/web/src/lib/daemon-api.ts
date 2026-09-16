@@ -13,9 +13,13 @@ import type {
   Project,
   ProviderKind,
   ProviderProbe,
+  ProviderResumeCursor,
+  ProviderSessionHistory,
+  ProviderSessionSummary,
   ReviewDiffData,
   ReviewDiffSource,
   ResponsePayload,
+  RuntimeMode,
   SessionMessageMatch,
   SlashCommand,
   SkillsCatalog,
@@ -125,6 +129,33 @@ export async function searchSessionMessages(
     'sessionMessageMatches',
   )
   return response.matches
+}
+
+export async function listProviderSessions(
+  client: WakuClient,
+  provider: ProviderKind,
+  limit = 250,
+): Promise<ProviderSessionSummary[]> {
+  const response = expectResponse(
+    await client.request({ type: 'listProviderSessions', provider, limit }),
+    'providerSessions',
+  )
+  return response.sessions
+}
+
+export async function loadProviderSessionHistory(
+  client: WakuClient,
+  summary: ProviderSessionSummary,
+): Promise<ProviderSessionHistory> {
+  const response = expectResponse(
+    await client.request({
+      type: 'loadProviderSession',
+      cursor: summary.cursor,
+      cwd: summary.cwd,
+    }),
+    'providerSessionHistory',
+  )
+  return response.history
 }
 
 export async function loadDaemonSettings(
@@ -612,7 +643,6 @@ export function createSession(
     provider,
     model: null,
     runtime_mode: 'fullAccess',
-    interaction_mode: 'build',
     reasoning_effort: null,
     service_tier: null,
     context_window: null,
@@ -630,6 +660,43 @@ export function createSession(
     turns: [],
     queued_messages: [],
   }
+}
+
+export function createResumedSession(
+  projectId: string,
+  summary: ProviderSessionSummary,
+  history: ProviderSessionHistory,
+  runtimeMode: RuntimeMode = 'fullAccess',
+): AgentSession {
+  const now = unixTime()
+  const createdAt = summary.created_at || now
+  const updatedAt = Math.max(summary.updated_at, createdAt)
+  const hasHistory = history.messages.length > 0 || history.turns.length > 0
+  return {
+    ...createSession(projectId, summary.cursor.provider, false),
+    auto_title: summary.title,
+    runtime_mode: runtimeMode,
+    provider_cursor: summary.cursor,
+    created_at: createdAt,
+    updated_at: updatedAt,
+    last_reply_at: hasHistory ? updatedAt : null,
+    messages: history.messages,
+    turns: history.turns,
+  }
+}
+
+export function providerSessionNativeId(cursor: ProviderResumeCursor): string {
+  return cursor.provider === 'amp' || cursor.provider === 'codex'
+    ? cursor.threadId
+    : cursor.sessionId
+}
+
+export function sameProviderSession(
+  left: ProviderResumeCursor,
+  right: ProviderResumeCursor,
+): boolean {
+  return left.provider === right.provider
+    && providerSessionNativeId(left) === providerSessionNativeId(right)
 }
 
 export function beginTurn(

@@ -32,13 +32,24 @@ updater.updating: 正在更新…
 updater.up_to_date: Waku 已是最新版本
 updater.failed: "更新失败：%{error}"
 command_palette.placeholder: 搜索任务或运行命令…
+command_palette.resume_placeholder: 搜索终端会话…
+command_palette.resume_provider_placeholder: 选择服务商…
 command_palette.suggested: 建议
 command_palette.tasks: 任务
+command_palette.sessions: 终端会话
+command_palette.providers: 服务商
 command_palette.commands: 命令
 command_palette.settings: 设置
 command_palette.new_task: 新建任务
+command_palette.resume: 恢复…
+command_palette.change_provider: 更改服务商
+command_palette.current_provider: 当前服务商
 command_palette.open_project: 打开项目…
 command_palette.choose_model: 选择模型…
+command_palette.copy_task_id: 复制任务 ID
+command_palette.copy_agent_cli_thread_id: 复制智能体 CLI 线程 ID
+command_palette.task_id_copied: 已复制任务 ID
+command_palette.agent_cli_thread_id_copied: 已复制智能体 CLI 线程 ID
 command_palette.collapse_sidebar_groups: 折叠所有侧边栏分组
 command_palette.show_sidebar: 显示侧边栏
 command_palette.hide_sidebar: 隐藏侧边栏
@@ -49,6 +60,13 @@ command_palette.you: 你
 command_palette.agent: 智能体
 command_palette.no_results: 未找到匹配的任务或命令
 command_palette.no_results_hint: 可尝试搜索任务标题、消息、项目、设置或命令
+command_palette.no_matching_providers: 未找到匹配的服务商
+command_palette.loading_sessions: 正在加载终端会话…
+command_palette.no_resume_sessions: 没有可恢复的终端会话
+command_palette.no_resume_sessions_hint: 已在 Waku 中的会话不会显示。请在智能体 CLI 中开始会话后重试。
+command_palette.could_not_load_sessions: 无法加载终端会话
+command_palette.loading_selected_session: 正在加载对话…
+command_palette.resume_failed: "无法恢复会话：%{error}"
 language.title: 语言
 language.system: 跟随系统
 language.description: 选择 Waku 的界面语言
@@ -58,9 +76,9 @@ settings.providers: 服务商
 settings.usage: 用量
 settings.daemon: 守护进程
 settings.computer_use: 电脑操作
-settings.general_keywords: 通用 本地 项目 对话 隐私 匿名 使用数据 分析 分享 更新 自动 版本
+settings.general_keywords: 通用 本地 项目 对话 隐私 匿名 使用数据 分析 分享 更新 自动 版本 数学 公式 表达式 math latex
 settings.appearance_keywords: 外观 主题 系统 浅色 深色 语言 英语 中文 简体 字号 字体 大小 编辑器
-settings.providers_keywords: 服务商 智能体 模型 命令行 版本 安装 检测 claude codex cursor opencode amp grok pi
+settings.providers_keywords: 服务商 智能体 模型 命令行 版本 安装 检测 claude codex cursor opencode opencode2 amp grok pi
 settings.skills: 技能
 settings.skills_keywords: 技能 技能库 智能体 禁用 启用 删除 claude codex cursor opencode pi amp 共享
 settings.usage_keywords: 用量 令牌 费用 支出 缓存 每日 图表 模型 明细 历史 claude codex
@@ -139,6 +157,8 @@ settings.ui_font_size: 界面字号
 settings.ui_font_size_description: 整个界面与消息的文字大小
 settings.code_font_size: 代码字号
 settings.code_font_size_description: 文件编辑器、差分视图、代码块与工具输出的文字大小
+settings.render_math: 渲染数学公式
+settings.render_math_description: 在 Markdown 中显示排版后的公式。关闭后显示 LaTeX 源码。
 settings.theme_system: 跟随系统
 settings.theme_light: 浅色
 settings.theme_dark: 深色
@@ -188,7 +208,7 @@ providers.checked_just_now: 刚刚检查过
 providers.checked_minutes_ago: "%{count} 分钟前检查过"
 providers.checked_hours_ago: "%{count} 小时前检查过"
 computer_use.allow_apps: 允许 Waku 操作其他应用
-computer_use.availability: Codex、OpenCode、Grok 和 Pi 支持电脑操作功能
+computer_use.availability: Codex、OpenCode、OpenCode 2、Grok 和 Pi 支持电脑操作功能
 computer_use.macos_access: macOS 权限
 computer_use.helper_access: 请向 Waku 的独立控制助手 %{helper} 授予权限
 computer_use.screen_recording: 屏幕录制
@@ -235,6 +255,7 @@ sidebar.add_project: 添加远程项目
 sidebar.resize: 调整侧边栏宽度
 sidebar.status_working: 正在工作
 sidebar.status_waiting: 正在等待
+sidebar.status_background: 等待后台任务
 sidebar.status_failed: 失败
 project.new_project: 新建项目…
 project.no_project: 不使用项目
@@ -257,6 +278,7 @@ common.copy_message_title: 复制消息
 common.copy_selection: 复制所选内容
 common.copy_to_composer: 复制到输入框
 common.copy_code: 复制代码
+common.copy_expression: 复制表达式
 common.cancel: 取消
 common.send: 发送
 session.fork_task: 从此处派生任务
@@ -293,6 +315,8 @@ activity.action_plan: 计划
 activity.action_use: 使用
 activity.ask_questions: 提问
 activity.arguments: 参数
+activity.tool_name: 工具
+activity.mcp_server: MCP 服务器
 activity.output: 输出
 activity.image_output: 图片输出
 activity.open_file: 打开文件
@@ -382,19 +406,14 @@ activity.plan_step: 计划步骤
 activity.plan_steps: 计划步骤
 activity.tool_call: 工具调用
 activity.tool_calls: 工具调用
-mode.build: 构建
-mode.plan: 计划
 mode.supervised: 监督
 mode.auto_accept_edits: 自动接受修改
 mode.auto: 自动
 mode.full_access: 完全访问
-mode.plan_description: 仅检查并制定计划，不进行任何修改
-mode.plan_not_supported: 该智能体不支持规划模式
 mode.supervised_description: 执行命令或修改文件前先征求许可
 mode.auto_accept_edits_description: 自动批准文件修改，执行其他操作前先询问
 mode.auto_description: 由 AI 审核并批准常规操作；高风险操作仍会询问
 mode.full_access_description: 无需确认即可执行命令和修改文件
-mode.switch_to: 切换为%{mode}
 agent_preset.standard: 标准模式
 agent_preset.code: 代码模式
 agent_preset.minimal: 极简模式
@@ -405,7 +424,6 @@ agent_preset.minimal_description: 仅提供持久 bash 与 str_replace_editor �
 agent_preset.creator_description: 用于创建自定义 Agent 预设：具备标准模式的全部能力，并提供运行时检查、插件实验和预设创作指导。
 agent_preset.custom: 自定义
 agent_preset.no_description: 暂无描述。
-agent_preset.minimal_no_plan: 极简模式不包含计划功能
 computer_use.allow_for_task: 本次任务允许
 computer_use.always_allow_app: 始终允许此应用
 computer_use.allow_control: 允许 Waku 控制“%{app}”吗？
@@ -416,7 +434,6 @@ computer_use.no_bundle_id: 此应用没有 Bundle ID，因此无法设为始终�
 computer_use.stopped: 已停止
 computer_use.controlling: 正在控制
 computer_use.captured: 已截取
-computer_use.take_control: 接管
 computer_use.preparing_preview: 正在准备预览…
 common.deny: 拒绝
 permission.allow_once: 仅允许一次
@@ -470,6 +487,7 @@ command_scope.project: 项目
 command_scope.user: 用户
 command_scope.skill: 技能
 command_scope.builtin: 内置
+command_scope.waku: waku
 skills.search: 搜索技能…
 skills.count_one: 1 个技能
 skills.count_many: "%{count} 个技能"
@@ -518,6 +536,7 @@ commands.fast_description: 切换快速模式
 commands.fast_enabled: 已启用快速模式
 commands.fast_disabled: 已关闭快速模式
 commands.goal_description: 为此任务设定一个持续追求的目标
+commands.resume_description: 恢复终端智能体会话
 goal.title: 目标
 goal.objective_placeholder: 这个任务应该持续朝什么方向努力？
 goal.set: 设定目标
@@ -585,6 +604,8 @@ project.add_project: 添加项目
 errors.remote_project_picker: 添加守护进程主机上的项目需要远程路径选择器，但该功能尚不可用
 session.stopped: 已停止
 session.turn_completed: 本轮已完成
+session.turn_waiting_background: 正在等待后台任务
+transcript.waiting_background: 正在等待后台任务
 session.stopped_before_response: 智能体在返回回复前停止了
 session.codex_exited_before_response: Codex app-server 在返回回复前退出了
 session.steer_rejected: 无法向智能体补充指示（%{error}）；消息已排队，将作为后续消息发送
@@ -711,6 +732,8 @@ environment.summary: 环境和后台工作
 environment.changes: 更改
 environment.commit_or_push: 提交或推送
 environment.compare_branch: 比较分支
+environment.task_id: 任务 ID
+environment.agent_cli_thread_id: 智能体 CLI 线程 ID
 commit.message_placeholder: 提交信息（留空以自动生成）…
 commit.message: 提交信息
 commit.include_unstaged: 包含未暂存的更改
@@ -1010,6 +1033,7 @@ usage_error.read_file: 无法读取 %{path}
 usage_error.codex_auth_invalid: Codex auth.json 不是有效的 JSON
 usage_error.codex_access_token_missing: Codex auth.json 中没有访问令牌；请运行 `codex login`
 usage_error.opencode_go_key_rejected: OpenCode Go API 密钥无法读取用量（HTTP %{status}）；请重新连接 OpenCode Go
+usage_error.opencode_go_not_entitled: OpenCode Go 用量需要有效的 OpenCode Go 订阅
 usage_error.no_rate_limit_windows: 用量接口未返回任何速率限制周期
 usage_error.start_grok_probe: 无法启动 `grok agent stdio`
 usage_error.grok_stdin_unavailable: Grok 的标准输入不可用

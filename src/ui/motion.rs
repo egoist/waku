@@ -1,10 +1,9 @@
 //! Shared pulse clock for the repeating loaders.
 //!
-//! Ported from Zeron's motion kit (<https://github.com/zeronsh/comet>, MIT).
 //! A repeating `with_animation` element requests a redraw every display frame
 //! for as long as it is mounted — one working row pinned the whole window at
 //! 120 Hz on a ProMotion panel. Loaders instead read their phase from one
-//! shared clock: it ticks at ~30 fps, notifies only views that painted a
+//! shared clock: it ticks at up to 60 fps, notifies only views that painted a
 //! loader recently, and parks itself once the last lease lapses, so a window
 //! with no loader mounted schedules nothing at all. Every loader shares one
 //! epoch, keeping multi-instance loaders phase-locked.
@@ -17,9 +16,11 @@ use gpui::{
     ease_out_quint, percentage,
 };
 
-/// Repeat-tick interval (~30 fps): visually equivalent for these chunky
-/// pulses and spins at a quarter of a ProMotion display's redraws.
-const PULSE_TICK: Duration = Duration::from_millis(33);
+/// Repeat-tick interval, rounded up so spinner ticks never exceed 60 fps.
+const PULSE_TICK: Duration = Duration::from_nanos(16_666_667);
+
+/// Non-spinning pulses retain their ~30 fps cadence on the faster clock.
+const PULSE_STRIDE: u32 = 2;
 
 /// How long a view stays on the tick list after it last painted a loader. One
 /// lease outlives a few missed frames; an unmounted loader stops renewing and
@@ -57,19 +58,19 @@ impl Default for PulseClock {
     }
 }
 
-/// Keep `view` re-rendering at [`PULSE_TICK`] until the lease lapses. A caller
+/// Keep `view` re-rendering at ~30 fps until the lease lapses. A caller
 /// that stops leasing stops being notified, and the clock parks once no
 /// leases remain — quiescence needs no unsubscribe step.
 pub fn pulse_lease(view: EntityId, cx: &mut App) {
-    pulse_lease_with_stride(view, 1, cx);
+    pulse_lease_with_stride(view, PULSE_STRIDE, cx);
 }
 
-/// [`pulse_lease`] at every second tick (~15 fps), for animations whose view
+/// [`pulse_lease`] at half rate (~15 fps), for animations whose view
 /// is expensive to rebuild and whose motion survives the coarser step — a
 /// notify re-renders the view's whole subtree, so cadence is priced per
 /// tick, not per animation.
 pub fn pulse_lease_slow(view: EntityId, cx: &mut App) {
-    pulse_lease_with_stride(view, 2, cx);
+    pulse_lease_with_stride(view, PULSE_STRIDE * 2, cx);
 }
 
 fn pulse_lease_with_stride(view: EntityId, stride: u32, cx: &mut App) {
@@ -146,18 +147,18 @@ fn pulse_phase(period: Duration, stride: u32, view: EntityId, cx: &mut App) -> f
 pub fn pulse(period: Duration, render: impl FnOnce(f32) -> AnyElement + 'static) -> Pulse {
     Pulse {
         period,
-        stride: 1,
+        stride: PULSE_STRIDE,
         render: Box::new(render),
     }
 }
 
-/// A rotating loader icon riding the shared clock.
+/// A rotating loader icon riding the shared clock at up to 60 fps.
 pub fn spin(icon: Svg) -> AnyElement {
     spin_with_stride(icon, 1)
 }
 
-/// A rotating loader at every second tick (~15 fps — the classic
-/// discrete-step spinner cadence). For loaders on expensive surfaces: the
+/// A rotating loader at every second tick (~30 fps).
+/// For loaders on expensive surfaces: the
 /// sidebar rebuilds its whole subtree per notify, and a session row's working
 /// spinner is not worth pricing that at full rate.
 pub fn spin_slow(icon: Svg) -> AnyElement {
@@ -181,12 +182,12 @@ pub struct Pulse {
 }
 
 impl Pulse {
-    /// Tick every `stride`-th pulse instead of every one. A view's whole
+    /// Tick every `stride`-th ~30 fps pulse instead of every one. A view's whole
     /// subtree rebuilds per notify — the pane ticks at the fastest of its
     /// lessees — so a loader mounted for a whole turn on an expensive
     /// surface should ride the coarser cadence.
     pub fn every(mut self, stride: u32) -> Self {
-        self.stride = stride.max(1);
+        self.stride = stride.max(1).saturating_mul(PULSE_STRIDE);
         self
     }
 }
@@ -198,8 +199,7 @@ impl RenderOnce for Pulse {
     }
 }
 
-/// How long a side panel takes to slide open or shut. Zeron's panel
-/// transition (`crates/ui/src/motion.rs` `RESIZE`) is 200ms — long enough to
+/// How long a side panel takes to slide open or shut. 200ms is long enough to
 /// read as travel rather than a jump cut, short enough that the layout is
 /// settled before the pointer arrives anywhere else.
 pub const PANEL_SLIDE: Duration = Duration::from_millis(200);

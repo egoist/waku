@@ -93,7 +93,7 @@ pub fn detect_trigger(text: &str, cursor: usize) -> Option<Trigger> {
 /// - Claude Code's SDK initialization control request reports built-ins,
 ///   plugins, commands, skills, descriptions, and argument hints.
 /// - Codex app-server's `experimentalFeature/list` and `skills/list`, Amp's
-///   `skill list --json`, OpenCode's effective `debug config`, and Pi/Oh My
+///   `skill list --json`, OpenCode's HTTP command catalogues, and Pi/Oh My
 ///   Pi's RPC registries report the commands their non-TUI transports can
 ///   actually invoke.
 /// - Cursor, Fx, Grok, Kimi Code, and Harness expose commands only after a real
@@ -107,8 +107,8 @@ pub fn detect_trigger(text: &str, cursor: usize) -> Option<Trigger> {
 /// - Claude Code: `.claude/commands` and `.claude/skills` in the project and
 ///   the config dir (`$CLAUDE_CONFIG_DIR`, default `~/.claude`).
 /// - Codex: `~/.codex/prompts`, expanded by Waku at submit.
-/// - OpenCode: `.opencode/command` and `~/.config/opencode/command`, expanded
-///   by Waku — its server transport takes plain prompt text.
+/// - OpenCode: `.opencode/command` and `~/.config/opencode/command`, resolved
+///   by the server's native command endpoint.
 /// - Cursor: `.cursor/commands` in the project and home, expanded by Waku.
 /// - Pi: prompt templates in `.pi/prompts` and `~/.pi/agent/prompts`,
 ///   expanded by Waku, plus skills in `.pi/skills` and `~/.pi/agent/skills`.
@@ -193,11 +193,16 @@ fn assemble_slash_commands(
                 scan_skill_files(provider, &home.join(".codex/skills"), &mut commands);
             }
         }
+        // OpenCode 2 publishes commands and skills over its v2 API
+        // (`GET /api/command`, `GET /api/skill`), so it seeds nothing from
+        // the filesystem here. The shared `.agents/skills` + `.waku/commands`
+        // layer below still applies.
+        ProviderKind::OpenCode2 => {}
         ProviderKind::OpenCode => {
             scan_command_files(
                 &project_root.join(".opencode/command"),
                 CommandScope::Project,
-                true,
+                false,
                 &mut commands,
             );
             scan_skill_files(
@@ -215,7 +220,7 @@ fn assemble_slash_commands(
                 scan_command_files(
                     &home.join(".config/opencode/command"),
                     CommandScope::User,
-                    true,
+                    false,
                     &mut commands,
                 );
                 scan_skill_files(
@@ -343,7 +348,20 @@ fn assemble_slash_commands(
         );
     }
     commands.extend(cli_commands);
-    dedup_and_sort_commands(commands)
+    let mut commands = dedup_and_sort_commands(commands);
+    // `/resume` belongs to Waku rather than any one provider. Reserve the
+    // name after provider/project discovery so every composer exposes the
+    // same picker and submitting it can never leak into an agent turn.
+    commands.retain(|command| command.name != "resume");
+    commands.push(SlashCommand {
+        name: "resume".to_owned(),
+        description: crate::i18n::translate("commands.resume_description"),
+        scope: CommandScope::Waku,
+        argument_hint: None,
+        template: None,
+    });
+    sort_commands_for_display(&mut commands);
+    commands
 }
 
 /// Fold the commands a live process reported into the discovered list.
@@ -1300,6 +1318,59 @@ mod tests {
     }
 
     #[test]
+    fn opencode_commands_use_native_dispatch_while_waku_templates_still_expand() {
+        let root =
+            std::env::temp_dir().join(format!("waku-native-commands-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(root.join(".opencode/command")).unwrap();
+        std::fs::create_dir_all(root.join(".waku/commands")).unwrap();
+        std::fs::write(
+            root.join(".opencode/command/native-review.md"),
+            "Review $ARGUMENTS",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join(".waku/commands/waku-review.md"),
+            "Review $ARGUMENTS",
+        )
+        .unwrap();
+        let commands = assemble_slash_commands(
+            ProviderKind::OpenCode,
+            &root,
+            vec![SlashCommand {
+                name: "init".into(),
+                description: "Initialize".into(),
+                scope: CommandScope::Builtin,
+                argument_hint: None,
+                template: None,
+            }],
+        );
+        assert_eq!(
+            resolved_submission(ProviderKind::OpenCode, "/native-review changes", &commands),
+            None
+        );
+        assert_eq!(
+            resolved_submission(ProviderKind::OpenCode, "/init", &commands),
+            None
+        );
+        assert_eq!(
+            resolved_submission(ProviderKind::OpenCode, "/waku-review changes", &commands)
+                .as_deref(),
+            Some("Review changes")
+        );
+        assert!(
+            commands
+                .iter()
+                .position(|command| command.name == "init")
+                .unwrap()
+                < commands
+                    .iter()
+                    .position(|command| command.name == "native-review")
+                    .unwrap()
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn shared_skills_are_listed_raw_on_every_provider() {
         let root = std::env::temp_dir().join(format!("waku-skills-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
@@ -1366,6 +1437,35 @@ mod tests {
             );
             let _ = std::fs::remove_dir_all(root.join(dir));
         }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn waku_resume_is_reserved_and_listed_for_every_provider() {
+        let root = std::env::temp_dir().join(format!("waku-resume-command-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join(".waku/commands")).unwrap();
+        std::fs::write(root.join(".waku/commands/resume.md"), "Project override").unwrap();
+
+        for provider in ProviderKind::ALL {
+            let commands = assemble_slash_commands(provider, &root, Vec::new());
+            let resume = commands
+                .iter()
+                .filter(|command| command.name == "resume")
+                .collect::<Vec<_>>();
+            assert_eq!(
+                resume.len(),
+                1,
+                "{provider:?} has duplicate Resume commands",
+            );
+            assert_eq!(resume[0].scope, CommandScope::Waku);
+            assert_eq!(resume[0].template, None);
+            assert_eq!(
+                resume[0].description,
+                crate::i18n::translate("commands.resume_description")
+            );
+        }
+
         let _ = std::fs::remove_dir_all(&root);
     }
 

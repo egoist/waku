@@ -13,18 +13,18 @@ use base64::Engine as _;
 use parking_lot::Mutex;
 use rquickjs::context::EvalOptions;
 use rquickjs::{Context, Ctx, Exception, Function, Persistent, Promise, Runtime, Value};
+use serde::Deserialize;
 use serde_json::{Map, Value as JsonValue, json};
 
 const MCP_PROTOCOL_VERSION: &str = "2025-06-18";
 const DEFAULT_EXECUTION_TIMEOUT_MS: u64 = 30_000;
 const MAX_REQUEST_BYTES: usize = 16 * 1024 * 1024;
 
-// Mirrors Codex node_repl's server instructions, substituting the actual QuickJS backend and
-// omitting its unsupported Node module-directory guidance.
-const SERVER_INSTRUCTIONS: &str = "Use `js` to run JavaScript in the persistent QuickJS kernel. When a skill or prompt says to use `waku_js_repl`, call this server's `js` execution tool. Calls default to a 30000 ms (30 seconds) timeout when `timeout_ms` is omitted. The runtime exposes `nodeRepl.cwd`, `nodeRepl.homeDir`, `nodeRepl.tmpDir`, `nodeRepl.requestMeta`, `nodeRepl.setResponseMeta(...)`, and `await nodeRepl.emitImage(...)`. Top-level bindings persist across `js` calls until `js_reset`; do not redeclare existing `const` or `let` names. Reuse existing bindings, use top-level `var` for reusable state that may be assigned again, or choose a fresh descriptive name.";
+// Instructions for Waku's persistent QuickJS runtime and its jsRepl helpers.
+const SERVER_INSTRUCTIONS: &str = "Use `js` to run JavaScript in the persistent QuickJS kernel. When a skill or prompt says to use `waku_js_repl`, call this server's `js` execution tool. Calls default to a 30000 ms (30 seconds) timeout when `timeout_ms` is omitted. The runtime exposes `jsRepl.cwd`, `jsRepl.homeDir`, `jsRepl.tmpDir`, `jsRepl.requestMeta`, `jsRepl.setResponseMeta(...)`, and `await jsRepl.emitImage(...)`. Top-level bindings persist across `js` calls until `js_reset`; do not redeclare existing `const` or `let` names. Reuse existing bindings, use top-level `var` for reusable state that may be assigned again, or choose a fresh descriptive name.";
 
 const KERNEL_BOOTSTRAP: &str = include_str!("js_repl_bootstrap.js");
-const JS_TOOL_DESCRIPTION: &str = "Run JavaScript in a persistent QuickJS kernel with top-level await. This is the JavaScript execution tool for the `waku_js_repl` MCP server; use it whenever instructions say to use `waku_js_repl`, the Waku JavaScript REPL MCP, or run Waku JavaScript REPL code. If `timeout_ms` is omitted, execution times out after 30000 ms (30 seconds); pass a larger `timeout_ms` for slow Computer Use automation or other long-running operations. Use `nodeRepl.cwd`, `nodeRepl.homeDir`, and `nodeRepl.tmpDir` to inspect host paths. Use `nodeRepl.requestMeta` to inspect the current MCP request `_meta` object during a tool call. Use `nodeRepl.setResponseMeta(meta)` to attach top-level MCP result `_meta`; repeated calls shallow-merge object keys for the current tool call. Use `nodeRepl.write(value)` to add output without a newline. Strings are unchanged; other values use console-style formatting, including BigInt and circular objects. Prefer it over `console.log(...)` for final output; `console.log(...)` remains useful for debugging or multiple values. Use `await nodeRepl.emitImage(imageLike)` to return images; each call adds one image to the outer tool result, so call it multiple times to emit multiple images. Supported image inputs are a base64 data URL, a file URL, or an object with a `url` property. Saved references to `nodeRepl.write(...)` and `nodeRepl.emitImage(...)` stay reusable across calls. Scheduled callbacks only run while a JavaScript execution call is active; overdue timers resume at the start of the next call. Top-level bindings persist across calls until `js_reset`. If a call throws, prior bindings remain available and bindings that finished initializing before the throw often remain reusable. For reusable names that may be assigned again later, prefer top-level `var name = ...`; `var` can be redeclared across calls. If you hit `SyntaxError: Identifier 'x' has already been declared`, reuse the existing binding if possible, reassign it only if it was declared with `let` or `var`, or pick a new name instead of resetting immediately; a previous `const x` cannot be changed into `var x`. Use a short `{ ... }` block only for temporary scratch names, and do not wrap an entire call in block scope if you want those names reusable later. Module imports are not supported. Prefer `nodeRepl.write(...)` for text or formatted values and `nodeRepl.emitImage(...)` for images.";
+const JS_TOOL_DESCRIPTION: &str = "Run JavaScript in a persistent QuickJS kernel with top-level await. This is the JavaScript execution tool for the `waku_js_repl` MCP server; use it whenever instructions say to use `waku_js_repl`, the Waku JavaScript REPL MCP, or run Waku JavaScript REPL code. If `timeout_ms` is omitted, execution times out after 30000 ms (30 seconds); pass a larger `timeout_ms` for slow Computer Use automation or other long-running operations. Use `jsRepl.cwd`, `jsRepl.homeDir`, and `jsRepl.tmpDir` to inspect host paths. Use `jsRepl.requestMeta` to inspect the current MCP request `_meta` object during a tool call. Use `jsRepl.setResponseMeta(meta)` to attach top-level MCP result `_meta`; repeated calls shallow-merge object keys for the current tool call. Use `jsRepl.write(value)` to add output without a newline. Strings are unchanged; other values use console-style formatting, including BigInt and circular objects. Prefer it over `console.log(...)` for final output; `console.log(...)` remains useful for debugging or multiple values. Use `await jsRepl.emitImage(imageLike)` to return images; each call adds one image to the outer tool result, so call it multiple times to emit multiple images. Supported image inputs are a base64 data URL, a file URL, an object with a `url` property, or a Cua image content block with `data` and `mimeType`. Saved references to `jsRepl.write(...)` and `jsRepl.emitImage(...)` stay reusable across calls. Scheduled callbacks only run while a JavaScript execution call is active; overdue timers resume at the start of the next call. Top-level bindings persist across calls until `js_reset`. If a call throws, prior bindings remain available and bindings that finished initializing before the throw often remain reusable. For reusable names that may be assigned again later, prefer top-level `var name = ...`; `var` can be redeclared across calls. If you hit `SyntaxError: Identifier 'x' has already been declared`, reuse the existing binding if possible, reassign it only if it was declared with `let` or `var`, or pick a new name instead of resetting immediately; a previous `const x` cannot be changed into `var x`. Use a short `{ ... }` block only for temporary scratch names, and do not wrap an entire call in block scope if you want those names reusable later. Initialize Cua Driver with `await setupComputerUseRuntime({ globals: globalThis })`, which exposes every native tool as `cua.<tool_name>(arguments)`, such as `cua.list_apps()` or `cua.click(arguments)`. The bundled Computer Use skill documents the method signatures; call the methods directly. Module imports are not supported. Prefer `jsRepl.write(...)` for text or formatted values and `jsRepl.emitImage(...)` for images.";
 
 #[derive(Default)]
 struct CallOutput {
@@ -130,7 +130,8 @@ pub fn serve_stdio() -> anyhow::Result<()> {
 }
 
 fn serve<R: BufRead, W: Write>(mut input: R, mut output: W) -> anyhow::Result<()> {
-    let mut repl = JavaScriptRepl::new()?;
+    let mut repl =
+        ReplHost::new(std::env::var_os("WAKU_COMPUTER_USE_SESSIONS_DIRECTORY").map(PathBuf::from))?;
     let mut line = String::new();
     loop {
         line.clear();
@@ -180,7 +181,7 @@ fn serve<R: BufRead, W: Write>(mut input: R, mut output: W) -> anyhow::Result<()
             "initialize" => json_rpc_result(id, initialize_result()),
             "ping" => json_rpc_result(id, json!({})),
             "tools/list" => json_rpc_result(id, json!({"tools": tool_definitions()})),
-            "tools/call" => match call_tool(&mut repl, &params) {
+            "tools/call" => match repl.call(&params) {
                 Ok(result) => json_rpc_result(id, result),
                 Err(error) => json_rpc_error(id, -32602, &error.to_string()),
             },
@@ -193,6 +194,84 @@ fn serve<R: BufRead, W: Write>(mut input: R, mut output: W) -> anyhow::Result<()
         }
     }
     Ok(())
+}
+
+#[derive(Clone, Deserialize, Eq, PartialEq)]
+struct SessionConfig {
+    server_path: PathBuf,
+    process_directory: PathBuf,
+    cwd: PathBuf,
+}
+
+enum ReplHost {
+    Single(JavaScriptRepl),
+    Sessions {
+        directory: PathBuf,
+        kernels: HashMap<String, (SessionConfig, JavaScriptRepl)>,
+    },
+}
+
+fn session_config_path(directory: &Path, session: &str) -> PathBuf {
+    directory.join(format!(
+        "{}.json",
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(session)
+    ))
+}
+
+impl ReplHost {
+    fn new(directory: Option<PathBuf>) -> anyhow::Result<Self> {
+        Ok(match directory {
+            Some(directory) => Self::Sessions {
+                directory,
+                kernels: HashMap::new(),
+            },
+            None => Self::Single(JavaScriptRepl::new()?),
+        })
+    }
+
+    fn call(&mut self, params: &JsonValue) -> anyhow::Result<JsonValue> {
+        match self {
+            Self::Single(repl) => call_tool(repl, params),
+            Self::Sessions { directory, kernels } => {
+                // OpenCode supplies this host metadata; it is never an
+                // agent-provided tool argument. Sessions without a Waku
+                // registration cannot use the shared workspace connection.
+                let session = params
+                    .pointer("/_meta/sessionID")
+                    .and_then(JsonValue::as_str)
+                    .filter(|session| !session.is_empty() && session.len() <= 160)
+                    .ok_or_else(|| {
+                        anyhow!("OpenCode session metadata is required for Waku Computer Use")
+                    })?;
+                kernels.retain(|id, _| session_config_path(directory, id).is_file());
+                let config_path = session_config_path(directory, session);
+                let bytes = fs::read(&config_path)
+                    .context("Computer Use is not enabled for this OpenCode session")?;
+                let config: SessionConfig = serde_json::from_slice(&bytes)
+                    .context("invalid Waku Computer Use session registration")?;
+                if !config.process_directory.is_dir() {
+                    kernels.remove(session);
+                    bail!("this Waku Computer Use session has ended");
+                }
+                // A reattached Waku runtime gets a fresh process directory.
+                // Reset only that session, leaving other tasks' bindings intact.
+                if kernels
+                    .get(session)
+                    .is_none_or(|(previous, _)| previous != &config)
+                {
+                    let repl = JavaScriptRepl::with_bridge(NativeComputerUseClient {
+                        connection: None,
+                        config: Some(config.clone()),
+                    })?;
+                    kernels.insert(session.to_owned(), (config, repl));
+                }
+                call_tool(
+                    &mut kernels.get_mut(session).expect("inserted above").1,
+                    params,
+                )
+            }
+        }
+    }
 }
 
 fn initialize_result() -> JsonValue {
@@ -218,7 +297,7 @@ fn tool_definitions() -> Vec<JsonValue> {
                 "properties": {
                     "code": {
                         "type": "string",
-                        "description": "JavaScript source to execute in the persistent QuickJS kernel. The code runs with top-level await and can use `sky` and the `nodeRepl` helpers."
+                        "description": "JavaScript source to execute in the persistent QuickJS kernel. The code runs with top-level await and can use `cua` and the `jsRepl` helpers."
                     },
                     "timeout_ms": {
                         "type": "integer",
@@ -237,7 +316,7 @@ fn tool_definitions() -> Vec<JsonValue> {
         }),
         json!({
             "name": "js_reset",
-            "description": "Reset the persistent JavaScript kernel and clear all bindings created by prior `js` calls. The `nodeRepl` helpers and lazy `setupComputerUseRuntime(...)` entrypoint are installed again automatically; `sky` remains unset until setup is called.",
+            "description": "Reset the persistent JavaScript kernel and clear all bindings created by prior `js` calls. The `jsRepl` helpers and lazy `setupComputerUseRuntime(...)` entrypoint are installed again automatically; `cua` remains unset until setup is called.",
             "inputSchema": {
                 "type": "object",
                 "additionalProperties": false,
@@ -323,7 +402,11 @@ struct JavaScriptRepl {
 
 impl JavaScriptRepl {
     fn new() -> anyhow::Result<Self> {
-        let bridge = Arc::new(Mutex::new(NativeComputerUseClient::new()));
+        Self::with_bridge(NativeComputerUseClient::new())
+    }
+
+    fn with_bridge(bridge: NativeComputerUseClient) -> anyhow::Result<Self> {
+        let bridge = Arc::new(Mutex::new(bridge));
         let call_output = Arc::new(Mutex::new(None));
         let deadline = Arc::new(Mutex::new(None));
         let timed_out = Arc::new(AtomicBool::new(false));
@@ -343,6 +426,7 @@ impl JavaScriptRepl {
     }
 
     fn reset(&mut self) -> anyhow::Result<()> {
+        self.bridge.lock().connection = None;
         self.kernel = create_kernel(
             self.bridge.clone(),
             self.call_output.clone(),
@@ -500,17 +584,16 @@ fn create_kernel(
         |ctx| -> anyhow::Result<(Persistent<Function<'static>>, Persistent<Function<'static>>)> {
             let globals = ctx.globals();
 
-            let sky_bridge = bridge.clone();
-            let sky_deadline = deadline.clone();
+            globals.set("__wakuComputerPlatform", std::env::consts::OS)?;
+            let cua_bridge = bridge.clone();
+            let cua_deadline = deadline.clone();
             globals.set(
-                "__wakuSkyCall",
+                "__wakuCuaCall",
                 Function::new(ctx.clone(), move |name: String, arguments: String| {
-                    let deadline = *sky_deadline.lock();
+                    let deadline = *cua_deadline.lock();
                     let result = serde_json::from_str::<JsonValue>(&arguments)
                         .context("Computer Use arguments are invalid JSON")
-                        .and_then(|arguments| {
-                            sky_bridge.lock().call_sky(&name, arguments, deadline)
-                        });
+                        .and_then(|arguments| cua_bridge.lock().call(&name, arguments, deadline));
                     match result {
                         Ok(value) => json!({"ok": true, "value": value}).to_string(),
                         Err(error) => json!({"ok": false, "error": error.to_string()}).to_string(),
@@ -603,7 +686,12 @@ fn create_kernel(
                 })?,
             )?;
 
-            let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+            let cwd = bridge
+                .lock()
+                .config
+                .as_ref()
+                .map(|config| config.cwd.clone())
+                .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
             let home = dirs::home_dir().unwrap_or_default();
             let temp = std::env::temp_dir();
             globals.set("__wakuCwd", cwd.display().to_string())?;
@@ -768,82 +856,37 @@ fn image_mime_type(path: &Path, bytes: &[u8]) -> anyhow::Result<&'static str> {
 
 struct NativeComputerUseClient {
     connection: Option<HelperConnection>,
+    config: Option<SessionConfig>,
 }
 
 impl NativeComputerUseClient {
     fn new() -> Self {
-        Self { connection: None }
-    }
-
-    fn call_sky(
-        &mut self,
-        name: &str,
-        arguments: JsonValue,
-        deadline: Option<Instant>,
-    ) -> anyhow::Result<JsonValue> {
-        if !matches!(
-            name,
-            "list_apps"
-                | "get_app_state"
-                | "click"
-                | "drag"
-                | "perform_secondary_action"
-                | "set_value"
-                | "select_text"
-                | "scroll"
-                | "press_key"
-                | "type_text"
-        ) {
-            bail!("unknown sky operation: {name}");
-        }
-        let requested_app = arguments.get("app").cloned().unwrap_or(JsonValue::Null);
-        let result = self.call_helper(name, arguments, deadline)?;
-        match name {
-            "list_apps" => {
-                if let Some(apps) = result.pointer("/structuredContent/apps") {
-                    return Ok(apps.clone());
-                }
-                let text = text_content(&result);
-                serde_json::from_str(&text).context("Computer Use returned an invalid app list")
-            }
-            "get_app_state" => {
-                let structured = result
-                    .get("structuredContent")
-                    .and_then(JsonValue::as_object);
-                let app = structured
-                    .and_then(|value| value.get("app"))
-                    .cloned()
-                    .unwrap_or(requested_app);
-                let text = structured
-                    .and_then(|value| value.get("text"))
-                    .and_then(JsonValue::as_str)
-                    .map(str::to_owned)
-                    .unwrap_or_else(|| text_content(&result));
-                let screenshot = structured
-                    .and_then(|value| value.get("screenshot"))
-                    .and_then(JsonValue::as_str)
-                    .map(|url| json!({"url": url}))
-                    .unwrap_or(JsonValue::Null);
-                Ok(json!({"app": app, "text": text, "screenshot": screenshot}))
-            }
-            _ => Ok(JsonValue::Null),
+        Self {
+            connection: None,
+            config: None,
         }
     }
 
-    fn call_helper(
+    fn call(
         &mut self,
-        name: &str,
+        method: &str,
         arguments: JsonValue,
         deadline: Option<Instant>,
     ) -> anyhow::Result<JsonValue> {
+        if !matches!(method, "tools/list" | "tools/call") {
+            bail!("unsupported Cua Driver request: {method}");
+        }
         if self.connection.is_none() {
-            self.connection = Some(HelperConnection::start(deadline)?);
+            self.connection = Some(HelperConnection::start(deadline, self.config.as_ref())?);
         }
+        // Preserve Cua's complete envelope, including isError, stable error
+        // codes, image metadata and action completion. A tool refusal must not
+        // discard the SDK session or silently retry an input action.
         let result = self
             .connection
             .as_mut()
             .expect("initialized above")
-            .call(name, arguments, deadline);
+            .request(method, arguments, deadline);
         if result.is_err() {
             self.connection = None;
         }
@@ -853,7 +896,7 @@ impl NativeComputerUseClient {
 
 struct HelperConnection {
     child: Child,
-    input: BufWriter<ChildStdin>,
+    input: Option<BufWriter<ChildStdin>>,
     output: BufReader<ChildStdout>,
     next_id: u64,
 }
@@ -881,9 +924,18 @@ impl RequestWatchdog {
                 if completion.recv_timeout(remaining).is_ok() {
                     return false;
                 }
-                let _ = Command::new("/bin/kill")
-                    .args(["-TERM", &pid.to_string()])
-                    .status();
+                #[cfg(unix)]
+                unsafe {
+                    libc::kill(pid as i32, libc::SIGTERM);
+                }
+                #[cfg(windows)]
+                {
+                    use std::os::windows::process::CommandExt;
+                    let _ = Command::new("taskkill")
+                        .args(["/PID", &pid.to_string(), "/T", "/F"])
+                        .creation_flags(0x0800_0000)
+                        .status();
+                }
                 true
             })?;
         Ok(Self {
@@ -914,13 +966,42 @@ impl Drop for RequestWatchdog {
 }
 
 impl HelperConnection {
-    fn start(deadline: Option<Instant>) -> anyhow::Result<Self> {
-        let command = std::env::var_os("WAKU_COMPUTER_USE_SERVER")
-            .map(PathBuf::from)
+    fn start(deadline: Option<Instant>, config: Option<&SessionConfig>) -> anyhow::Result<Self> {
+        // The SDK host ships in every bundle, but only development builds may
+        // run it. Refusing here means a release build never reaches the SDK
+        // even when WAKU_COMPUTER_USE_SERVER is set by hand.
+        if !waku_protocol::computer_use::is_available() {
+            bail!("Waku Computer Use is not available in this build");
+        }
+        let command = config
+            .map(|config| config.server_path.clone())
+            .or_else(|| std::env::var_os("WAKU_COMPUTER_USE_SERVER").map(PathBuf::from))
             .ok_or_else(|| {
-                anyhow!("WAKU_COMPUTER_USE_SERVER is required before the first sky operation")
+                anyhow!(
+                    "WAKU_COMPUTER_USE_SERVER is required before the first Cua Driver operation"
+                )
             })?;
-        let mut child = Command::new(&command)
+        let mut helper = Command::new(&command);
+        if let Some(config) = config {
+            helper
+                .env(
+                    "WAKU_COMPUTER_USE_PROCESS_DIRECTORY",
+                    &config.process_directory,
+                )
+                .current_dir(&config.cwd);
+        }
+        #[cfg(target_os = "linux")]
+        if std::env::var_os("WAYLAND_DISPLAY").is_some()
+            && std::env::var_os("CUA_DRIVER_RS_ENABLE_WAYLAND").is_none()
+        {
+            helper.env("CUA_DRIVER_RS_ENABLE_WAYLAND", "1");
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            helper.creation_flags(0x0800_0000);
+        }
+        let mut child = helper
             .arg("mcp")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -946,7 +1027,7 @@ impl HelperConnection {
         }
         let mut connection = Self {
             child,
-            input: BufWriter::new(input),
+            input: Some(BufWriter::new(input)),
             output: BufReader::new(output),
             next_id: 1,
         };
@@ -963,23 +1044,6 @@ impl HelperConnection {
         Ok(connection)
     }
 
-    fn call(
-        &mut self,
-        name: &str,
-        arguments: JsonValue,
-        deadline: Option<Instant>,
-    ) -> anyhow::Result<JsonValue> {
-        let result = self.request(
-            "tools/call",
-            json!({"name": name, "arguments": arguments}),
-            deadline,
-        )?;
-        if result.get("isError").and_then(JsonValue::as_bool) == Some(true) {
-            bail!("{}", text_content(&result));
-        }
-        Ok(result)
-    }
-
     fn request(
         &mut self,
         method: &str,
@@ -991,7 +1055,9 @@ impl HelperConnection {
         let watchdog = RequestWatchdog::start(self.child.id(), deadline)?;
         let result = (|| -> anyhow::Result<JsonValue> {
             write_message(
-                &mut self.input,
+                self.input
+                    .as_mut()
+                    .ok_or_else(|| anyhow!("Computer Use connection closed"))?,
                 &json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params}),
             )?;
             loop {
@@ -1032,7 +1098,9 @@ impl HelperConnection {
 
     fn notify(&mut self, method: &str, params: JsonValue) -> anyhow::Result<()> {
         write_message(
-            &mut self.input,
+            self.input
+                .as_mut()
+                .ok_or_else(|| anyhow!("Computer Use connection closed"))?,
             &json!({"jsonrpc": "2.0", "method": method, "params": params}),
         )
     }
@@ -1040,21 +1108,18 @@ impl HelperConnection {
 
 impl Drop for HelperConnection {
     fn drop(&mut self) {
+        // EOF cancels active work and lets the in-process SDK shut down its
+        // sessions. Keep a bounded fallback for a broken native host.
+        drop(self.input.take());
+        for _ in 0..50 {
+            if self.child.try_wait().ok().flatten().is_some() {
+                return;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
         let _ = self.child.kill();
         let _ = self.child.wait();
     }
-}
-
-fn text_content(result: &JsonValue) -> String {
-    result
-        .get("content")
-        .and_then(JsonValue::as_array)
-        .into_iter()
-        .flatten()
-        .filter(|item| item.get("type").and_then(JsonValue::as_str) == Some("text"))
-        .filter_map(|item| item.get("text").and_then(JsonValue::as_str))
-        .collect::<Vec<_>>()
-        .join("\n\n")
 }
 
 fn write_message(output: &mut impl Write, message: &JsonValue) -> anyhow::Result<()> {
@@ -1085,6 +1150,77 @@ mod tests {
     }
 
     #[test]
+    fn opencode_sessions_isolate_bindings_reset_and_registration_lifetime() {
+        let root =
+            std::env::temp_dir().join(format!("waku-repl-sessions-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let register = |session: &str, generation: &str| {
+            let directory = root.join(generation);
+            fs::create_dir_all(&directory).unwrap();
+            fs::write(
+                session_config_path(&root, session),
+                json!({
+                    "server_path": "unused-in-this-test",
+                    "process_directory": directory,
+                    "cwd": directory,
+                })
+                .to_string(),
+            )
+            .unwrap();
+            directory
+        };
+        let a = register("ses_a", "first-a");
+        let b = register("ses_b", "first-b");
+        let mut host = ReplHost::new(Some(root.clone())).unwrap();
+        let js = |session: &str, code: &str| json!({"name": "js", "arguments": {"code": code}, "_meta": {"sessionID": session}});
+        assert!(
+            host.call(&json!({"name": "js", "arguments": {"code": "1"}}))
+                .is_err()
+        );
+        assert!(host.call(&js("ses_unregistered", "1")).is_err());
+        let result = host
+            .call(&js("ses_a", "var counter = 41; jsRepl.write(jsRepl.cwd)"))
+            .unwrap();
+        assert_eq!(result["content"][0]["text"], a.display().to_string());
+        let result = host
+            .call(&js(
+                "ses_b",
+                "jsRepl.write(typeof counter); var counter = 7;",
+            ))
+            .unwrap();
+        assert_eq!(result["content"][0]["text"], "undefined");
+        assert_eq!(
+            host.call(&js("ses_a", "jsRepl.write(++counter)")).unwrap()["content"][0]["text"],
+            "42"
+        );
+        host.call(&json!({"name":"js_reset","arguments":{},"_meta":{"sessionID":"ses_a"}}))
+            .unwrap();
+        assert_eq!(
+            host.call(&js("ses_a", "jsRepl.write(typeof counter)"))
+                .unwrap()["content"][0]["text"],
+            "undefined"
+        );
+        assert_eq!(
+            host.call(&js("ses_b", "jsRepl.write(counter)")).unwrap()["content"][0]["text"],
+            "7"
+        );
+        assert_eq!(
+            host.call(&js("ses_b", "jsRepl.write(jsRepl.cwd)")).unwrap()["content"][0]["text"],
+            b.display().to_string()
+        );
+        fs::remove_file(session_config_path(&root, "ses_b")).unwrap();
+        assert!(host.call(&js("ses_b", "jsRepl.write(counter)")).is_err());
+        register("ses_b", "second-b");
+        assert_eq!(
+            host.call(&js("ses_b", "jsRepl.write(typeof counter)"))
+                .unwrap()["content"][0]["text"],
+            "undefined"
+        );
+        drop(host);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn tool_list_matches_the_supported_repl_surface() {
         let tools = tool_definitions();
         assert_eq!(
@@ -1097,8 +1233,8 @@ mod tests {
         assert_eq!(tools[0]["description"], JS_TOOL_DESCRIPTION.trim());
         assert!(SERVER_INSTRUCTIONS.contains("`waku_js_repl`"));
         assert!(!SERVER_INSTRUCTIONS.contains("`node_repl`"));
-        assert!(!SERVER_INSTRUCTIONS.contains("nodeRepl.write"));
-        assert!(JS_TOOL_DESCRIPTION.contains("nodeRepl.write"));
+        assert!(!SERVER_INSTRUCTIONS.contains("jsRepl.write"));
+        assert!(JS_TOOL_DESCRIPTION.contains("jsRepl.write"));
         assert!(!SERVER_INSTRUCTIONS.contains("js_add_node_module_dir"));
         assert!(JS_TOOL_DESCRIPTION.contains("Module imports are not supported"));
     }
@@ -1111,7 +1247,7 @@ mod tests {
             false
         );
         assert_eq!(
-            call(&mut repl, "nodeRepl.write(String(persistentValue + 1));")["content"][0]["text"],
+            call(&mut repl, "jsRepl.write(String(persistentValue + 1));")["content"][0]["text"],
             "42"
         );
         repl.reset().unwrap();
@@ -1119,16 +1255,16 @@ mod tests {
     }
 
     #[test]
-    fn repl_supports_top_level_await_and_lazy_native_sky() {
+    fn repl_supports_top_level_await_and_lazy_cua_driver() {
         let mut repl = JavaScriptRepl::new().unwrap();
-        let initial = call(&mut repl, "nodeRepl.write(typeof sky);");
+        let initial = call(&mut repl, "jsRepl.write(typeof cua);");
         assert_eq!(initial["content"][0]["text"], "undefined");
         let result = call(
             &mut repl,
-            "await setupComputerUseRuntime({ globals: globalThis }); var promisedValue = await Promise.resolve(7); nodeRepl.write(`${sky.target}:${promisedValue}`);",
+            "var promisedValue = await Promise.resolve(7); jsRepl.write(`${typeof setupComputerUseRuntime}:${promisedValue}`);",
         );
         assert_eq!(result["isError"], false);
-        assert_eq!(result["content"][0]["text"], "mac:7");
+        assert_eq!(result["content"][0]["text"], "function:7");
     }
 
     #[test]
@@ -1138,7 +1274,7 @@ mod tests {
             &mut repl,
             r#"
                 var timeoutValue = await new Promise((resolve) => setTimeout(resolve, 2, "done"));
-                nodeRepl.write(timeoutValue);
+                jsRepl.write(timeoutValue);
             "#,
         );
         assert_eq!(timeout["isError"], false);
@@ -1157,7 +1293,7 @@ mod tests {
                     }
                   }, 2, "tick");
                 });
-                nodeRepl.write(intervalValues.join(","));
+                jsRepl.write(intervalValues.join(","));
             "#,
         );
         assert_eq!(interval["isError"], false);
@@ -1169,27 +1305,27 @@ mod tests {
         let mut repl = JavaScriptRepl::new().unwrap();
         let scheduled = call(
             &mut repl,
-            r#"var pendingTimer = setTimeout(() => nodeRepl.write("late"), 2);"#,
+            r#"var pendingTimer = setTimeout(() => jsRepl.write("late"), 2);"#,
         );
         assert_eq!(scheduled["isError"], false);
         assert_eq!(scheduled["content"][0]["text"], "");
         thread::sleep(Duration::from_millis(5));
         assert_eq!(
-            call(&mut repl, r#"nodeRepl.write("now");"#)["content"][0]["text"],
+            call(&mut repl, r#"jsRepl.write("now");"#)["content"][0]["text"],
             "latenow"
         );
 
         let cancelled = call(
             &mut repl,
             r#"
-                var cancelledTimer = setTimeout(() => nodeRepl.write("unexpected"), 2);
+                var cancelledTimer = setTimeout(() => jsRepl.write("unexpected"), 2);
                 clearTimeout(cancelledTimer);
             "#,
         );
         assert_eq!(cancelled["isError"], false);
         thread::sleep(Duration::from_millis(5));
         assert_eq!(
-            call(&mut repl, r#"nodeRepl.write("cleared");"#)["content"][0]["text"],
+            call(&mut repl, r#"jsRepl.write("cleared");"#)["content"][0]["text"],
             "cleared"
         );
     }
@@ -1203,17 +1339,17 @@ mod tests {
                 var compatibilityTimer = setTimeout(() => {}, 1000);
                 var initiallyRefed = compatibilityTimer.hasRef();
                 compatibilityTimer.unref();
-                nodeRepl.write(JSON.stringify({
+                jsRepl.write(JSON.stringify({
                   globalAlias: global === globalThis,
                   process: typeof process,
                   require: typeof require,
                   module: typeof module,
                   dirname: typeof __dirname,
                   filename: typeof __filename,
-                  tmpDirAlias: tmpDir === nodeRepl.tmpDir,
-                  nodeReplFrozen: Object.isFrozen(nodeRepl),
-                  envFrozen: Object.isFrozen(nodeRepl.env),
-                  envKeys: Object.keys(nodeRepl.env).length,
+                  tmpDirAlias: tmpDir === jsRepl.tmpDir,
+                  jsReplFrozen: Object.isFrozen(jsRepl),
+                  envFrozen: Object.isFrozen(jsRepl.env),
+                  envKeys: Object.keys(jsRepl.env).length,
                   buffer: Buffer.from("hello").toString("base64"),
                   decoded: Buffer.from("aGVsbG8=", "base64").toString(),
                   text: new TextDecoder().decode(new TextEncoder().encode("hello")),
@@ -1236,7 +1372,7 @@ mod tests {
         assert_eq!(globals["dirname"], "undefined");
         assert_eq!(globals["filename"], "undefined");
         assert_eq!(globals["tmpDirAlias"], true);
-        assert_eq!(globals["nodeReplFrozen"], true);
+        assert_eq!(globals["jsReplFrozen"], true);
         assert_eq!(globals["envFrozen"], true);
         assert_eq!(globals["envKeys"], 0);
         assert_eq!(globals["buffer"], "aGVsbG8=");
@@ -1282,10 +1418,10 @@ mod tests {
         let mut repl = JavaScriptRepl::new().unwrap();
         let result = repl.execute(
             r#"
-                nodeRepl.write(nodeRepl.requestMeta.label);
-                nodeRepl.write(`:${Object.isFrozen(nodeRepl.requestMeta)}`);
-                nodeRepl.setResponseMeta({ source: "quickjs" });
-                await nodeRepl.emitImage("data:image/png;base64,aGVsbG8=");
+                jsRepl.write(jsRepl.requestMeta.label);
+                jsRepl.write(`:${Object.isFrozen(jsRepl.requestMeta)}`);
+                jsRepl.setResponseMeta({ source: "quickjs" });
+                await jsRepl.emitImage("data:image/png;base64,aGVsbG8=");
             "#,
             Duration::from_secs(1),
             json!({"label": "metadata"}),

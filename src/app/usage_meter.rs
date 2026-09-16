@@ -286,11 +286,15 @@ impl Waku {
     }
 }
 
+/// Fraction of the window in use, capped at 100%. A provider (notably
+/// OpenCode) can report a lifetime/cumulative token counter that exceeds the
+/// model's window; the context can never be more than fully used, so anything
+/// past the window reads as full rather than an impossible percentage.
 fn context_percent(usage: ContextUsage) -> Option<f64> {
     usage
         .window
         .filter(|window| *window > 0)
-        .map(|window| usage.tokens as f64 * 100.0 / window as f64)
+        .map(|window| (usage.tokens as f64 * 100.0 / window as f64).min(100.0))
 }
 
 /// The trigger glyph: a ring whose arc fills clockwise from 12 o'clock as the
@@ -400,7 +404,7 @@ fn usage_panel(
     let value = match (usage.window, percent) {
         (Some(window), Some(percent)) => format!(
             "{} / {} ({percent:.0}%)",
-            format_tokens(usage.tokens),
+            format_tokens(usage.tokens.min(window)),
             format_tokens(window)
         ),
         // The transport reports occupancy but not the window size.
@@ -604,4 +608,48 @@ fn meter_bar(theme: &Theme, percent: f64) -> Div {
         .rounded_full()
         .bg(theme.overlay_strong)
         .child(div().h_full().w(relative(fraction)).rounded_full().bg(fill))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn context_percent_caps_at_full_when_provider_over_reports() {
+        // OpenCode reports lifetime/cumulative session counters that can run
+        // far past the model's window; the meter must read "full", never an
+        // impossible percentage like 472%.
+        let usage = ContextUsage {
+            tokens: 4_718_002,
+            window: Some(1_000_000),
+        };
+        assert_eq!(context_percent(usage), Some(100.0));
+    }
+
+    #[test]
+    fn context_percent_reports_partial_usage_verbatim() {
+        let usage = ContextUsage {
+            tokens: 250_000,
+            window: Some(1_000_000),
+        };
+        assert_eq!(context_percent(usage), Some(25.0));
+    }
+
+    #[test]
+    fn context_percent_is_none_without_a_positive_window() {
+        assert_eq!(
+            context_percent(ContextUsage {
+                tokens: 4_718_002,
+                window: None,
+            }),
+            None
+        );
+        assert_eq!(
+            context_percent(ContextUsage {
+                tokens: 4_718_002,
+                window: Some(0),
+            }),
+            None
+        );
+    }
 }

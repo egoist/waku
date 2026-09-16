@@ -8,6 +8,9 @@
 //! per block is therefore one measured-layout node and one `shape_text` call,
 //! which GPUI's line-layout cache reuses verbatim across frames when the text
 //! and wrap width are unchanged.
+//! Math paragraphs use one measured element with retained native glyph layouts
+//! and cached formula images (see [`math_text`]); ordinary prose stays on the
+//! StyledText path.
 //!
 //! **Color is paint, geometry is layout.** Syntax highlighting, inline-code
 //! washes and the selection wash are all painted from geometry read back out of
@@ -39,10 +42,40 @@ use super::selection::{
 };
 use super::veil::{RowVeil, apply_veil};
 use crate::theme::Theme;
+use crate::ui::menu::{ContextMenuHandle, context_menu};
 use crate::ui::tooltip::Tooltip;
 
+mod math_text;
+
 /// Selection geometry: the laid-out text handle for one painted element.
-pub type TextGeometry = TextLayout;
+#[derive(Clone)]
+pub enum TextGeometry {
+    Text(TextLayout),
+    Math(math_text::Geometry),
+}
+
+impl TextGeometry {
+    fn bounds(&self) -> Bounds<Pixels> {
+        match self {
+            Self::Text(layout) => layout.bounds(),
+            Self::Math(layout) => layout.bounds(),
+        }
+    }
+
+    fn index_for_position(&self, position: Point<Pixels>) -> Result<usize, usize> {
+        match self {
+            Self::Text(layout) => layout.index_for_position(position),
+            Self::Math(layout) => layout.index_for_position(position),
+        }
+    }
+
+    fn is_missing(&self) -> bool {
+        match self {
+            Self::Text(layout) => layout_missing(layout),
+            Self::Math(layout) => layout.is_missing(),
+        }
+    }
+}
 
 /// The transcript's shared selection handles, specialised to real geometry.
 pub type TranscriptSelection = SelectionState<TextGeometry>;
@@ -212,8 +245,11 @@ impl Palette {
             code_wash: theme.code_wash,
             selection: theme.selection,
             search_match: search_yellow.opacity(if theme.is_dark { 0.18 } else { 0.20 }),
-            active_search_match: active_search_orange
-                .opacity(if theme.is_dark { 0.78 } else { 0.70 }),
+            active_search_match: active_search_orange.opacity(if theme.is_dark {
+                0.78
+            } else {
+                0.70
+            }),
             accent: theme.accent,
             added: theme.success,
             removed: theme.danger,
@@ -255,6 +291,7 @@ pub struct FlatText {
     pub runs: Vec<TextRun>,
     pub links: Vec<(Range<usize>, String)>,
     pub code_ranges: Vec<Range<usize>>,
+    pub math: Option<Rc<math_text::MathData>>,
 }
 
 /// One literal find-in-page hit inside a shaped markdown text element.
@@ -288,6 +325,7 @@ pub fn flatten(
     let mut out: Vec<TextRun> = Vec::with_capacity(runs.len());
     let mut links: Vec<(Range<usize>, String)> = Vec::new();
     let mut code_ranges: Vec<Range<usize>> = Vec::new();
+    let mut math = Vec::new();
 
     for run in runs {
         if run.text.is_empty() {
@@ -296,6 +334,13 @@ pub fn flatten(
         let start = text.len();
         text.push_str(&run.text);
         let end = text.len();
+        if run.style.math {
+            math.push(math_text::MathSpan {
+                range: start..end,
+                latex: std::sync::Arc::from(run.text.as_str()),
+                display: false,
+            });
+        }
 
         let mut run_font = font(if run.style.code {
             MONO_FAMILY
@@ -359,6 +404,7 @@ pub fn flatten(
         runs: out,
         links,
         code_ranges,
+        math: (!math.is_empty()).then(|| Rc::new(math_text::MathData::new(math))),
     }
 }
 
@@ -389,6 +435,7 @@ pub fn flatten_plain(
         runs,
         links: Vec::new(),
         code_ranges: Vec::new(),
+        math: None,
     }
 }
 
@@ -474,6 +521,7 @@ impl MarkdownView {
             *self.veil.borrow_mut() = RowVeil::seeded();
         }
         let changed = self.parser.text() != text;
+        let append = !changed || text.starts_with(self.parser.text());
         if changed {
             self.parser.set_text(text);
         }
@@ -493,7 +541,7 @@ impl MarkdownView {
                 // Markdown block structure only ever extends the final block,
                 // so every element before it is still valid. A streamed delta
                 // thus re-flattens one block instead of the whole response.
-                let boundary = self.volatile_from.get();
+                let boundary = if append { self.volatile_from.get() } else { 0 };
                 self.flats
                     .borrow_mut()
                     .retain(|ordinal, _| *ordinal < boundary);
@@ -530,7 +578,7 @@ impl MarkdownView {
         let settled = if self.tail.is_empty() {
             all.len()
         } else {
-            all.len().saturating_sub(1)
+            self.parser.display_tail_start()
         };
         all[..settled]
             .iter()
@@ -557,6 +605,9 @@ pub struct Ctx<'a> {
     /// Set while rendering the first element of a block, for copy spacing.
     starts_block: Cell<bool>,
     animate_streaming: bool,
+    math_enabled: bool,
+    math_menu: Option<ContextMenuHandle>,
+    wrap_math_menu: bool,
     now: Instant,
 }
 
@@ -578,6 +629,9 @@ impl<'a> Ctx<'a> {
             next_ordinal: Cell::new(0),
             starts_block: Cell::new(true),
             animate_streaming: true,
+            math_enabled: true,
+            math_menu: None,
+            wrap_math_menu: false,
             now: Instant::now(),
         }
     }
@@ -601,6 +655,25 @@ impl<'a> Ctx<'a> {
         self
     }
 
+    pub fn with_math_enabled(mut self, enabled: bool) -> Self {
+        self.math_enabled = enabled;
+        self
+    }
+
+    /// Contribute formula actions to an existing message menu.
+    pub fn with_context_menu(mut self, menu: ContextMenuHandle) -> Self {
+        self.math_menu = Some(menu);
+        self.wrap_math_menu = false;
+        self
+    }
+
+    /// Give a standalone Markdown surface its own formula context menu.
+    pub fn with_math_context_menu(mut self, menu: ContextMenuHandle) -> Self {
+        self.math_menu = Some(menu);
+        self.wrap_math_menu = true;
+        self
+    }
+
     fn with_cache(&self, view: &'a MarkdownView) -> Self {
         Self {
             row: self.row.clone(),
@@ -613,6 +686,9 @@ impl<'a> Ctx<'a> {
             next_ordinal: Cell::new(self.next_ordinal.get()),
             starts_block: Cell::new(self.starts_block.get()),
             animate_streaming: self.animate_streaming,
+            math_enabled: self.math_enabled,
+            math_menu: self.math_menu.clone(),
+            wrap_math_menu: self.wrap_math_menu,
             now: Instant::now(),
         }
     }
@@ -741,7 +817,7 @@ fn text_element_with_selection(
                 key: key.clone(),
                 text: Rc::from(text.as_ref()),
                 block_break,
-                geometry: layout.clone(),
+                geometry: TextGeometry::Text(layout.clone()),
             });
         }
     })
@@ -758,7 +834,10 @@ fn text_element_with_selection(
         .into_any_element()
 }
 
-fn text_element(flat: &FlatText, key: TextKey, ctx: &Ctx) -> AnyElement {
+fn text_element(flat: &Rc<FlatText>, key: TextKey, ctx: &Ctx) -> AnyElement {
+    if ctx.math_enabled && flat.math.is_some() {
+        return math_text::element(flat.clone(), key, ctx);
+    }
     let runs = match ctx
         .cache
         .filter(|view| ctx.animate_streaming && view.streaming.get())
@@ -921,8 +1000,11 @@ fn range_rects(
 /// Painted glyph boxes for a byte range in a registered text element.
 /// Find-in-page uses this after a virtualized row mounts to reveal the exact
 /// wrapped line rather than stopping at the top of a long message.
-pub fn text_range_bounds(layout: &TextLayout, range: &Range<usize>) -> Vec<Bounds<Pixels>> {
-    range_rects(layout, range, 0.0, 0.0)
+pub fn text_range_bounds(layout: &TextGeometry, range: &Range<usize>) -> Vec<Bounds<Pixels>> {
+    match layout {
+        TextGeometry::Text(layout) => range_rects(layout, range, 0.0, 0.0),
+        TextGeometry::Math(layout) => layout.range_rects(range),
+    }
 }
 
 /// `TextLayout::bounds` panics before prepaint has run. A row that was spliced
@@ -939,7 +1021,7 @@ fn registry_point(
 ) -> Option<(usize, usize)> {
     let mut best: Option<(usize, f32)> = None;
     for (index, entry) in registry.entries().iter().enumerate() {
-        if layout_missing(&entry.geometry) {
+        if entry.geometry.is_missing() {
             continue;
         }
         let bounds = entry.geometry.bounds();
@@ -982,8 +1064,7 @@ pub fn install_selection_input(window: &mut Window, state: &TranscriptSelection)
             }
             let registry = state.registry.borrow();
             let hit = registry.entries().iter().enumerate().find(|(_, entry)| {
-                !layout_missing(&entry.geometry)
-                    && entry.geometry.bounds().contains(&event.position)
+                !entry.geometry.is_missing() && entry.geometry.bounds().contains(&event.position)
             });
             let mut selection = state.selection.borrow_mut();
             match hit {
@@ -1127,7 +1208,7 @@ fn search_block(
             *ordinal += 1;
             search_text(&text, current, regex, cap, matches)
         }
-        Block::CodeBlock { code, .. } => {
+        Block::CodeBlock { code, .. } | Block::DisplayMath { latex: code } => {
             let current = *ordinal;
             *ordinal += 1;
             search_text(code, current, regex, cap, matches)
@@ -1230,7 +1311,8 @@ fn markdown_capped<'a>(
     // stay cacheable across appends.
     let last_base = block_ordinal_base(blocks.len() - 1);
     ctx.next_ordinal.set(last_base);
-    view.volatile_from.set(last_base);
+    view.volatile_from
+        .set(block_ordinal_base(view.parser.display_tail_start()));
     children.push(render_block(last, &ctx));
     if ctx.animate_streaming && view.streaming.get() {
         // Every element visible on the attach pass has synchronously adopted
@@ -1238,15 +1320,27 @@ fn markdown_capped<'a>(
         view.veil.borrow_mut().finish_frame();
     }
 
+    let element = div()
+        .w_full()
+        .min_w_0()
+        .flex()
+        .flex_col()
+        .gap(px(ctx.metrics.block_gap))
+        .children(children);
     Some(
-        div()
-            .w_full()
-            .min_w_0()
-            .flex()
-            .flex_col()
-            .gap(px(ctx.metrics.block_gap))
-            .children(children)
-            .into_any_element(),
+        if ctx.math_enabled
+            && ctx.wrap_math_menu
+            && let Some(menu) = &ctx.math_menu
+        {
+            context_menu(
+                element,
+                SharedString::from(format!("math-menu-{}", ctx.row)),
+                menu,
+                |_| Vec::new(),
+            )
+        } else {
+            element.into_any_element()
+        },
     )
 }
 
@@ -1282,6 +1376,32 @@ fn render_block(block: &Block, ctx: &Ctx) -> AnyElement {
                 .into_any_element()
         }
         Block::Image { url, alt } => render_image(url, alt, ctx),
+        Block::DisplayMath { latex } => {
+            let key = ctx.next_key();
+            let flat = ctx.flat(key.index, || {
+                let mut flat = flatten_plain(
+                    latex.clone(),
+                    MONO_FAMILY,
+                    FontWeight::NORMAL,
+                    ctx.palette.text,
+                );
+                flat.math = Some(Rc::new(math_text::MathData::new(vec![
+                    math_text::MathSpan {
+                        range: 0..latex.len(),
+                        latex: std::sync::Arc::from(latex.as_str()),
+                        display: true,
+                    },
+                ])));
+                flat
+            });
+            div()
+                .w_full()
+                .min_w_0()
+                .text_size(px(ctx.metrics.text_size))
+                .line_height(px(ctx.metrics.line_height))
+                .child(text_element(&flat, key, ctx))
+                .into_any_element()
+        }
         Block::CodeBlock { language, code } => render_code_block(language.as_deref(), code, ctx),
         Block::BlockQuote { children } => {
             let rendered = children
@@ -1528,6 +1648,7 @@ fn render_code_block(language: Option<&str>, code: &str, ctx: &Ctx) -> AnyElemen
             runs: code_runs(code, lang, &code_font, ctx.palette),
             links: Vec::new(),
             code_ranges: Vec::new(),
+            math: None,
         }
     });
     let label = language
@@ -1864,6 +1985,20 @@ mod tests {
 
     fn palette() -> Palette {
         Palette::from_theme(&Theme::dark())
+    }
+
+    #[test]
+    fn math_search_uses_the_same_source_ranges_and_ordinals_as_selection() {
+        let source = "before $x^2$ after\n\n$$x^2$$\n\n| Value |\n| --- |\n| $x^2$ |";
+        let (matches, limited) = markdown_search_matches(source, &Regex::new(r"x\^2").unwrap(), 20);
+        assert!(!limited);
+        assert_eq!(
+            matches
+                .iter()
+                .map(|found| (found.ordinal, found.range.clone()))
+                .collect::<Vec<_>>(),
+            vec![(0, 7..10), (1 << 16, 0..3), ((2 << 16) + 1, 0..3)]
+        );
     }
 
     fn runs_of(source: &str) -> Vec<InlineRun> {

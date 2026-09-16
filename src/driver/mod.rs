@@ -30,7 +30,6 @@ pub(crate) fn start_remote(
             binary: options.binary,
             cwd: options.cwd,
             mode: waku_client::encode_enum(options.mode)?,
-            interaction_mode: waku_client::encode_enum(options.interaction_mode)?,
             model: options.model,
             reasoning_effort: options.reasoning_effort,
             service_tier: options.service_tier,
@@ -234,8 +233,12 @@ impl RemoteDriverControl {
 }
 
 impl DriverControl for RemoteDriverControl {
-    fn prompt(&self, prompt: String) {
-        self.notify(waku_client::Command::Prompt { prompt });
+    fn prompt(&self, prompt: String, turn_id: Option<uuid::Uuid>, message_id: Option<uuid::Uuid>) {
+        self.notify(waku_client::Command::Prompt {
+            prompt,
+            turn_id,
+            message_id,
+        });
     }
 
     fn supports_steer(&self) -> bool {
@@ -316,7 +319,6 @@ impl DriverControl for RemoteDriverControl {
         let options = (|| {
             Ok::<_, anyhow::Error>(waku_client::WireSessionOptions {
                 mode: waku_client::encode_enum(options.mode)?,
-                interaction_mode: waku_client::encode_enum(options.interaction_mode)?,
                 model: options.model,
                 reasoning_effort: options.reasoning_effort,
                 service_tier: options.service_tier,

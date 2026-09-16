@@ -1,8 +1,7 @@
 //! OpenCode server lifecycle and native-session helpers.
 
-use std::io::{Read, Write};
-use std::net::{TcpListener, TcpStream};
-use std::path::Path;
+use std::net::TcpListener;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -11,7 +10,7 @@ use anyhow::{Context as _, anyhow, bail};
 use parking_lot::Mutex;
 use serde_json::{Value, json};
 
-use crate::model::ProviderResumeCursor;
+use crate::model::{ProviderKind, ProviderResumeCursor, ProviderSessionSummary};
 
 const SERVER_START_TIMEOUT: Duration = Duration::from_secs(10);
 const HTTP_TIMEOUT: Duration = Duration::from_secs(10);
@@ -24,6 +23,77 @@ const FORK_HTTP_TIMEOUT: Duration = Duration::from_secs(120);
 /// A startup probe caught there must give up quickly and retry — at the full
 /// `HTTP_TIMEOUT` one hung probe would eat the whole start budget.
 const HEALTH_PROBE_TIMEOUT: Duration = Duration::from_secs(1);
+
+/// Lists OpenCode's root sessions across every project, newest first.
+///
+/// ACP `session/list` is project-scoped: OpenCode resolves the request `cwd`,
+/// or the process cwd without one, to a project and lists only that project's
+/// sessions, so a catalog launched from Waku's isolated temp directory saw
+/// nothing but the "global" project. The server's `/experimental/session`
+/// route is the one cross-project listing OpenCode exposes, and each entry
+/// carries the directory the session was started in.
+pub fn list_provider_sessions(
+    binary: &Path,
+    limit: usize,
+) -> anyhow::Result<Vec<ProviderSessionSummary>> {
+    if limit == 0 {
+        return Ok(Vec::new());
+    }
+    let server = match crate::opencode_pool::any_live(binary) {
+        Some(server) => server,
+        None => crate::opencode_pool::acquire(
+            binary,
+            &crate::acp_session::catalog_working_directory()?,
+        )?,
+    };
+    let response = server.request(
+        "GET",
+        &format!("/experimental/session?roots=true&limit={limit}"),
+        None,
+    )?;
+    Ok(session_summaries(&response))
+}
+
+fn session_summaries(response: &Value) -> Vec<ProviderSessionSummary> {
+    response
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(session_summary)
+        .collect()
+}
+
+fn session_summary(session: &Value) -> Option<ProviderSessionSummary> {
+    let session_id = session.get("id")?.as_str()?.trim();
+    if session_id.is_empty() {
+        return None;
+    }
+    let cwd = PathBuf::from(session.get("directory")?.as_str()?);
+    if !cwd.is_absolute() {
+        return None;
+    }
+    let time = session.get("time");
+    let created_at = unix_seconds(time.and_then(|time| time.get("created")));
+    let updated_at = unix_seconds(time.and_then(|time| time.get("updated"))).max(created_at);
+    Some(ProviderSessionSummary {
+        cursor: ProviderResumeCursor::OpenCode {
+            session_id: session_id.to_owned(),
+        },
+        title: crate::acp_session::session_title(
+            ProviderKind::OpenCode,
+            session.get("title").and_then(Value::as_str),
+            session_id,
+        ),
+        cwd,
+        created_at,
+        updated_at,
+    })
+}
+
+/// OpenCode stamps sessions in Unix milliseconds; the catalog sorts in seconds.
+fn unix_seconds(value: Option<&Value>) -> u64 {
+    value.and_then(Value::as_u64).unwrap_or_default() / 1000
+}
 
 pub fn fork_session_at_turn(
     binary: &Path,
@@ -273,6 +343,9 @@ impl Drop for OpenCodeServer {
 /// Sends one request to a server identified by port alone. Readers that must
 /// not keep the server alive (they only unblock when it exits) hold the port
 /// instead of a handle and request through this.
+/// Sends one request to a server identified by port alone. Readers that must
+/// not keep the server alive (they only unblock when it exits) hold the port
+/// instead of a handle and request through this.
 pub(crate) fn request_json_on_port(
     port: u16,
     method: &str,
@@ -280,171 +353,13 @@ pub(crate) fn request_json_on_port(
     body: Option<&Value>,
     timeout: Duration,
 ) -> anyhow::Result<Value> {
-    let body = body.map(serde_json::to_vec).transpose()?;
-    let response = http_request(port, method, path, body.as_deref(), timeout)?;
-    // Some routes answer 204 No Content — `prompt_async` among them — and
-    // the status was already checked, so an empty success body is Null.
-    if response.iter().all(u8::is_ascii_whitespace) {
-        return Ok(Value::Null);
-    }
-    serde_json::from_slice(&response)
-        .with_context(|| format!("OpenCode returned invalid JSON for {method} {path}"))
-}
-
-fn http_request(
-    port: u16,
-    method: &str,
-    path: &str,
-    body: Option<&[u8]>,
-    timeout: Duration,
-) -> anyhow::Result<Vec<u8>> {
-    let mut stream = TcpStream::connect(("127.0.0.1", port))
-        .with_context(|| format!("could not connect to OpenCode on local port {port}"))?;
-    stream.set_read_timeout(Some(timeout))?;
-    stream.set_write_timeout(Some(timeout))?;
-    let body = body.unwrap_or_default();
-    write!(
-        stream,
-        "{method} {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nAccept: application/json\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-        body.len()
-    )?;
-    stream.write_all(body)?;
-    stream.flush()?;
-
-    let mut response = Vec::new();
-    let mut buffer = [0_u8; 8 * 1024];
-    loop {
-        // HTTP/1.1 connections are allowed to stay alive after a complete
-        // response, even when the client asks to close. Waiting for EOF made a
-        // valid OpenCode response end as macOS EAGAIN once the socket timeout
-        // elapsed. Stop at the protocol's own body boundary instead.
-        if http_response_is_complete(&response)? {
-            break;
-        }
-        let read = stream
-            .read(&mut buffer)
-            .with_context(|| format!("failed reading OpenCode response for {method} {path}"))?;
-        if read == 0 {
-            break;
-        }
-        response.extend_from_slice(&buffer[..read]);
-    }
-    parse_http_response(&response)
-}
-
-fn http_response_is_complete(response: &[u8]) -> anyhow::Result<bool> {
-    let Some(header_end) = response.windows(4).position(|window| window == b"\r\n\r\n") else {
-        return Ok(false);
-    };
-    let headers = std::str::from_utf8(&response[..header_end])?;
-    let body = &response[header_end + 4..];
-    if header_value(headers, "transfer-encoding").is_some_and(|value| {
-        value
-            .split(',')
-            .any(|encoding| encoding.trim().eq_ignore_ascii_case("chunked"))
-    }) {
-        return chunked_body_is_complete(body);
-    }
-    if let Some(length) = header_value(headers, "content-length") {
-        let length = length
-            .trim()
-            .parse::<usize>()
-            .context("OpenCode returned an invalid HTTP content length")?;
-        return Ok(body.len() >= length);
-    }
-
-    let status = headers
-        .lines()
-        .next()
-        .and_then(|line| line.split_whitespace().nth(1))
-        .and_then(|status| status.parse::<u16>().ok());
-    Ok(status.is_some_and(|status| matches!(status, 204 | 205 | 304)))
-}
-
-fn header_value<'a>(headers: &'a str, name: &str) -> Option<&'a str> {
-    headers.lines().skip(1).find_map(|line| {
-        let (header, value) = line.split_once(':')?;
-        header.eq_ignore_ascii_case(name).then_some(value.trim())
-    })
-}
-
-fn chunked_body_is_complete(mut input: &[u8]) -> anyhow::Result<bool> {
-    loop {
-        let Some(line_end) = input.windows(2).position(|window| window == b"\r\n") else {
-            return Ok(false);
-        };
-        let size_text = std::str::from_utf8(&input[..line_end])?
-            .split(';')
-            .next()
-            .unwrap_or_default();
-        let size = usize::from_str_radix(size_text.trim(), 16)
-            .context("OpenCode returned an invalid HTTP chunk size")?;
-        input = &input[line_end + 2..];
-        if size == 0 {
-            return Ok(true);
-        }
-        if input.len() < size + 2 {
-            return Ok(false);
-        }
-        if &input[size..size + 2] != b"\r\n" {
-            bail!("OpenCode returned an invalid chunked response");
-        }
-        input = &input[size + 2..];
-    }
-}
-
-fn parse_http_response(response: &[u8]) -> anyhow::Result<Vec<u8>> {
-    let Some(header_end) = response.windows(4).position(|window| window == b"\r\n\r\n") else {
-        bail!("OpenCode returned an invalid HTTP response");
-    };
-    let headers = std::str::from_utf8(&response[..header_end])?;
-    let status = headers
-        .lines()
-        .next()
-        .and_then(|line| line.split_whitespace().nth(1))
-        .and_then(|status| status.parse::<u16>().ok())
-        .ok_or_else(|| anyhow!("OpenCode returned an invalid HTTP status"))?;
-    let body = &response[header_end + 4..];
-    let body = if headers.lines().any(|line| {
-        line.eq_ignore_ascii_case("transfer-encoding: chunked")
-            || line
-                .to_ascii_lowercase()
-                .starts_with("transfer-encoding: chunked")
-    }) {
-        decode_chunked(body)?
-    } else {
-        body.to_vec()
-    };
-    if !(200..300).contains(&status) {
-        let detail = String::from_utf8_lossy(&body);
-        bail!("OpenCode session request failed with HTTP {status}: {detail}");
-    }
-    Ok(body)
-}
-
-fn decode_chunked(mut input: &[u8]) -> anyhow::Result<Vec<u8>> {
-    let mut output = Vec::new();
-    loop {
-        let Some(line_end) = input.windows(2).position(|window| window == b"\r\n") else {
-            bail!("OpenCode returned an invalid chunked response");
-        };
-        let size_text = std::str::from_utf8(&input[..line_end])?
-            .split(';')
-            .next()
-            .unwrap_or_default();
-        let size = usize::from_str_radix(size_text.trim(), 16)
-            .context("OpenCode returned an invalid HTTP chunk size")?;
-        input = &input[line_end + 2..];
-        if size == 0 {
-            break;
-        }
-        if input.len() < size + 2 || &input[size..size + 2] != b"\r\n" {
-            bail!("OpenCode returned a truncated HTTP chunk");
-        }
-        output.extend_from_slice(&input[..size]);
-        input = &input[size + 2..];
-    }
-    Ok(output)
+    crate::http_wire::request_json(
+        &crate::http_wire::Endpoint::local(port),
+        method,
+        path,
+        body,
+        timeout,
+    )
 }
 
 pub(crate) fn encode_path_segment(value: &str) -> String {
@@ -495,47 +410,6 @@ mod tests {
         })));
     }
 
-    #[test]
-    fn parses_content_length_and_chunked_http_responses() {
-        assert_eq!(
-            parse_http_response(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n{}").unwrap(),
-            b"{}"
-        );
-        assert_eq!(
-            parse_http_response(
-                b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n4\r\n{\"id\r\n4\r\n\":1}\r\n0\r\n\r\n"
-            )
-            .unwrap(),
-            b"{\"id\":1}"
-        );
-    }
-
-    #[test]
-    fn detects_complete_http_bodies_without_waiting_for_connection_close() {
-        assert!(
-            !http_response_is_complete(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n{").unwrap()
-        );
-        assert!(
-            http_response_is_complete(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n{}").unwrap()
-        );
-        assert!(
-            !http_response_is_complete(
-                b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n4\r\n{}"
-            )
-            .unwrap()
-        );
-        assert!(
-            http_response_is_complete(
-                b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n2\r\n{}\r\n0\r\n\r\n"
-            )
-            .unwrap()
-        );
-        assert!(
-            http_response_is_complete(b"HTTP/1.1 204 No Content\r\nConnection: keep-alive\r\n\r\n")
-                .unwrap()
-        );
-    }
-
     #[cfg(unix)]
     #[test]
     fn liveness_probe_reaps_an_exited_child() {
@@ -571,6 +445,71 @@ mod tests {
             "a TERM-responsive child should not consume the shutdown budget"
         );
         assert!(!server.is_alive());
+    }
+
+    #[test]
+    fn global_session_list_maps_root_sessions_across_projects() {
+        let catalog_root = std::env::temp_dir().join("waku-opencode-session-catalog");
+        let waku_directory = catalog_root.join("dev").join("waku");
+        let response = json!([
+            {
+                "id": "ses_waku",
+                "title": "Review and merge Waku PR #113",
+                "directory": waku_directory,
+                "time": { "created": 1_787_000_000_123_u64, "updated": 1_787_000_100_999_u64 },
+                "project": { "id": "prj_waku", "worktree": waku_directory }
+            },
+            {
+                "id": " ses_untitled ",
+                "directory": catalog_root,
+                "time": { "created": 1_786_000_000_000_u64 },
+                "project": { "id": "global", "worktree": catalog_root }
+            },
+            { "id": "ses_relative", "title": "skipped", "directory": "relative/dir" },
+            { "title": "no id", "directory": catalog_root },
+            { "id": "", "directory": catalog_root }
+        ]);
+
+        let sessions = session_summaries(&response);
+
+        assert_eq!(sessions.len(), 2, "{sessions:#?}");
+        assert_eq!(
+            sessions[0].cursor,
+            ProviderResumeCursor::OpenCode {
+                session_id: "ses_waku".into()
+            }
+        );
+        assert_eq!(sessions[0].title, "Review and merge Waku PR #113");
+        assert_eq!(sessions[0].cwd, waku_directory);
+        assert_eq!(sessions[0].created_at, 1_787_000_000);
+        assert_eq!(sessions[0].updated_at, 1_787_000_100);
+        assert_eq!(sessions[1].title, "OpenCode session ses_unti");
+        assert_eq!(sessions[1].cwd, catalog_root);
+        assert_eq!(sessions[1].updated_at, sessions[1].created_at);
+    }
+
+    #[test]
+    fn global_session_list_tolerates_a_non_array_response() {
+        assert!(session_summaries(&Value::Null).is_empty());
+        assert!(session_summaries(&json!({ "error": "nope" })).is_empty());
+    }
+
+    /// The catalog must come from OpenCode's cross-project store, not the
+    /// project the server happens to run in: every entry keeps its own
+    /// directory, and nothing is a subagent child.
+    #[test]
+    #[ignore = "requires an installed opencode"]
+    fn lists_sessions_across_projects_on_a_real_server() {
+        let binary =
+            crate::command_env::find_executable("opencode").expect("opencode is not installed");
+        let sessions = list_provider_sessions(&binary, 50).expect("the catalog should load");
+        assert!(sessions.iter().all(|session| session.cwd.is_absolute()));
+        assert!(
+            sessions
+                .windows(2)
+                .all(|pair| pair[0].updated_at >= pair[1].updated_at),
+            "OpenCode lists newest first"
+        );
     }
 
     /// Exercises the same cold-session path used when an edited message is

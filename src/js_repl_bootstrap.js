@@ -17,7 +17,7 @@
     }
   };
 
-  const nativeSkyCall = globalThis.__wakuSkyCall;
+  const nativeCuaCall = globalThis.__wakuCuaCall;
   const nativeWrite = globalThis.__wakuWrite;
   const nativeEmitImage = globalThis.__wakuEmitImage;
   const nativeSetResponseMeta = globalThis.__wakuSetResponseMeta;
@@ -27,7 +27,7 @@
   const cwd = globalThis.__wakuCwd;
   const homeDir = globalThis.__wakuHomeDir;
   const tmpDir = globalThis.__wakuTmpDir;
-  delete globalThis.__wakuSkyCall;
+  delete globalThis.__wakuCuaCall;
   delete globalThis.__wakuWrite;
   delete globalThis.__wakuEmitImage;
   delete globalThis.__wakuSetResponseMeta;
@@ -339,55 +339,52 @@
   globalThis.global = globalThis;
   globalThis.tmpDir = tmpDir;
 
-  const chromeComputerUseMetaKey = "codex/computerUseChrome";
-  const macChromeAppPathPattern = /(?:^|[\\/])Google Chrome\.app(?:[\\/]|$)/i;
-  const markChromeComputerUse = (arguments_) => {
-    if (typeof arguments_ !== "object" || arguments_ === null) return;
-    const descriptor = Object.getOwnPropertyDescriptor(arguments_, "app");
-    if (!descriptor || !("value" in descriptor) || typeof descriptor.value !== "string") return;
-    const app = descriptor.value.trim();
-    if (
-      ["chrome", "google chrome", "com.google.chrome"].includes(app.toLowerCase()) ||
-      macChromeAppPathPattern.test(app)
-    ) {
-      nativeSetResponseMeta(JSON.stringify({ [chromeComputerUseMetaKey]: true }));
-    }
-  };
-  const nativeCall = (name, arguments_ = {}) => {
-    if (name !== "list_apps") markChromeComputerUse(arguments_);
-    const envelope = JSON.parse(nativeSkyCall(name, JSON.stringify(arguments_ ?? {})));
-    if (!envelope.ok) throw new Error(envelope.error || `Computer Use ${name} failed`);
+  const computerPlatform = globalThis.__wakuComputerPlatform;
+  const nativeCall = (method, arguments_ = {}) => {
+    const envelope = JSON.parse(nativeCuaCall(method, JSON.stringify(arguments_)));
+    if (!envelope.ok) throw new Error(envelope.error || "Cua Driver connection failed");
     return envelope.value;
   };
-  const computerUseRuntimeKey = Symbol.for("openai.computer-use.runtime");
+  const computerUseRuntimeKey = Symbol.for("waku.cua-driver.runtime");
   globalThis.setupComputerUseRuntime = async ({ globals = globalThis } = {}) => {
-    let sky = globalThis[computerUseRuntimeKey];
-    if (!sky) {
-      sky = Object.freeze({
-        target: "mac",
-        list_apps: async () => nativeCall("list_apps"),
-        get_app_state: async (arguments_ = {}) => nativeCall("get_app_state", arguments_),
-        click: async (arguments_) => { nativeCall("click", arguments_); },
-        drag: async (arguments_) => { nativeCall("drag", arguments_); },
-        perform_secondary_action: async (arguments_) => { nativeCall("perform_secondary_action", arguments_); },
-        set_value: async (arguments_) => { nativeCall("set_value", arguments_); },
-        select_text: async (arguments_) => { nativeCall("select_text", arguments_); },
-        scroll: async (arguments_) => { nativeCall("scroll", arguments_); },
-        press_key: async (arguments_) => { nativeCall("press_key", arguments_); },
-        type_text: async (arguments_) => { nativeCall("type_text", arguments_); },
+    let cua = globalThis[computerUseRuntimeKey];
+    if (!cua) {
+      const callTool = async (name, arguments_ = {}) => {
+        if (typeof name !== "string" || !name.trim()) throw new TypeError("Cua tool name is required");
+        if (typeof arguments_ !== "object" || arguments_ === null || Array.isArray(arguments_)) {
+          throw new TypeError("Cua tool arguments must be an object");
+        }
+        return nativeCall("tools/call", { name, arguments: arguments_ });
+      };
+      const api = Object.assign(Object.create(null), {
+        platform: computerPlatform,
       });
-      Object.defineProperty(globalThis, computerUseRuntimeKey, { value: sky });
+      // Discover once when the runtime is initialized, so every native tool
+      // is directly callable without maintaining a separate platform allowlist.
+      const catalog = nativeCall("tools/list");
+      for (const { name } of catalog.tools) {
+        if (name === "bring_to_front") continue;
+        if (typeof name !== "string" || !name.trim() || name in api || name === "then") {
+          throw new TypeError(`Invalid Cua tool name: ${name}`);
+        }
+        Object.defineProperty(api, name, {
+          enumerable: true,
+          value: (arguments_ = {}) => callTool(name, arguments_),
+        });
+      }
+      cua = Object.freeze(api);
+      Object.defineProperty(globalThis, computerUseRuntimeKey, { value: cua });
     }
-    Reflect.set(globalThis, "sky", sky);
-    Reflect.set(globals, "sky", sky);
-    return sky;
+    Reflect.set(globalThis, "cua", cua);
+    Reflect.set(globals, "cua", cua);
+    return cua;
   };
 
   let requestMeta = Object.freeze({});
   globalThis.__wakuSetRequestMeta = (meta) => {
     requestMeta = Object.freeze(meta ?? {});
   };
-  globalThis.nodeRepl = Object.freeze({
+  globalThis.jsRepl = Object.freeze({
     cwd,
     env: Object.freeze({}),
     homeDir,
@@ -399,9 +396,11 @@
       if (!envelope.ok) throw new TypeError(envelope.error || "response metadata must be an object");
     },
     emitImage: async (imageLike) => {
-      const candidate = typeof imageLike === "string" ? imageLike : imageLike?.url;
+      const candidate = typeof imageLike === "string" ? imageLike
+        : imageLike?.type === "image" && typeof imageLike.data === "string" && typeof imageLike.mimeType === "string"
+          ? `data:${imageLike.mimeType};base64,${imageLike.data}` : imageLike?.url;
       if (typeof candidate !== "string") {
-        throw new TypeError("emitImage expects a data URL, file URL, or { url } object");
+        throw new TypeError("emitImage expects a data URL, file URL, { url }, or Cua image content block");
       }
       const envelope = JSON.parse(nativeEmitImage(candidate));
       if (!envelope.ok) throw new Error(envelope.error || "could not emit image");

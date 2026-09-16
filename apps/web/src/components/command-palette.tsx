@@ -1,18 +1,28 @@
-import type { AgentSession, SessionMessageMatch } from '@waku/client'
+import type { AgentSession, ProviderKind, ProviderSessionSummary, SessionMessageMatch } from '@waku/client'
 import { useEffect, useRef, useState } from 'react'
-import { ProviderIcon, WakuIcon, type WakuIconName } from '@/components/waku-icon'
+import { toast } from 'sonner'
+import { ProviderIcon, PROVIDERS, providerMeta, WakuIcon, type WakuIconName } from '@/components/waku-icon'
 import type { SettingsPageId } from '@/components/settings-view'
 import { SETTINGS_PAGES } from '@/components/settings-view'
-import { displayTitle, searchSessionMessages, type TaskState } from '@/lib/daemon-api'
+import {
+  displayTitle,
+  listProviderSessions,
+  providerSessionNativeId,
+  sameProviderSession,
+  searchSessionMessages,
+  type TaskState,
+} from '@/lib/daemon-api'
 import { useDaemon } from '@/lib/daemon-context'
+import { useDaemonSettings } from '@/hooks/use-daemon-data'
 import { useI18n } from '@/lib/i18n'
 import { fuzzyScore, shouldKeepPreviousPaletteItems } from '@/lib/palette-search'
 import { useMacLikePlatform } from '@/lib/platform'
 import { projectDisplayName } from '@/lib/project-presentation'
-import { sessionHasStarted } from '@/lib/sidebar-presentation'
+import { formatTimeAgo, sessionHasStarted } from '@/lib/sidebar-presentation'
 import { cn } from '@/lib/utils'
 
-type PaletteSection = 'suggested' | 'tasks' | 'commands' | 'settings'
+type PaletteSection = 'suggested' | 'tasks' | 'sessions' | 'providers' | 'commands' | 'settings'
+export type CommandPaletteView = 'commands' | 'resume' | 'resumeProviders'
 type Translator = (key: string, params?: Record<string, string | number>) => string
 
 interface PaletteItem {
@@ -24,8 +34,10 @@ interface PaletteItem {
   icon?: WakuIconName
   provider?: AgentSession['provider']
   shortcut?: string
+  pending?: boolean
+  closeOnRun?: boolean
   keywords: string
-  run: () => void
+  run: () => void | Promise<void>
 }
 
 export interface CommandPaletteActions {
@@ -38,6 +50,7 @@ export interface CommandPaletteActions {
   toggleRightPanel: () => void
   openSettings: (page: SettingsPageId) => void
   selectTask: (sessionId: string) => void
+  resumeProviderSession: (summary: ProviderSessionSummary) => Promise<void>
 }
 
 export function CommandPalette({
@@ -48,6 +61,8 @@ export function CommandPalette({
   rightPanelVisible,
   canChooseModel,
   canToggleUsage,
+  currentProvider,
+  initialView = 'commands',
   actions,
   onOpenChange,
 }: {
@@ -58,18 +73,28 @@ export function CommandPalette({
   rightPanelVisible: boolean
   canChooseModel: boolean
   canToggleUsage: boolean
+  currentProvider: ProviderKind
+  initialView?: CommandPaletteView
   actions: CommandPaletteActions
   onOpenChange: (open: boolean) => void
 }) {
   const { t } = useI18n()
   const { client } = useDaemon()
+  const settings = useDaemonSettings()
+  const [view, setView] = useState<CommandPaletteView>(initialView)
+  const [resumeProvider, setResumeProvider] = useState<ProviderKind>(currentProvider)
   const [query, setQuery] = useState('')
   const [matches, setMatches] = useState<SessionMessageMatch[]>([])
   const [matchesQuery, setMatchesQuery] = useState<string | null>(null)
   const [searchPending, setSearchPending] = useState(false)
+  const [providerSessions, setProviderSessions] = useState<ProviderSessionSummary[]>([])
+  const [providerSessionsPending, setProviderSessionsPending] = useState(false)
+  const [providerSessionError, setProviderSessionError] = useState<string | null>(null)
+  const [providerSessionImport, setProviderSessionImport] = useState<string | null>(null)
   const [previousItems, setPreviousItems] = useState<PaletteItem[]>([])
   const [selected, setSelected] = useState(0)
   const input = useRef<HTMLInputElement>(null)
+  const resumeProviderButton = useRef<HTMLButtonElement>(null)
   const previousFocus = useRef<HTMLElement | null>(null)
   const messageSearchCache = useRef(new Map<string, SessionMessageMatch[]>())
   const macShortcuts = useMacLikePlatform()
@@ -88,18 +113,24 @@ export function CommandPalette({
     previousFocus.current = document.activeElement instanceof HTMLElement
       ? document.activeElement
       : null
+    setView(initialView)
+    setResumeProvider(currentProvider)
     setQuery('')
     setMatches([])
     setMatchesQuery(null)
     setSearchPending(false)
+    setProviderSessions([])
+    setProviderSessionsPending(initialView === 'resume')
+    setProviderSessionError(null)
+    setProviderSessionImport(null)
     setPreviousItems([])
     setSelected(0)
     messageSearchCache.current.clear()
     requestAnimationFrame(() => input.current?.focus())
-  }, [open])
+  }, [currentProvider, initialView, open])
 
   useEffect(() => {
-    if (!open || !client || !query.trim()) {
+    if (!open || view !== 'commands' || !client || !query.trim()) {
       setMatchesQuery(null)
       setSearchPending(false)
       return
@@ -140,26 +171,127 @@ export function CommandPalette({
       current = false
       window.clearTimeout(timer)
     }
-  }, [client, open, query])
+  }, [client, open, query, view])
 
-  const nextItems = buildItems({
-    taskState,
-    query,
-    matches: matchesQuery === query.trim() ? matches : [],
-    selectedSessionId,
-    sidebarVisible,
-    rightPanelVisible,
-    canChooseModel,
-    canToggleUsage,
-    macShortcuts,
-    actions,
-    t,
-  })
-  const items = shouldKeepPreviousPaletteItems(
+  useEffect(() => {
+    if (!open || view !== 'resume') return
+    if (!client) {
+      setProviderSessions([])
+      setProviderSessionsPending(false)
+      setProviderSessionError('The daemon is disconnected')
+      return
+    }
+    let current = true
+    setProviderSessions([])
+    setProviderSessionsPending(true)
+    setProviderSessionError(null)
+    void listProviderSessions(client, resumeProvider)
+      .then((sessions) => {
+        if (!current) return
+        setProviderSessions(sessions)
+        setProviderSessionsPending(false)
+      })
+      .catch((error) => {
+        if (!current) return
+        setProviderSessions([])
+        setProviderSessionsPending(false)
+        setProviderSessionError(errorMessage(error))
+      })
+    return () => {
+      current = false
+    }
+  }, [client, open, resumeProvider, view])
+
+  function openResumeView() {
+    setResumeProvider(currentProvider)
+    setView('resume')
+    setQuery('')
+    setPreviousItems([])
+    setSelected(0)
+    setProviderSessionsPending(true)
+    setProviderSessionError(null)
+    setProviderSessionImport(null)
+  }
+
+  function openResumeProviderView() {
+    setView('resumeProviders')
+    setQuery('')
+    setPreviousItems([])
+    setSelected(0)
+    requestAnimationFrame(() => input.current?.focus())
+  }
+
+  function selectResumeProvider(provider: ProviderKind) {
+    setResumeProvider(provider)
+    setView('resume')
+    setQuery('')
+    setProviderSessions([])
+    setProviderSessionsPending(true)
+    setProviderSessionError(null)
+    setProviderSessionImport(null)
+    setPreviousItems([])
+    setSelected(0)
+    requestAnimationFrame(() => input.current?.focus())
+  }
+
+  async function resumeProviderSession(summary: ProviderSessionSummary) {
+    if (providerSessionImport) return
+    const identity = providerSessionNativeId(summary.cursor)
+    setProviderSessionImport(`${summary.cursor.provider}:${identity}`)
+    setProviderSessionError(null)
+    try {
+      await actions.resumeProviderSession(summary)
+      restorePreviousFocus()
+      onOpenChange(false)
+    } catch (error) {
+      const message = errorMessage(error)
+      setProviderSessionError(message)
+      toast.error(t('command_palette.resume_failed', { error: message }))
+    } finally {
+      setProviderSessionImport(null)
+    }
+  }
+
+  const selectableResumeProviders = PROVIDERS.filter(({ id }) =>
+    id === resumeProvider || !settings.data?.disabled_providers.includes(id))
+  const nextItems = view === 'resume'
+    ? buildResumeItems({
+        taskState,
+        query,
+        sessions: providerSessions,
+        importing: providerSessionImport,
+        resume: (summary) => resumeProviderSession(summary),
+      })
+    : view === 'resumeProviders'
+      ? buildResumeProviderItems({
+          query,
+          providers: selectableResumeProviders.map(({ id }) => id),
+          current: resumeProvider,
+          select: selectResumeProvider,
+          t,
+        })
+    : buildItems({
+        taskState,
+        query,
+        matches: matchesQuery === query.trim() ? matches : [],
+        selectedSessionId,
+        sidebarVisible,
+        rightPanelVisible,
+        canChooseModel,
+        canToggleUsage,
+        macShortcuts,
+        actions,
+        openResume: openResumeView,
+        t,
+      })
+  const items = view === 'commands' && shouldKeepPreviousPaletteItems(
     nextItems.length,
     searchPending,
     previousItems.length,
   ) ? previousItems : nextItems
+  const resultsPending = view === 'resume'
+    ? providerSessionsPending
+    : view === 'commands' && searchPending
 
   useEffect(() => setSelected((current) => Math.min(current, Math.max(0, items.length - 1))), [items.length])
   if (!open) return null
@@ -167,14 +299,42 @@ export function CommandPalette({
   function execute(index = selected) {
     const item = items[index]
     if (!item) return
+    if (item.closeOnRun === false) {
+      void item.run()
+      return
+    }
     restorePreviousFocus()
     onOpenChange(false)
-    item.run()
+    void item.run()
   }
 
   function dismiss() {
     restorePreviousFocus()
     onOpenChange(false)
+  }
+
+  function escape() {
+    if (view === 'resumeProviders') {
+      setView('resume')
+      setQuery('')
+      setProviderSessions([])
+      setProviderSessionsPending(true)
+      setProviderSessionError(null)
+      setSelected(0)
+      requestAnimationFrame(() => input.current?.focus())
+      return
+    }
+    if (view === 'resume') {
+      setView('commands')
+      setQuery('')
+      setProviderSessions([])
+      setProviderSessionsPending(false)
+      setProviderSessionError(null)
+      setProviderSessionImport(null)
+      setSelected(0)
+      return
+    }
+    dismiss()
   }
 
   return (
@@ -192,10 +352,18 @@ export function CommandPalette({
           <input
             aria-activedescendant={items[selected] ? `palette-${items[selected]!.id}` : undefined}
             aria-controls="command-palette-results"
-            aria-label={t('command_palette.placeholder')}
+            aria-label={t(view === 'resume'
+              ? 'command_palette.resume_placeholder'
+              : view === 'resumeProviders'
+                ? 'command_palette.resume_provider_placeholder'
+                : 'command_palette.placeholder')}
             autoComplete="off"
             className="h-full min-w-0 flex-1 bg-transparent text-[15.5px] outline-none placeholder:text-[var(--text-ghost)]"
-            placeholder={t('command_palette.placeholder')}
+            placeholder={t(view === 'resume'
+              ? 'command_palette.resume_placeholder'
+              : view === 'resumeProviders'
+                ? 'command_palette.resume_provider_placeholder'
+                : 'command_palette.placeholder')}
             ref={input}
             role="combobox"
             value={query}
@@ -203,10 +371,15 @@ export function CommandPalette({
               const nextQuery = event.target.value
               setPreviousItems(items)
               setQuery(nextQuery)
-              setSearchPending(Boolean(client && nextQuery.trim()))
+              setSearchPending(view === 'commands' && Boolean(client && nextQuery.trim()))
               setSelected(0)
             }}
             onKeyDown={(event) => {
+              if (event.key === 'Tab' && view === 'resume' && !resultsPending) {
+                event.preventDefault()
+                resumeProviderButton.current?.focus()
+                return
+              }
               const page = event.key === 'PageDown' ? 7 : event.key === 'PageUp' ? -7 : 0
               if (event.key === 'ArrowDown' || (event.ctrlKey && event.key === 'n') || event.key === 'Tab' && !event.shiftKey) {
                 event.preventDefault()
@@ -228,18 +401,73 @@ export function CommandPalette({
                 execute()
               } else if (event.key === 'Escape') {
                 event.preventDefault()
-                dismiss()
+                escape()
               }
             }}
           />
+          {view === 'resume' && (resultsPending ? (
+            <div className="ml-3 flex h-8 shrink-0 items-center gap-2 px-2.5 text-[12px] text-[var(--text-secondary)]">
+              <ProviderIcon className="size-3.5" provider={resumeProvider} />
+              <span>{providerMeta(resumeProvider).name}</span>
+            </div>
+          ) : (
+            <button
+              aria-label={`${t('command_palette.change_provider')}: ${providerMeta(resumeProvider).name}`}
+              className="ml-3 flex h-8 shrink-0 items-center gap-2 rounded-lg border px-2.5 text-[12px] text-[var(--text-secondary)] outline-none hover:bg-accent focus-visible:ring-2 focus-visible:ring-ring"
+              ref={resumeProviderButton}
+              type="button"
+              onClick={openResumeProviderView}
+              onKeyDown={(event) => {
+                if (event.key === 'Escape') {
+                  event.preventDefault()
+                  input.current?.focus()
+                } else if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+                  event.preventDefault()
+                  input.current?.focus()
+                }
+              }}
+            >
+              <ProviderIcon className="size-3.5" provider={resumeProvider} />
+              <span>{providerMeta(resumeProvider).shortName}</span>
+              <WakuIcon className="size-3 text-[var(--text-tertiary)]" name="chevronDown" />
+            </button>
+          ))}
         </div>
         <div className="min-h-0 overflow-y-auto px-2 pb-2" id="command-palette-results" role="listbox">
-          {!items.length && !searchPending ? (
+          {!items.length ? (
             <div className="grid h-[180px] place-items-center text-center">
               <div>
-                <WakuIcon className="mx-auto size-[18px] text-[var(--text-ghost)]" name="search" />
-                <div className="mt-3 text-[13px] font-medium text-[var(--text-secondary)]">{t('command_palette.no_results')}</div>
-                <div className="mt-[5px] text-[11.5px] text-[var(--text-tertiary)]">{t('command_palette.no_results_hint')}</div>
+                <WakuIcon
+                  className={cn(
+                    'mx-auto size-[18px] text-[var(--text-ghost)]',
+                    view === 'resume' && resultsPending && 'animate-spin motion-reduce:animate-none',
+                  )}
+                  name={view === 'resume' && resultsPending
+                    ? 'loaderCircle'
+                    : view === 'resume' && providerSessionError ? 'alert' : 'search'}
+                />
+                <div className="mt-3 text-[13px] font-medium text-[var(--text-secondary)]">
+                  {view === 'resume' && resultsPending
+                    ? t('command_palette.loading_sessions')
+                    : view === 'resume' && providerSessionError
+                      ? t('command_palette.could_not_load_sessions')
+                      : t(view === 'resume'
+                          ? 'command_palette.no_resume_sessions'
+                          : view === 'resumeProviders'
+                            ? 'command_palette.no_matching_providers'
+                            : 'command_palette.no_results')}
+                </div>
+                {!(view === 'resume' && resultsPending) && (
+                  <div className="mt-[5px] text-[11.5px] text-[var(--text-tertiary)]">
+                    {view === 'resume' && providerSessionError
+                      ? providerSessionError
+                      : view === 'resumeProviders'
+                        ? null
+                        : t(view === 'resume'
+                            ? 'command_palette.no_resume_sessions_hint'
+                            : 'command_palette.no_results_hint')}
+                  </div>
+                )}
               </div>
             </div>
           ) : (
@@ -271,8 +499,8 @@ function PaletteRows({
     const header = section !== item.section
     section = item.section
     return (
-      <div key={item.id}>
-        {header && (
+      <div className={cn(header && item.section === 'providers' && 'pt-2')} key={item.id}>
+        {header && item.section !== 'providers' && (
           <div className="flex h-[30px] items-center px-[9px] pt-2.5 text-[11px] font-medium text-[var(--text-tertiary)]">
             {t(`command_palette.${item.section}`)}
           </div>
@@ -291,7 +519,9 @@ function PaletteRows({
           onMouseEnter={() => onSelected(index)}
         >
           <span className="grid size-5 shrink-0 place-items-center text-[var(--text-secondary)]">
-            {item.provider
+            {item.pending
+              ? <WakuIcon className="size-4 animate-spin motion-reduce:animate-none" name="loaderCircle" />
+              : item.provider
               ? <ProviderIcon className="size-4" provider={item.provider} />
               : item.icon && <WakuIcon className="size-4" name={item.icon} />}
           </span>
@@ -337,6 +567,7 @@ function buildItems({
   canToggleUsage,
   macShortcuts,
   actions,
+  openResume,
   t,
 }: {
   taskState: TaskState
@@ -349,13 +580,18 @@ function buildItems({
   canToggleUsage: boolean
   macShortcuts: boolean
   actions: CommandPaletteActions
+  openResume: () => void
   t: Translator
-}) {
+}): PaletteItem[] {
   const searching = Boolean(query.trim())
   const commandSection: PaletteSection = searching ? 'commands' : 'suggested'
   const shortcut = (mac: string, other: string) => macShortcuts ? mac : other
   const commands: PaletteItem[] = [
     command('new-task', commandSection, t('command_palette.new_task'), 'pencil', shortcut('⌘N', 'Ctrl+N'), `new task session chat conversation start ${t('command_palette.new_task')}`, actions.newTask),
+    {
+      ...command('resume', commandSection, t('command_palette.resume'), 'rotateCw', undefined, `resume continue restore import external terminal cli session conversation ${t('command_palette.resume')}`, openResume),
+      closeOnRun: false,
+    },
     command('open-project', commandSection, t('command_palette.open_project'), 'folder', shortcut('⌘O', 'Ctrl+O'), `open add folder project workspace repository repo ${t('command_palette.open_project')}`, actions.openProject),
   ]
   if (canChooseModel) commands.push(command('choose-model', commandSection, t('command_palette.choose_model'), 'bot', shortcut('⌘/', 'Ctrl+/'), `choose change select model provider agent ${t('command_palette.choose_model')}`, actions.chooseModel))
@@ -421,6 +657,8 @@ function buildItems({
 
   const sectionRank: Record<PaletteSection, number> = {
     tasks: 0,
+    sessions: 0,
+    providers: 0,
     commands: 1,
     suggested: 1,
     settings: 2,
@@ -443,6 +681,101 @@ function buildItems({
   ]
 }
 
+function buildResumeProviderItems({
+  query,
+  providers,
+  current,
+  select,
+  t,
+}: {
+  query: string
+  providers: ProviderKind[]
+  current: ProviderKind
+  select: (provider: ProviderKind) => void
+  t: Translator
+}): PaletteItem[] {
+  const normalized = query.trim()
+  return providers
+    .map((provider, order) => {
+      const meta = providerMeta(provider)
+      const keywords = `${meta.name} ${meta.shortName} ${meta.command} provider agent cli`
+      return {
+        score: normalized ? fuzzyScore(normalized, keywords) : 0,
+        order,
+        item: {
+          id: `resume-provider-${provider}`,
+          section: 'providers' as const,
+          label: meta.name,
+          detail: provider === current ? t('command_palette.current_provider') : undefined,
+          provider,
+          closeOnRun: false,
+          keywords,
+          run: () => select(provider),
+        },
+      }
+    })
+    .filter((candidate): candidate is typeof candidate & { score: number } =>
+      candidate.score !== null)
+    .sort((left, right) => normalized
+      ? right.score - left.score || left.order - right.order
+      : left.order - right.order)
+    .map(({ item }) => item)
+}
+
+function buildResumeItems({
+  taskState,
+  query,
+  sessions,
+  importing,
+  resume,
+}: {
+  taskState: TaskState
+  query: string
+  sessions: ProviderSessionSummary[]
+  importing: string | null
+  resume: (summary: ProviderSessionSummary) => Promise<void>
+}): PaletteItem[] {
+  const normalized = query.trim()
+  const now = Math.floor(Date.now() / 1_000)
+  return sessions
+    .filter((summary) => !taskState.sessions.some((session) =>
+      session.provider_cursor
+        ? sameProviderSession(session.provider_cursor, summary.cursor)
+        : false))
+    .map((summary, order) => {
+      const provider = providerMeta(summary.cursor.provider)
+      const nativeId = providerSessionNativeId(summary.cursor)
+      const identity = `${summary.cursor.provider}:${nativeId}`
+      const keywords = `${summary.title} ${summary.cwd} ${provider.shortName} ${provider.name} ${nativeId} resume continue terminal cli session conversation`
+      return {
+        summary,
+        order,
+        score: normalized ? fuzzyScore(normalized, keywords) : 0,
+        item: {
+          id: `provider-session-${identity}`,
+          section: 'sessions' as const,
+          label: summary.title,
+          detail: `${provider.shortName} · ${summary.cwd} · ${formatTimeAgo(Math.max(0, now - summary.updated_at))}`,
+          provider: summary.cursor.provider,
+          pending: importing === identity,
+          closeOnRun: false,
+          keywords,
+          run: () => resume(summary),
+        },
+      }
+    })
+    .filter((candidate): candidate is typeof candidate & { score: number } =>
+      candidate.score !== null)
+    .sort((left, right) => normalized
+      ? right.score - left.score
+        || right.summary.updated_at - left.summary.updated_at
+        || left.order - right.order
+      : right.summary.updated_at - left.summary.updated_at
+        || left.order - right.order)
+    .slice(0, 30)
+    .map(({ item }) => item)
+}
+
 function command(
   id: string,
   section: PaletteSection,
@@ -453,4 +786,8 @@ function command(
   run: () => void,
 ): PaletteItem {
   return { id, section, label, icon, shortcut, keywords, run }
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error)
 }

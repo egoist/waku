@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 use std::fs::{self, OpenOptions};
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read as _, Seek as _, SeekFrom, Write};
 #[cfg(unix)]
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
@@ -12,7 +12,13 @@ use chrono::{SecondsFormat, Utc};
 use serde_json::{Map, Value, json};
 use uuid::Uuid;
 
+use crate::model::{
+    AgentTurn, Message, MessageRole, ProviderResumeCursor, ProviderSessionHistory,
+    ProviderSessionSummary, TurnStatus,
+};
+
 const TRANSCRIPT_TYPES: [&str; 5] = ["user", "assistant", "attachment", "system", "progress"];
+const SUMMARY_EDGE_BYTES: u64 = 256 * 1024;
 
 pub struct ForkedClaudeSession {
     pub session_id: String,
@@ -38,6 +44,25 @@ pub fn fork_session_at(
     title: &str,
 ) -> anyhow::Result<ForkedClaudeSession> {
     fork_session_at_in(&projects_directory()?, session_id, up_to_message_id, title)
+}
+
+/// List Claude Code conversations that can be resumed by session ID.
+///
+/// Claude keeps one JSONL file per top-level conversation directly beneath a
+/// project directory. Sub-agent transcripts live deeper and are deliberately
+/// excluded, matching the interactive `/resume` picker.
+pub fn list_provider_sessions(limit: usize) -> anyhow::Result<Vec<ProviderSessionSummary>> {
+    list_provider_sessions_in(&projects_directory()?, limit)
+}
+
+/// Import the visible text of one Claude Code conversation. The native JSONL
+/// remains the source of truth and the returned cursor continues that exact
+/// conversation on the next Waku prompt.
+pub fn provider_session_history(
+    session_id: &str,
+    turn_limit: usize,
+) -> anyhow::Result<ProviderSessionHistory> {
+    provider_session_history_in(&projects_directory()?, session_id, turn_limit)
 }
 
 fn projects_directory() -> anyhow::Result<PathBuf> {
@@ -80,6 +105,494 @@ fn read_entries(path: &Path) -> anyhow::Result<Vec<Value>> {
         .map_while(Result::ok)
         .filter_map(|line| serde_json::from_str::<Value>(&line).ok())
         .collect())
+}
+
+fn compact_import_entry(value: Value) -> Option<Value> {
+    let entry = value.as_object()?;
+    let kind = entry.get("type").and_then(Value::as_str)?;
+    if !TRANSCRIPT_TYPES.contains(&kind) {
+        return None;
+    }
+    let mut compact = Map::new();
+    for key in [
+        "type",
+        "uuid",
+        "parentUuid",
+        "isSidechain",
+        "isMeta",
+        "timestamp",
+    ] {
+        if let Some(value) = entry.get(key) {
+            compact.insert(key.to_owned(), value.clone());
+        }
+    }
+    if matches!(kind, "user" | "assistant")
+        && let Some(content) = entry
+            .get("message")
+            .and_then(|message| message.get("content"))
+    {
+        let compact_content = match content {
+            Value::String(text) => Value::String(text.clone()),
+            Value::Array(blocks) if kind == "user" => {
+                if blocks
+                    .iter()
+                    .any(|block| block.get("type").and_then(Value::as_str) == Some("tool_result"))
+                {
+                    json!([{ "type": "tool_result" }])
+                } else {
+                    let mut text = blocks
+                        .iter()
+                        .filter(|block| block.get("type").and_then(Value::as_str) == Some("text"))
+                        .filter_map(|block| {
+                            block
+                                .get("text")
+                                .and_then(Value::as_str)
+                                .map(|text| json!({"type": "text", "text": text}))
+                        })
+                        .collect::<Vec<_>>();
+                    if text.is_empty() && !blocks.is_empty() {
+                        // Preserve a non-text user input as a real turn without
+                        // retaining its potentially large image payload.
+                        text.push(json!({"type": "input"}));
+                    }
+                    Value::Array(text)
+                }
+            }
+            Value::Array(blocks) => Value::Array(
+                blocks
+                    .iter()
+                    .filter(|block| block.get("type").and_then(Value::as_str) == Some("text"))
+                    .filter_map(|block| {
+                        block
+                            .get("text")
+                            .and_then(Value::as_str)
+                            .map(|text| json!({"type": "text", "text": text}))
+                    })
+                    .collect(),
+            ),
+            _ => Value::Null,
+        };
+        compact.insert("message".into(), json!({"content": compact_content}));
+    }
+    Some(Value::Object(compact))
+}
+
+fn read_import_entries(path: &Path) -> anyhow::Result<Vec<Value>> {
+    let file = fs::File::open(path)
+        .with_context(|| format!("could not open Claude session {}", path.display()))?;
+    Ok(serde_json::Deserializer::from_reader(BufReader::new(file))
+        .into_iter::<Value>()
+        .filter_map(Result::ok)
+        .filter_map(compact_import_entry)
+        .collect())
+}
+
+/// Read bounded metadata windows from a native transcript. Titles and the
+/// first prompt live near the front, while custom renames are commonly near
+/// the tail; catalog discovery must not deserialize hundreds of full, often
+/// multi-megabyte conversations just to draw a picker row.
+fn read_summary_entries(path: &Path) -> anyhow::Result<Vec<Value>> {
+    let mut file = fs::File::open(path)
+        .with_context(|| format!("could not open Claude session {}", path.display()))?;
+    let len = file.metadata().map(|metadata| metadata.len()).unwrap_or(0);
+    let mut windows = Vec::new();
+    if len <= SUMMARY_EDGE_BYTES * 2 {
+        file.read_to_end(&mut windows)?;
+    } else {
+        std::io::Read::by_ref(&mut file)
+            .take(SUMMARY_EDGE_BYTES)
+            .read_to_end(&mut windows)?;
+        file.seek(SeekFrom::Start(len - SUMMARY_EDGE_BYTES))?;
+        let mut tail = Vec::with_capacity(SUMMARY_EDGE_BYTES as usize);
+        file.read_to_end(&mut tail)?;
+        windows.push(b'\n');
+        windows.extend(tail);
+    }
+    Ok(windows
+        .split(|byte| *byte == b'\n')
+        .filter_map(|line| serde_json::from_slice::<Value>(line).ok())
+        .collect())
+}
+
+fn modified_at(path: &Path) -> u64 {
+    path.metadata()
+        .ok()
+        .and_then(|metadata| metadata.modified().ok())
+        .and_then(|modified| modified.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|elapsed| elapsed.as_secs())
+        .unwrap_or_default()
+}
+
+fn entry_timestamp(entry: &Map<String, Value>) -> Option<u64> {
+    let timestamp = entry.get("timestamp").and_then(Value::as_str)?;
+    chrono::DateTime::parse_from_rfc3339(timestamp)
+        .ok()
+        .and_then(|timestamp| u64::try_from(timestamp.timestamp()).ok())
+}
+
+fn message_text(entry: &Map<String, Value>) -> Option<String> {
+    let content = entry
+        .get("message")
+        .and_then(|message| message.get("content"))?;
+    let text = match content {
+        Value::String(text) => text.clone(),
+        Value::Array(blocks) => blocks
+            .iter()
+            .filter(|block| block.get("type").and_then(Value::as_str) == Some("text"))
+            .filter_map(|block| block.get("text").and_then(Value::as_str))
+            .collect::<Vec<_>>()
+            .join("\n\n"),
+        _ => return None,
+    };
+    (!text.trim().is_empty()).then_some(text)
+}
+
+fn title_from_prompt(prompt: &str) -> Option<String> {
+    let mut title = prompt
+        .split_whitespace()
+        .take(7)
+        .collect::<Vec<_>>()
+        .join(" ");
+    if title.is_empty() {
+        return None;
+    }
+    if title.chars().count() > 54 {
+        title = format!("{}…", title.chars().take(53).collect::<String>());
+    }
+    Some(title)
+}
+
+fn session_summary_from_path(path: &Path) -> anyhow::Result<ProviderSessionSummary> {
+    let session_id = path
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .ok_or_else(|| anyhow!("Claude session path has no UTF-8 filename"))?;
+    Uuid::parse_str(session_id).context("Claude session filename is not a UUID")?;
+    let entries = read_summary_entries(path)?;
+    let transcript = entries
+        .iter()
+        .filter_map(Value::as_object)
+        .collect::<Vec<_>>();
+    let cwd = transcript
+        .iter()
+        .copied()
+        .find_map(|entry| entry.get("cwd").and_then(Value::as_str))
+        .map(PathBuf::from)
+        .filter(|cwd| cwd.is_absolute() && cwd.is_dir())
+        .ok_or_else(|| anyhow!("Claude session {session_id} has no available working directory"))?;
+    let first_prompt = transcript
+        .iter()
+        .find(|entry| {
+            entry.get("type").and_then(Value::as_str) == Some("user") && is_user_prompt(entry)
+        })
+        .and_then(|entry| message_text(entry));
+    let custom_title = entries
+        .iter()
+        .filter(|entry| entry.get("type").and_then(Value::as_str) == Some("custom-title"))
+        .filter_map(|entry| entry.get("customTitle").and_then(Value::as_str))
+        .map(str::trim)
+        .filter(|title| !title.is_empty())
+        .next_back();
+    let ai_title = entries
+        .iter()
+        .filter(|entry| entry.get("type").and_then(Value::as_str) == Some("ai-title"))
+        .filter_map(|entry| entry.get("aiTitle").and_then(Value::as_str))
+        .map(str::trim)
+        .filter(|title| !title.is_empty())
+        .next_back();
+    let title = custom_title
+        .or(ai_title)
+        .map(str::to_owned)
+        .or_else(|| first_prompt.as_deref().and_then(title_from_prompt))
+        .ok_or_else(|| anyhow!("Claude session {session_id} has no user prompt"))?;
+    let file_timestamp = modified_at(path);
+    let created_at = transcript
+        .iter()
+        .copied()
+        .filter_map(entry_timestamp)
+        .min()
+        .unwrap_or(file_timestamp);
+    let updated_at = entries
+        .iter()
+        .filter_map(Value::as_object)
+        .filter_map(entry_timestamp)
+        .max()
+        .unwrap_or_default()
+        .max(file_timestamp)
+        .max(created_at);
+
+    Ok(ProviderSessionSummary {
+        cursor: ProviderResumeCursor::Claude {
+            session_id: session_id.to_owned(),
+            resume_at: None,
+        },
+        title,
+        cwd,
+        created_at,
+        updated_at,
+    })
+}
+
+#[derive(Debug)]
+struct IndexedClaudeSession {
+    first_prompt: String,
+    cwd: PathBuf,
+    created_at: u64,
+    updated_at: u64,
+}
+
+fn history_timestamp(value: &Value) -> u64 {
+    let timestamp = value.as_u64().unwrap_or_default();
+    // Claude's terminal history currently stores unix milliseconds while its
+    // transcript entries use RFC 3339. Accept seconds too for older layouts.
+    if timestamp > 10_000_000_000 {
+        timestamp / 1_000
+    } else {
+        timestamp
+    }
+}
+
+fn provider_session_files(projects_directory: &Path) -> anyhow::Result<Vec<(u64, PathBuf)>> {
+    let mut candidates = Vec::new();
+    for project in fs::read_dir(projects_directory).with_context(|| {
+        format!(
+            "could not read Claude's session directory at {}",
+            projects_directory.display()
+        )
+    })? {
+        let Ok(project) = project else {
+            continue;
+        };
+        let Ok(file_type) = project.file_type() else {
+            continue;
+        };
+        if !file_type.is_dir() {
+            continue;
+        }
+        let Ok(entries) = fs::read_dir(project.path()) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|extension| extension.to_str()) != Some("jsonl")
+                || entry.metadata().is_ok_and(|metadata| metadata.len() == 0)
+            {
+                continue;
+            }
+            candidates.push((modified_at(&path), path));
+        }
+    }
+    Ok(candidates)
+}
+
+fn list_provider_sessions_from_history(
+    projects_directory: &Path,
+    history_path: &Path,
+    limit: usize,
+) -> anyhow::Result<Vec<ProviderSessionSummary>> {
+    let file = fs::File::open(history_path).with_context(|| {
+        format!(
+            "could not read Claude's terminal history at {}",
+            history_path.display()
+        )
+    })?;
+    let mut indexed = HashMap::<String, IndexedClaudeSession>::new();
+    for value in BufReader::new(file)
+        .lines()
+        .map_while(Result::ok)
+        .filter_map(|line| serde_json::from_str::<Value>(&line).ok())
+    {
+        let Some(session_id) = value
+            .get("sessionId")
+            .and_then(Value::as_str)
+            .filter(|id| Uuid::parse_str(id).is_ok())
+        else {
+            continue;
+        };
+        let Some(prompt) = value
+            .get("display")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|prompt| !prompt.is_empty())
+        else {
+            continue;
+        };
+        let Some(cwd) = value
+            .get("project")
+            .and_then(Value::as_str)
+            .map(PathBuf::from)
+            .filter(|cwd| cwd.is_absolute() && cwd.is_dir())
+        else {
+            continue;
+        };
+        let timestamp = history_timestamp(&value["timestamp"]);
+        indexed
+            .entry(session_id.to_owned())
+            .and_modify(|session| {
+                session.cwd = cwd.clone();
+                if timestamp > 0 {
+                    session.created_at = if session.created_at == 0 {
+                        timestamp
+                    } else {
+                        session.created_at.min(timestamp)
+                    };
+                    session.updated_at = session.updated_at.max(timestamp);
+                }
+            })
+            .or_insert_with(|| IndexedClaudeSession {
+                first_prompt: prompt.to_owned(),
+                cwd,
+                created_at: timestamp,
+                updated_at: timestamp,
+            });
+    }
+
+    let files = provider_session_files(projects_directory)?
+        .into_iter()
+        .filter_map(|(modified_at, path)| {
+            let session_id = path.file_stem()?.to_str()?.to_owned();
+            Some((session_id, (modified_at, path)))
+        })
+        .collect::<HashMap<_, _>>();
+    let mut sessions = indexed
+        .into_iter()
+        .filter_map(|(session_id, indexed)| {
+            let (file_updated_at, path) = files.get(&session_id)?;
+            let fallback_title = title_from_prompt(&indexed.first_prompt)?;
+            let mut summary = session_summary_from_path(path).unwrap_or(ProviderSessionSummary {
+                cursor: ProviderResumeCursor::Claude {
+                    session_id: session_id.clone(),
+                    resume_at: None,
+                },
+                title: fallback_title,
+                cwd: indexed.cwd.clone(),
+                created_at: indexed.created_at,
+                updated_at: indexed.updated_at,
+            });
+            summary.cwd = indexed.cwd;
+            if indexed.created_at > 0 {
+                summary.created_at = summary.created_at.min(indexed.created_at);
+            }
+            summary.updated_at = summary
+                .updated_at
+                .max(indexed.updated_at)
+                .max(*file_updated_at);
+            Some(summary)
+        })
+        .collect::<Vec<_>>();
+    sessions.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+    sessions.truncate(limit);
+    Ok(sessions)
+}
+
+fn list_provider_sessions_in(
+    projects_directory: &Path,
+    limit: usize,
+) -> anyhow::Result<Vec<ProviderSessionSummary>> {
+    if limit == 0 || !projects_directory.exists() {
+        return Ok(Vec::new());
+    }
+    // `history.jsonl` is Claude's interactive CLI index. Headless `-p` and
+    // Agent SDK runs still have transcripts under `projects/` but are absent
+    // from this index, which naturally keeps Waku-created sessions out of the
+    // terminal resume picker even after their Waku task has been deleted.
+    let history_path = projects_directory
+        .parent()
+        .map(|directory| directory.join("history.jsonl"));
+    if let Some(history_path) = history_path.filter(|path| path.is_file()) {
+        return list_provider_sessions_from_history(projects_directory, &history_path, limit);
+    }
+    let mut candidates = provider_session_files(projects_directory)?;
+    candidates.sort_by(|a, b| b.0.cmp(&a.0));
+
+    let mut sessions = Vec::new();
+    for (_, path) in candidates {
+        if let Ok(summary) = session_summary_from_path(&path) {
+            sessions.push(summary);
+            if sessions.len() == limit {
+                break;
+            }
+        }
+    }
+    Ok(sessions)
+}
+
+fn provider_session_history_in(
+    projects_directory: &Path,
+    session_id: &str,
+    turn_limit: usize,
+) -> anyhow::Result<ProviderSessionHistory> {
+    let entries = read_import_entries(&find_session_file(projects_directory, session_id)?)?;
+    let chain = active_chain(&entries);
+    let mut history = ProviderSessionHistory::default();
+
+    for entry in chain {
+        let kind = entry.get("type").and_then(Value::as_str);
+        let native_id = entry.get("uuid").and_then(Value::as_str);
+        let timestamp = entry_timestamp(entry).unwrap_or_else(crate::model::unix_time);
+        if kind == Some("user") && is_user_prompt(entry) {
+            let turn_id = Uuid::new_v4();
+            history.turns.push(AgentTurn {
+                id: turn_id,
+                turn_count: history.turns.len() + 1,
+                status: TurnStatus::Completed,
+                provider_turn_started: true,
+                provider_resume_at: native_id.map(str::to_owned),
+                started_at: timestamp,
+                completed_at: Some(timestamp),
+                checkpoint: None,
+            });
+            if let Some(content) = message_text(entry) {
+                let mut message = Message::new_for_turn(MessageRole::User, content, turn_id);
+                message.created_at = timestamp;
+                history.messages.push(message);
+            }
+            continue;
+        }
+
+        let Some(turn) = history.turns.last_mut() else {
+            continue;
+        };
+        if matches!(kind, Some("user" | "assistant")) {
+            if let Some(native_id) = native_id {
+                turn.provider_resume_at = Some(native_id.to_owned());
+            }
+            turn.completed_at = Some(turn.completed_at.unwrap_or(timestamp).max(timestamp));
+        }
+        if kind != Some("assistant") {
+            continue;
+        }
+        let Some(content) = message_text(entry) else {
+            continue;
+        };
+        if let Some(previous) = history.messages.last_mut().filter(|message| {
+            message.turn_id == Some(turn.id) && message.role == MessageRole::Assistant
+        }) {
+            if !previous.content.is_empty() {
+                previous.content.push_str("\n\n");
+            }
+            previous.content.push_str(&content);
+            previous.created_at = previous.created_at.max(timestamp);
+        } else {
+            let mut message = Message::new_for_turn(MessageRole::Assistant, content, turn.id);
+            message.created_at = timestamp;
+            history.messages.push(message);
+        }
+    }
+
+    if history.turns.len() > turn_limit {
+        let retained = history
+            .turns
+            .iter()
+            .rev()
+            .take(turn_limit)
+            .map(|turn| turn.id)
+            .collect::<std::collections::HashSet<_>>();
+        history
+            .messages
+            .retain(|message| message.turn_id.is_some_and(|id| retained.contains(&id)));
+    }
+    Ok(history)
 }
 
 fn transcript_entries(entries: &[Value]) -> Vec<&Map<String, Value>> {
@@ -395,10 +908,24 @@ mod tests {
     fn fixture() -> (PathBuf, PathBuf) {
         let root = std::env::temp_dir().join(format!("waku-claude-session-{}", Uuid::new_v4()));
         let project = root.join("projects").join("-tmp-project");
+        let workspace = root.join("workspace");
         fs::create_dir_all(&project).unwrap();
+        fs::create_dir_all(&workspace).unwrap();
         let source = project.join(format!("{SESSION}.jsonl"));
+        let mut history = fs::File::create(root.join("history.jsonl")).unwrap();
+        serde_json::to_writer(
+            &mut history,
+            &json!({
+                "display": "first",
+                "project": workspace,
+                "sessionId": SESSION,
+                "timestamp": 1_767_225_600_000_u64
+            }),
+        )
+        .unwrap();
+        history.write_all(b"\n").unwrap();
         let entries = [
-            json!({"type":"user","uuid":USER_ONE,"parentUuid":null,"sessionId":SESSION,"timestamp":"2026-01-01T00:00:00.000Z","message":{"role":"user","content":"first"}}),
+            json!({"type":"user","uuid":USER_ONE,"parentUuid":null,"sessionId":SESSION,"cwd":workspace,"timestamp":"2026-01-01T00:00:00.000Z","message":{"role":"user","content":"first"}}),
             json!({"type":"ai-title","aiTitle":"Generated first task title","sessionId":SESSION}),
             json!({"type":"progress","uuid":PROGRESS,"parentUuid":USER_ONE,"sessionId":SESSION,"timestamp":"2026-01-01T00:00:01.000Z"}),
             json!({"type":"assistant","uuid":ASSISTANT_ONE,"parentUuid":PROGRESS,"sessionId":SESSION,"timestamp":"2026-01-01T00:00:02.000Z","message":{"role":"assistant","content":[{"type":"tool_use"}]}}),
@@ -452,6 +979,79 @@ mod tests {
         let metadata = session_metadata_in(&root.join("projects"), SESSION).unwrap();
         assert_eq!(metadata.title.as_deref(), Some("Renamed provider task"));
         fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn lists_resumable_sessions_and_imports_recent_visible_turns() {
+        let (root, source) = fixture();
+        let projects = root.join("projects");
+        let headless = source
+            .parent()
+            .unwrap()
+            .join("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa.jsonl");
+        serde_json::to_writer(
+            fs::File::create(headless).unwrap(),
+            &json!({
+                "type": "user",
+                "uuid": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+                "parentUuid": null,
+                "sessionId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+                "cwd": root.join("workspace"),
+                "message": {"role": "user", "content": "not from terminal history"}
+            }),
+        )
+        .unwrap();
+
+        let sessions = list_provider_sessions_in(&projects, 10).unwrap();
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].title, "Generated first task title");
+        assert_eq!(sessions[0].cwd, root.join("workspace"));
+        assert_eq!(sessions[0].cursor.native_id(), SESSION);
+
+        let history = provider_session_history_in(&projects, SESSION, 1).unwrap();
+        assert_eq!(history.turns.len(), 2);
+        assert_eq!(history.turns[1].turn_count, 2);
+        assert_eq!(history.messages.len(), 2);
+        assert_eq!(history.messages[0].content, "second");
+        assert_eq!(history.messages[1].content, "later");
+        assert_eq!(
+            history.turns[1].provider_resume_at.as_deref(),
+            Some(ASSISTANT_THREE)
+        );
+
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn import_compaction_drops_large_native_payloads_without_losing_turn_shape() {
+        let tool_result = compact_import_entry(json!({
+            "type": "user",
+            "uuid": TOOL_RESULT,
+            "parentUuid": ASSISTANT_ONE,
+            "message": {"content": [{
+                "type": "tool_result",
+                "content": "x".repeat(100_000)
+            }]}
+        }))
+        .unwrap();
+        let tool_result = tool_result.as_object().unwrap();
+        assert!(!is_user_prompt(tool_result));
+        assert!(serde_json::to_vec(tool_result).unwrap().len() < 256);
+
+        let image_prompt = compact_import_entry(json!({
+            "type": "user",
+            "uuid": USER_TWO,
+            "parentUuid": ASSISTANT_TWO,
+            "message": {"content": [{
+                "type": "image",
+                "source": {"data": "x".repeat(100_000)}
+            }]}
+        }))
+        .unwrap();
+        let image_prompt = image_prompt.as_object().unwrap();
+        assert!(is_user_prompt(image_prompt));
+        assert_eq!(message_text(image_prompt), None);
+        assert!(serde_json::to_vec(image_prompt).unwrap().len() < 256);
     }
 
     #[test]

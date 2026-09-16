@@ -26,9 +26,27 @@ use crate::persistence::{ComposerDraftStore, PersistedState, StateStore};
 use crate::settings::DaemonSettingsStore;
 use waku_protocol::provider_session::{ProviderSessionFork, ProviderSessionForkRequest};
 
+/// How many fully hydrated transcripts the daemon keeps resident.
+///
+/// Hydration is a cache: consumers reload a released session from the store on
+/// demand. Without a cap, a daemon that lives for days adopts the transcript
+/// of every session its clients have touched — SaveTaskState pushes, hydrate
+/// requests, forks, checkpoints — and resident memory grows without bound.
+const RESIDENT_TRANSCRIPT_WINDOW: usize = 24;
+
+/// Releases resident transcripts beyond the recency window after a save.
+/// `pinned` names sessions with live runtimes; dirty sessions are skipped
+/// inside [`PersistedState::trim_idle_transcripts`] because they hold unsaved
+/// work.
+fn trim_resident_transcripts(state: &mut PersistedState, pinned: &HashSet<Uuid>) {
+    state.trim_idle_transcripts(pinned, RESIDENT_TRANSCRIPT_WINDOW);
+}
+
 pub struct WakuBackend {
     sessions: Mutex<HashMap<Uuid, (Uuid, DriverHandle)>>,
     terminals: Mutex<HashMap<Uuid, (Uuid, crate::terminal::DaemonTerminal)>>,
+    #[cfg(all(test, unix))]
+    terminal_shell: Option<alacritty_terminal::tty::Shell>,
     settings: DaemonSettingsStore,
     task_store: StateStore,
     task_state: Mutex<PersistedState>,
@@ -63,6 +81,8 @@ impl WakuBackend {
         Ok(Self {
             sessions: Mutex::new(HashMap::new()),
             terminals: Mutex::new(HashMap::new()),
+            #[cfg(all(test, unix))]
+            terminal_shell: None,
             settings,
             task_store,
             task_state: Mutex::new(task_state),
@@ -74,6 +94,33 @@ impl WakuBackend {
             usage_rates_dir,
             default_cwd: std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
         })
+    }
+
+    #[cfg(all(test, unix))]
+    pub(crate) fn with_terminal_shell(mut self, shell: alacritty_terminal::tty::Shell) -> Self {
+        self.terminal_shell = Some(shell);
+        self
+    }
+
+    fn open_terminal(
+        &self,
+        cwd: &Path,
+        cols: u16,
+        rows: u16,
+        events: EventSink,
+    ) -> anyhow::Result<crate::terminal::DaemonTerminal> {
+        #[cfg(all(test, unix))]
+        if let Some(shell) = &self.terminal_shell {
+            return crate::terminal::DaemonTerminal::open_with_shell(
+                cwd,
+                cols,
+                rows,
+                events,
+                shell.clone(),
+            );
+        }
+        ensure_shell_environment();
+        crate::terminal::DaemonTerminal::open(cwd, cols, rows, events)
     }
 
     /// Capture and persist one ending checkpoint exactly once per daemon.
@@ -378,6 +425,10 @@ impl Backend for WakuBackend {
                             .cloned()
                     })
                     .collect();
+                // The save above can adopt full transcripts for every session
+                // the client touched. Keep only the recent window resident;
+                // the echoed clones above still carry the saved detail.
+                trim_resident_transcripts(&mut state, &active_runtimes.keys().copied().collect());
                 Ok(ResponsePayload::TaskStateSaved { sessions })
             }
             Command::RemoveSession => {
@@ -411,6 +462,9 @@ impl Backend for WakuBackend {
                 Ok(ResponsePayload::Ack)
             }
             Command::HydrateSession { session_id } => {
+                // Live runtimes stay resident; everything else is trimmed to
+                // the recency window once the response is built.
+                let pinned = self.sessions.lock().keys().copied().collect();
                 let mut state = self.task_state.lock();
                 let session = if let Some(session) = state
                     .sessions
@@ -422,11 +476,173 @@ impl Backend for WakuBackend {
                 } else {
                     None
                 };
+                trim_resident_transcripts(&mut state, &pinned);
                 Ok(ResponsePayload::Session { session })
             }
             Command::SearchSessionMessages { query, limit } => {
                 let matches = self.task_store.session_message_search(query, limit)()?;
                 Ok(ResponsePayload::SessionMessageMatches { matches })
+            }
+            Command::ListProviderSessions { provider, limit } => {
+                const MAX_PROVIDER_SESSIONS: usize = 500;
+                let limit = limit.min(MAX_PROVIDER_SESSIONS);
+                if limit == 0 {
+                    return Ok(ResponsePayload::ProviderSessions {
+                        sessions: Vec::new(),
+                    });
+                }
+                ensure_shell_environment();
+                let settings = self.settings.get();
+                if settings.disabled_providers.contains(&provider) {
+                    return Ok(ResponsePayload::ProviderSessions {
+                        sessions: Vec::new(),
+                    });
+                }
+                let binary_override = settings
+                    .provider_binary_overrides
+                    .get(&provider)
+                    .map(String::as_str);
+                let Some(binary) = crate::model::provider_probe(provider, binary_override).path
+                else {
+                    return Ok(ResponsePayload::ProviderSessions {
+                        sessions: Vec::new(),
+                    });
+                };
+                // Discovery is deliberately provider-scoped. Opening Resume
+                // must not start every installed agent CLI, and another
+                // provider is queried only after the user explicitly picks it.
+                let mut sessions = match provider {
+                    ProviderKind::Amp => {
+                        crate::amp_session::list_provider_sessions(&binary, limit)?
+                    }
+                    ProviderKind::Claude => crate::claude_session::list_provider_sessions(limit)?,
+                    ProviderKind::Codex => {
+                        crate::codex_session::list_provider_sessions(&binary, limit)?
+                    }
+                    ProviderKind::Cursor | ProviderKind::Fx => {
+                        crate::acp_session::list_provider_sessions(provider, &binary, &[], limit)?
+                    }
+                    ProviderKind::OpenCode => {
+                        crate::opencode_session::list_provider_sessions(&binary, limit)?
+                    }
+                    ProviderKind::OpenCode2 => {
+                        crate::opencode2_session::list_provider_sessions(&binary, limit)?
+                    }
+                    ProviderKind::DeepSeek => {
+                        crate::deepseek_session::list_provider_sessions(&binary, limit)?
+                    }
+                    ProviderKind::Grok => crate::grok_session::list_provider_sessions(limit)?,
+                    ProviderKind::Kimi => crate::kimi_session::list_provider_sessions(limit)?,
+                    ProviderKind::OhMyPi | ProviderKind::Pi => {
+                        crate::pi_session::list_provider_sessions(provider, limit)?
+                    }
+                };
+                sessions.sort_by(|a, b| {
+                    b.updated_at
+                        .cmp(&a.updated_at)
+                        .then_with(|| a.title.cmp(&b.title))
+                });
+                let imported = {
+                    let state = self.task_state.lock();
+                    state
+                        .sessions
+                        .iter()
+                        .filter_map(|session| session.provider_cursor.as_ref())
+                        .map(|cursor| (cursor.provider(), cursor.native_id().to_owned()))
+                        .collect::<HashSet<_>>()
+                };
+                sessions.retain(|session| {
+                    !imported.contains(&(session.provider(), session.cursor.native_id().to_owned()))
+                });
+                sessions.truncate(limit);
+                Ok(ResponsePayload::ProviderSessions { sessions })
+            }
+            Command::LoadProviderSession { cursor, cwd } => {
+                // Preserve every native turn shell for exact provider turn
+                // numbering, but bound imported display text to recent turns.
+                const VISIBLE_TURN_LIMIT: usize = 100;
+                let history = match &cursor {
+                    ProviderResumeCursor::Amp { thread_id, .. } => {
+                        let binary = self.provider_binary(ProviderKind::Amp)?;
+                        crate::amp_session::provider_session_history(
+                            &binary,
+                            &cwd,
+                            thread_id,
+                            VISIBLE_TURN_LIMIT,
+                        )?
+                    }
+                    ProviderResumeCursor::Claude { session_id, .. } => {
+                        self.provider_binary(ProviderKind::Claude)?;
+                        crate::claude_session::provider_session_history(
+                            session_id,
+                            VISIBLE_TURN_LIMIT,
+                        )?
+                    }
+                    ProviderResumeCursor::Codex { thread_id } => {
+                        let binary = self.provider_binary(ProviderKind::Codex)?;
+                        crate::codex_session::provider_session_history(
+                            &binary,
+                            thread_id,
+                            VISIBLE_TURN_LIMIT,
+                        )?
+                    }
+                    // OpenCode 2 is not an ACP provider: its history comes
+                    // from the adopted v2 service's own export route.
+                    ProviderResumeCursor::OpenCode2 { session_id, .. } => {
+                        let binary = self.provider_binary(ProviderKind::OpenCode2)?;
+                        crate::opencode2_session::provider_session_history(
+                            &binary,
+                            session_id,
+                            VISIBLE_TURN_LIMIT,
+                        )?
+                    }
+                    ProviderResumeCursor::Cursor { session_id, .. }
+                    | ProviderResumeCursor::Fx { session_id }
+                    | ProviderResumeCursor::OpenCode { session_id }
+                    | ProviderResumeCursor::Grok { session_id }
+                    | ProviderResumeCursor::Kimi { session_id } => {
+                        let provider = cursor.provider();
+                        let binary = self.provider_binary(provider)?;
+                        crate::acp_session::provider_session_history(
+                            provider,
+                            &binary,
+                            &cwd,
+                            session_id,
+                            VISIBLE_TURN_LIMIT,
+                        )?
+                    }
+                    ProviderResumeCursor::DeepSeek { session_id } => {
+                        let binary = self.provider_binary(ProviderKind::DeepSeek)?;
+                        crate::deepseek_session::provider_session_history(
+                            &binary,
+                            session_id,
+                            VISIBLE_TURN_LIMIT,
+                        )?
+                    }
+                    ProviderResumeCursor::OhMyPi {
+                        session_id,
+                        session_file,
+                    }
+                    | ProviderResumeCursor::Pi {
+                        session_id,
+                        session_file,
+                    } => {
+                        self.provider_binary(cursor.provider())?;
+                        let session_file = session_file.as_deref().ok_or_else(|| {
+                            anyhow!(
+                                "{} did not report its native session file",
+                                cursor.provider().display_name()
+                            )
+                        })?;
+                        crate::pi_session::provider_session_history(
+                            cursor.provider(),
+                            session_id,
+                            session_file,
+                            VISIBLE_TURN_LIMIT,
+                        )?
+                    }
+                };
+                Ok(ResponsePayload::ProviderSessionHistory { history })
             }
             Command::LoadComposerDrafts => Ok(ResponsePayload::ComposerDrafts {
                 drafts: self.composer_drafts.load()?,
@@ -511,8 +727,7 @@ impl Backend for WakuBackend {
                 result: crate::workspace::execute(operation)?,
             }),
             Command::OpenTerminal { cwd, cols, rows } => {
-                ensure_shell_environment();
-                let terminal = crate::terminal::DaemonTerminal::open(&cwd, cols, rows, events)?;
+                let terminal = self.open_terminal(&cwd, cols, rows, events)?;
                 let previous = self
                     .terminals
                     .lock()
@@ -569,7 +784,6 @@ impl Backend for WakuBackend {
                     binary: options.binary,
                     cwd: options.cwd,
                     mode: decode_enum(&options.mode)?,
-                    interaction_mode: decode_enum(&options.interaction_mode)?,
                     model: options.model,
                     reasoning_effort: options.reasoning_effort,
                     service_tier: options.service_tier,
@@ -634,6 +848,25 @@ impl Backend for WakuBackend {
                     }
                     driver.clone()
                 };
+                if let Command::Prompt {
+                    prompt,
+                    turn_id,
+                    message_id,
+                } = &command
+                {
+                    // Publish the submission into the runtime's event stream
+                    // before the provider can start the turn. Every attached
+                    // client mirrors the user message and its turn from this
+                    // event, so the submitting client's own save is no longer
+                    // the only record of the prompt — a follower that only
+                    // knew the provider's `turnStarted` used to persist a
+                    // projection without it, erasing the message for everyone.
+                    events.send(event_to_wire(DriverEvent::PromptSubmitted {
+                        message: prompt.clone(),
+                        turn_id: turn_id.unwrap_or_else(Uuid::new_v4),
+                        message_id: message_id.unwrap_or_else(Uuid::new_v4),
+                    })?)?;
+                }
                 handle_driver_command(&driver, command)
             }
         }
@@ -682,7 +915,6 @@ fn merge_stale_session_metadata(existing: &mut AgentSession, incoming: AgentSess
         existing.provider = incoming.provider;
         existing.model = incoming.model;
         existing.runtime_mode = incoming.runtime_mode;
-        existing.interaction_mode = incoming.interaction_mode;
         existing.reasoning_effort = incoming.reasoning_effort;
         existing.service_tier = incoming.service_tier;
         existing.context_window = incoming.context_window;
@@ -804,6 +1036,7 @@ impl WakuBackend {
                 .err()
                 .map(|error| error.to_string());
 
+        let pinned = self.sessions.lock().keys().copied().collect();
         let mut state = self.task_state.lock();
         state.push_session(forked.clone());
         if let Err(error) = self.task_store.save(&mut state) {
@@ -811,6 +1044,7 @@ impl WakuBackend {
             let _ = crate::checkpoint::delete_all_session_refs(&cwd, fork_id);
             return Err(error).context("could not save the forked task");
         }
+        trim_resident_transcripts(&mut state, &pinned);
         Ok((forked, checkpoint_warning))
     }
 
@@ -942,6 +1176,7 @@ impl WakuBackend {
         rewound.truncate_after_turn(retained_turn_count);
         rewound.status = SessionStatus::Idle;
 
+        let pinned = self.sessions.lock().keys().copied().collect();
         let mut state = self.task_state.lock();
         let existing = state
             .sessions
@@ -953,6 +1188,7 @@ impl WakuBackend {
         self.task_store
             .save(&mut state)
             .context("could not save the rewound task")?;
+        trim_resident_transcripts(&mut state, &pinned);
         Ok((rewound, cleanup_warning))
     }
 
@@ -1024,6 +1260,21 @@ impl WakuBackend {
                 let fork = fork_provider_session(ProviderSessionForkRequest::OpenCode {
                     binary: self.provider_binary(ProviderKind::OpenCode)?,
                     cwd: cwd.to_owned(),
+                    session_id: session_id.clone(),
+                    turn_count: provider_turn_count,
+                })?;
+                Ok((fork.cursor, HashMap::new()))
+            }
+            ProviderKind::OpenCode2 => {
+                let Some(ProviderResumeCursor::OpenCode2 { session_id, .. }) =
+                    source.provider_cursor.as_ref()
+                else {
+                    bail!("OpenCode 2's native session is unavailable");
+                };
+                // No cwd: a v2 session carries its own `location`, so there is
+                // no server working directory to fork against.
+                let fork = fork_provider_session(ProviderSessionForkRequest::OpenCode2 {
+                    binary: self.provider_binary(ProviderKind::OpenCode2)?,
                     session_id: session_id.clone(),
                     turn_count: provider_turn_count,
                 })?;
@@ -1119,7 +1370,6 @@ impl WakuBackend {
                 binary: self.provider_binary(source.provider)?,
                 cwd: cwd.to_owned(),
                 mode: source.runtime_mode,
-                interaction_mode: source.interaction_mode,
                 model: source.model.clone(),
                 reasoning_effort: source.reasoning_effort.clone(),
                 service_tier: source.service_tier.clone(),
@@ -1190,6 +1440,31 @@ impl WakuBackend {
                     fork_provider_session(ProviderSessionForkRequest::OpenCode {
                         binary: binary.to_owned(),
                         cwd: cwd.to_owned(),
+                        session_id: session_id.clone(),
+                        turn_count: provider_turn_count,
+                    })?
+                    .cursor
+                };
+                Ok((Some(cursor), HashMap::new(), false))
+            }
+            ProviderKind::OpenCode2 => {
+                let cursor = if let Some(driver) = self
+                    .sessions
+                    .lock()
+                    .get(&source.id)
+                    .map(|(_, driver)| driver.clone())
+                {
+                    driver
+                        .rollback(rollback_turns)?
+                        .ok_or_else(|| anyhow!("OpenCode 2 returned no rewound-session cursor"))?
+                } else {
+                    let Some(ProviderResumeCursor::OpenCode2 { session_id, .. }) =
+                        source.provider_cursor.as_ref()
+                    else {
+                        bail!("OpenCode 2's native session is unavailable");
+                    };
+                    fork_provider_session(ProviderSessionForkRequest::OpenCode2 {
+                        binary: binary.to_owned(),
                         session_id: session_id.clone(),
                         turn_count: provider_turn_count,
                     })?
@@ -1281,7 +1556,6 @@ impl WakuBackend {
                 binary: binary.to_owned(),
                 cwd: cwd.to_owned(),
                 mode: source.runtime_mode,
-                interaction_mode: source.interaction_mode,
                 model: source.model.clone(),
                 reasoning_effort: source.reasoning_effort.clone(),
                 service_tier: source.service_tier.clone(),
@@ -1462,6 +1736,15 @@ fn fork_provider_session(
             HashMap::new(),
             None,
         ),
+        ProviderSessionForkRequest::OpenCode2 {
+            binary,
+            session_id,
+            turn_count,
+        } => (
+            crate::opencode2_session::fork_session_at_turn(&binary, &session_id, turn_count)?,
+            HashMap::new(),
+            None,
+        ),
         ProviderSessionForkRequest::Grok {
             binary,
             cwd,
@@ -1485,7 +1768,7 @@ fn handle_driver_command(
     command: Command,
 ) -> anyhow::Result<ResponsePayload> {
     match command {
-        Command::Prompt { prompt } => driver.prompt(prompt),
+        Command::Prompt { prompt, .. } => driver.prompt(prompt),
         Command::Steer { prompt } => driver.steer(prompt),
         Command::Cancel => driver.cancel(),
         Command::CancelComputerUse => driver.cancel_computer_use(),
@@ -1526,7 +1809,6 @@ fn handle_driver_command(
             return Ok(ResponsePayload::OptionsApplied {
                 applied: driver.apply_options(SessionOptions {
                     mode: decode_enum(&options.mode)?,
-                    interaction_mode: decode_enum(&options.interaction_mode)?,
                     model: options.model,
                     reasoning_effort: options.reasoning_effort,
                     service_tier: options.service_tier,
@@ -1561,6 +1843,8 @@ fn handle_driver_command(
         | Command::RemoveSession
         | Command::HydrateSession { .. }
         | Command::SearchSessionMessages { .. }
+        | Command::ListProviderSessions { .. }
+        | Command::LoadProviderSession { .. }
         | Command::LoadComposerDrafts
         | Command::SaveComposerDrafts { .. }
         | Command::ApplyComposerDraftChanges { .. }
@@ -1620,6 +1904,7 @@ fn event_to_wire(event: DriverEvent) -> anyhow::Result<WireDriverEvent> {
             ("availableCommands", serde_json::to_value(commands)?)
         }
         DriverEvent::TurnStarted => ("turnStarted", Value::Null),
+        DriverEvent::TurnParked => ("turnParked", Value::Null),
         DriverEvent::TextDelta(text) => ("textDelta", Value::String(text)),
         DriverEvent::ReasoningDelta(text) => ("reasoningDelta", Value::String(text)),
         DriverEvent::Activity {
@@ -1673,6 +1958,14 @@ fn event_to_wire(event: DriverEvent) -> anyhow::Result<WireDriverEvent> {
                 image_url: state.image_url,
             })?,
         ),
+        DriverEvent::PromptSubmitted {
+            message,
+            turn_id,
+            message_id,
+        } => (
+            "promptSubmitted",
+            json!({ "message": message, "turnId": turn_id, "messageId": message_id }),
+        ),
         DriverEvent::SteerAccepted { message } => ("steerAccepted", json!({ "message": message })),
         DriverEvent::SteerRejected { message, reason } => (
             "steerRejected",
@@ -1710,6 +2003,7 @@ pub fn event_from_wire(event: WireDriverEvent) -> anyhow::Result<DriverEvent> {
         "autoTitleUpdated" => DriverEvent::AutoTitleUpdated(serde_json::from_value(payload)?),
         "availableCommands" => DriverEvent::AvailableCommands(serde_json::from_value(payload)?),
         "turnStarted" => DriverEvent::TurnStarted,
+        "turnParked" => DriverEvent::TurnParked,
         "textDelta" => DriverEvent::TextDelta(serde_json::from_value(payload)?),
         "reasoningDelta" => DriverEvent::ReasoningDelta(serde_json::from_value(payload)?),
         "activity" => {
@@ -1749,6 +2043,14 @@ pub fn event_from_wire(event: WireDriverEvent) -> anyhow::Result<DriverEvent> {
                 image_url: state.image_url,
             })
         }
+        "promptSubmitted" => {
+            let submitted: SubmittedPromptWire = serde_json::from_value(payload)?;
+            DriverEvent::PromptSubmitted {
+                message: submitted.message,
+                turn_id: submitted.turn_id,
+                message_id: submitted.message_id,
+            }
+        }
         "steerAccepted" => {
             let steer: AcceptedSteerWire = serde_json::from_value(payload)?;
             DriverEvent::SteerAccepted {
@@ -1782,6 +2084,14 @@ pub fn event_from_wire(event: WireDriverEvent) -> anyhow::Result<DriverEvent> {
         "processExited" => DriverEvent::ProcessExited,
         kind => bail!("daemon sent an unsupported driver event {kind:?}"),
     })
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SubmittedPromptWire {
+    message: String,
+    turn_id: Uuid,
+    message_id: Uuid,
 }
 
 #[derive(Deserialize)]
@@ -1957,6 +2267,27 @@ mod tests {
         assert!(matches!(
             event_from_wire(wire).unwrap(),
             DriverEvent::TextDelta(text) if text == "hello"
+        ));
+    }
+
+    #[test]
+    fn wire_event_round_trip_preserves_prompt_submission_identity() {
+        let turn_id = Uuid::new_v4();
+        let message_id = Uuid::new_v4();
+        let wire = event_to_wire(DriverEvent::PromptSubmitted {
+            message: "ship it".into(),
+            turn_id,
+            message_id,
+        })
+        .unwrap();
+        assert_eq!(wire.kind, "promptSubmitted");
+        assert_eq!(wire.payload["message"], "ship it");
+        assert_eq!(wire.payload["turnId"], turn_id.to_string());
+        assert_eq!(wire.payload["messageId"], message_id.to_string());
+        assert!(matches!(
+            event_from_wire(wire).unwrap(),
+            DriverEvent::PromptSubmitted { message, turn_id: decoded_turn, message_id: decoded_message }
+                if message == "ship it" && decoded_turn == turn_id && decoded_message == message_id
         ));
     }
 }

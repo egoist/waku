@@ -1,12 +1,10 @@
-//! In-app updates via Sparkle.
+//! In-app updates.
 //!
-//! `scripts/bundle.sh` embeds Sparkle.framework at Contents/Frameworks, and
-//! this module loads it at runtime instead of linking it, so a bare `cargo
-//! run` binary simply runs without an updater. Sparkle still owns update
-//! discovery, download, signature verification, installation, and relaunch.
-//! Waku's routing user driver keeps automatic checks in the sidebar, but
-//! forwards an explicit Check for Updates action to Sparkle's standard user
-//! driver so the original updater window still appears when requested.
+//! macOS delegates to the Sparkle framework embedded by `scripts/bundle.sh`.
+//! Windows and Linux implement the same signed-appcast contract themselves,
+//! while sharing the status/events consumed by the sidebar and Settings.
+//! Linux only enables the updater for the marked, user-writable tarball
+//! layout; package-manager-owned builds continue to defer to their manager.
 //!
 //! Debug builds stay dormant so the dev watcher's app never offers to replace
 //! itself with a production build. `WAKU_PREVIEW_UPDATE=1` fakes only the
@@ -32,11 +30,18 @@ pub enum UpdateStatus {
 }
 
 #[derive(Clone, Debug)]
-#[cfg_attr(not(any(target_os = "macos", target_os = "windows")), allow(dead_code))]
+#[cfg_attr(
+    not(any(target_os = "linux", target_os = "macos", target_os = "windows")),
+    allow(dead_code)
+)]
 pub enum UpdaterEvent {
     StatusChanged(UpdateStatus),
     UpToDate,
     Failed(String),
+    /// The Linux handoff helper has validated its inputs and is waiting for
+    /// the desktop process to finish its normal asynchronous quit handlers.
+    #[cfg(target_os = "linux")]
+    QuitAndInstall,
 }
 
 #[cfg(target_os = "macos")]
@@ -819,7 +824,7 @@ pub use macos::Updater;
 /// Kept off the platform modules so the ordering and parsing rules — the part
 /// that decides which build a user is offered — are exercised by `cargo test`
 /// on every host, not only on the one that ships an updater.
-#[cfg(any(target_os = "windows", test))]
+#[cfg(any(target_os = "linux", target_os = "windows", test))]
 mod feed {
     #[derive(Clone, Debug, PartialEq, Eq)]
     pub(super) struct AppcastItem {
@@ -831,9 +836,9 @@ mod feed {
 
     /// The newest signed item in a Sparkle appcast.
     ///
-    /// `scripts/appcast-windows.ts` writes this feed, so the shape is a
-    /// contract rather than arbitrary XML: one `<item>` per release, each with
-    /// a `sparkle:shortVersionString` and a signed `<enclosure>`. Items whose
+    /// The native appcast scripts write this feed, so the shape is a contract
+    /// rather than arbitrary XML: one `<item>` per release, each with a
+    /// `sparkle:shortVersionString` and a signed `<enclosure>`. Items whose
     /// signature is missing are ignored rather than trusted.
     pub(super) fn newest_item(feed: &str) -> Option<AppcastItem> {
         feed.split("<item>")
@@ -1436,13 +1441,25 @@ mod windows {
 #[cfg(target_os = "windows")]
 pub use windows::Updater;
 
-/// Linux has no updater yet — `install.sh` re-run is the upgrade path. This
-/// stub is the seam where an implementation slots in; callers already treat
-/// `None` as "no updater".
-#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+#[cfg(target_os = "linux")]
+mod linux;
+
+#[cfg(target_os = "linux")]
+pub use linux::Updater;
+
+/// The newly relaunched Linux build calls this only after its main window is
+/// open. The helper then knows it can discard the rollback copy.
+#[cfg(target_os = "linux")]
+pub(crate) use linux::signal_relaunch_ready;
+
+#[cfg(not(target_os = "linux"))]
+pub(crate) fn signal_relaunch_ready() {}
+
+/// Unsupported platforms keep the updater seam inert.
+#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
 pub struct Updater;
 
-#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
 impl Updater {
     pub fn init() -> Option<Self> {
         None

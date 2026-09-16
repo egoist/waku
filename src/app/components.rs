@@ -3,6 +3,9 @@ use super::*;
 use chrono::{Datelike, Days};
 use std::path::Path;
 
+const USER_MESSAGE_MAX_HEIGHT: f32 = 400.0;
+const USER_MESSAGE_VIEWPORT_MAX_HEIGHT: f32 = USER_MESSAGE_MAX_HEIGHT - 16.0;
+
 pub(super) fn pulse_dot(size: f32, color: Hsla) -> AnyElement {
     motion::pulse(Duration::from_millis(1600), move |phase| {
         div()
@@ -354,6 +357,7 @@ pub(super) struct MessageRender<'a> {
     pub(super) copied: bool,
     pub(super) assistant_message_action: Option<AssistantMessageAction>,
     pub(super) user_message_action: Option<UserMessageAction>,
+    pub(super) user_message_viewport: Option<&'a UserMessageScrollViewport>,
     pub(super) message_edit_input: Option<Entity<ComposerInput>>,
     pub(super) attachment_menus: Vec<ContextMenuHandle>,
     pub(super) attachment_images: Vec<Option<Arc<gpui::Image>>>,
@@ -549,6 +553,7 @@ pub(super) fn render_message(params: MessageRender, cx: &mut App) -> AnyElement 
         copied,
         assistant_message_action,
         user_message_action,
+        user_message_viewport,
         message_edit_input,
         attachment_menus,
         attachment_images,
@@ -679,15 +684,120 @@ pub(super) fn render_message(params: MessageRender, cx: &mut App) -> AnyElement 
                     let body = render_markdown_message_body(&content, markdown, theme, ctx);
                     column = column.child(
                         div()
+                            .id(SharedString::from(format!(
+                                "user-message-bubble-{message_id}"
+                            )))
                             .max_w(px(540.0))
+                            .max_h(px(USER_MESSAGE_MAX_HEIGHT))
                             .min_w_0()
+                            .relative()
+                            .overflow_hidden()
                             .rounded(px(12.0))
+                            .border_1()
+                            .border_color(theme.raised)
                             .bg(theme.raised)
-                            .px(px(12.0))
-                            .py(px(8.0))
+                            .px(px(11.0))
+                            .py(px(7.0))
                             .text_size(sp(14.0))
                             .line_height(sp(20.0))
-                            .child(body),
+                            .child(
+                                div()
+                                    .min_w_0()
+                                    .relative()
+                                    .max_h(px(USER_MESSAGE_VIEWPORT_MAX_HEIGHT))
+                                    .overflow_hidden()
+                                    .child(
+                                        div()
+                                            .id(SharedString::from(format!(
+                                                "user-message-scroll-{message_id}"
+                                            )))
+                                            .min_w_0()
+                                            .max_h(px(USER_MESSAGE_VIEWPORT_MAX_HEIGHT))
+                                            .when_some(user_message_viewport, |body, viewport| {
+                                                let wheel_scroll = viewport.scroll_handle.clone();
+                                                body.overflow_y_scroll()
+                                                    .track_scroll(&viewport.scroll_handle)
+                                                    .on_scroll_wheel(move |_, _, cx| {
+                                                        contain_scroll(&wheel_scroll, cx);
+                                                    })
+                                            })
+                                            .child(body),
+                                    )
+                                    // Keep the fades inside the bubble's padding so
+                                    // square fade quads cannot paint over its rounded corners.
+                                    .when_some(user_message_viewport, |body, viewport| {
+                                        body.child(scrollbar::edge_fade(
+                                            viewport.scroll_handle.clone(),
+                                            scrollbar::FadeEdge::Top,
+                                            theme.raised,
+                                        ))
+                                        .child(
+                                            scrollbar::edge_fade(
+                                                viewport.scroll_handle.clone(),
+                                                scrollbar::FadeEdge::Bottom,
+                                                theme.raised,
+                                            ),
+                                        )
+                                    }),
+                            )
+                            .when_some(user_message_viewport, |bubble, viewport| {
+                                let key_scroll = viewport.scroll_handle.clone();
+                                let key_menu = menu.clone();
+                                let key_owner = waku.entity_id();
+                                bubble
+                                    .track_focus(menu.trigger_focus_handle())
+                                    .tab_group()
+                                    .tab_index(0)
+                                    .focus_visible(|style| style.border_color(theme.accent))
+                                    .on_key_down(move |event: &KeyDownEvent, window, cx| {
+                                        if event.keystroke.key == "f10"
+                                            && event.keystroke.modifiers.shift
+                                        {
+                                            key_menu.open_context_menu(window, cx);
+                                            cx.stop_propagation();
+                                            return;
+                                        }
+                                        let modifiers = &event.keystroke.modifiers;
+                                        if modifiers.control
+                                            || modifiers.alt
+                                            || modifiers.platform
+                                            || (modifiers.shift && event.keystroke.key != "space")
+                                        {
+                                            return;
+                                        }
+                                        let max_offset = key_scroll.max_offset().y;
+                                        if max_offset <= px(0.5) {
+                                            return;
+                                        }
+                                        let offset = key_scroll.offset();
+                                        let page = key_scroll.bounds().size.height * 0.9;
+                                        let next = match event.keystroke.key.as_str() {
+                                            "up" => offset.y + px(40.0),
+                                            "down" => offset.y - px(40.0),
+                                            "pageup" => offset.y + page,
+                                            "pagedown" => offset.y - page,
+                                            "home" => Pixels::ZERO,
+                                            "end" => -max_offset,
+                                            "space" if modifiers.shift => offset.y + page,
+                                            "space" => offset.y - page,
+                                            _ => return,
+                                        }
+                                        .clamp(-max_offset, Pixels::ZERO);
+                                        if next != offset.y {
+                                            key_scroll.set_offset(point(offset.x, next));
+                                            cx.notify(key_owner);
+                                        }
+                                        cx.stop_propagation();
+                                    })
+                                    .child(
+                                        scrollbar::vertical(
+                                            &viewport.scroll_handle,
+                                            &viewport.scrollbar,
+                                        )
+                                        .top(px(8.0))
+                                        .bottom(px(8.0)),
+                                    )
+                            }),
                     );
                 }
                 column = column.child(render_message_footer(
@@ -1293,6 +1403,8 @@ pub(super) fn activity_file_change_stats(activity: &ActivityItem) -> Option<(u64
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub(super) enum ActivityDisclosureSectionKind {
+    McpServer,
+    ToolName,
     Command,
     Arguments,
     Output,
@@ -1302,6 +1414,8 @@ pub(super) enum ActivityDisclosureSectionKind {
 impl ActivityDisclosureSectionKind {
     pub(super) fn id(self) -> &'static str {
         match self {
+            Self::McpServer => "mcp-server",
+            Self::ToolName => "tool-name",
             Self::Command => "command",
             Self::Arguments => "arguments",
             Self::Output => "output",
@@ -1311,6 +1425,8 @@ impl ActivityDisclosureSectionKind {
 
     pub(super) fn label(self) -> Option<String> {
         match self {
+            Self::McpServer => Some(tr!("activity.mcp_server")),
+            Self::ToolName => Some(tr!("activity.tool_name")),
             Self::Command => Some(tr!("activity.command_detail")),
             Self::Arguments => Some(tr!("activity.arguments")),
             Self::Output => Some(tr!("activity.output")),
@@ -1329,6 +1445,24 @@ pub(super) fn activity_disclosure_sections(
     activity: &ActivityItem,
 ) -> Vec<ActivityDisclosureSection> {
     let mut sections = Vec::new();
+    for (kind, content) in [
+        (
+            ActivityDisclosureSectionKind::McpServer,
+            activity.mcp_server.as_deref(),
+        ),
+        (
+            ActivityDisclosureSectionKind::ToolName,
+            activity.tool_name.as_deref(),
+        ),
+    ] {
+        if let Some(content) = content.map(str::trim).filter(|content| !content.is_empty()) {
+            sections.push(ActivityDisclosureSection {
+                kind,
+                content: content.to_owned(),
+            });
+        }
+    }
+    let metadata_count = sections.len();
     if activity.kind == ActivityKind::Command {
         if let Some(command) = activity
             .arguments
@@ -1392,7 +1526,7 @@ pub(super) fn activity_disclosure_sections(
             content: String::new(),
         });
     }
-    if sections.is_empty()
+    if sections.len() == metadata_count
         && let Some(detail) = activity
             .detail
             .as_deref()
@@ -1504,6 +1638,63 @@ mod message_time_tests {
                 format_message_time_at(unix_seconds(local_datetime(2026, 5, day, 9, 0)), now);
             assert!(formatted.starts_with(&format!("May {day}{suffix},")));
         }
+    }
+
+    #[test]
+    fn activity_disclosure_distinguishes_mcp_identity_from_the_title() {
+        let activity = ActivityItem::new(
+            Some("tool-1".into()),
+            crate::model::ActivityKind::Tool,
+            "List running apps via CUA",
+            None,
+            true,
+        )
+        .with_tool_name(Some("js"))
+        .with_mcp_server(Some("waku_js_repl"))
+        .with_arguments(Some("{}".into()));
+        assert_eq!(
+            activity_display_title(&activity),
+            "List running apps via CUA"
+        );
+        assert_eq!(
+            activity_disclosure_sections(&activity),
+            vec![
+                ActivityDisclosureSection {
+                    kind: ActivityDisclosureSectionKind::McpServer,
+                    content: "waku_js_repl".into()
+                },
+                ActivityDisclosureSection {
+                    kind: ActivityDisclosureSectionKind::ToolName,
+                    content: "js".into()
+                },
+                ActivityDisclosureSection {
+                    kind: ActivityDisclosureSectionKind::Arguments,
+                    content: "{}".into()
+                },
+            ]
+        );
+
+        let regular = ActivityItem::new(
+            None,
+            crate::model::ActivityKind::Tool,
+            "Read notes",
+            Some("Could not read notes".into()),
+            true,
+        )
+        .with_tool_name(Some("read_file"));
+        assert_eq!(
+            activity_disclosure_sections(&regular),
+            vec![
+                ActivityDisclosureSection {
+                    kind: ActivityDisclosureSectionKind::ToolName,
+                    content: "read_file".into()
+                },
+                ActivityDisclosureSection {
+                    kind: ActivityDisclosureSectionKind::Detail,
+                    content: "Could not read notes".into()
+                },
+            ]
+        );
     }
 
     #[test]

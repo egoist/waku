@@ -10,7 +10,7 @@ The script needs no root. It unpacks the release tarball into
 `~/.local/waku.app` and installs the desktop entry into
 `~/.local/share/applications`, so **Waku appears in your applications menu** —
 you can also launch it from a terminal via `waku` command. Run the script again to
-upgrade; it replaces the previous install rather than merging into it.
+upgrade manually; the installed app also keeps itself current.
 
 Waku expects:
 
@@ -22,6 +22,7 @@ Waku expects:
   are accepted, so it can run in a VM, but see the note below.
 - **x86_64 or aarch64.** Other architectures build from source.
 - `xdg-desktop-portal` for native file dialogs.
+- `curl` or `wget` for installation and update downloads.
 
 Set `WAKU_VERSION` to install a specific version rather than the latest.
 
@@ -43,9 +44,10 @@ The archive uses an install-prefix layout (`bin/`, `share/`) beneath one
 versioned directory, so `--strip-components=1` into a prefix such as
 `/usr/local` works too.
 
-**Keep `bin/` intact.** Waku launches `waku-daemon` from its own directory, so
-copying `bin/waku` somewhere on its own leaves it unable to start the daemon.
-A symlink is fine — Waku resolves it back to the real path.
+**Keep `bin/` and `share/waku/` intact.** Waku launches its daemon, updater,
+and Computer Use helpers from `bin/`; the SDK library and supporting resources
+ship in the same installation. A symlink is fine — Waku resolves it back to
+the real path.
 
 Installing the desktop entry is the part that matters — it is how the app is
 launched normally, and it is what associates the running window with its icon
@@ -65,8 +67,25 @@ sed -i "s|^Icon=sh.waku$|Icon=$HOME/.local/waku.app/share/icons/hicolor/256x256/
 
 ## Updating
 
-Waku does not update itself on Linux — Sparkle is macOS-only. Re-run the
-install script to upgrade.
+Tarball installs under the user's home directory update themselves. Waku
+checks once per launch by default; an available release appears in the sidebar
+footer. Clicking it validates the staged installation, quits through Waku's
+normal draft/state saves, swaps the complete prefix, and relaunches. If the new
+build exits before opening its window, the helper restores and relaunches the
+previous version.
+
+Every archive is verified with the same Ed25519 release key used by the macOS
+and Windows updaters. The architecture-specific feeds are:
+
+- `https://releases.waku.sh/appcast-linux-x86_64.xml`
+- `https://releases.waku.sh/appcast-linux-aarch64.xml`
+
+Use **Check for Updates** for an explicit check, or disable launch checks in
+**Settings → General → Automatic updates**. System-wide installs such as
+`/usr/local`, builds without the managed-install marker, root sessions, and
+package-manager-owned builds do not modify themselves; upgrade those through
+their original installation method. Re-running `install.sh` remains a safe
+manual fallback for the default `~/.local/waku.app` install.
 
 ## Uninstalling
 
@@ -80,7 +99,8 @@ and settings stay in `~/.waku`; delete that directory to remove them too.
 ## Building from source
 
 See [CONTRIBUTING.md](../CONTRIBUTING.md) for build prerequisites, then
-produce the same archive this page installs with:
+install Bun for the SDK artifact assembler, then produce the same archive
+this page installs with:
 
 ```sh
 ./scripts/bundle-linux.sh
@@ -92,6 +112,13 @@ To exercise the install script against that local build:
 WAKU_BUNDLE_PATH=target/release/waku-<version>-<target>.tar.gz \
   sh website/public/install.sh
 ```
+
+## Computer Use
+
+Debug builds expose Computer Use through the bundled Cua Driver SDK. X11 and
+AT-SPI use the current desktop session; native Wayland support is experimental
+and depends on compositor integrations. See [Computer Use](computer-use.md)
+for capability checks, packaged helper files, and limitations.
 
 ## Running in a virtual machine
 

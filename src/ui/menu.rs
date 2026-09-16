@@ -29,9 +29,9 @@ use std::rc::Rc;
 use gpui::{
     AnyElement, App, Bounds, Display, Element, ElementId, FocusHandle, FontWeight, GlobalElementId,
     InspectorElementId, InteractiveElement, IntoElement, KeyDownEvent, LayoutId, MouseButton,
-    MouseDownEvent, ParentElement, Pixels, Point, Position, RenderOnce, SharedString, Size, Style,
-    StatefulInteractiveElement, Styled, Window, actions, anchored, canvas, deferred, div, img,
-    prelude::FluentBuilder, px,
+    MouseDownEvent, ParentElement, Pixels, Point, Position, RenderOnce, SharedString, Size,
+    StatefulInteractiveElement, Style, Styled, Window, actions, anchored, canvas, deferred, div,
+    img, prelude::FluentBuilder, px,
 };
 
 actions!(
@@ -82,6 +82,7 @@ use crate::theme::{Theme, sp};
 use crate::ui::icon;
 
 /// One row of a menu.
+#[derive(Clone)]
 pub enum MenuItem {
     Entry {
         label: SharedString,
@@ -213,9 +214,13 @@ impl MenuItem {
 }
 
 /// Where an open menu is anchored, in window coordinates.
-#[derive(Debug, Default)]
+#[derive(Default)]
 struct MenuState {
     open: Option<Point<Pixels>>,
+    /// A nested hit target can contribute actions to its ancestor's menu.
+    /// Snapshot them on opening so streaming/reflow cannot retarget an action.
+    pending_context_items: Vec<MenuItem>,
+    context_items: Vec<MenuItem>,
     /// Keyboard cursor over focusable entries.
     highlighted: Option<usize>,
     /// Parent item whose flyout is visible.
@@ -277,6 +282,10 @@ impl ContextMenuHandle {
         self.state.borrow().open.is_some()
     }
 
+    pub fn set_context_items(&self, items: Vec<MenuItem>) {
+        self.state.borrow_mut().pending_context_items = items;
+    }
+
     /// The card's focus handle, for content-focusing surfaces whose panel has
     /// no input of its own: focusing the card puts the menu key context on
     /// the dispatch path, which is what lets `escape` dismiss it.
@@ -305,6 +314,8 @@ impl ContextMenuHandle {
             let mut state = self.state.borrow_mut();
             let was_open = state.open.is_some();
             state.open = None;
+            state.pending_context_items.clear();
+            state.context_items.clear();
             state.highlighted = None;
             state.active_submenu = None;
             state.submenu_highlighted = None;
@@ -346,6 +357,7 @@ impl ContextMenuHandle {
             let mut state = self.state.borrow_mut();
             let was_open = state.open.is_some();
             state.open = Some(position);
+            state.context_items = std::mem::take(&mut state.pending_context_items);
             state.highlighted = None;
             state.active_submenu = None;
             state.submenu_highlighted = None;
@@ -892,6 +904,8 @@ where
     let id: ElementId = id.into();
     let open_at = handle.state.borrow().open;
     let handle_for_down = handle.clone();
+    let items = Rc::new(items);
+    let items_for_down = items.clone();
 
     let element = element
         .relative()
@@ -899,6 +913,15 @@ where
         .on_mouse_down(
             MouseButton::Right,
             move |event: &MouseDownEvent, window, cx| {
+                if handle_for_down
+                    .state
+                    .borrow()
+                    .pending_context_items
+                    .is_empty()
+                    && items_for_down(cx).is_empty()
+                {
+                    return;
+                }
                 open_menu(
                     &handle_for_down,
                     event.position,
@@ -925,7 +948,7 @@ where
                     .child(MenuCard {
                         id,
                         handle: handle.clone(),
-                        items: Rc::new(items),
+                        items,
                     }),
             )
             .with_priority(1),
@@ -944,7 +967,16 @@ struct MenuCard {
 impl RenderOnce for MenuCard {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let theme = Theme::current(cx);
-        let items = (self.items)(cx);
+        let item_builder: Rc<dyn Fn(&mut App) -> Vec<MenuItem>> = {
+            let handle = self.handle.clone();
+            let base_items = self.items.clone();
+            Rc::new(move |cx| {
+                let mut items = handle.state.borrow().context_items.clone();
+                items.extend(base_items(cx));
+                items
+            })
+        };
+        let items = item_builder(cx);
         let focusable = focusable_indexes(&items);
         let (highlighted, active_submenu, submenu_highlighted) = {
             let state = self.handle.state.borrow();
@@ -1007,7 +1039,7 @@ impl RenderOnce for MenuCard {
             .on_key_down({
                 let handle = self.handle.clone();
                 let focusable = focusable.clone();
-                let items = self.items.clone();
+                let items = item_builder.clone();
                 move |event: &KeyDownEvent, window, cx| {
                     on_menu_key(&handle, &focusable, &items, event, window, cx);
                 }
@@ -1715,11 +1747,9 @@ mod tests {
 
     #[test]
     fn submenus_are_focusable() {
-        let items = vec![MenuItem::submenu_with_value(
-            "Grouping",
-            "Updated",
-            |_| Vec::new(),
-        )];
+        let items = vec![MenuItem::submenu_with_value("Grouping", "Updated", |_| {
+            Vec::new()
+        })];
         assert_eq!(*focusable_indexes(&items), vec![0]);
     }
 

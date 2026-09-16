@@ -92,6 +92,20 @@ fn load_remote_task_state(
     Ok(RemoteTaskStateSnapshot { projects, sessions })
 }
 
+/// The running turn and the user message that opened it — the identity other
+/// clients adopt when the daemon publishes this submission to the runtime.
+pub(super) fn submitted_prompt_identity(session: &AgentSession) -> (Option<Uuid>, Option<Uuid>) {
+    let Some(turn_id) = session.active_turn_id() else {
+        return (None, None);
+    };
+    let message_id = session
+        .messages
+        .iter()
+        .find(|message| message.turn_id == Some(turn_id) && message.role == MessageRole::User)
+        .map(|message| message.id);
+    (Some(turn_id), message_id)
+}
+
 pub(super) fn session_has_active_provider_turn(session: &AgentSession) -> bool {
     session.is_busy()
         && session
@@ -458,6 +472,38 @@ fn perform_provider_rewind(
             };
             Ok((Some(cursor), None, None))
         }
+        ProviderKind::OpenCode2 => {
+            let cursor = if let Some(driver) = request.driver.as_ref() {
+                driver.rollback(request.rollback_turns)?.ok_or_else(|| {
+                    anyhow::anyhow!("OpenCode 2 returned no cursor for the rewound session")
+                })?
+            } else {
+                let Some(ProviderResumeCursor::OpenCode2 {
+                    session_id: native_session_id,
+                    ..
+                }) = request.provider_cursor.as_ref()
+                else {
+                    anyhow::bail!(tr!(
+                        "errors.provider_native_cursor_unavailable",
+                        provider = "OpenCode 2"
+                    ));
+                };
+                let binary = request.binary.as_deref().ok_or_else(|| {
+                    anyhow::anyhow!(tr!("errors.provider_not_found", provider = "OpenCode 2"))
+                })?;
+                request
+                    .workspace_client
+                    .fork_provider_session(
+                        waku_client::provider_session::ProviderSessionForkRequest::OpenCode2 {
+                            binary: binary.to_owned(),
+                            session_id: native_session_id.clone(),
+                            turn_count: request.provider_turn_count,
+                        },
+                    )?
+                    .cursor
+            };
+            Ok((Some(cursor), None, None))
+        }
         ProviderKind::Amp => {
             let Some(ProviderResumeCursor::Amp {
                 thread_id: native_thread_id,
@@ -772,6 +818,38 @@ fn perform_response_fork(mut request: ResponseForkRequest) -> Result<PreparedRes
                             waku_client::provider_session::ProviderSessionForkRequest::OpenCode {
                                 binary: binary.to_owned(),
                                 cwd: request.source_workspace_path.clone(),
+                                session_id: native_session_id.clone(),
+                                turn_count: request.provider_turn_count,
+                            },
+                        )?
+                        .cursor,
+                    None,
+                    None,
+                ))
+            }
+            ProviderKind::OpenCode2 => {
+                let Some(ProviderResumeCursor::OpenCode2 {
+                    session_id: native_session_id,
+                    ..
+                }) = request.source.provider_cursor.as_ref()
+                else {
+                    anyhow::bail!(tr!(
+                        "errors.provider_native_session_unavailable",
+                        provider = "OpenCode 2"
+                    ));
+                };
+                let binary = request.binary.as_deref().ok_or_else(|| {
+                    anyhow::anyhow!(tr!(
+                        "errors.provider_not_installed",
+                        provider = "OpenCode 2"
+                    ))
+                })?;
+                Ok((
+                    request
+                        .workspace_client
+                        .fork_provider_session(
+                            waku_client::provider_session::ProviderSessionForkRequest::OpenCode2 {
+                                binary: binary.to_owned(),
                                 session_id: native_session_id.clone(),
                                 turn_count: request.provider_turn_count,
                             },
@@ -1558,7 +1636,7 @@ impl Waku {
             return provider.short_name().to_owned();
         };
         self.provider_probe(provider)
-            .and_then(|probe| probe.models.iter().find(|candidate| candidate.id == model))
+            .and_then(|probe| probe.model(model))
             .map(|candidate| candidate.name.clone())
             .unwrap_or_else(|| model.to_owned())
     }
@@ -1568,10 +1646,16 @@ impl Waku {
         session: &AgentSession,
     ) -> Option<&ProviderModel> {
         let model = self.model_for_session(session)?;
-        self.provider_probe(session.provider)?
-            .models
-            .iter()
-            .find(|candidate| candidate.id == model)
+        self.provider_probe(session.provider)?.model(model)
+    }
+
+    pub(super) fn catalog_model_id_for_session<'a>(
+        &'a self,
+        session: &'a AgentSession,
+    ) -> Option<&'a str> {
+        self.model_metadata_for_session(session)
+            .map(|model| model.id.as_str())
+            .or_else(|| self.model_for_session(session))
     }
 
     pub(super) fn selected_transcript_blocks(&self) -> &[TranscriptBlock] {
@@ -1848,6 +1932,7 @@ impl Waku {
         let binary_provider = match provider {
             ProviderKind::Amp => Some("Amp"),
             ProviderKind::OpenCode => Some("OpenCode"),
+            ProviderKind::OpenCode2 => Some("OpenCode 2"),
             ProviderKind::Grok => Some("Grok Build"),
             _ => None,
         };
@@ -2222,6 +2307,7 @@ impl Waku {
         let needs_binary = rollback_turns > 0
             && (matches!(source.provider, ProviderKind::Amp)
                 || (source.provider == ProviderKind::OpenCode && driver.is_none())
+                || (source.provider == ProviderKind::OpenCode2 && driver.is_none())
                 || (source.provider == ProviderKind::Grok && retained_turn_count > 0));
         let binary = needs_binary
             .then(|| {
@@ -2468,6 +2554,7 @@ impl Waku {
                     | ProviderKind::Cursor
                     | ProviderKind::DeepSeek
                     | ProviderKind::OpenCode
+                    | ProviderKind::OpenCode2
                     | ProviderKind::Grok
             ) && provider_rewind_cursor.is_some())
         {
@@ -2531,7 +2618,7 @@ impl Waku {
                 .map(|model| model.id.clone())
         });
         let model_metadata = self.model_metadata_for_session(session);
-        let reasoning_effort = session.reasoning_effort.clone().filter(|effort| {
+        let mut reasoning_effort = session.reasoning_effort.clone().filter(|effort| {
             model_metadata.is_some_and(|model| {
                 model
                     .reasoning_efforts
@@ -2539,7 +2626,7 @@ impl Waku {
                     .any(|option| option.id == *effort)
             })
         });
-        let service_tier = session.service_tier.clone().filter(|tier| {
+        let mut service_tier = session.service_tier.clone().filter(|tier| {
             tier == "default"
                 || model_metadata.is_some_and(|model| {
                     model.service_tiers.iter().any(|option| option.id == *tier)
@@ -2553,9 +2640,27 @@ impl Waku {
                     .any(|option| option.id == *window)
             })
         });
+        if session.provider == ProviderKind::Cursor
+            && let Some(requested) = model.as_deref()
+            && let Some(probe) = self.provider_probe(session.provider)
+            && let Some(matched) =
+                waku_protocol::model_catalog::cursor_catalog_model(&probe.models, requested)
+        {
+            if reasoning_effort.is_none() {
+                reasoning_effort = waku_protocol::model_catalog::cursor_suffix_reasoning_effort(
+                    &matched.suffix,
+                    &matched.model.reasoning_efforts,
+                );
+            }
+            if service_tier.is_none() {
+                service_tier = waku_protocol::model_catalog::cursor_suffix_service_tier(
+                    &matched.suffix,
+                    &matched.model.service_tiers,
+                );
+            }
+        }
         SessionOptions {
             mode: session.runtime_mode,
-            interaction_mode: session.interaction_mode,
             model,
             reasoning_effort,
             service_tier,
@@ -2680,7 +2785,6 @@ impl Waku {
         let agent_preset = self.agent_preset_for_session(session);
         let SessionOptions {
             mode,
-            interaction_mode,
             model,
             reasoning_effort,
             service_tier,
@@ -2693,13 +2797,12 @@ impl Waku {
                 binary,
                 cwd,
                 mode,
-                interaction_mode,
                 model,
                 reasoning_effort,
                 service_tier,
                 context_window,
                 agent_preset,
-                computer_use_enabled: cfg!(target_os = "macos") && self.state.computer_use_enabled,
+                computer_use_enabled: self.state.computer_use_enabled,
                 provider_cursor: session.provider_cursor.clone(),
             },
             event_wake: self.event_wake_tx.clone(),
@@ -2885,6 +2988,7 @@ impl Waku {
                 pending_events: VecDeque::new(),
                 pending_steers: VecDeque::new(),
                 stream_phase: None,
+                park_announced: false,
                 stream_remeasure_pending: false,
                 pending_permission: None,
                 pending_user_input: None,
@@ -2918,6 +3022,13 @@ impl Waku {
             return;
         };
         if self.response_fork_preparations.contains_key(&session.id) {
+            return;
+        }
+        if session.status == SessionStatus::Background {
+            // The turn is parked on detached work and the provider is idle,
+            // so the message goes straight in as a steer: queued, it would
+            // wait for a settle that only the message itself could hasten.
+            self.steer_composer_submission(submission, cx);
             return;
         }
         if session.is_busy() {
@@ -3427,9 +3538,19 @@ impl Waku {
         // Claude's commands pass through untouched; its CLI owns expansion.
         let prompt = submission.prompt;
         let driver_prompt = self.resolve_provider_submission(provider, &prompt);
+        // The turn and its user message landed at accept time. Their ids go
+        // with the prompt so every other client attached to the runtime
+        // mirrors the same rows instead of minting its own.
+        let (turn_id, message_id) = self
+            .state
+            .sessions
+            .iter()
+            .find(|session| session.id == session_id)
+            .map(submitted_prompt_identity)
+            .unwrap_or((None, None));
         let mut failed_to_start = false;
         match driver {
-            Ok(driver) => driver.prompt(driver_prompt),
+            Ok(driver) => driver.prompt(driver_prompt, turn_id, message_id),
             Err(error) => {
                 failed_to_start = true;
                 let message = tr!("errors.start_agent", error = error);
@@ -3575,6 +3696,7 @@ impl Waku {
                         | DriverEvent::AgentPresetSelected(_)
                         | DriverEvent::AutoTitleUpdated(_)
                         | DriverEvent::Permission { .. }
+                        | DriverEvent::PromptSubmitted { .. }
                         | DriverEvent::SteerAccepted { .. }
                         | DriverEvent::SteerRejected { .. }
                         | DriverEvent::TurnFinished { .. }

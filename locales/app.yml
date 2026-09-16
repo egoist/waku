@@ -66,20 +66,42 @@ updater.failed:
 
 command_palette.placeholder:
   en: Search tasks or run a command…
+command_palette.resume_placeholder:
+  en: Search terminal sessions…
+command_palette.resume_provider_placeholder:
+  en: Select a provider…
 command_palette.suggested:
   en: Suggested
 command_palette.tasks:
   en: Tasks
+command_palette.sessions:
+  en: Terminal sessions
+command_palette.providers:
+  en: Providers
 command_palette.commands:
   en: Commands
 command_palette.settings:
   en: Settings
 command_palette.new_task:
   en: New task
+command_palette.resume:
+  en: Resume…
+command_palette.change_provider:
+  en: Change provider
+command_palette.current_provider:
+  en: Current provider
 command_palette.open_project:
   en: Open project…
 command_palette.choose_model:
   en: Choose model…
+command_palette.copy_task_id:
+  en: Copy Task ID
+command_palette.copy_agent_cli_thread_id:
+  en: Copy Agent CLI thread ID
+command_palette.task_id_copied:
+  en: Task ID copied
+command_palette.agent_cli_thread_id_copied:
+  en: Agent CLI thread ID copied
 command_palette.collapse_sidebar_groups:
   en: Collapse all sidebar groups
 command_palette.show_sidebar:
@@ -100,6 +122,20 @@ command_palette.no_results:
   en: No matching tasks or commands
 command_palette.no_results_hint:
   en: Try a task title, message, project, setting, or command
+command_palette.no_matching_providers:
+  en: No matching providers
+command_palette.loading_sessions:
+  en: Loading terminal sessions…
+command_palette.no_resume_sessions:
+  en: No resumable terminal sessions
+command_palette.no_resume_sessions_hint:
+  en: Sessions already in Waku are hidden. Start one in an agent CLI and try again.
+command_palette.could_not_load_sessions:
+  en: Couldn’t load terminal sessions
+command_palette.loading_selected_session:
+  en: Loading conversation…
+command_palette.resume_failed:
+  en: "Couldn’t resume session: %{error}"
 
 language.title:
   en: Language
@@ -121,11 +157,11 @@ settings.daemon:
 settings.computer_use:
   en: Computer Use
 settings.general_keywords:
-  en: general local projects conversations privacy analytics telemetry anonymous sharing updates automatic sparkle version
+  en: general local projects conversations privacy analytics telemetry anonymous sharing updates automatic sparkle version math latex formula expression
 settings.appearance_keywords:
   en: appearance theme system light dark language english chinese simplified font size text editor
 settings.providers_keywords:
-  en: providers agents models cli version install detect claude codex cursor opencode amp grok pi
+  en: providers agents models cli version install detect claude codex cursor opencode opencode2 amp grok pi
 settings.skills:
   en: Skills
 settings.skills_keywords:
@@ -282,6 +318,10 @@ settings.code_font_size:
   en: Code font size
 settings.code_font_size_description:
   en: Text size in the file editor, diffs, code blocks, and tool output
+settings.render_math:
+  en: Render math expressions
+settings.render_math_description:
+  en: Show formatted math in Markdown. Turn off to show LaTeX source.
 settings.theme_system:
   en: System
 settings.theme_light:
@@ -386,7 +426,13 @@ providers.checked_hours_ago:
 computer_use.allow_apps:
   en: Let Waku use apps
 computer_use.availability:
-  en: Computer Use is available with Codex, OpenCode, Grok, and Pi
+  en: Computer Use is available with Codex, OpenCode, OpenCode 2, Grok, and Pi
+computer_use.desktop_access:
+  en: Desktop access
+computer_use.windows_access_description:
+  en: Control apps in your current Windows desktop session. Windows may restrict access to elevated apps and secure desktops.
+computer_use.linux_access_description:
+  en: Control apps in your current Linux desktop session. Capture and input support depend on your compositor and accessibility services.
 computer_use.macos_access:
   en: macOS access
 computer_use.helper_access:
@@ -482,6 +528,8 @@ sidebar.status_working:
   en: Working
 sidebar.status_waiting:
   en: Waiting
+sidebar.status_background:
+  en: Waiting for background tasks
 sidebar.status_failed:
   en: Failed
 
@@ -529,6 +577,8 @@ common.copy_to_composer:
   en: Copy to Composer
 common.copy_code:
   en: Copy Code
+common.copy_expression:
+  en: Copy Expression
 common.cancel:
   en: Cancel
 common.send:
@@ -604,6 +654,10 @@ activity.ask_questions:
   en: Ask questions
 activity.arguments:
   en: Arguments
+activity.tool_name:
+  en: Tool
+activity.mcp_server:
+  en: MCP server
 activity.output:
   en: Output
 activity.image_output:
@@ -742,6 +796,16 @@ activity.tool:
   en: Tool
 activity.plan_updated:
   en: Plan updated
+activity.compacting_context:
+  en: Compacting context
+activity.compacted_context:
+  en: Compacted context
+activity.compaction_failed:
+  en: Context compaction failed
+activity.provider_retrying:
+  en: Retrying the request
+activity.background_shell:
+  en: Background shell
 activity.output_truncated:
   en: "\n\n… output truncated"
 activity.thought:
@@ -783,10 +847,6 @@ activity.tool_call:
 activity.tool_calls:
   en: tool calls
 
-mode.build:
-  en: Build
-mode.plan:
-  en: Plan
 mode.supervised:
   en: Supervised
 mode.auto_accept_edits:
@@ -795,8 +855,6 @@ mode.auto:
   en: Auto
 mode.full_access:
   en: Full access
-mode.plan_description:
-  en: Inspect and plan without making changes
 mode.supervised_description:
   en: Ask before commands and file changes
 mode.auto_accept_edits_description:
@@ -805,11 +863,6 @@ mode.auto_description:
   en: An AI reviewer approves routine actions; risky ones still ask
 mode.full_access_description:
   en: Allow commands and edits without prompts
-mode.switch_to:
-  en: Switch to %{mode}
-mode.plan_not_supported:
-  en: This agent does not support Plan
-
 agent_preset.standard:
   en: Standard mode
 agent_preset.code:
@@ -830,9 +883,6 @@ agent_preset.custom:
   en: Custom
 agent_preset.no_description:
   en: No description.
-agent_preset.minimal_no_plan:
-  en: Minimal mode does not include Plan
-
 computer_use.allow_for_task:
   en: Allow for task
 computer_use.always_allow_app:
@@ -853,8 +903,6 @@ computer_use.controlling:
   en: Controlling
 computer_use.captured:
   en: Captured
-computer_use.take_control:
-  en: Take Control
 computer_use.preparing_preview:
   en: Preparing preview…
 
@@ -966,6 +1014,8 @@ command_scope.skill:
   en: skill
 command_scope.builtin:
   en: built-in
+command_scope.waku:
+  en: waku
 
 skills.search:
   en: Search skills…
@@ -1064,6 +1114,8 @@ commands.fast_disabled:
   en: Fast mode disabled
 commands.goal_description:
   en: Set a goal this task keeps pursuing
+commands.resume_description:
+  en: Resume a terminal agent session
 
 goal.title:
   en: Goal
@@ -1204,6 +1256,10 @@ session.stopped:
   en: Stopped
 session.turn_completed:
   en: Turn completed
+session.turn_waiting_background:
+  en: Waiting for background tasks
+transcript.waiting_background:
+  en: Waiting for background tasks
 session.stopped_before_response:
   en: The agent stopped before returning a response
 session.codex_exited_before_response:
@@ -1461,6 +1517,10 @@ environment.commit_or_push:
   en: Commit or push
 environment.compare_branch:
   en: Compare branch
+environment.task_id:
+  en: Task ID
+environment.agent_cli_thread_id:
+  en: Agent CLI thread ID
 
 commit.message_placeholder:
   en: Commit message (leave blank to generate)…
@@ -2077,6 +2137,8 @@ usage_error.codex_access_token_missing:
   en: Codex auth.json has no access token; run `codex login`
 usage_error.opencode_go_key_rejected:
   en: OpenCode Go API key can't read usage (HTTP %{status}); reconnect OpenCode Go
+usage_error.opencode_go_not_entitled:
+  en: OpenCode Go usage needs an active OpenCode Go subscription
 usage_error.no_rate_limit_windows:
   en: The usage endpoint reported no rate-limit windows
 usage_error.start_grok_probe:

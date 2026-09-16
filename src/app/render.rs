@@ -252,6 +252,7 @@ impl Render for Waku {
                 .relative()
                 .size_full()
                 .on_action(cx.listener(Self::toggle_command_palette_action))
+                .on_action(cx.listener(Self::open_resume_picker_action))
                 .on_action(cx.listener(Self::switch_task_forward_action))
                 .on_action(cx.listener(Self::switch_task_backward_action))
                 .on_action(cx.listener(Self::select_first_task_action))
@@ -276,7 +277,7 @@ impl Render for Waku {
         let theme = Theme::current(cx);
         let empty = should_render_empty_state(self.selected_session());
         let permission = self.render_permission(cx);
-        let computer_use = self.render_computer_use_overlay(cx);
+        let computer_use = self.render_computer_use_overlay(window, cx);
         let command_palette = self.render_command_palette(window, cx);
         let commit_dialog = self.render_commit_dialog(cx);
         let goal_dialog = self.render_goal_dialog(window, cx);
@@ -290,6 +291,7 @@ impl Render for Waku {
             .on_action(cx.listener(Self::toggle_sidebar_action))
             .on_action(cx.listener(Self::toggle_right_panel_action))
             .on_action(cx.listener(Self::toggle_command_palette_action))
+            .on_action(cx.listener(Self::open_resume_picker_action))
             .on_action(cx.listener(Self::toggle_fps_counter_action))
             .on_action(cx.listener(Self::navigate_back_action))
             .on_action(cx.listener(Self::navigate_forward_action))
@@ -373,7 +375,6 @@ impl Render for Waku {
                     })
                     .relative()
                     .children(toast)
-                    .children(computer_use)
                     .when(self.sidebar_visible, |element| {
                         element.child(self.render_panel_resize_handle(
                             "sidebar-resize-handle",
@@ -408,6 +409,7 @@ impl Render for Waku {
                         ),
                 )
             })
+            .children(computer_use)
             .children(command_palette)
             .children(commit_dialog)
             .children(goal_dialog)

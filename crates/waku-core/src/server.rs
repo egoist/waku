@@ -6,7 +6,7 @@ use std::sync::{Arc, Weak};
 use std::time::Duration;
 
 use anyhow::{Context as _, bail};
-use crossbeam_channel::{Receiver, Sender, unbounded};
+use crossbeam_channel::{Receiver, Sender, bounded, unbounded};
 use parking_lot::Mutex;
 use subtle::ConstantTimeEq as _;
 use tungstenite::handshake::server::{
@@ -26,15 +26,34 @@ use crate::protocol::{
 
 const ACCEPT_POLL_INTERVAL: Duration = Duration::from_millis(25);
 const SOCKET_POLL_INTERVAL: Duration = Duration::from_millis(25);
+/// A socket write that makes no progress for this long means the client is
+/// not reading. Keeping the connection would let its event queue grow without
+/// bound, so it is dropped; clients reconnect and resume from their cursors.
+const SOCKET_WRITE_STALL_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_HANDSHAKE_MESSAGE_BYTES: usize = 64 * 1024;
 const MAX_CONNECTIONS: usize = 64;
-const MAX_REPLAY_EVENTS_PER_SESSION: usize = 4096;
+const MAX_REPLAY_EVENTS_PER_SESSION: usize = 2048;
+/// Per-subscriber cap on queued daemon messages. A subscriber that falls this
+/// far behind live events is dropped instead of buffered for, so a stalled
+/// client cannot make the daemon's heap grow at the stream rate forever.
+/// (Max 8 replaying runtimes at `MAX_REPLAY_EVENTS_PER_SESSION` fits; an
+/// overflow during replay or live emission closes the connection and the
+/// client reconnects from its last replayed cursor.)
+const MAX_QUEUED_MESSAGES_PER_SUBSCRIBER: usize = 16384;
 const MAX_CACHED_RESPONSES: usize = 2048;
+/// Responses are cached by request id so a client that missed a reply can
+/// fetch it after reconnecting. Caching is bounded by bytes as well as count:
+/// outcomes such as a hydrated session can be megabytes, and a count-only cap
+/// would let a handful of them pin hundreds of megabytes in the daemon.
+const MAX_CACHED_RESPONSE_BYTES: usize = 64 * 1024 * 1024;
+const NATIVE_CLIENT_HEADER: &str = "x-waku-client";
+const NATIVE_CLIENT_HEADER_VALUE: &str = "native";
 
 #[derive(Clone, Debug, Default)]
 pub struct ServerOptions {
-    /// Browser WebSocket handshakes always carry an Origin header. Native
-    /// clients do not. An empty set therefore permits native clients only.
+    /// Browser WebSocket handshakes carry an Origin header. Most native clients
+    /// do not; React Native does and identifies itself with `x-waku-client`.
+    /// An empty set therefore still permits native clients only.
     pub allowed_origins: HashSet<String>,
     /// Only a daemon owned by the desktop process should accept the global
     /// shutdown control message. Service-managed daemons keep running when an
@@ -80,15 +99,32 @@ impl EventSink {
     }
 }
 
+/// One connected client's delivery state.
+struct Subscriber {
+    messages: Sender<ServerMessage>,
+    /// Signalled when the subscriber falls too far behind and is dropped from
+    /// the hub. The connection polls it and closes, letting the client
+    /// reconnect and resume from its last replayed cursor.
+    kicked: Sender<()>,
+}
+
+impl Subscriber {
+    fn new(messages: Sender<ServerMessage>) -> (Self, Receiver<()>) {
+        let (kicked, kicked_rx) = unbounded();
+        (Self { messages, kicked }, kicked_rx)
+    }
+}
+
 #[derive(Default)]
 struct HubState {
     next_subscriber_id: u64,
     task_state_revision: u64,
-    subscribers: HashMap<u64, Sender<ServerMessage>>,
+    subscribers: HashMap<u64, Subscriber>,
     active_runtimes: HashMap<Uuid, Uuid>,
     next_sequences: HashMap<(Uuid, Uuid), u64>,
     journal: HashMap<(Uuid, Uuid), VecDeque<SequencedEvent>>,
-    responses: VecDeque<(Uuid, ResponseOutcome)>,
+    responses: VecDeque<(Uuid, ResponseOutcome, usize)>,
+    cached_response_bytes: usize,
     catalog_projects: HashMap<Uuid, ProjectCatalogEntry>,
     catalog_sessions: HashMap<Uuid, SessionCatalogEntry>,
 }
@@ -232,14 +268,22 @@ impl Hub {
                 journal.pop_front();
             }
         }
-        let message = ServerMessage::Event(event);
-        state
-            .subscribers
-            .retain(|_, subscriber| subscriber.send(message.clone()).is_ok());
+        Self::broadcast(&mut state, &ServerMessage::Event(event), None);
     }
 
-    fn subscribe(&self, resume_from: &[ReplayCursor], sender: Sender<ServerMessage>) -> u64 {
+    fn subscribe(&self, resume_from: &[ReplayCursor], subscriber: Subscriber) -> u64 {
         let mut state = self.state.lock();
+        let id = state.next_subscriber_id;
+        state.next_subscriber_id = state.next_subscriber_id.saturating_add(1);
+        // The subscriber is registered before replay so an oversized journal
+        // can only truncate the replay, never leave a live connection without
+        // events. Replay runs under the hub lock so no live event can
+        // interleave with the journal catch-up, and pushes into the bounded
+        // queue are non-blocking. Dropping the oldest replayed events matches
+        // the journal's own rollover semantics; clients reconcile any gap
+        // from session state.
+        let messages = subscriber.messages.clone();
+        state.subscribers.insert(id, subscriber);
         for (&(session_id, runtime_id), events) in &state.journal {
             let sequence = resume_from
                 .iter()
@@ -251,17 +295,43 @@ impl Hub {
                 .map(|cursor| cursor.sequence)
                 .unwrap_or_default();
             for event in events.iter().filter(|event| event.sequence > sequence) {
-                let _ = sender.send(ServerMessage::Event(event.clone()));
+                if messages.len() >= MAX_QUEUED_MESSAGES_PER_SUBSCRIBER
+                    || messages
+                        .try_send(ServerMessage::Event(event.clone()))
+                        .is_err()
+                {
+                    return id;
+                }
             }
         }
-        let id = state.next_subscriber_id;
-        state.next_subscriber_id = state.next_subscriber_id.saturating_add(1);
-        state.subscribers.insert(id, sender);
         id
     }
 
     fn unsubscribe(&self, subscriber_id: u64) {
         self.state.lock().subscribers.remove(&subscriber_id);
+    }
+
+    /// Sends `message` to every subscriber except `skip`, dropping any whose
+    /// bounded queue is full. Buffering a stalled client at the daemon's
+    /// event rate is how resident memory grew without bound; a dropped
+    /// subscriber's connection observes the kick, closes, and reconnects with
+    /// replay cursors, so no event stream is lost permanently.
+    fn broadcast(state: &mut HubState, message: &ServerMessage, skip: Option<u64>) {
+        let mut overwhelmed = Vec::new();
+        for (&subscriber_id, subscriber) in &state.subscribers {
+            if Some(subscriber_id) == skip {
+                continue;
+            }
+            if subscriber.messages.len() >= MAX_QUEUED_MESSAGES_PER_SUBSCRIBER
+                || subscriber.messages.try_send(message.clone()).is_err()
+            {
+                overwhelmed.push((subscriber_id, subscriber.kicked.clone()));
+            }
+        }
+        for (subscriber_id, kicked) in overwhelmed {
+            state.subscribers.remove(&subscriber_id);
+            let _ = kicked.send(());
+        }
     }
 
     fn task_state_changed(&self, source_subscriber_id: u64) {
@@ -313,9 +383,7 @@ impl Hub {
         let message = ServerMessage::TaskStateChanged {
             revision: state.task_state_revision,
         };
-        state.subscribers.retain(|subscriber_id, subscriber| {
-            *subscriber_id == source_subscriber_id || subscriber.send(message.clone()).is_ok()
-        });
+        Self::broadcast(state, &message, Some(source_subscriber_id));
     }
 
     fn cached_response(&self, request_id: Uuid) -> Option<ResponseOutcome> {
@@ -324,14 +392,36 @@ impl Hub {
             .responses
             .iter()
             .rev()
-            .find_map(|(cached_id, outcome)| (*cached_id == request_id).then(|| outcome.clone()))
+            .find_map(|(cached_id, outcome, _)| (*cached_id == request_id).then(|| outcome.clone()))
     }
 
     fn cache_response(&self, request_id: Uuid, outcome: ResponseOutcome) {
+        // File bytes are bulk data that clients read once; caching a copy per
+        // request would duplicate every open file in daemon memory, and the
+        // request is cheap to re-run if it is ever retried.
+        if matches!(
+            &outcome,
+            ResponseOutcome::Ok {
+                payload: ResponsePayload::BlobData { .. }
+            }
+        ) {
+            return;
+        }
+        // Outcomes carry serde payloads whose in-memory size tracks their
+        // serialized form closely enough for a cache budget.
+        let bytes = serde_json::to_string(&outcome)
+            .map(|serialized| serialized.len())
+            .unwrap_or(0);
         let mut state = self.state.lock();
-        state.responses.push_back((request_id, outcome));
-        while state.responses.len() > MAX_CACHED_RESPONSES {
-            state.responses.pop_front();
+        state.cached_response_bytes = state.cached_response_bytes.saturating_add(bytes);
+        state.responses.push_back((request_id, outcome, bytes));
+        while state.responses.len() > MAX_CACHED_RESPONSES
+            || state.cached_response_bytes > MAX_CACHED_RESPONSE_BYTES
+        {
+            if let Some((_, _, evicted_bytes)) = state.responses.pop_front() {
+                state.cached_response_bytes =
+                    state.cached_response_bytes.saturating_sub(evicted_bytes);
+            }
         }
     }
 }
@@ -585,11 +675,20 @@ fn handle_connection(
     socket
         .get_mut()
         .set_read_timeout(Some(SOCKET_POLL_INTERVAL))?;
+    // A client that stops reading must not let its outgoing queue grow at the
+    // daemon's event rate; a write stalled past this timeout drops it.
+    socket
+        .get_mut()
+        .set_write_timeout(Some(SOCKET_WRITE_STALL_TIMEOUT))?;
 
-    let (outgoing, outgoing_rx) = unbounded();
-    let subscriber_id = hub.subscribe(&resume_from, outgoing.clone());
+    let (outgoing, outgoing_rx) = bounded(MAX_QUEUED_MESSAGES_PER_SUBSCRIBER);
+    let (subscriber, kicked) = Subscriber::new(outgoing.clone());
+    let subscriber_id = hub.subscribe(&resume_from, subscriber);
 
     'connection: while !shutdown.load(Ordering::Acquire) {
+        if kicked.try_recv().is_ok() {
+            break;
+        }
         while let Ok(message) = outgoing_rx.try_recv() {
             if write_json(&mut socket, &message).is_err() {
                 break 'connection;
@@ -643,12 +742,17 @@ fn validate_handshake(
             "unknown daemon endpoint",
         ));
     }
+    let is_native_client = request
+        .headers()
+        .get(NATIVE_CLIENT_HEADER)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value == NATIVE_CLIENT_HEADER_VALUE);
     if let Some(origin) = request.headers().get(ORIGIN) {
         let allowed = origin
             .to_str()
             .ok()
             .is_some_and(|origin| allowed_origins.contains(origin));
-        if !allowed {
+        if !allowed && !is_native_client {
             return Err(handshake_error(
                 StatusCode::FORBIDDEN,
                 "WebSocket origin is not allowed",
@@ -1009,7 +1113,7 @@ mod tests {
                 Command::GetSettings => Ok(ResponsePayload::Settings {
                     settings: DaemonSettings::default(),
                 }),
-                Command::Prompt { prompt } => {
+                Command::Prompt { prompt, .. } => {
                     events.send(WireDriverEvent::new("textDelta", json!(prompt)))?;
                     Ok(ResponsePayload::Ack)
                 }
@@ -1060,9 +1164,9 @@ mod tests {
     fn task_state_revisions_notify_other_clients_only() {
         let hub = Hub::default();
         let (source_tx, source_rx) = unbounded();
-        let source_id = hub.subscribe(&[], source_tx);
+        let source_id = hub.subscribe(&[], Subscriber::new(source_tx).0);
         let (observer_tx, observer_rx) = unbounded();
-        hub.subscribe(&[], observer_tx);
+        hub.subscribe(&[], Subscriber::new(observer_tx).0);
 
         hub.task_state_changed(source_id);
 
@@ -1097,6 +1201,14 @@ mod tests {
         let observer = DaemonClient::connect(&address.to_string(), "secret".into()).unwrap();
         let source_revisions = source.subscribe_task_state();
         let observer_revisions = observer.subscribe_task_state();
+        // The handshake can finish before the server registers its subscriber.
+        // Complete the observer's initial load before another client publishes.
+        assert!(matches!(
+            observer
+                .request(Uuid::nil(), Uuid::nil(), Command::LoadTaskState)
+                .unwrap(),
+            ResponsePayload::TaskState { .. }
+        ));
         let session = AgentSession::new(Uuid::new_v4(), ProviderKind::Codex);
         let session_id = session.id;
 
@@ -1293,7 +1405,6 @@ mod tests {
                         binary: PathBuf::from("codex"),
                         cwd: PathBuf::from("."),
                         mode: "fullAccess".into(),
-                        interaction_mode: "build".into(),
                         model: None,
                         reasoning_effort: None,
                         service_tier: None,
@@ -1361,7 +1472,6 @@ mod tests {
                         binary: PathBuf::from("codex"),
                         cwd: PathBuf::from("."),
                         mode: "fullAccess".into(),
-                        interaction_mode: "build".into(),
                         model: None,
                         reasoning_effort: None,
                         service_tier: None,
@@ -1402,6 +1512,8 @@ mod tests {
                 runtime_id,
                 Command::Prompt {
                     prompt: "streamed from the first client".into(),
+                    turn_id: None,
+                    message_id: None,
                 },
             )
             .unwrap();
@@ -1440,6 +1552,10 @@ mod tests {
     #[test]
     fn remote_supervisor_reconnects_without_losing_the_daemon_runtime() {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        // Keep the address reserved between servers. If the first listener is
+        // dropped before the replacement binds, a parallel test can claim the
+        // newly freed ephemeral port and make this test fail with AddrInUse.
+        let replacement_listener = listener.try_clone().unwrap();
         let address = listener.local_addr().unwrap();
         let backend = Arc::new(TestBackend::default());
         let first_shutdown = Arc::new(AtomicBool::new(false));
@@ -1473,7 +1589,6 @@ mod tests {
                         binary: PathBuf::from("codex"),
                         cwd: PathBuf::from("."),
                         mode: "fullAccess".into(),
-                        interaction_mode: "build".into(),
                         model: None,
                         reasoning_effort: None,
                         service_tier: None,
@@ -1489,14 +1604,13 @@ mod tests {
         first_shutdown.store(true, Ordering::Release);
         first_server.join().unwrap();
 
-        let listener = TcpListener::bind(address).unwrap();
         let second_shutdown = Arc::new(AtomicBool::new(false));
         let second_server = {
             let backend = backend.clone();
             let shutdown = second_shutdown.clone();
             std::thread::spawn(move || {
                 serve(
-                    listener,
+                    replacement_listener,
                     "secret".into(),
                     backend,
                     shutdown,
@@ -1528,11 +1642,12 @@ mod tests {
         let root = std::env::temp_dir().join(format!("waku-terminal-{}", Uuid::new_v4()));
         std::fs::create_dir_all(&root).unwrap();
         let hub = Arc::new(Hub::default());
-        let terminal = crate::terminal::DaemonTerminal::open(
+        let terminal = crate::terminal::DaemonTerminal::open_with_shell(
             &root,
             80,
             24,
             hub.event_sink(Uuid::new_v4(), Uuid::new_v4()),
+            terminal_test_shell("while IFS= read -r line; do :; done"),
         )
         .unwrap();
         let (dropped, finished) = bounded(1);
@@ -1551,13 +1666,35 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn websocket_terminal_round_trip_streams_input_and_output() {
+        websocket_terminal_round_trip(false);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn websocket_terminal_close_does_not_wait_for_a_shell_ignoring_hangup() {
+        websocket_terminal_round_trip(true);
+    }
+
+    #[cfg(unix)]
+    fn terminal_test_shell(script: &str) -> alacritty_terminal::tty::Shell {
+        // Do not load the developer's or CI runner's login files, prompt
+        // plugins, or terminal capability queries in a transport test.
+        alacritty_terminal::tty::Shell::new("/bin/sh".into(), vec!["-c".into(), script.into()])
+    }
+
+    #[cfg(unix)]
+    fn websocket_terminal_round_trip(ignore_hangup: bool) {
         let root = std::env::temp_dir().join(format!("waku-terminal-{}", Uuid::new_v4()));
         std::fs::create_dir_all(&root).unwrap();
         let backend = WakuBackend::new(
             DaemonSettingsStore::open(root.join("settings.json")).unwrap(),
             StateStore::daemon(root.join("app.db")),
         )
-        .unwrap();
+        .unwrap()
+        .with_terminal_shell(terminal_test_shell(&format!(
+            "{}\nprintf 'ready:%s\\n' \"$$\"\nwhile IFS= read -r line; do printf 'received:%s\\n' \"$line\"; done",
+            if ignore_hangup { "trap '' HUP" } else { ":" },
+        )));
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
         let shutdown = Arc::new(AtomicBool::new(false));
@@ -1593,6 +1730,15 @@ mod tests {
                 .unwrap(),
             ResponsePayload::Ack
         ));
+        // Wait until the shell has installed its signal handler. Receiving
+        // local echo alone does not prove that shell startup has completed.
+        let ready = terminal_output_until(&events, b"\n");
+        let child_pid: libc::pid_t = String::from_utf8_lossy(&ready)
+            .trim()
+            .strip_prefix("ready:")
+            .unwrap()
+            .parse()
+            .unwrap();
         client
             .request(
                 terminal_id,
@@ -1603,10 +1749,39 @@ mod tests {
             )
             .unwrap();
 
-        // The raw test client intentionally does not emulate wterm's replies
-        // to terminal capability queries. The PTY's local echo is enough to
-        // prove that daemon-side input and output both crossed the WebSocket.
-        let marker = b"waku-terminal-round-trip";
+        // The response prefix is absent from the input, so a PTY echo cannot
+        // satisfy this assertion before the child has actually read it.
+        terminal_output_until(&events, b"received:waku-terminal-round-trip");
+
+        let (closed, finished) = bounded(1);
+        let closing_client = client.clone();
+        let close = std::thread::spawn(move || {
+            let _ = closed.send(closing_client.request(
+                terminal_id,
+                terminal_id,
+                Command::CloseTerminal,
+            ));
+        });
+        let result = finished.recv_timeout(Duration::from_secs(3));
+        if result.is_err() {
+            // Clean up the fixture even when shutdown regresses, and fail
+            // here instead of waiting for the client's 120-second timeout.
+            unsafe {
+                libc::kill(child_pid, libc::SIGKILL);
+            }
+        }
+        client.shutdown();
+        server.join().unwrap();
+        close.join().unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+        assert!(
+            matches!(result, Ok(Ok(ResponsePayload::Ack))),
+            "closing daemon terminal did not complete: {result:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    fn terminal_output_until(events: &Receiver<SequencedEvent>, marker: &[u8]) -> Vec<u8> {
         let deadline = std::time::Instant::now() + Duration::from_secs(3);
         let mut output = Vec::new();
         let mut seen_events = Vec::new();
@@ -1633,16 +1808,7 @@ mod tests {
             "daemon terminal did not return the shell marker; events={seen_events:?}, output={}",
             String::from_utf8_lossy(&output)
         );
-        assert!(matches!(
-            client
-                .request(terminal_id, terminal_id, Command::CloseTerminal)
-                .unwrap(),
-            ResponsePayload::Ack
-        ));
-
-        client.shutdown();
-        server.join().unwrap();
-        std::fs::remove_dir_all(root).unwrap();
+        output
     }
 
     #[test]
@@ -1687,6 +1853,29 @@ mod tests {
         assert!(validate_handshake(&request, HandshakeResponse::new(()), &allowed).is_ok());
         let native = HandshakeRequest::builder().uri("/v1").body(()).unwrap();
         assert!(validate_handshake(&native, HandshakeResponse::new(()), &HashSet::new()).is_ok());
+
+        let react_native = HandshakeRequest::builder()
+            .uri("/v1")
+            .header(ORIGIN, "http://192.168.0.114:34125")
+            .header(NATIVE_CLIENT_HEADER, NATIVE_CLIENT_HEADER_VALUE)
+            .body(())
+            .unwrap();
+        assert!(
+            validate_handshake(&react_native, HandshakeResponse::new(()), &HashSet::new()).is_ok()
+        );
+
+        let forged_native = HandshakeRequest::builder()
+            .uri("/v1")
+            .header(ORIGIN, "https://attacker.example")
+            .header(NATIVE_CLIENT_HEADER, "browser")
+            .body(())
+            .unwrap();
+        assert_eq!(
+            validate_handshake(&forged_native, HandshakeResponse::new(()), &HashSet::new())
+                .unwrap_err()
+                .status(),
+            StatusCode::FORBIDDEN
+        );
     }
 
     #[test]
@@ -1703,7 +1892,7 @@ mod tests {
         let old_runtime_id = Uuid::new_v4();
         let new_runtime_id = Uuid::new_v4();
         let (outgoing, events) = unbounded();
-        hub.subscribe(&[], outgoing);
+        hub.subscribe(&[], Subscriber::new(outgoing).0);
 
         hub.begin_runtime(session_id, old_runtime_id);
         let old_sink = hub.event_sink(session_id, old_runtime_id);
@@ -1750,7 +1939,7 @@ mod tests {
                 epoch: Uuid::nil(),
                 sequence: u64::MAX,
             }],
-            outgoing,
+            Subscriber::new(outgoing).0,
         );
 
         let ServerMessage::Event(event) = events.recv().unwrap() else {
@@ -1758,6 +1947,64 @@ mod tests {
         };
         assert_eq!(event.epoch, hub.epoch);
         assert_eq!(event.sequence, 1);
+    }
+
+    #[test]
+    fn subscriber_that_cannot_keep_up_is_kicked_and_removed() {
+        let hub = Arc::new(Hub::default());
+        let session_id = Uuid::new_v4();
+        let runtime_id = Uuid::new_v4();
+        // Capacity one and no drainer: the second queued message overflows.
+        let (outgoing, events) = bounded(1);
+        let (subscriber, kicked) = Subscriber::new(outgoing);
+        hub.subscribe(&[], subscriber);
+        hub.begin_runtime(session_id, runtime_id);
+        let sink = hub.event_sink(session_id, runtime_id);
+
+        sink.send(WireDriverEvent::new("one", serde_json::Value::Null))
+            .unwrap();
+        // Nobody drains, so a second queued message overflows: the subscriber
+        // is dropped from the hub and its connection is told to close.
+        sink.send(WireDriverEvent::new("two", serde_json::Value::Null))
+            .unwrap();
+        assert!(kicked.try_recv().is_ok());
+
+        assert!(matches!(
+            events.try_recv(),
+            Ok(ServerMessage::Event(event)) if event.event.kind == "one"
+        ));
+        assert!(events.try_recv().is_err());
+        sink.send(WireDriverEvent::new("three", serde_json::Value::Null))
+            .unwrap();
+        assert!(events.try_recv().is_err());
+    }
+
+    #[test]
+    fn response_cache_evicts_oversized_and_byte_budget_exceeding_outcomes() {
+        let hub = Hub::default();
+        let oversized_id = Uuid::new_v4();
+        let oversized = ResponseOutcome::Ok {
+            payload: ResponsePayload::Cursor {
+                cursor: Some(serde_json::Value::String(
+                    "x".repeat(MAX_CACHED_RESPONSE_BYTES + 1),
+                )),
+            },
+        };
+        hub.cache_response(oversized_id, oversized);
+        // A single outcome larger than the whole byte budget is never
+        // retained; retrying the request runs it again instead of pinning a
+        // >64 MB payload in daemon memory.
+        assert!(hub.cached_response(oversized_id).is_none());
+
+        let kept_id = Uuid::new_v4();
+        hub.cache_response(
+            kept_id,
+            ResponseOutcome::Ok {
+                payload: ResponsePayload::Ack,
+            },
+        );
+        assert!(hub.cached_response(kept_id).is_some());
+        assert!(hub.cached_response(oversized_id).is_none());
     }
 
     struct BlockingProbeBackend {
@@ -1905,6 +2152,8 @@ mod tests {
                 runtime_id: blocked_runtime_id,
                 command: Command::Prompt {
                     prompt: "after start".into(),
+                    turn_id: None,
+                    message_id: None,
                 },
             },
             second_client_outgoing,
@@ -1999,7 +2248,6 @@ mod tests {
             binary: PathBuf::from("codex"),
             cwd: PathBuf::from("."),
             mode: "fullAccess".into(),
-            interaction_mode: "build".into(),
             model: None,
             reasoning_effort: None,
             service_tier: None,

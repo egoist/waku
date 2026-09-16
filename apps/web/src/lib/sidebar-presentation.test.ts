@@ -91,7 +91,6 @@ function session(patch: Partial<AgentSession>): AgentSession {
     provider: 'codex',
     model: null,
     runtime_mode: 'ask',
-    interaction_mode: 'build',
     status: 'idle',
     created_at: 10,
     updated_at: 10,

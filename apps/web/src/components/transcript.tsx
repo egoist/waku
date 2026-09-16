@@ -689,7 +689,7 @@ function buildTranscriptItems(
     }
   }
 
-  if (['connecting', 'working', 'waiting'].includes(session.status)) {
+  if (['connecting', 'working', 'waiting', 'background'].includes(session.status)) {
     const runningIndex = lastIndexWhere(session.turns, (turn) => turn.status === 'running')
     const running = runningIndex >= 0 ? session.turns[runningIndex] : null
     if (running) {

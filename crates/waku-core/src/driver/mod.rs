@@ -8,9 +8,13 @@ mod codex;
 mod computer_use;
 mod deepseek;
 mod opencode;
+mod opencode2;
+mod opencode2_computer_use;
 mod pi;
 mod support;
 mod title_refresh;
+
+pub(crate) use acp::catalog_agent;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -19,8 +23,8 @@ use crossbeam_channel::{Receiver, SendError, Sender, unbounded};
 
 use crate::computer_use::ComputerToolRequest;
 use crate::model::{
-    BackgroundWorkKey, DriverEvent, GoalOperation, InteractionMode, ProviderKind,
-    ProviderResumeCursor, RuntimeMode, UserInputAnswer,
+    BackgroundWorkKey, DriverEvent, GoalOperation, ProviderKind, ProviderResumeCursor, RuntimeMode,
+    UserInputAnswer,
 };
 
 /// Provider events remain synchronous to send from reader threads, while the
@@ -182,7 +186,6 @@ pub struct DriverStartOptions {
     pub binary: PathBuf,
     pub cwd: PathBuf,
     pub mode: RuntimeMode,
-    pub interaction_mode: InteractionMode,
     pub model: Option<String>,
     pub reasoning_effort: Option<String>,
     pub service_tier: Option<String>,
@@ -198,7 +201,6 @@ pub struct DriverStartOptions {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SessionOptions {
     pub mode: RuntimeMode,
-    pub interaction_mode: InteractionMode,
     pub model: Option<String>,
     pub reasoning_effort: Option<String>,
     pub service_tier: Option<String>,
@@ -207,9 +209,15 @@ pub struct SessionOptions {
 
 pub(crate) fn start_local(
     provider: ProviderKind,
-    options: DriverStartOptions,
+    mut options: DriverStartOptions,
     events: DriverEventSender,
 ) -> anyhow::Result<DriverHandle> {
+    // Computer Use is experimental, so release builds never start its helper
+    // whatever a client, a migrated state file, or an environment variable
+    // asks for. Every driver reads the clamped flag, which also means only
+    // debug builds register the REPL server's Cua bridge or attach the skill.
+    options.computer_use_enabled =
+        crate::computer_use::resolve_enabled(options.computer_use_enabled);
     let inner: Arc<dyn DriverControl> = match provider {
         ProviderKind::Codex => Arc::new(codex::CodexDriver::start(options, events)?),
         ProviderKind::Pi => Arc::new(pi::PiDriver::start(pi::PiFlavor::Pi, options, events)?),
@@ -226,6 +234,10 @@ pub(crate) fn start_local(
         // OpenCode's own server is its real API, and it is what exposes
         // interactive permission requests.
         ProviderKind::OpenCode => Arc::new(opencode::OpenCodeDriver::start(options, events)?),
+        // OpenCode 2 is not a per-workspace server: one adopted background
+        // service carries every workspace, and every Waku task rides its one
+        // event stream.
+        ProviderKind::OpenCode2 => Arc::new(opencode2::OpenCode2Driver::start(options, events)?),
         // Claude serves a realtime stream of user messages on stdin — the same
         // transport the Agent SDK drives — which is what lets its Supervised
         // mode ask rather than decide alone.

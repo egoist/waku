@@ -194,6 +194,7 @@ fn task_switcher_status_icon(status: SessionStatus) -> Option<&'static str> {
     match status {
         SessionStatus::Idle => None,
         SessionStatus::Connecting | SessionStatus::Working => Some("icons/loader-circle.svg"),
+        SessionStatus::Background => Some("icons/hourglass.svg"),
         SessionStatus::Waiting => Some("icons/alert.svg"),
         SessionStatus::Failed => Some("icons/x.svg"),
     }
@@ -512,8 +513,9 @@ impl Waku {
                     .flex()
                     .items_center()
                     .gap(px(7.0))
-                    .child(icon(
-                        provider_icon(provider),
+                    .child(provider_mark(
+                        &theme,
+                        provider,
                         14.0,
                         provider_color(&theme, provider),
                     ))
@@ -637,8 +639,9 @@ impl Waku {
                     .flex()
                     .items_center()
                     .gap(px(8.0))
-                    .child(icon(
-                        provider_icon(provider),
+                    .child(provider_mark(
+                        &theme,
+                        provider,
                         16.0,
                         if highlighted {
                             provider_color(&theme, provider)

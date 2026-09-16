@@ -32,11 +32,11 @@ use crate::md;
 use crate::model::{
     ActivityItem, ActivityKind, AgentSession, BackgroundWorkEvent, BackgroundWorkItem,
     BackgroundWorkKey, BackgroundWorkKind, BackgroundWorkStatus, Checkpoint, CheckpointStatus,
-    ContextUsage, DriverEvent, FavoriteModel, InteractionMode, Message, MessageAttachment,
-    MessageRole, PendingPermission, Project, ProviderKind, ProviderModel, ProviderProbe,
-    ProviderResumeCursor, QueuedMessage, ReasoningBlock, RuntimeMode, SessionStatus,
-    SessionWorkspace, TranscriptBlock, TurnStatus, UserInputAnswer, UserInputQuestion,
-    compact_path, unix_time, unix_time_millis,
+    ContextUsage, DriverEvent, FavoriteModel, Message, MessageAttachment, MessageRole,
+    PendingPermission, Project, ProviderKind, ProviderModel, ProviderProbe, ProviderResumeCursor,
+    ProviderSessionHistory, ProviderSessionSummary, QueuedMessage, ReasoningBlock, RuntimeMode,
+    SessionStatus, SessionWorkspace, TranscriptBlock, TurnStatus, UserInputAnswer,
+    UserInputQuestion, compact_path, unix_time, unix_time_millis,
 };
 use unicode_segmentation::UnicodeSegmentation;
 
@@ -63,13 +63,13 @@ use crate::theme::{Theme, ThemePreference, sp};
 use crate::ui::text_field::TextField;
 use crate::ui::{
     MenuChip, ProjectNameSelector, activity_icon, activity_noun, contain_scroll, file_icon, icon,
-    icon_button, motion, provider_color, provider_icon, status_color, toggle_switch,
+    icon_button, motion, provider_color, provider_mark, status_color, toggle_switch,
 };
 use crate::{
     CancelTaskSwitch, CancelTurn, CloseFind, CloseWindow, ConfirmTaskSwitch, CopySelection,
     FindNext, FindPrevious, FocusComposer, NavigateBack, NavigateForward, NewProject, NewSession,
-    OpenFind, OpenFindReplace, OpenSettings, ReplaceAllMatches, SaveFile, SelectFirstTask,
-    SelectLastTask, SwitchTaskBackward, SwitchTaskForward, ToggleCommandPalette,
+    OpenFind, OpenFindReplace, OpenResumePicker, OpenSettings, ReplaceAllMatches, SaveFile,
+    SelectFirstTask, SelectLastTask, SwitchTaskBackward, SwitchTaskForward, ToggleCommandPalette,
     ToggleFindCaseSensitive, ToggleFindRegex, ToggleFindWholeWord, ToggleFpsCounter,
     ToggleModelPicker, ToggleRightPanel, ToggleSidebar, ToggleUsagePanel,
 };
@@ -112,11 +112,10 @@ const NAVIGATION_RAIL_ANIMATION_DURATION: Duration = Duration::from_millis(300);
 const ESCAPE_STOP_CONFIRMATION_TIMEOUT: Duration = Duration::from_secs(3);
 /// Presentation pacing only. The app sleeps until a provider or background
 /// result wakes it, then uses this cadence while streamed chunks remain.
-/// 120 ms matches Zeron's `STREAM_COMMIT_MS`: chunks queue for a full
-/// interval and fold into one drain → one notify → one remeasure, so the
-/// per-commit parse/flatten/highlight work runs at ~8 Hz regardless of the
-/// provider's chunk rate, and the veil dissolve spans the gap so streamed
-/// text still reads as continuous.
+/// Chunks queue for a full interval and fold into one drain → one notify →
+/// one remeasure, so the per-commit parse/flatten/highlight work runs at ~8 Hz
+/// regardless of the provider's chunk rate, and the veil dissolve spans the
+/// gap so streamed text still reads as continuous.
 const STREAM_FRAME_INTERVAL: Duration = Duration::from_millis(120);
 /// How long a session may sit untouched before its provider process is released.
 /// Codex and Pi stay resident between turns, so without this an afternoon of
@@ -227,7 +226,7 @@ impl SettingsPage {
     /// its navigation entry points. Keeping this decision on the page itself
     /// makes the Settings sidebar and command palette use the same gate.
     fn is_visible_in_navigation(self) -> bool {
-        self != Self::ComputerUse || cfg!(all(debug_assertions, target_os = "macos"))
+        self != Self::ComputerUse || crate::computer_use::is_available()
     }
 }
 
@@ -861,6 +860,9 @@ struct SessionRuntime {
     /// accepted/rejected acknowledgement, in transport order.
     pending_steers: VecDeque<ComposerSubmission>,
     stream_phase: Option<StreamPhase>,
+    /// The parked-turn notification has fired for the turn in flight, so a
+    /// wake that parks again does not repeat it. Cleared when the turn ends.
+    park_announced: bool,
     stream_remeasure_pending: bool,
     pending_permission: Option<PendingPermission>,
     pending_user_input: Option<PendingUserInput>,
@@ -930,7 +932,8 @@ struct ComputerUsePreview {
     target: Option<ComputerTarget>,
     phase: ComputerUsePhase,
     visible: bool,
-    screenshot: Option<Arc<gpui::Image>>,
+    frames: crate::computer_use::PreviewFrames<crate::computer_use::PreviewImage>,
+    decode_task: Option<gpui::Task<()>>,
 }
 
 #[derive(Debug, Default)]
@@ -1017,6 +1020,12 @@ struct ActivityScrollViewport {
     follow_tail: Rc<Cell<bool>>,
     last_scrolled: Rc<Cell<Option<Pixels>>>,
     last_max_offset: Rc<Cell<Option<Pixels>>>,
+}
+
+#[derive(Clone, Default)]
+struct UserMessageScrollViewport {
+    scroll_handle: ScrollHandle,
+    scrollbar: Rc<ScrollbarState>,
 }
 
 impl Default for ActivityScrollViewport {
@@ -1341,6 +1350,8 @@ pub struct Waku {
     right_panel_rendered_width: f32,
     fps_counter_visible: bool,
     panel_resize_drag: Option<PanelResizeDrag>,
+    /// Window-relative PiP position, independent of incoming preview frames.
+    computer_use_preview_position: Option<gpui::Point<Pixels>>,
     right_panel_session_states: HashMap<Uuid, RightPanelSessionState>,
     right_panel_surfaces: Vec<RightPanelSurface>,
     right_panel_active_surface: Option<usize>,
@@ -1542,6 +1553,8 @@ pub struct Waku {
     /// Parsed markdown per assistant message, keeping each response's
     /// incremental parse and flattened blocks alive across frames.
     message_markdown: RefCell<HashMap<Uuid, MarkdownView>>,
+    /// Stable offsets for capped user bubbles, including across virtualized row rebuilds.
+    user_message_viewports: RefCell<HashMap<Uuid, UserMessageScrollViewport>>,
     /// Parsed markdown for reasoning activities, keyed by stable activity id.
     activity_markdown: RefCell<HashMap<Uuid, MarkdownView>>,
     /// Byte offsets live reasoning peeks render from, slid forward as the
@@ -1601,11 +1614,11 @@ mod background_work;
 mod branches;
 mod command_palette;
 mod commit_dialog;
-mod goal_dialog;
 mod components;
 mod composer;
 mod drafts;
 mod file_search;
+mod goal_dialog;
 mod image_preview;
 mod render;
 mod right_panel;
@@ -1629,8 +1642,8 @@ use background_work::{
 };
 pub use command_palette::init as init_command_palette;
 pub use commit_dialog::init as init_commit_dialog_keys;
-pub use goal_dialog::init as init_goal_dialog_keys;
 use components::*;
+pub use goal_dialog::init as init_goal_dialog_keys;
 pub use image_preview::init as init_image_preview_keys;
 pub use settings::init as init_settings_keys;
 pub use sidebar::init as init_sidebar_keys;
@@ -1639,6 +1652,13 @@ pub use skills_page::init as init_skills_keys;
 use streaming::*;
 use transcript::*;
 use transcript_view::ConversationNavigationRail;
+
+/// Collapse provider- or page-supplied text into a label that cannot contain
+/// hard line breaks. GPUI's `truncate()` prevents wrapping, but explicit
+/// newlines still produce multiple visual lines.
+fn single_line_label(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
 
 /// Seconds until any session's time label next changes value, or `None` when
 /// no label is on the clock at all. A running turn's elapsed counter moves
@@ -1776,6 +1796,13 @@ impl Waku {
                 self.updater_status = crate::updater::UpdateStatus::Idle;
                 self.reset_updater_button_animation();
                 self.show_toast(tr!("updater.failed", error = error));
+            }
+            #[cfg(target_os = "linux")]
+            crate::updater::UpdaterEvent::QuitAndInstall => {
+                // The helper has already validated both prefixes and now
+                // waits for GPUI's normal asynchronous quit hooks to finish
+                // saving drafts and window state before it swaps them.
+                cx.quit();
             }
         }
         cx.notify();
@@ -1950,10 +1977,8 @@ impl Waku {
         });
 
         let composer = cx.new(|cx| ComposerInput::new(window, cx).padding_x(px(14.0), cx));
-        let user_input_answer = cx.new(|cx| {
-            TextInput::new(window, cx)
-                .placeholder(tr!("user_input.other_placeholder"))
-        });
+        let user_input_answer = cx
+            .new(|cx| TextInput::new(window, cx).placeholder(tr!("user_input.other_placeholder")));
         let command_palette_search = cx.new(|cx| {
             TextInput::new(window, cx)
                 .clear_on_escape()
@@ -2006,14 +2031,10 @@ impl Waku {
                 .select_all_on_focus_click()
                 .placeholder(tr!("input.detected_automatically"))
         });
-        let usage_project_filter = cx.new(|cx| {
-            TextInput::new(window, cx)
-                .placeholder(tr!("input.filter_projects"))
-        });
-        let right_panel_diff_filter = cx.new(|cx| {
-            TextInput::new(window, cx)
-                .placeholder(tr!("diff.filter_files"))
-        });
+        let usage_project_filter =
+            cx.new(|cx| TextInput::new(window, cx).placeholder(tr!("input.filter_projects")));
+        let right_panel_diff_filter =
+            cx.new(|cx| TextInput::new(window, cx).placeholder(tr!("diff.filter_files")));
         let navigation_rail = cx.new(|_| ConversationNavigationRail::new());
         let sidebar_pane = WakuPane::new(Waku::sidebar_pane_content, cx);
         let transcript_pane = WakuPane::new(Waku::transcript_pane_content, cx);
@@ -2174,7 +2195,7 @@ impl Waku {
         let (event_wake_tx, event_wake_events) = smol::channel::bounded(1);
         let (task_state_sync_tx, task_state_sync_events) = unbounded();
         #[cfg(target_os = "macos")]
-        {
+        if crate::computer_use::is_available() {
             let computer_permission_tx = computer_permission_tx.clone();
             let event_wake = event_wake_tx.clone();
             let daemon = daemon.client();
@@ -2545,14 +2566,11 @@ impl Waku {
                 )
                 .detach();
             }
-            cx.subscribe(
-                &skills_search,
-                |_: &mut Self, _, event: &InputEvent, cx| {
-                    if matches!(event, InputEvent::Edited) {
-                        cx.notify();
-                    }
-                },
-            )
+            cx.subscribe(&skills_search, |_: &mut Self, _, event: &InputEvent, cx| {
+                if matches!(event, InputEvent::Edited) {
+                    cx.notify();
+                }
+            })
             .detach();
             cx.subscribe(
                 &session_rename_input,
@@ -2859,6 +2877,7 @@ impl Waku {
                 },
                 fps_counter_visible: false,
                 panel_resize_drag: None,
+                computer_use_preview_position: None,
                 right_panel_session_states: HashMap::new(),
                 right_panel_surfaces: Vec::new(),
                 right_panel_active_surface: None,
@@ -2969,6 +2988,7 @@ impl Waku {
                 transcript_scrollbar_dragging: Cell::new(false),
                 transcript_layout_width: Cell::new(Pixels::ZERO),
                 message_markdown: RefCell::new(HashMap::new()),
+                user_message_viewports: RefCell::new(HashMap::new()),
                 activity_markdown: RefCell::new(HashMap::new()),
                 reasoning_window_starts: RefCell::new(HashMap::new()),
                 activity_scroll_viewports: RefCell::new(HashMap::new()),

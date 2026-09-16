@@ -23,8 +23,8 @@ use crate::driver::{
 };
 use crate::model::{
     ActivityKind, BackgroundWorkEvent, BackgroundWorkItem, BackgroundWorkKind,
-    BackgroundWorkStatus, DriverEvent, InteractionMode, PermissionOption, ProviderResumeCursor,
-    ReportedCommand, RuntimeMode, UserInputAnswer, UserInputOption, UserInputQuestion,
+    BackgroundWorkStatus, DriverEvent, PermissionOption, ProviderResumeCursor, ReportedCommand,
+    RuntimeMode, UserInputAnswer, UserInputOption, UserInputQuestion,
 };
 
 enum CommandMessage {
@@ -102,7 +102,6 @@ impl DeepSeekDriver {
             binary,
             cwd,
             mode,
-            interaction_mode,
             model,
             reasoning_effort,
             service_tier,
@@ -158,6 +157,8 @@ impl DeepSeekDriver {
 
         let baseline = fetch_history(&server, &session_id)
             .context("could not read DeepSeek Harness session history")?;
+        normalize_legacy_read_only_mode(&server, &session_id, baseline.projection_values.as_ref())
+            .context("could not normalize the DeepSeek Harness session")?;
         let available_commands = fetch_commands(&server, &session_id)
             .context("could not read DeepSeek Harness commands")?;
         let command_names = available_commands
@@ -166,7 +167,6 @@ impl DeepSeekDriver {
             .collect::<HashSet<_>>();
         let initial_options = SessionOptions {
             mode,
-            interaction_mode,
             model,
             reasoning_effort,
             service_tier,
@@ -177,7 +177,6 @@ impl DeepSeekDriver {
             &session_id,
             &initial_options,
             baseline.projection_values.as_ref(),
-            &command_names,
         )
         .context("could not configure the DeepSeek Harness session")?;
         // Selecting a model or changing a native command-backed option appends
@@ -499,13 +498,7 @@ fn handle_command(
             let projections = fetch_history(server, session_id)
                 .ok()
                 .and_then(|history| history.projection_values);
-            match apply_session_options(
-                server,
-                session_id,
-                &options,
-                projections.as_ref(),
-                &state.command_names,
-            ) {
+            match apply_session_options(server, session_id, &options, projections.as_ref()) {
                 Ok(()) => *mode.lock() = options.mode,
                 Err(error) => {
                     let _ = events.send(DriverEvent::Error(format!(
@@ -836,7 +829,8 @@ fn handle_tool_call(
         presented,
         false,
         false,
-    );
+    )
+    .with_tool_name(data.get("name").and_then(Value::as_str));
     let _ = events.send(DriverEvent::RichActivity(item));
 }
 
@@ -879,7 +873,8 @@ fn handle_tool_result(
             .unwrap_or(false);
     let item = activity::tool_activity(
         call_id, kind, title, arguments, output, presented, failed, true,
-    );
+    )
+    .with_tool_name(stored.as_ref().map(|tool| tool.name.as_str()));
     let _ = events.send(DriverEvent::RichActivity(item));
 }
 
@@ -1304,7 +1299,6 @@ fn apply_session_options(
     session_id: &str,
     options: &SessionOptions,
     projections: Option<&Value>,
-    command_names: &HashSet<String>,
 ) -> anyhow::Result<()> {
     if let Some(model) = options.model.as_deref() {
         let (provider, model) = match model.split_once('/') {
@@ -1348,30 +1342,41 @@ fn apply_session_options(
             );
         }
     }
-    let plan =
-        options.interaction_mode == InteractionMode::Plan || options.mode == RuntimeMode::Plan;
-    let current_plan = projections
+    Ok(())
+}
+
+/// Older sessions can retain Harness's command-backed read-only state. Clear
+/// it once while attaching; ordinary option changes no longer know about or
+/// manipulate that state.
+fn normalize_legacy_read_only_mode(
+    server: &PooledDeepSeekServer,
+    session_id: &str,
+    projections: Option<&Value>,
+) -> anyhow::Result<()> {
+    if !legacy_read_only_mode_active(projections) {
+        return Ok(());
+    }
+    let execution = execute_harness_command(server, session_id, "/plan off")?;
+    if execution.success {
+        Ok(())
+    } else {
+        bail!(
+            "read-only cleanup command failed: {}",
+            execution.text.unwrap_or_else(|| "unknown error".to_owned())
+        )
+    }
+}
+
+fn legacy_read_only_mode_active(projections: Option<&Value>) -> bool {
+    let active = projections
         .and_then(|values| values.pointer("/plan/active"))
-        .and_then(Value::as_bool);
-    let pending_plan = projections
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let pending = projections
         .and_then(|values| values.pointer("/plan/pending"))
         .and_then(Value::as_bool)
         .unwrap_or(false);
-    let supports_plan = command_names.contains("plan") || current_plan.is_some();
-    if plan && !supports_plan {
-        bail!("the selected Harness agent preset does not support Plan mode");
-    }
-    if supports_plan && (current_plan != Some(plan) || pending_plan) {
-        let execution =
-            execute_harness_command(server, session_id, if plan { "/plan" } else { "/plan off" })?;
-        if !execution.success {
-            bail!(
-                "plan command failed: {}",
-                execution.text.unwrap_or_else(|| "unknown error".to_owned())
-            );
-        }
-    }
-    Ok(())
+    active || pending
 }
 
 fn fetch_history(
@@ -1457,6 +1462,19 @@ fn fetch_history(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn legacy_read_only_projection_is_normalized_on_attach() {
+        assert!(legacy_read_only_mode_active(Some(&json!({
+            "plan": {"active": true, "pending": false}
+        }))));
+        assert!(legacy_read_only_mode_active(Some(&json!({
+            "plan": {"active": false, "pending": true}
+        }))));
+        assert!(!legacy_read_only_mode_active(Some(&json!({
+            "plan": {"active": false, "pending": false}
+        }))));
+    }
 
     #[test]
     fn question_answers_separate_provider_options_from_custom_text() {

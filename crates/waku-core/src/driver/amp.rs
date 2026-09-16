@@ -35,7 +35,7 @@ use super::activity;
 use crate::driver::{
     DriverControl, DriverEventSender, DriverEventSink, DriverStartOptions, SessionOptions,
 };
-use crate::model::{ActivityKind, DriverEvent, InteractionMode, ProviderResumeCursor, RuntimeMode};
+use crate::model::{ActivityKind, DriverEvent, ProviderResumeCursor, RuntimeMode};
 
 enum CommandMessage {
     Prompt(String),
@@ -88,7 +88,6 @@ impl AmpDriver {
             binary,
             cwd,
             mode,
-            interaction_mode,
             model,
             reasoning_effort,
             service_tier,
@@ -97,10 +96,8 @@ impl AmpDriver {
             computer_use_enabled: _,
             provider_cursor,
         } = options;
-        if mode != RuntimeMode::FullAccess || interaction_mode != InteractionMode::Build {
-            return Err(anyhow!(
-                "Amp currently supports Build with Full access only"
-            ));
+        if mode != RuntimeMode::FullAccess {
+            return Err(anyhow!("Amp currently supports Full access only"));
         }
         let (thread_id, fork_context) = match provider_cursor {
             Some(ProviderResumeCursor::Amp {
@@ -568,7 +565,6 @@ mod tests {
                 binary,
                 cwd: std::env::temp_dir(),
                 mode: RuntimeMode::FullAccess,
-                interaction_mode: InteractionMode::Build,
                 model: None,
                 reasoning_effort: None,
                 service_tier: None,
@@ -627,7 +623,6 @@ mod tests {
                 binary,
                 cwd: std::env::temp_dir(),
                 mode: RuntimeMode::FullAccess,
-                interaction_mode: InteractionMode::Build,
                 model: None,
                 reasoning_effort: None,
                 service_tier: Some("fast".into()),

@@ -53,9 +53,9 @@ Everything during a stream happens at one of two rates, and every change to
 the pipeline must keep it that way:
 
 **Commits, ≤ ~8.3 Hz.** Provider chunks queue for a full
-`STREAM_FRAME_INTERVAL` (120 ms, matching Zeron's `STREAM_COMMIT_MS`) and fold
-into one drain → one notify → one tail remeasure
-([src/app.rs](../src/app.rs), [src/app/runtime.rs](../src/app/runtime.rs)).
+`STREAM_FRAME_INTERVAL` (120 ms) and fold into one drain → one notify → one
+tail remeasure ([src/app.rs](../src/app.rs),
+[src/app/runtime.rs](../src/app/runtime.rs)).
 Two hard-won rules:
 
 - The pump timer must **not** race the wake channel. It used to, which made
@@ -68,21 +68,23 @@ Two hard-won rules:
   second**, sailing straight past the floor. Fast thinking hitting 40% CPU
   while text streamed at 10% was this one flag.
 
-**Pulse ticks, ≤ ~30 Hz.** All repeating animation rides the shared
-self-parking clock in [src/ui/motion.rs](../src/ui/motion.rs) (ported from
-Zeron): loaders read a phase from a shared epoch, leases expire 300 ms after
-the loader last painted, and the clock parks when no leases remain. Never use
+**Pulse ticks, ≤ 60 Hz.** All repeating animation rides the shared
+self-parking clock in [src/ui/motion.rs](../src/ui/motion.rs): loaders read
+a phase from a shared epoch, leases expire 300 ms after the loader last
+painted, and the clock parks when no leases remain. Never use
 `with_animation(...).repeat()` — it re-arms `request_animation_frame` every
 display frame. A view's whole subtree rebuilds per tick, so cadence is priced
-per *view*, not per animation: leases carry a stride (`spin_slow`,
-`pulse_lease_slow`, `Pulse::every(2)` ≈ 15 Hz) for loaders mounted on
-expensive surfaces — the working dots set the transcript pane's tick floor for
-the entire turn. Strides re-establish on every tick (a lease's stride resets
-after it fires); an earlier version kept the minimum stride forever, so one
-full-rate lease permanently dragged its pane back to 30 Hz.
+per *view*, not per animation: spinners use the full 60 Hz rate, while
+`spin_slow` uses every second tick (≈ 30 Hz). Non-spinning pulses and
+`pulse_lease` retain ≈ 30 Hz; `pulse_lease_slow` and `Pulse::every(2)` use
+≈ 15 Hz for loaders mounted on expensive surfaces — the working dots set the
+transcript pane's tick floor for the entire turn. Strides re-establish on
+every tick (a lease's stride resets after it fires); an earlier version kept
+the minimum stride forever, so one full-rate lease permanently dragged its
+pane back to 30 Hz.
 
 The veil dissolve is a pulse-clock client like everything else: the message
-veil at full rate, the reasoning veil strided, both leasing
+veil at ≈ 30 Hz, the reasoning veil at ≈ 15 Hz, both leasing
 `window.current_view()` so a dissolve only rebuilds the island that hosts it.
 
 **Overlay scrollbars are the classic violator of both cadences.** A streaming
@@ -119,6 +121,34 @@ moment any scrollbar became visible.
   or the streaming flag changed — the derivation re-parses the final block and
   runs for every visible row every frame.
 
+## Markdown math
+
+Inline `$…$` and display `$$…$$` formulas use the native RaTeX engine
+([src/md/math.rs](../src/md/math.rs)). Parsing TeX, loading embedded font
+outlines, producing SVGs and rasterizing them all run on the background
+executor. A frame only queues cache misses and reads completed results.
+The General setting **Render math expressions** is enabled by default.
+When disabled, every Markdown surface uses selectable LaTeX text without
+queuing math jobs. Right-clicking a rendered formula adds **Copy Expression**
+to its context menu; the copied source is captured at the click so later
+streaming or layout changes cannot change the expression being copied.
+
+Two workers process batches of up to eight formulas. Pending work is
+deduplicated across Markdown views and capped at 128 requests. The image
+cache retains at most 256 entries / 32 MiB, including failed results so
+invalid formulas never retry on every frame. Eviction explicitly releases
+GPUI sprite-atlas entries as well as CPU images. A separate bounded cache
+keeps color-independent typesetting for theme and display-scale changes.
+Individual formulas are limited to 8 KiB of source and two million raster
+pixels; pending, invalid or oversized formulas keep selectable source text.
+
+Ordinary prose retains the existing `StyledText` path. A paragraph containing
+math uses one measured element with cached glyph runs and line positions,
+including baseline alignment and Unicode wrapping. It does not create an
+element per word or start an animation clock. Selection and search use the
+original LaTeX byte ranges. The manual measurement is
+`cargo test --locked -p waku --lib md::math::tests::benchmark_native_math_cache -- --ignored --nocapture`.
+
 ## Measuring
 
 Sampling alone misled this investigation for hours; counters cracked it in one
@@ -151,6 +181,6 @@ row (gpui `list()` semantics). If that ever needs to shrink: fork-level cached
 list rows need a measure-once extension to `ViewElement` caching (cached views
 lay out from style, not content, which breaks the list's measurement as-is);
 alternatively fold activities into the virtualized list as block-granularity
-rows the way Zeron does. Smaller levers, in memory and unproven: stable
+rows. Smaller levers, in memory and unproven: stable
 `StyledText` element ids for gpui's per-element layout memo, and the per-row
 `Message` clones in the row builder.

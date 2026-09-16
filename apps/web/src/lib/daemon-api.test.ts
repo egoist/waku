@@ -1,5 +1,12 @@
 import { describe, expect, test } from 'bun:test'
-import type { ComposerDraftChange, DaemonSettings, Project, WakuClient } from '@waku/client'
+import type {
+  ComposerDraftChange,
+  DaemonSettings,
+  Project,
+  ProviderSessionHistory,
+  ProviderSessionSummary,
+  WakuClient,
+} from '@waku/client'
 import {
   applyComposerDraftChanges,
   beginTurn,
@@ -7,11 +14,15 @@ import {
   captureTurnCheckpoint,
   captureTurnStart,
   createProject,
+  createResumedSession,
   createSession,
+  listProviderSessions,
+  loadProviderSessionHistory,
   persistProject,
   persistSession,
   probeProvider,
   removeSession,
+  sameProviderSession,
   selectableProjects,
   writeWorkspaceTextFile,
   type DaemonDirectory,
@@ -308,6 +319,68 @@ describe('persistSession', () => {
       liveSessionIds: [saved.id],
       sessions: [saved],
     }])
+  })
+})
+
+describe('provider session resume', () => {
+  const summary: ProviderSessionSummary = {
+    cursor: { provider: 'claude', sessionId: 'native-session' },
+    title: 'Imported terminal task',
+    cwd: '/srv/waku',
+    created_at: 100,
+    updated_at: 200,
+  }
+
+  test('lists the catalog and loads only the selected history', async () => {
+    const history: ProviderSessionHistory = { messages: [], turns: [] }
+    const commands: unknown[] = []
+    const client = {
+      request: async (command: unknown) => {
+        commands.push(command)
+        return (command as { type: string }).type === 'listProviderSessions'
+          ? { type: 'providerSessions', sessions: [summary] }
+          : { type: 'providerSessionHistory', history }
+      },
+    } as unknown as WakuClient
+
+    await expect(listProviderSessions(client, 'claude')).resolves.toEqual([summary])
+    await expect(loadProviderSessionHistory(client, summary)).resolves.toEqual(history)
+    expect(commands).toEqual([
+      { type: 'listProviderSessions', provider: 'claude', limit: 250 },
+      { type: 'loadProviderSession', cursor: summary.cursor, cwd: '/srv/waku' },
+    ])
+  })
+
+  test('builds a local task with the provider cursor, history, and inherited access mode', () => {
+    const history = {
+      messages: [{ id: 'message' }],
+      turns: [{ id: 'turn' }],
+    } as unknown as ProviderSessionHistory
+    const session = createResumedSession('project', summary, history, 'ask')
+
+    expect(session).toMatchObject({
+      project_id: 'project',
+      provider: 'claude',
+      auto_title: 'Imported terminal task',
+      runtime_mode: 'ask',
+      provider_cursor: summary.cursor,
+      created_at: 100,
+      updated_at: 200,
+      last_reply_at: 200,
+      messages: history.messages,
+      turns: history.turns,
+    })
+  })
+
+  test('matches Claude replay cursors by provider and native ID', () => {
+    expect(sameProviderSession(
+      { provider: 'claude', sessionId: 'native-session' },
+      { provider: 'claude', sessionId: 'native-session', resumeAt: 'message-2' },
+    )).toBe(true)
+    expect(sameProviderSession(
+      { provider: 'claude', sessionId: 'native-session' },
+      { provider: 'codex', threadId: 'native-session' },
+    )).toBe(false)
   })
 })
 

@@ -21,16 +21,16 @@ else
     IFS= read -r cached_identity < "$debug_identity_cache" || cached_identity=""
     if [ -n "$cached_identity" ]; then
       codesign_identity=$(security find-identity -v -p codesigning 2>/dev/null \
-        | awk -v identity="$cached_identity" 'index($0, identity) { print $2; exit }')
+        | awk -v identity="$cached_identity" 'index($0, identity) && !/CSSMERR/ { print $2; exit }')
     fi
   fi
   if [ -z "$codesign_identity" ]; then
     codesign_identity=$(security find-identity -v -p codesigning 2>/dev/null \
-      | awk -v identity="$preferred_identity" 'index($0, "\"" identity) { print $2; exit }')
+      | awk -v identity="$preferred_identity" 'index($0, "\"" identity) && !/CSSMERR/ { print $2; exit }')
   fi
   if [ -z "$codesign_identity" ]; then
     codesign_identity=$(security find-identity -v -p codesigning 2>/dev/null \
-      | awk -v identity="$fallback_identity" 'index($0, "\"" identity) { print $2; exit }')
+      | awk -v identity="$fallback_identity" 'index($0, "\"" identity) && !/CSSMERR/ { print $2; exit }')
   fi
   if [ -z "$codesign_identity" ]; then
     codesign_identity="-"
@@ -74,15 +74,19 @@ repl_executable="$contents/Resources/waku_js_repl"
 daemon_executable="$contents/MacOS/waku-daemon"
 swift_module_cache="$cargo_target_dir/$profile/swift-module-cache"
 helper_source="resources/computer-use/WakuComputerUse.swift"
-menu_bar_cursor_resource="resources/computer-use/menubar-cursor.png"
-overlay_cursor_resource="resources/computer-use/overlay-cursor.svg"
+helper_sdk_source="resources/computer-use/CuaDriver.swift"
+cua_sdk_directory=$(bun scripts/cua-host.ts)
+cua_sdk_library="$cua_sdk_directory/libcua_driver_sdk.dylib"
 helper_fingerprint="$({
   shasum -a 256 \
     "$helper_source" \
-    resources/computer-use/Info.plist \
-    "$menu_bar_cursor_resource" \
-    "$overlay_cursor_resource"
-  printf '%s\n' "standalone-service-v2" "$helper_name" "$bundle_identifier.computer-use" "$codesign_identity" "$(uname -m)-apple-macos13.0"
+    "$helper_sdk_source" \
+    "$cua_sdk_library" \
+    "$cua_sdk_directory/cua_driver_abi.h" \
+    "$cua_sdk_directory/cua-host.h" \
+    resources/computer-use/CUA-LICENSE \
+    resources/computer-use/Info.plist
+  printf '%s\n' "cua-in-process-v1" "$helper_name" "$bundle_identifier.computer-use" "$codesign_identity" "$(uname -m)-apple-macos13.0"
   xcrun swiftc -version
 } | shasum -a 256 | awk '{ print $1 }')"
 helper_cache_root=".waku-cache/computer-use/$profile"
@@ -101,9 +105,10 @@ if [ ! -d "$cached_helper_bundle" ]; then
   rm -rf "$helper_cache_staging"
   cached_helper_staging="$helper_cache_staging/$helper_name.app"
   cached_helper_contents="$cached_helper_staging/Contents"
-  mkdir -p "$cached_helper_contents/MacOS" "$cached_helper_contents/Resources" "$swift_module_cache"
+  mkdir -p "$cached_helper_contents/MacOS" "$cached_helper_contents/Resources" "$cached_helper_contents/Frameworks" "$swift_module_cache"
   cp resources/computer-use/Info.plist "$cached_helper_contents/Info.plist"
-  cp "$menu_bar_cursor_resource" "$overlay_cursor_resource" "$cached_helper_contents/Resources/"
+  cp resources/computer-use/CUA-LICENSE "$cached_helper_contents/Resources/"
+  cp "$cua_sdk_library" "$cached_helper_contents/Frameworks/"
   printf '%s\n' "$helper_fingerprint" > "$cached_helper_contents/Resources/.waku-helper-fingerprint"
   plutil -replace CFBundleDisplayName -string "$helper_name" "$cached_helper_contents/Info.plist"
   plutil -replace CFBundleExecutable -string "$helper_name" "$cached_helper_contents/Info.plist"
@@ -114,13 +119,19 @@ if [ ! -d "$cached_helper_bundle" ]; then
     -parse-as-library \
     -module-cache-path "$swift_module_cache" \
     -target "$(uname -m)-apple-macos13.0" \
-    "$helper_source" \
+    -import-objc-header "$cua_sdk_directory/cua-host.h" \
+    -L "$cached_helper_contents/Frameworks" -lcua_driver_sdk \
+    -Xlinker -rpath -Xlinker @executable_path/../Frameworks \
+    "$helper_source" "$helper_sdk_source" \
     -o "$cached_helper_contents/MacOS/$helper_name"
   if [ "$codesign_identity" = "-" ]; then
+    codesign --force --sign - "$cached_helper_contents/Frameworks/libcua_driver_sdk.dylib"
     codesign --force --sign - "$cached_helper_staging"
   elif [ "$profile" = "release" ]; then
+    codesign --force --options runtime --timestamp --sign "$codesign_identity" "$cached_helper_contents/Frameworks/libcua_driver_sdk.dylib"
     codesign --force --options runtime --timestamp --sign "$codesign_identity" "$cached_helper_staging"
   else
+    codesign --force --options runtime --sign "$codesign_identity" "$cached_helper_contents/Frameworks/libcua_driver_sdk.dylib"
     codesign --force --options runtime --sign "$codesign_identity" "$cached_helper_staging"
   fi
   mkdir -p "$helper_cache_root"
@@ -162,7 +173,7 @@ fi
 cp resources/Info.plist "$contents/Info.plist"
 cp "resources/$icon_file" "$contents/Resources/AppIcon.icns"
 cp resources/computer-use/pi-extension.ts "$contents/Resources/computer-use/pi-extension.ts"
-cp resources/computer-use/SKILL.md "$contents/Resources/skills/waku-computer-use/SKILL.md"
+bun scripts/cua-api.ts "$cached_helper_bundle/Contents/MacOS/$helper_name" "$contents/Resources/skills/waku-computer-use/SKILL.md"
 frameworks_directory="$contents/Frameworks"
 sparkle_framework="$frameworks_directory/Sparkle.framework"
 mkdir -p "$frameworks_directory"

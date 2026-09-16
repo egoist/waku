@@ -6,6 +6,7 @@ import {
   expandCommandTemplate,
   expandedComposerSubmission,
   isFastModeToggleSubmission,
+  isResumeSubmission,
   mergeComposerCommands,
   parseGoalSubmission,
   replaceComposerTrigger,
@@ -46,13 +47,16 @@ describe('composer autocomplete', () => {
     const discovered = [
       command('review', 'Project', 'Review changes', 'Review $ARGUMENTS'),
       command('deploy', 'Skill', 'Deploy the app', null),
+      command('resume', 'Waku', 'Resume a session', null),
     ]
     const reported: ReportedCommand[] = [
       { name: 'review', description: 'Provider review' },
       { name: 'compact', description: 'Compact context' },
+      { name: 'resume', description: 'Provider resume' },
     ]
     expect(mergeComposerCommands(discovered, reported)).toEqual([
       command('compact', 'Builtin', 'Compact context', null),
+      discovered[2],
       discovered[0],
       discovered[1],
     ])
@@ -66,6 +70,13 @@ describe('composer autocomplete', () => {
     expect(isFastModeToggleSubmission('codex', '/fast', [
       command('fast', 'Project', 'Project fast command', 'Run fast'),
     ])).toBe(false)
+  })
+
+  test('recognizes Resume as an exact provider-neutral local command', () => {
+    expect(isResumeSubmission('/resume')).toBe(true)
+    expect(isResumeSubmission('  /resume  ')).toBe(true)
+    expect(isResumeSubmission('/resume latest')).toBe(false)
+    expect(isResumeSubmission('please /resume')).toBe(false)
   })
 
   test('toggles the concrete Fast service-tier ID reported by the model', () => {

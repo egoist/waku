@@ -17,11 +17,14 @@ macro_rules! tr {
     };
 }
 
+pub mod acp_session;
 pub mod amp_session;
 pub mod attachments;
 pub mod blob_store;
 pub mod checkpoint;
+mod claude_metadata;
 pub mod claude_session;
+pub mod codex_session;
 pub mod command_env;
 pub mod composer_complete;
 pub mod computer_use;
@@ -34,14 +37,19 @@ mod frontmatter;
 pub mod git_branch;
 pub mod git_commit;
 pub mod grok_session;
+mod http_wire;
 pub mod i18n;
 pub mod identity;
 pub mod kimi_session;
 pub mod model;
 pub mod model_catalog;
+pub mod opencode2_api;
+pub mod opencode2_service;
+pub mod opencode2_session;
 pub mod opencode_pool;
 pub mod opencode_session;
 pub mod persistence;
+pub mod pi_session;
 pub mod projectless;
 pub mod settings;
 pub mod skills;

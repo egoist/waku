@@ -35,10 +35,7 @@ impl Waku {
             Query::Ready(result) => match result.as_ref() {
                 Ok(Some(snapshot)) => {
                     let snapshot = snapshot.clone();
-                    self.cache_sidebar_branch_label(
-                        &workspace_path,
-                        snapshot.display_branch(),
-                    );
+                    self.cache_sidebar_branch_label(&workspace_path, snapshot.display_branch());
                     self.visible_branch_snapshot = Some((workspace_path, snapshot.clone()));
                     Some(snapshot)
                 }
@@ -87,10 +84,8 @@ impl Waku {
                             return;
                         }
                         match &result {
-                            Ok(Some(snapshot)) => waku.cache_sidebar_branch_label(
-                                &fetch_path,
-                                snapshot.display_branch(),
-                            ),
+                            Ok(Some(snapshot)) => waku
+                                .cache_sidebar_branch_label(&fetch_path, snapshot.display_branch()),
                             Ok(None) => waku.cache_sidebar_branch_label(&fetch_path, None),
                             Err(_) => {}
                         }

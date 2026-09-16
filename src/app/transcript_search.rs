@@ -38,6 +38,7 @@ struct TranscriptSearchMatch {
 struct TranscriptSearchTarget {
     generation: u64,
     current: usize,
+    message_id: Uuid,
     row_index: usize,
     key: TextKey,
     range: Range<usize>,
@@ -50,6 +51,7 @@ impl TranscriptSearch {
         Some(TranscriptSearchTarget {
             generation: self.generation,
             current,
+            message_id: found.message_id,
             row_index: found.row_index,
             key: TextKey::new(format!("message-{}", found.message_id), found.text.ordinal),
             range: found.text.range.clone(),
@@ -360,7 +362,7 @@ impl Waku {
             return;
         }
         let match_bounds = self.transcript_search_match_bounds(&target);
-        let Some(match_bounds) = match_bounds else {
+        let Some(mut match_bounds) = match_bounds else {
             if attempt < 1 {
                 cx.on_next_frame(window, move |this, window, cx| {
                     this.reveal_transcript_search_geometry(target, attempt + 1, window, cx)
@@ -368,6 +370,29 @@ impl Waku {
             }
             return;
         };
+
+        // Reveal inside a capped user bubble before positioning the transcript.
+        // Search keeps full text geometry even when those glyphs are clipped.
+        if let Some(viewport) = self.user_message_viewports.borrow().get(&target.message_id) {
+            let scroll = &viewport.scroll_handle;
+            let bounds = scroll.bounds();
+            let margin = px(18.0);
+            if scroll.max_offset().y > px(0.5)
+                && (match_bounds.top() < bounds.top() + margin
+                    || match_bounds.bottom() > bounds.bottom() - margin)
+            {
+                let current = scroll.offset();
+                let target_y = bounds.top() + bounds.size.height * 0.35;
+                let next = (current.y + target_y - match_bounds.top())
+                    .clamp(-scroll.max_offset().y, Pixels::ZERO);
+                if next != current.y {
+                    scroll.set_offset(point(current.x, next));
+                    match_bounds.origin.y += next - current.y;
+                    self.detach_transcript_search_from_tail();
+                    cx.notify();
+                }
+            }
+        }
 
         let rows = self.active_transcript_rows();
         let viewport = rows.viewport_bounds();

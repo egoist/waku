@@ -1,0 +1,47 @@
+diff --git a/ios/vendor/GhosttyTerminal/Platform/UIKit/UITerminalView+UITextInput.swift b/ios/vendor/GhosttyTerminal/Platform/UIKit/UITerminalView+UITextInput.swift
+index f2fc42e015abe04eb3c9f5c2ced4b2f9771ee820..28dc4f594a2918b1314498da884f52b47fae26e6 100644
+--- a/ios/vendor/GhosttyTerminal/Platform/UIKit/UITerminalView+UITextInput.swift
++++ b/ios/vendor/GhosttyTerminal/Platform/UIKit/UITerminalView+UITextInput.swift
+@@ -69,9 +69,42 @@
+                 }
+             #endif
+ 
++            // The software keyboard's Return arrives as a text insertion of
++            // "\n". The text path is paste-like — with bracketed paste active
++            // the shell inserts a literal newline into its edit buffer
++            // instead of accepting the line — so Return must travel the key
++            // path, the way a hardware keyboard delivers it. Longer strings
++            // containing newlines (dictation, actual pastes) stay on the
++            // text path, where paste semantics are correct.
++            if text == "\n" {
++                sendReturnKey()
++                return
++            }
++
+             inputHandler.insertText(text)
+         }
+ 
++        /// Deliver Return exactly as a hardware keyboard would: one Enter key
++        /// event through the core's key encoder, so terminal modes (kitty
++        /// keyboard protocol included) keep deciding the bytes.
++        private func sendReturnKey() {
++            let usage = UInt16(UIKeyboardHIDUsage.keyboardReturnOrEnter.rawValue)
++
++            var keyEvent = ghostty_input_key_s()
++            keyEvent.action = GHOSTTY_ACTION_PRESS
++            keyEvent.mods = ghostty_input_mods_e(rawValue: 0)
++            keyEvent.keycode = TerminalHardwareKeyRouter.appKitKeyCodeForUIKit(
++                usage: usage
++            )
++            keyEvent.composing = false
++
++            let carriageReturn = "\r"
++            carriageReturn.withCString { ptr in
++                keyEvent.text = ptr
++                surface?.sendKeyEvent(keyEvent)
++            }
++        }
++
+         open func deleteBackward() {
+             if inputHandler.deleteBackwardInMarkedText() {
+                 TerminalDebugLog.log(.input, "deleteBackward handled by marked text")

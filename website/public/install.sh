@@ -116,15 +116,21 @@ main() {
     mkdir -p "$staging" "$(dirname "$bin_link")" "$(dirname "$desktop_file")"
     tar -xzf "$archive" --strip-components=1 -C "$staging"
 
-    # Waku resolves waku-daemon next to its own executable, so the two must
-    # stay together in bin/. Linking only the binary onto PATH is safe —
-    # current_exe() resolves the symlink back into waku.app.
-    for binary in waku waku-daemon; do
+    # Waku resolves its daemon and self-update helper next to its own
+    # executable, so all three must stay together in bin/. Linking only the
+    # main binary onto PATH is safe — current_exe() resolves the symlink back
+    # into waku.app.
+    for binary in waku waku-daemon waku-updater; do
         if [ ! -x "$staging/bin/$binary" ]; then
             echo "Archive is missing bin/$binary." >&2
             exit 1
         fi
     done
+    if [ "$(cat "$staging/share/waku/self-update-v1" 2>/dev/null || true)" != \
+        "waku-self-update-v1" ]; then
+        echo "Archive is missing its managed-install marker." >&2
+        exit 1
+    fi
     # Replace rather than merge: a file dropped from a later layout must not
     # survive the upgrade.
     rm -rf "$app_dir"

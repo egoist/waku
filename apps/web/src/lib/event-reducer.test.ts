@@ -231,15 +231,53 @@ describe('thread goals', () => {
     expect(settled.session.status).toBe('idle')
   })
 
-  test('unsolicited turns are codex-only and never preempt an active turn', () => {
-    const claude: AgentSession = {
+  test('a parked claude turn stays open and its wake continues it', () => {
+    let session: AgentSession = { ...runningSession(), provider: 'claude' }
+    session = apply(session, 'textDelta', 'Started it in the background.')
+    session = apply(session, 'turnParked', null)
+    expect(session.status).toBe('background')
+    expect(session.turns).toHaveLength(1)
+    expect(session.turns[0]?.status).toBe('running')
+    expect(session.messages.at(-1)?.streaming).toBe(false)
+
+    session = apply(session, 'turnStarted', null)
+    expect(session.status).toBe('working')
+    expect(session.turns).toHaveLength(1)
+    expect(session.turns[0]?.id).toBe('turn')
+
+    const settled = reduceRuntimeEvent(
+      session,
+      event('turnFinished', { success: true, summary: null }),
+      clock,
+    )
+    expect(settled.settled).toBe(true)
+    expect(settled.session.status).toBe('idle')
+    expect(settled.session.turns).toHaveLength(1)
+  })
+
+  test('a claude wake with no held turn gets a transcript home', () => {
+    const idle: AgentSession = {
       ...runningSession(),
       provider: 'claude',
       status: 'idle',
       messages: [],
       turns: [],
     }
-    expect(apply(claude, 'turnStarted', null).turns).toHaveLength(0)
+    const woken = apply(idle, 'turnStarted', null)
+    expect(woken.status).toBe('working')
+    expect(woken.turns).toHaveLength(1)
+    expect(woken.turns[0]?.provider_turn_started).toBe(true)
+  })
+
+  test('unsolicited turns belong to self-waking providers and never preempt an active turn', () => {
+    const amp: AgentSession = {
+      ...runningSession(),
+      provider: 'amp',
+      status: 'idle',
+      messages: [],
+      turns: [],
+    }
+    expect(apply(amp, 'turnStarted', null).turns).toHaveLength(0)
 
     const active = runningSession()
     const next = apply(active, 'turnStarted', null)
@@ -266,7 +304,6 @@ function runningSession(): AgentSession {
     workspace: { kind: 'local' },
     provider: 'codex',
     runtime_mode: 'fullAccess',
-    interaction_mode: 'build',
     status: 'connecting',
     created_at: 100,
     updated_at: 100,

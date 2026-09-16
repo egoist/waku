@@ -5,6 +5,12 @@
   "private": true,
   "exports": {
     ".": "./src/index.ts",
+    "./event-reducer": "./src/event-reducer.ts",
+    "./transcript-presentation": "./src/transcript-presentation.ts",
+    "./composer-preferences": "./src/composer-preferences.ts",
+    "./composer-autocomplete": "./src/composer-autocomplete.ts",
+    "./fuzzy-search": "./src/fuzzy-search.ts",
+    "./provider-probe-cache": "./src/provider-probe-cache.ts",
     "./protocol": "./src/generated/index.ts"
   },
   "scripts": {

@@ -35,7 +35,7 @@ export const appcastName = (arch: Architecture) => `appcast-windows-${arch}.xml`
 /** `generate_keys` emits libsodium's 64-byte secret key: seed then public. */
 const PKCS8_ED25519_PREFIX = Buffer.from("302e020100300506032b657004220420", "hex");
 
-function privateKeyFromSparkleSecret(secret: string) {
+export function privateKeyFromSparkleSecret(secret: string) {
   const bytes = Buffer.from(secret.trim(), "base64");
   if (bytes.length !== 64 && bytes.length !== 32) {
     throw new Error(

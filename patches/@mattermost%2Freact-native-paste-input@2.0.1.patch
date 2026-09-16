@@ -1,0 +1,18 @@
+diff --git a/react-native-paste-input.podspec b/react-native-paste-input.podspec
+index bb61e476b7209445164ab7e79e5ea8eb5816252c..cc0739a03e5f43bcc0aa0a5a7d75a09327c9a6ed 100644
+--- a/react-native-paste-input.podspec
++++ b/react-native-paste-input.podspec
+@@ -15,8 +15,12 @@ Pod::Spec.new do |s|
+   s.swift_version = '5.0'
+ 
+   s.source_files = "ios/**/*.{h,m,mm,swift,cpp}"
++  s.pod_target_xcconfig = { "DEFINES_MODULE" => "YES" }
+ 
+-  if ENV['RCT_NEW_ARCH_ENABLED'] != '1'
++  # React Native 0.86 enables the New Architecture inside use_react_native!,
++  # after CocoaPods has already evaluated autolinked podspecs. Reject only an
++  # explicitly disabled architecture so the RN default can proceed.
++  if ENV['RCT_NEW_ARCH_ENABLED'] == '0'
+     raise Pod::Informative, "react-native-paste-input #{package["version"]} requires the React Native New Architecture (Fabric/TurboModules)."
+   end
+ 

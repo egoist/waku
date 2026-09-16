@@ -4,10 +4,11 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use crossbeam_channel::{Receiver, SendError, Sender, unbounded};
+use uuid::Uuid;
 use waku_protocol::computer_use::ComputerToolRequest;
 use waku_protocol::model::{
-    BackgroundWorkKey, DriverEvent, GoalOperation, InteractionMode, ProviderResumeCursor,
-    RuntimeMode, UserInputAnswer,
+    BackgroundWorkKey, DriverEvent, GoalOperation, ProviderResumeCursor, RuntimeMode,
+    UserInputAnswer,
 };
 
 #[derive(Clone)]
@@ -41,8 +42,11 @@ impl DriverHandle {
         Self { inner: control }
     }
 
-    pub fn prompt(&self, prompt: String) {
-        self.inner.prompt(prompt);
+    /// Send a prompt along with the ids this client gave the turn it opened
+    /// and that turn's user message, so the daemon can publish the same
+    /// identity to every other client attached to the runtime.
+    pub fn prompt(&self, prompt: String, turn_id: Option<Uuid>, message_id: Option<Uuid>) {
+        self.inner.prompt(prompt, turn_id, message_id);
     }
 
     pub fn supports_steer(&self) -> bool {
@@ -109,7 +113,7 @@ impl DriverHandle {
 }
 
 pub trait DriverControl: Send + Sync {
-    fn prompt(&self, prompt: String);
+    fn prompt(&self, prompt: String, turn_id: Option<Uuid>, message_id: Option<Uuid>);
     fn supports_steer(&self) -> bool {
         false
     }
@@ -137,7 +141,6 @@ pub struct DriverStartOptions {
     pub binary: PathBuf,
     pub cwd: PathBuf,
     pub mode: RuntimeMode,
-    pub interaction_mode: InteractionMode,
     pub model: Option<String>,
     pub reasoning_effort: Option<String>,
     pub service_tier: Option<String>,
@@ -150,7 +153,6 @@ pub struct DriverStartOptions {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SessionOptions {
     pub mode: RuntimeMode,
-    pub interaction_mode: InteractionMode,
     pub model: Option<String>,
     pub reasoning_effort: Option<String>,
     pub service_tier: Option<String>,

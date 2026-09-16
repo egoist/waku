@@ -23,9 +23,9 @@ use crate::driver::{
 };
 use crate::model::{
     ActivityItem, ActivityKind, BackgroundWorkEvent, BackgroundWorkItem, BackgroundWorkKey,
-    BackgroundWorkKind, BackgroundWorkStatus, DriverEvent, GoalOperation, InteractionMode,
-    PermissionOption, ProviderResumeCursor, RuntimeMode, ThreadGoal, ThreadGoalStatus,
-    UserInputAnswer, UserInputOption, UserInputQuestion, unix_time_millis,
+    BackgroundWorkKind, BackgroundWorkStatus, DriverEvent, GoalOperation, PermissionOption,
+    ProviderResumeCursor, RuntimeMode, ThreadGoal, ThreadGoalStatus, UserInputAnswer,
+    UserInputOption, UserInputQuestion, unix_time_millis,
 };
 
 const DISABLE_EXTERNAL_COMPUTER_USE_PLUGIN: &str =
@@ -55,9 +55,9 @@ enum CommandMessage {
         turns: usize,
         response: Sender<Result<(), String>>,
     },
-    Fork {
+    PrepareFork {
         turns_to_remove: usize,
-        response: Sender<Result<String, String>>,
+        response: Sender<Result<(String, String), String>>,
     },
     Options(SessionOptions),
     Goal(GoalOperation),
@@ -129,8 +129,9 @@ impl BackgroundRpcState {
 
 pub struct CodexDriver {
     commands: Sender<CommandMessage>,
+    binary: PathBuf,
+    cwd: PathBuf,
     mode: RuntimeMode,
-    interaction_mode: InteractionMode,
     computer_use_process_directory: Option<PathBuf>,
     computer_use_server_path: Option<PathBuf>,
     computer_use_preview_monitor: Option<computer_use_runtime::ComputerUsePreviewMonitor>,
@@ -166,7 +167,7 @@ impl CodexComputerUseConfig {
 }
 
 /// Register Waku's long-lived QuickJS MCP server and keep the raw native helper
-/// private behind its built-in `sky` object. Codex sees only the compact
+/// private behind its built-in `cua` object. Codex sees only the compact
 /// `js` / `js_reset` execution surface.
 fn configure_computer_use_command(command: &mut Command, config: Option<&CodexComputerUseConfig>) {
     if let Some(config) = config {
@@ -209,7 +210,6 @@ impl CodexDriver {
             binary,
             cwd,
             mode,
-            interaction_mode,
             model,
             reasoning_effort,
             service_tier,
@@ -282,9 +282,6 @@ impl CodexDriver {
             u64,
             (usize, Sender<Result<(), String>>),
         >::new()));
-        let pending_forks = Arc::new(Mutex::new(
-            HashMap::<u64, Sender<Result<String, String>>>::new(),
-        ));
         let pending_steers = Arc::new(Mutex::new(HashMap::<u64, String>::new()));
         let background_rpcs = Arc::new(Mutex::new(BackgroundRpcState::default()));
         let goal_rpcs = Arc::new(Mutex::new(GoalRpcState::default()));
@@ -298,7 +295,6 @@ impl CodexDriver {
         let writer_turn_id = turn_id.clone();
         let writer_turn_ids = turn_ids.clone();
         let writer_pending_rollbacks = pending_rollbacks.clone();
-        let writer_pending_forks = pending_forks.clone();
         let writer_pending_steers = pending_steers.clone();
         let writer_background_rpcs = background_rpcs.clone();
         let writer_goal_rpcs = goal_rpcs.clone();
@@ -366,8 +362,7 @@ impl CodexDriver {
                 // one of those is a new value here rather than a new process.
                 // The permission policy is deliberately not in that set — see
                 // `apply_options`.
-                let (approval_policy, sandbox, approvals_reviewer) =
-                    codex_permissions(mode, interaction_mode);
+                let (approval_policy, sandbox, approvals_reviewer) = codex_permissions(mode);
                 let mut model = model;
                 let mut reasoning_effort = reasoning_effort;
                 let mut service_tier = service_tier;
@@ -565,7 +560,7 @@ impl CodexDriver {
                             }
                             continue;
                         }
-                        CommandMessage::Fork {
+                        CommandMessage::PrepareFork {
                             turns_to_remove,
                             response,
                         } => {
@@ -584,24 +579,7 @@ impl CodexDriver {
                                     }
                                 }
                             };
-                            next_request_id += 1;
-                            let request_id = next_request_id;
-                            writer_pending_forks.lock().insert(request_id, response);
-                            let message = json!({
-                                "method": "thread/fork",
-                                "id": request_id,
-                                "params": {
-                                    "threadId": thread_id,
-                                    "lastTurnId": last_turn_id
-                                }
-                            });
-                            if let Err(error) = write_json_line(&mut stdin, &message)
-                                && let Some(response) =
-                                    writer_pending_forks.lock().remove(&request_id)
-                            {
-                                let _ = response
-                                    .send(Err(format!("Codex transport write failed: {error}")));
-                            }
+                            let _ = response.send(Ok((thread_id, last_turn_id)));
                             continue;
                         }
                         CommandMessage::Options(options) => {
@@ -751,7 +729,6 @@ impl CodexDriver {
         let reader_turn_id = turn_id.clone();
         let reader_turn_ids = turn_ids.clone();
         let reader_pending_rollbacks = pending_rollbacks.clone();
-        let reader_pending_forks = pending_forks.clone();
         let reader_pending_steers = pending_steers.clone();
         let reader_background_rpcs = background_rpcs.clone();
         let reader_goal_rpcs = goal_rpcs.clone();
@@ -777,7 +754,6 @@ impl CodexDriver {
                                         &reader_turn_id,
                                         &reader_turn_ids,
                                         &reader_pending_rollbacks,
-                                        &reader_pending_forks,
                                         &reader_pending_steers,
                                         &reader_background_rpcs,
                                         &reader_goal_rpcs,
@@ -881,8 +857,9 @@ impl CodexDriver {
 
         Ok(Self {
             commands,
+            binary,
+            cwd,
             mode,
-            interaction_mode,
             computer_use_process_directory,
             computer_use_server_path,
             computer_use_preview_monitor,
@@ -890,19 +867,12 @@ impl CodexDriver {
     }
 }
 
-fn codex_permissions(
-    mode: RuntimeMode,
-    interaction_mode: InteractionMode,
-) -> (&'static str, &'static str, &'static str) {
-    if interaction_mode == InteractionMode::Plan || mode == RuntimeMode::Plan {
-        return ("never", "read-only", "user");
-    }
+fn codex_permissions(mode: RuntimeMode) -> (&'static str, &'static str, &'static str) {
     match mode {
         RuntimeMode::Ask => ("untrusted", "read-only", "user"),
         RuntimeMode::AutoAcceptEdits => ("on-request", "workspace-write", "user"),
         RuntimeMode::Auto => ("on-request", "workspace-write", "auto_review"),
         RuntimeMode::FullAccess => ("never", "danger-full-access", "user"),
-        RuntimeMode::Plan => unreachable!("handled above"),
     }
 }
 
@@ -1072,7 +1042,7 @@ impl DriverControl for CodexDriver {
         // same way even though they are also per-turn fields: loosening or
         // tightening what an already-running agent may touch deserves a fresh
         // thread, so a mode change asks to be restarted instead.
-        if options.mode != self.mode || options.interaction_mode != self.interaction_mode {
+        if options.mode != self.mode {
             return false;
         }
         self.commands.send(CommandMessage::Options(options)).is_ok()
@@ -1099,16 +1069,23 @@ impl DriverControl for CodexDriver {
     fn fork(&self, turns_to_remove: usize) -> anyhow::Result<ProviderResumeCursor> {
         let (response_tx, response_rx) = bounded(1);
         self.commands
-            .send(CommandMessage::Fork {
+            .send(CommandMessage::PrepareFork {
                 turns_to_remove,
                 response: response_tx,
             })
             .context("Codex driver stopped before forking")?;
-        let thread_id = response_rx
+        let (thread_id, last_turn_id) = response_rx
             .recv_timeout(Duration::from_secs(15))
             .context("timed out waiting for Codex conversation fork")?
             .map_err(anyhow::Error::msg)?;
-        Ok(ProviderResumeCursor::Codex { thread_id })
+        // Keep the source transport free while the caller's background task
+        // creates and closes the fork in its own short-lived app-server.
+        crate::codex_session::fork_session_at_turn(
+            &self.binary,
+            &self.cwd,
+            &thread_id,
+            &last_turn_id,
+        )
     }
 }
 
@@ -1645,7 +1622,6 @@ fn handle_codex_message(
     turn_id: &Mutex<Option<String>>,
     turn_ids: &Mutex<Vec<String>>,
     pending_rollbacks: &Mutex<HashMap<u64, (usize, Sender<Result<(), String>>)>>,
-    pending_forks: &Mutex<HashMap<u64, Sender<Result<String, String>>>>,
     pending_steers: &Mutex<HashMap<u64, String>>,
     background_rpcs: &Mutex<BackgroundRpcState>,
     goal_rpcs: &Mutex<GoalRpcState>,
@@ -1761,31 +1737,8 @@ fn handle_codex_message(
         return;
     }
 
-    if is_response
-        && let Some(id) = value.get("id").and_then(Value::as_u64)
-        && id != 1
-        && let Some(response) = pending_forks.lock().remove(&id)
-    {
-        let result = value
-            .pointer("/error/message")
-            .and_then(Value::as_str)
-            .map_or_else(
-                || {
-                    value
-                        .pointer("/result/thread/id")
-                        .and_then(Value::as_str)
-                        .map(str::to_owned)
-                        .ok_or_else(|| "Codex returned no forked thread ID.".to_owned())
-                },
-                |error| Err(error.to_owned()),
-            );
-        let _ = response.send(result);
-        return;
-    }
-
     if is_response && value.get("id").and_then(Value::as_u64) == Some(1) {
         if let Some(id) = value.pointer("/result/thread/id").and_then(Value::as_str) {
-            *thread_id.lock() = Some(id.to_owned());
             *turn_ids.lock() = value
                 .pointer("/result/thread/turns")
                 .and_then(Value::as_array)
@@ -1793,6 +1746,7 @@ fn handle_codex_message(
                 .flatten()
                 .filter_map(|turn| turn.get("id").and_then(Value::as_str).map(str::to_owned))
                 .collect();
+            *thread_id.lock() = Some(id.to_owned());
             if let Some(title) = value
                 .pointer("/result/thread/name")
                 .and_then(Value::as_str)
@@ -1915,6 +1869,8 @@ fn handle_codex_message(
                         detail,
                         complete,
                     )
+                    .with_tool_name(item.get("tool").and_then(Value::as_str))
+                    .with_mcp_server(item.get("server").and_then(Value::as_str))
                     .with_arguments(codex_item_arguments(item))
                     .with_activity_source(Some(item))
                     .with_output(output)
@@ -2524,12 +2480,181 @@ fn is_visible_stderr_notice(line: &str) -> bool {
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
+    #[test]
+    fn fork_releases_its_writer_before_a_new_driver_sends_a_message() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let directory = std::env::temp_dir().join(format!("waku-codex-fork-{}", Uuid::new_v4()));
+        fs::create_dir_all(&directory).unwrap();
+        let binary = directory.join("codex");
+        fs::write(&binary, include_str!("fixtures/codex_fork.sh")).unwrap();
+        fs::set_permissions(&binary, fs::Permissions::from_mode(0o755)).unwrap();
+        let start = |cursor| {
+            let (events, received) = crate::driver::test_event_channel();
+            let driver = CodexDriver::start(
+                DriverStartOptions {
+                    binary: binary.clone(),
+                    cwd: directory.clone(),
+                    mode: RuntimeMode::Ask,
+                    model: None,
+                    reasoning_effort: None,
+                    service_tier: None,
+                    context_window: None,
+                    agent_preset: None,
+                    computer_use_enabled: false,
+                    provider_cursor: Some(cursor),
+                },
+                events,
+            )
+            .unwrap();
+            assert!(matches!(
+                received.recv_timeout(Duration::from_secs(5)).unwrap(),
+                DriverEvent::Connected { .. }
+            ));
+            (driver, received)
+        };
+        let (source, source_events) = start(ProviderResumeCursor::Codex {
+            thread_id: "thread-original".to_owned(),
+        });
+
+        // A fork error belongs to its caller, not the source transcript.
+        assert!(
+            source
+                .fork(0)
+                .unwrap_err()
+                .to_string()
+                .contains("Cannot fork this turn")
+        );
+        let cursor = source.fork(1).unwrap();
+        assert!(matches!(
+            &cursor,
+            ProviderResumeCursor::Codex { thread_id } if thread_id == "thread-fork"
+        ));
+        let (fork, fork_events) = start(cursor);
+
+        for (driver, events) in [(&fork, &fork_events), (&source, &source_events)] {
+            driver.prompt("Continue this conversation".into());
+            let deadline = Instant::now() + Duration::from_secs(5);
+            let mut text = String::new();
+            loop {
+                match events
+                    .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+                    .unwrap()
+                {
+                    DriverEvent::TextDelta(delta) => text.push_str(&delta),
+                    DriverEvent::TurnFinished { success, .. } => {
+                        assert!(success);
+                        assert_eq!(text, "OK");
+                        break;
+                    }
+                    DriverEvent::Error(error) => panic!("Codex reported: {error}"),
+                    DriverEvent::ProcessExited => panic!("Codex exited before completing the turn"),
+                    _ => {}
+                }
+            }
+        }
+
+        drop(fork);
+        drop(source);
+        for events in [&fork_events, &source_events] {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while !matches!(
+                events
+                    .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+                    .unwrap(),
+                DriverEvent::ProcessExited
+            ) {}
+        }
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    #[ignore = "requires an installed, authenticated codex"]
+    fn codex_fork_preserves_history_and_both_sessions_against_real_cli() {
+        let binary = crate::command_env::find_executable("codex").expect("codex is not installed");
+        let cwd = std::env::temp_dir().join(format!("waku-codex-live-fork-{}", Uuid::new_v4()));
+        fs::create_dir_all(&cwd).unwrap();
+        let start = |cursor| {
+            let (events, received) = crate::driver::test_event_channel();
+            let driver = CodexDriver::start(
+                DriverStartOptions {
+                    binary: binary.clone(),
+                    cwd: cwd.clone(),
+                    mode: RuntimeMode::Ask,
+                    model: Some(CODEX_TITLE_MODEL.to_owned()),
+                    reasoning_effort: Some("low".to_owned()),
+                    service_tier: None,
+                    context_window: None,
+                    agent_preset: None,
+                    computer_use_enabled: false,
+                    provider_cursor: cursor,
+                },
+                events,
+            )
+            .unwrap();
+            (driver, received)
+        };
+        let prompt = |driver: &CodexDriver,
+                      events: &crossbeam_channel::Receiver<DriverEvent>,
+                      message: &str| {
+            driver.prompt(message.to_owned());
+            let deadline = Instant::now() + Duration::from_secs(90);
+            let mut text = String::new();
+            loop {
+                match events
+                    .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+                    .unwrap()
+                {
+                    DriverEvent::Connected { provider_cursor } => {
+                        eprintln!("live fork test cursor: {provider_cursor:?}");
+                    }
+                    DriverEvent::TextDelta(delta) => text.push_str(&delta),
+                    DriverEvent::TurnFinished { success, summary } => {
+                        assert!(success, "Codex failed: {summary:?}");
+                        return text;
+                    }
+                    DriverEvent::Error(error) => panic!("Codex reported: {error}"),
+                    DriverEvent::ProcessExited => panic!("Codex exited before completing the turn"),
+                    _ => {}
+                }
+            }
+        };
+        let (source, source_events) = start(None);
+        prompt(
+            &source,
+            &source_events,
+            "The current test word is ORCHID. Reply exactly OK. Do not use any tools.",
+        );
+        prompt(
+            &source,
+            &source_events,
+            "The current test word is now MAPLE. Reply exactly OK. Do not use any tools.",
+        );
+        let (fork, fork_events) = start(Some(source.fork(1).unwrap()));
+        let question =
+            "What is the current test word? Reply with only that word. Do not use tools.";
+        assert_eq!(prompt(&fork, &fork_events, question).trim(), "ORCHID");
+        assert_eq!(prompt(&source, &source_events, question).trim(), "MAPLE");
+        drop(fork);
+        drop(source);
+        for events in [&fork_events, &source_events] {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while !matches!(
+                events
+                    .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+                    .unwrap(),
+                DriverEvent::ProcessExited
+            ) {}
+        }
+        fs::remove_dir_all(cwd).unwrap();
+    }
+
     struct GoalHarness {
         thread_id: Mutex<Option<String>>,
         turn_id: Mutex<Option<String>>,
         turn_ids: Mutex<Vec<String>>,
         rollbacks: Mutex<HashMap<u64, (usize, Sender<Result<(), String>>)>>,
-        forks: Mutex<HashMap<u64, Sender<Result<String, String>>>>,
         steers: Mutex<HashMap<u64, String>>,
         background: Mutex<BackgroundRpcState>,
         goals: Mutex<GoalRpcState>,
@@ -2548,7 +2673,6 @@ mod tests {
                 turn_id: Mutex::new(None),
                 turn_ids: Mutex::new(Vec::new()),
                 rollbacks: Mutex::new(HashMap::new()),
-                forks: Mutex::new(HashMap::new()),
                 steers: Mutex::new(HashMap::new()),
                 background: Mutex::new(BackgroundRpcState::default()),
                 goals: Mutex::new(GoalRpcState::default()),
@@ -2567,7 +2691,6 @@ mod tests {
                 &self.turn_id,
                 &self.turn_ids,
                 &self.rollbacks,
-                &self.forks,
                 &self.steers,
                 &self.background,
                 &self.goals,
@@ -2594,11 +2717,7 @@ mod tests {
     #[test]
     fn goal_set_responses_become_goal_updates() {
         let harness = GoalHarness::new();
-        harness
-            .goals
-            .lock()
-            .pending
-            .insert(42, PendingGoalRpc::Set);
+        harness.goals.lock().pending.insert(42, PendingGoalRpc::Set);
         harness.handle(json!({"id": 42, "result": {"goal": goal_json()}}));
 
         let Ok(DriverEvent::GoalUpdated(Some(goal))) = harness.received.try_recv() else {
@@ -2812,35 +2931,26 @@ mod tests {
     #[test]
     fn access_modes_match_codex_permission_profiles() {
         assert_eq!(
-            codex_permissions(RuntimeMode::Ask, InteractionMode::Build),
+            codex_permissions(RuntimeMode::Ask),
             ("untrusted", "read-only", "user")
         );
         assert_eq!(
-            codex_permissions(RuntimeMode::AutoAcceptEdits, InteractionMode::Build),
+            codex_permissions(RuntimeMode::AutoAcceptEdits),
             ("on-request", "workspace-write", "user")
         );
         assert_eq!(
-            codex_permissions(RuntimeMode::Auto, InteractionMode::Build),
+            codex_permissions(RuntimeMode::Auto),
             ("on-request", "workspace-write", "auto_review")
         );
         assert_eq!(
-            codex_permissions(RuntimeMode::FullAccess, InteractionMode::Build),
+            codex_permissions(RuntimeMode::FullAccess),
             ("never", "danger-full-access", "user")
-        );
-        assert_eq!(
-            codex_permissions(RuntimeMode::FullAccess, InteractionMode::Plan),
-            ("never", "read-only", "user")
         );
     }
 
-    fn session_options(
-        mode: RuntimeMode,
-        interaction_mode: InteractionMode,
-        model: &str,
-    ) -> SessionOptions {
+    fn session_options(mode: RuntimeMode, model: &str) -> SessionOptions {
         SessionOptions {
             mode,
-            interaction_mode,
             model: Some(model.to_owned()),
             reasoning_effort: None,
             service_tier: None,
@@ -2853,34 +2963,22 @@ mod tests {
         let (commands, command_rx) = unbounded();
         let driver = CodexDriver {
             commands,
+            binary: PathBuf::from("codex"),
+            cwd: std::env::temp_dir(),
             mode: RuntimeMode::FullAccess,
-            interaction_mode: InteractionMode::Build,
             computer_use_process_directory: None,
             computer_use_server_path: None,
             computer_use_preview_monitor: None,
         };
 
-        assert!(driver.apply_options(session_options(
-            RuntimeMode::FullAccess,
-            InteractionMode::Build,
-            "gpt-5-codex"
-        )));
+        assert!(driver.apply_options(session_options(RuntimeMode::FullAccess, "gpt-5-codex")));
         assert!(matches!(
             command_rx.try_recv(),
             Ok(CommandMessage::Options(_))
         ));
 
-        // Both of these change the sandbox the running thread was opened with.
-        assert!(!driver.apply_options(session_options(
-            RuntimeMode::FullAccess,
-            InteractionMode::Plan,
-            "gpt-5-codex"
-        )));
-        assert!(!driver.apply_options(session_options(
-            RuntimeMode::Ask,
-            InteractionMode::Build,
-            "gpt-5-codex"
-        )));
+        // This changes the sandbox the running thread was opened with.
+        assert!(!driver.apply_options(session_options(RuntimeMode::Ask, "gpt-5-codex")));
         assert!(command_rx.try_recv().is_err());
     }
 
@@ -2928,7 +3026,7 @@ mod tests {
             .map(|argument| argument.to_string_lossy().into_owned())
             .collect::<Vec<_>>();
         // The raw helper must never be registered as a Codex MCP server: the
-        // Waku REPL owns it and exposes only `sky` inside JavaScript.
+        // Waku REPL owns it and exposes only `cua` inside JavaScript.
         assert!(
             !enabled_arguments
                 .iter()
@@ -3005,7 +3103,6 @@ mod tests {
         let turn_id = Mutex::new(None);
         let turn_ids = Mutex::new(Vec::new());
         let pending_rollbacks = Mutex::new(HashMap::new());
-        let pending_forks = Mutex::new(HashMap::new());
         let pending_steers = Mutex::new(HashMap::new());
         let background_rpcs = Mutex::new(BackgroundRpcState::default());
         let goal_rpcs = Mutex::new(GoalRpcState::default());
@@ -3019,7 +3116,6 @@ mod tests {
                 &turn_id,
                 &turn_ids,
                 &pending_rollbacks,
-                &pending_forks,
                 &pending_steers,
                 &background_rpcs,
                 &goal_rpcs,
@@ -3074,7 +3170,6 @@ mod tests {
         let turn_id = Mutex::new(None);
         let turn_ids = Mutex::new(vec!["turn-1".to_owned(), "turn-2".to_owned()]);
         let pending_rollbacks = Mutex::new(HashMap::new());
-        let pending_forks = Mutex::new(HashMap::new());
         let pending_steers = Mutex::new(HashMap::new());
         let background_rpcs = Mutex::new(BackgroundRpcState::default());
         let goal_rpcs = Mutex::new(GoalRpcState::default());
@@ -3090,7 +3185,6 @@ mod tests {
             &turn_id,
             &turn_ids,
             &pending_rollbacks,
-            &pending_forks,
             &pending_steers,
             &background_rpcs,
             &goal_rpcs,
@@ -3111,7 +3205,6 @@ mod tests {
         let turn_id = Mutex::new(None);
         let turn_ids = Mutex::new(vec!["turn-1".to_owned()]);
         let pending_rollbacks = Mutex::new(HashMap::new());
-        let pending_forks = Mutex::new(HashMap::new());
         let pending_steers = Mutex::new(HashMap::new());
         let background_rpcs = Mutex::new(BackgroundRpcState::default());
         let goal_rpcs = Mutex::new(GoalRpcState::default());
@@ -3127,7 +3220,6 @@ mod tests {
             &turn_id,
             &turn_ids,
             &pending_rollbacks,
-            &pending_forks,
             &pending_steers,
             &background_rpcs,
             &goal_rpcs,
@@ -3145,42 +3237,6 @@ mod tests {
     }
 
     #[test]
-    fn fork_rpc_returns_the_new_native_thread() {
-        let thread_id = Mutex::new(Some("thread-1".to_owned()));
-        let turn_id = Mutex::new(None);
-        let turn_ids = Mutex::new(vec!["turn-1".to_owned()]);
-        let pending_rollbacks = Mutex::new(HashMap::new());
-        let pending_forks = Mutex::new(HashMap::new());
-        let pending_steers = Mutex::new(HashMap::new());
-        let background_rpcs = Mutex::new(BackgroundRpcState::default());
-        let goal_rpcs = Mutex::new(GoalRpcState::default());
-        let (goal_commands, _goal_command_rx) = unbounded();
-        let (response_tx, response_rx) = bounded(1);
-        pending_forks.lock().insert(44, response_tx);
-        let (event_tx, event_rx) = unbounded();
-        let mut stream_state = CodexStreamState::default();
-
-        handle_codex_message(
-            json!({"id": 44, "result": {"thread": {"id": "thread-fork"}}}),
-            &thread_id,
-            &turn_id,
-            &turn_ids,
-            &pending_rollbacks,
-            &pending_forks,
-            &pending_steers,
-            &background_rpcs,
-            &goal_rpcs,
-            &goal_commands,
-            &event_tx,
-            &mut stream_state,
-        );
-
-        assert_eq!(response_rx.recv().unwrap(), Ok("thread-fork".to_owned()));
-        assert!(pending_forks.lock().is_empty());
-        assert!(event_rx.try_recv().is_err());
-    }
-
-    #[test]
     fn reasoning_parts_are_separated_from_each_other() {
         // Codex numbers reasoning parts but sends no separator with the deltas, so
         // appending them verbatim runs the headers together as `**one****two**`.
@@ -3188,7 +3244,6 @@ mod tests {
         let turn_id = Mutex::new(Some("turn-1".to_owned()));
         let turn_ids = Mutex::new(vec!["turn-1".to_owned()]);
         let pending_rollbacks = Mutex::new(HashMap::new());
-        let pending_forks = Mutex::new(HashMap::new());
         let pending_steers = Mutex::new(HashMap::new());
         let background_rpcs = Mutex::new(BackgroundRpcState::default());
         let goal_rpcs = Mutex::new(GoalRpcState::default());
@@ -3217,7 +3272,6 @@ mod tests {
                 &turn_id,
                 &turn_ids,
                 &pending_rollbacks,
-                &pending_forks,
                 &pending_steers,
                 &background_rpcs,
                 &goal_rpcs,
@@ -3247,7 +3301,6 @@ mod tests {
         let turn_id = Mutex::new(Some("turn-9".to_owned()));
         let turn_ids = Mutex::new(vec!["turn-9".to_owned()]);
         let pending_rollbacks = Mutex::new(HashMap::new());
-        let pending_forks = Mutex::new(HashMap::new());
         let pending_steers = Mutex::new(HashMap::new());
         let background_rpcs = Mutex::new(BackgroundRpcState::default());
         let goal_rpcs = Mutex::new(GoalRpcState::default());
@@ -3264,7 +3317,6 @@ mod tests {
             &turn_id,
             &turn_ids,
             &pending_rollbacks,
-            &pending_forks,
             &pending_steers,
             &background_rpcs,
             &goal_rpcs,
@@ -3289,7 +3341,6 @@ mod tests {
         let turn_id = Mutex::new(Some("turn-9".to_owned()));
         let turn_ids = Mutex::new(vec!["turn-9".to_owned()]);
         let pending_rollbacks = Mutex::new(HashMap::new());
-        let pending_forks = Mutex::new(HashMap::new());
         let pending_steers = Mutex::new(HashMap::new());
         let background_rpcs = Mutex::new(BackgroundRpcState::default());
         let goal_rpcs = Mutex::new(GoalRpcState::default());
@@ -3304,7 +3355,6 @@ mod tests {
             &turn_id,
             &turn_ids,
             &pending_rollbacks,
-            &pending_forks,
             &pending_steers,
             &background_rpcs,
             &goal_rpcs,
@@ -3357,7 +3407,6 @@ mod tests {
         let turn_id = Mutex::new(None);
         let turn_ids = Mutex::new(Vec::new());
         let pending_rollbacks = Mutex::new(HashMap::new());
-        let pending_forks = Mutex::new(HashMap::new());
         let pending_steers = Mutex::new(HashMap::new());
         let background_rpcs = Mutex::new(BackgroundRpcState::default());
         let goal_rpcs = Mutex::new(GoalRpcState::default());
@@ -3380,7 +3429,6 @@ mod tests {
             &turn_id,
             &turn_ids,
             &pending_rollbacks,
-            &pending_forks,
             &pending_steers,
             &background_rpcs,
             &goal_rpcs,
@@ -3464,6 +3512,49 @@ mod tests {
     }
 
     #[test]
+    fn mcp_activity_keeps_native_server_and_tool_names() {
+        let thread_id = Mutex::new(Some("thread-1".to_owned()));
+        let turn_id = Mutex::new(Some("turn-9".to_owned()));
+        let turn_ids = Mutex::new(vec!["turn-9".to_owned()]);
+        let pending_rollbacks = Mutex::new(HashMap::new());
+        let pending_steers = Mutex::new(HashMap::new());
+        let background_rpcs = Mutex::new(BackgroundRpcState::default());
+        let goal_rpcs = Mutex::new(GoalRpcState::default());
+        let (goal_commands, _goal_command_rx) = unbounded();
+        let (event_tx, event_rx) = unbounded();
+        let mut stream_state = CodexStreamState::default();
+        for method in ["item/started", "item/completed"] {
+            handle_codex_message(
+                json!({
+                    "method": method, "params": {
+                        "threadId": "thread-1", "turnId": "turn-9", "item": {
+                            "id": "cua-call", "type": "mcpToolCall", "server": "waku_js_repl", "tool": "js",
+                            "arguments": {"title": "List running apps via CUA", "code": "cua.list_apps()"}
+                        }
+                    }
+                }),
+                &thread_id,
+                &turn_id,
+                &turn_ids,
+                &pending_rollbacks,
+                &pending_steers,
+                &background_rpcs,
+                &goal_rpcs,
+                &goal_commands,
+                &event_tx,
+                &mut stream_state,
+            );
+            let DriverEvent::RichActivity(item) = event_rx.try_recv().unwrap() else {
+                panic!("expected a tool activity");
+            };
+            assert_eq!(item.title, "List running apps via CUA");
+            assert_eq!(item.tool_name.as_deref(), Some("js"));
+            assert_eq!(item.mcp_server.as_deref(), Some("waku_js_repl"));
+            assert_eq!(item.complete, method == "item/completed");
+        }
+    }
+
+    #[test]
     fn mcp_tool_title_prefers_the_human_facing_argument() {
         let titled = json!({
             "type": "mcpToolCall",
@@ -3471,14 +3562,14 @@ mod tests {
             "tool": "js",
             "arguments": {
                 "title": "Inspect Helium browser",
-                "code": "sky.get_app_state({ app: 'Helium' })"
+                "code": "cua.list_windows({})"
             }
         });
         let untitled = json!({
             "type": "mcpToolCall",
             "server": "waku_js_repl",
             "tool": "js",
-            "arguments": { "code": "sky.list_apps()" }
+            "arguments": { "code": "cua.list_apps()" }
         });
 
         assert_eq!(codex_item_title(&titled), "Inspect Helium browser");

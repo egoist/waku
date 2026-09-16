@@ -6,7 +6,7 @@ import { Type } from "typebox";
 type JsonObject = Record<string, unknown>;
 
 const jsToolDescription =
-  "Run JavaScript in Waku's persistent QuickJS kernel for Computer Use. Initialize `sky` lazily with `await setupComputerUseRuntime({ globals: globalThis })`. Calls time out after 30000 ms (30 seconds) unless `timeout_ms` is provided. Use `nodeRepl.write(...)` for text and `await nodeRepl.emitImage(...)` for images. Bindings and scheduled timers persist until the JavaScript kernel is reset.";
+  "Run JavaScript in Waku's persistent QuickJS kernel for Computer Use. Initialize `cua` with `await setupComputerUseRuntime({ globals: globalThis })`, then call native tools directly, such as `cua.list_apps()` and `cua.click(arguments)`. The bundled Computer Use skill documents the method signatures; call the methods directly. Calls time out after 30000 ms (30 seconds) unless `timeout_ms` is provided. Use `jsRepl.write(...)` for text and `await jsRepl.emitImage(...)` for images. Bindings and scheduled timers persist until the JavaScript kernel is reset.";
 
 class WakuMcpClient {
   private child: ChildProcessWithoutNullStreams | undefined;
@@ -163,7 +163,7 @@ export default function wakuComputerUse(pi: ExtensionAPI) {
       {
         code: Type.String({
           description:
-            "JavaScript source to execute in the persistent QuickJS kernel. The code runs with top-level await and can use `sky` and the `nodeRepl` helpers.",
+            "JavaScript source to execute in the persistent QuickJS kernel. The code runs with top-level await and can use `cua` and the `jsRepl` helpers.",
         }),
         timeout_ms: Type.Optional(
           Type.Integer({
@@ -193,7 +193,7 @@ export default function wakuComputerUse(pi: ExtensionAPI) {
     name: "js_reset",
     label: "Reset JavaScript",
     description:
-      "Reset the persistent JavaScript kernel and clear all bindings created by prior `js` calls. The `nodeRepl` helpers and lazy `setupComputerUseRuntime(...)` entrypoint are installed again automatically; `sky` remains unset until setup is called.",
+      "Reset the persistent JavaScript kernel and clear all bindings created by prior `js` calls. The `jsRepl` helpers and lazy `setupComputerUseRuntime(...)` entrypoint are installed again automatically; `cua` remains unset until setup is called.",
     parameters: Type.Object({}, { additionalProperties: false }),
     executionMode: "sequential",
     async execute() {

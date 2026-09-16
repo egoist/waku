@@ -3,7 +3,15 @@ import type { ActivityFileChange } from "./ActivityFileChange";
 import type { ActivityKind } from "./ActivityKind";
 import type { ReasoningBlock } from "./ReasoningBlock";
 
-export type ActivityItem = { id: string, source_id: string | null, kind: ActivityKind, title: string, detail: string | null, arguments?: string | null, output?: string | null,
+export type ActivityItem = { id: string, source_id: string | null, kind: ActivityKind, title: string,
+/**
+ * Native tool identity, separate from the human-readable activity title.
+ */
+tool_name?: string | null,
+/**
+ * MCP server identity, kept separate so clients need not parse tool names.
+ */
+mcp_server?: string | null, detail: string | null, arguments?: string | null, output?: string | null,
 /**
  * Images returned by a tool, kept separate from text so large data URLs
  * are never truncated or treated as literal activity output.

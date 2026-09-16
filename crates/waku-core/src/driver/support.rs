@@ -2,10 +2,12 @@
 //! each provider needs handed to it differently, stderr triage, and tool-name
 //! classification.
 
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context as _, anyhow};
+use parking_lot::Mutex;
 use serde_json::Value;
 
 use super::computer_use as computer_use_runtime;
@@ -365,6 +367,140 @@ pub(super) fn classify_tool(name: &str) -> ActivityKind {
     ActivityKind::from_tool_name(name)
 }
 
+/// The permission policy both OpenCode majors share.
+///
+/// `permission_responses` translates every durable "always" choice into a
+/// one-shot provider reply and keeps the rule in driver-local state. On v1
+/// that protected a per-workspace pooled server. On v2 it is more
+/// load-bearing still: an `always` reply writes into `/api/permission/saved`,
+/// a GLOBAL store shared with the user's own terminal, so a Full Access Waku
+/// task would silently disarm prompts in every other workspace and in the
+/// user's TUI. `always` is never put on the wire.
+#[derive(Clone, Debug)]
+pub(super) struct OpenCodePermissionRequest {
+    pub(super) permission: String,
+    pub(super) patterns: Vec<String>,
+    pub(super) always: Vec<String>,
+}
+
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub(super) struct OpenCodePermissionRule {
+    permission: String,
+    pattern: String,
+}
+
+#[derive(Default)]
+pub(super) struct OpenCodePermissionState {
+    pub(super) pending: HashMap<String, OpenCodePermissionRequest>,
+    pub(super) responding: HashSet<String>,
+    pub(super) approved: HashSet<OpenCodePermissionRule>,
+}
+
+impl OpenCodePermissionState {
+    pub(super) fn is_approved(&self, request: &OpenCodePermissionRequest) -> bool {
+        !request.patterns.is_empty()
+            && request.patterns.iter().all(|pattern| {
+                self.approved.iter().any(|rule| {
+                    opencode_wildcard_matches(&request.permission, &rule.permission)
+                        && opencode_wildcard_matches(pattern, &rule.pattern)
+                })
+            })
+    }
+
+    pub(super) fn remember(&mut self, request: &OpenCodePermissionRequest) {
+        // Mirror OpenCode's own `always` handling exactly: only provider-
+        // supplied reusable patterns become rules. An empty list deliberately
+        // resolves the current request without broadening future access.
+        self.approved
+            .extend(request.always.iter().map(|pattern| OpenCodePermissionRule {
+                permission: request.permission.clone(),
+                pattern: pattern.clone(),
+            }));
+    }
+}
+
+fn opencode_wildcard_matches(input: &str, pattern: &str) -> bool {
+    let input = input.replace('\\', "/");
+    let pattern = pattern.replace('\\', "/");
+    if pattern
+        .strip_suffix(" *")
+        .is_some_and(|prefix| input == prefix)
+    {
+        return true;
+    }
+
+    let input = input.chars().collect::<Vec<_>>();
+    let mut previous = vec![false; input.len() + 1];
+    previous[0] = true;
+    for token in pattern.chars() {
+        let mut current = vec![false; input.len() + 1];
+        if token == '*' {
+            current[0] = previous[0];
+        }
+        for index in 1..=input.len() {
+            current[index] = match token {
+                '*' => previous[index] || current[index - 1],
+                '?' => previous[index - 1],
+                literal => previous[index - 1] && literal == input[index - 1],
+            };
+        }
+        previous = current;
+    }
+    previous[input.len()]
+}
+
+pub(super) fn permission_responses(
+    permissions: &Mutex<OpenCodePermissionState>,
+    request_id: &str,
+    option_id: &str,
+) -> Vec<(String, String)> {
+    permission_responses_in(&mut permissions.lock(), request_id, option_id)
+}
+
+/// The same policy without the lock, for a driver whose permission state is
+/// already thread-local. OpenCode 2 runs commands and events on one worker, so
+/// there is nothing to serialize against.
+pub(super) fn permission_responses_in(
+    permissions: &mut OpenCodePermissionState,
+    request_id: &str,
+    option_id: &str,
+) -> Vec<(String, String)> {
+    let request = permissions.pending.remove(request_id);
+    if option_id != "always" {
+        permissions.responding.insert(request_id.to_owned());
+        return vec![(request_id.to_owned(), option_id.to_owned())];
+    }
+
+    if let Some(request) = request.as_ref() {
+        permissions.remember(request);
+    }
+    // OpenCode normally applies an `always` reply to other matching requests
+    // already pending in the same session. Preserve that behavior locally,
+    // but send every provider reply as one-shot so the shared server's cache
+    // remains untouched.
+    let additional = permissions
+        .pending
+        .iter()
+        .filter(|(_, request)| permissions.is_approved(request))
+        .map(|(request_id, _)| request_id.clone())
+        .collect::<Vec<_>>();
+    for request_id in &additional {
+        permissions.pending.remove(request_id);
+    }
+
+    let responses = std::iter::once((request_id.to_owned(), "once".into()))
+        .chain(
+            additional
+                .into_iter()
+                .map(|request_id| (request_id, "once".into())),
+        )
+        .collect::<Vec<_>>();
+    permissions
+        .responding
+        .extend(responses.iter().map(|(request_id, _)| request_id.clone()));
+    responses
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
@@ -547,5 +683,56 @@ mod tests {
             provider_stderr_error(vec!["warning: optional integration unavailable".into()]),
             None
         );
+    }
+    #[test]
+    fn always_without_provider_rules_does_not_broaden_future_access() {
+        let permissions = Mutex::new(OpenCodePermissionState::default());
+        permissions.lock().pending.insert(
+            "per_once".into(),
+            OpenCodePermissionRequest {
+                permission: "bash".into(),
+                patterns: vec!["cargo test".into()],
+                always: Vec::new(),
+            },
+        );
+
+        assert_eq!(
+            permission_responses(&permissions, "per_once", "always"),
+            [("per_once".into(), "once".into())]
+        );
+        assert!(permissions.lock().approved.is_empty());
+    }
+
+    #[test]
+    fn always_resolves_matching_requests_that_are_already_pending() {
+        let permissions = Mutex::new(OpenCodePermissionState::default());
+        let request = |patterns: &[&str]| OpenCodePermissionRequest {
+            permission: "bash".into(),
+            patterns: patterns.iter().map(|pattern| (*pattern).into()).collect(),
+            always: vec!["cargo *".into()],
+        };
+        permissions
+            .lock()
+            .pending
+            .insert("per_first".into(), request(&["cargo test"]));
+        permissions
+            .lock()
+            .pending
+            .insert("per_matching".into(), request(&["cargo check"]));
+        permissions
+            .lock()
+            .pending
+            .insert("per_other".into(), request(&["git status"]));
+
+        assert_eq!(
+            permission_responses(&permissions, "per_first", "always"),
+            [
+                ("per_first".into(), "once".into()),
+                ("per_matching".into(), "once".into()),
+            ]
+        );
+        let permissions = permissions.lock();
+        assert!(!permissions.pending.contains_key("per_matching"));
+        assert!(permissions.pending.contains_key("per_other"));
     }
 }

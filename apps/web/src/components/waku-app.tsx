@@ -9,12 +9,17 @@ import type {
   ComposerDraftTarget,
   MessageAttachment,
   Project,
+  ProviderSessionSummary,
   ReviewDiffSource,
 } from '@waku/client'
 import { useEffect, useRef, useState } from 'react'
 import { toast } from 'sonner'
 import { Button } from '@/components/ui/button'
-import { CommandPalette, type CommandPaletteActions } from '@/components/command-palette'
+import {
+  CommandPalette,
+  type CommandPaletteActions,
+  type CommandPaletteView,
+} from '@/components/command-palette'
 import { CommitDialog } from '@/components/commit-dialog'
 import { Composer } from '@/components/composer'
 import { ControlMenu } from '@/components/control-menu'
@@ -35,15 +40,18 @@ import {
 import { useDocumentTitle } from '@/hooks/use-document-title'
 import {
   applyComposerDraftChanges,
+  createResumedSession,
   createSession,
   createProject,
   createProjectlessWorkspace,
   daemonKeys,
   displayTitle,
   hydrateSession,
+  loadProviderSessionHistory,
   persistProject,
   removeSession,
   selectableProjects,
+  sameProviderSession,
   sessionCwd,
   type TaskState,
 } from '@/lib/daemon-api'
@@ -114,6 +122,7 @@ export function WakuApp() {
   const retainedPanelSessions = useRef(new Map<string, RetainedPanelSession>())
   const [retainedPanelSessionIds, setRetainedPanelSessionIds] = useState<string[]>([])
   const [paletteOpen, setPaletteOpen] = useState(false)
+  const [paletteInitialView, setPaletteInitialView] = useState<CommandPaletteView>('commands')
   const [focusComposerSignal, setFocusComposerSignal] = useState(0)
   const [modelPickerSignal, setModelPickerSignal] = useState(0)
   const [usagePanelSignal, setUsagePanelSignal] = useState(0)
@@ -200,7 +209,7 @@ export function WakuApp() {
     let cancelled = false
     const candidates = new Set(
       taskState.data.sessions
-        .filter((session) => ['connecting', 'working', 'waiting'].includes(session.status))
+        .filter((session) => ['connecting', 'working', 'waiting', 'background'].includes(session.status))
         .map((session) => session.id),
     )
     if (current?.id) candidates.add(current.id)
@@ -423,7 +432,8 @@ export function WakuApp() {
       const key = event.key.toLowerCase()
       if (key === 'k') {
         event.preventDefault()
-        setPaletteOpen((value) => !value)
+        if (paletteOpen) setPaletteOpen(false)
+        else openCommandPalette('commands')
         return
       }
       if (key === ',') {
@@ -485,6 +495,11 @@ export function WakuApp() {
       ? document.activeElement
       : null
     setProjectPickerOpen(true)
+  }
+
+  function openCommandPalette(view: CommandPaletteView = 'commands') {
+    setPaletteInitialView(view)
+    setPaletteOpen(true)
   }
 
   function rememberNavigation(navigation: RememberedNavigation) {
@@ -624,6 +639,34 @@ export function WakuApp() {
     }
     rememberNavigation({ kind: 'session', sessionId })
     void navigate({ search: { session: sessionId } })
+  }
+
+  async function resumeProviderSession(summary: ProviderSessionSummary) {
+    if (!client || !config || !taskState.data) {
+      throw new Error(t('errors.daemon_disconnected'))
+    }
+    const existing = taskState.data.sessions.find((session) =>
+      session.provider_cursor
+        ? sameProviderSession(session.provider_cursor, summary.cursor)
+        : false)
+    if (existing) {
+      pendingPaletteFocusSession.current = existing.id
+      selectSession(existing.id)
+      return
+    }
+
+    const history = await loadProviderSessionHistory(client, summary)
+    const existingProject = taskState.data.projects.find((project) => project.path === summary.cwd)
+    const project = existingProject ?? createProject(summary.cwd)
+    const session = createResumedSession(
+      project.id,
+      summary,
+      history,
+      activeSession?.runtime_mode ?? 'fullAccess',
+    )
+    const saved = await saveSession(session, existingProject ? undefined : project)
+    pendingPaletteFocusSession.current = saved.id
+    selectSession(saved.id)
   }
 
   async function forkResponse(session: AgentSession, turnCount: number) {
@@ -917,13 +960,16 @@ export function WakuApp() {
       pendingPaletteFocusSession.current = sessionId
       selectSession(sessionId)
     },
+    resumeProviderSession,
   }
 
   const palette = (
     <CommandPalette
       actions={paletteActions}
-      canChooseModel={Boolean(activeSession && !['connecting', 'working', 'waiting'].includes(activeSession.status))}
+      canChooseModel={Boolean(activeSession && !['connecting', 'working', 'waiting', 'background'].includes(activeSession.status))}
       canToggleUsage={Boolean(activeSession)}
+      currentProvider={activeSession?.provider ?? 'codex'}
+      initialView={paletteInitialView}
       open={paletteOpen}
       rightPanelVisible={rightPanelVisible}
       selectedSessionId={search.session}
@@ -943,7 +989,7 @@ export function WakuApp() {
           onNewTask={() => startNewTask()}
           onRemoveSession={removeSessionById}
           onRenameSession={renameSession}
-          onSearch={() => setPaletteOpen(true)}
+          onSearch={() => openCommandPalette('commands')}
           onSelectSession={selectSession}
           onSettings={() => openSettings('general')}
           onToggleSidebar={hideSidebar}
@@ -997,6 +1043,7 @@ export function WakuApp() {
                 onFocusSignalHandled={() => setFocusComposerSignal(0)}
                 onModelPickerSignalHandled={() => setModelPickerSignal(0)}
                 onProjectless={() => void createProjectlessTask()}
+                onResume={() => openCommandPalette('resume')}
                 onUsagePanelSignalHandled={() => setUsagePanelSignal(0)}
                 project={activeProject}
                 projects={selectableProjects(taskState.data.projects, activeProject)}
@@ -1076,6 +1123,7 @@ export function WakuApp() {
                   onPrefillSignalHandled={() => setComposerPrefill((value) =>
                     value?.sessionId === current.id ? null : value)}
                   onProjectless={() => void createProjectlessTask()}
+                  onResume={() => openCommandPalette('resume')}
                   onUsagePanelSignalHandled={() => setUsagePanelSignal(0)}
                   project={currentProject}
                   projects={taskState.data.projects}

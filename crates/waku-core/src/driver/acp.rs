@@ -17,9 +17,9 @@ use agent_client_protocol::schema::v1::{
     InitializeResponse, LoadSessionRequest, NewSessionRequest, PermissionOptionKind, PromptRequest,
     PromptResponse, RequestId, RequestPermissionOutcome, RequestPermissionRequest,
     RequestPermissionResponse, ResumeSessionRequest, SelectedPermissionOutcome, SessionConfigKind,
-    SessionConfigOption, SessionConfigOptionCategory, SessionConfigSelectOptions, SessionId,
-    SessionModeId, SessionModeState, SessionNotification, SetSessionConfigOptionRequest,
-    SetSessionModeRequest, StopReason, TextContent,
+    SessionConfigOption, SessionConfigOptionCategory, SessionConfigOptionValue,
+    SessionConfigSelectOptions, SessionId, SessionModeId, SessionModeState, SessionNotification,
+    SetSessionConfigOptionRequest, SetSessionModeRequest, StopReason, TextContent,
 };
 use agent_client_protocol::{
     AcpAgent, AcpAgentConfig, Agent, Client, ConnectionTo, Handled, LineDirection, Responder,
@@ -34,8 +34,12 @@ use crate::driver::{
     DriverControl, DriverEventSender, DriverEventSink, DriverStartOptions, SessionOptions,
 };
 use crate::model::{
-    ActivityKind, DriverEvent, InteractionMode, PermissionOption, ProviderKind,
-    ProviderResumeCursor, RuntimeMode, UserInputAnswer, UserInputOption, UserInputQuestion,
+    ActivityKind, DriverEvent, PermissionOption, ProviderKind, ProviderResumeCursor, RuntimeMode,
+    UserInputAnswer, UserInputOption, UserInputQuestion,
+};
+use waku_protocol::model_catalog::{
+    CursorModelSelection, cursor_suffix_has, normalize_cursor_reasoning_effort,
+    resolve_cursor_model,
 };
 
 enum CommandMessage {
@@ -58,7 +62,6 @@ pub struct AcpDriver {
     commands: smol::channel::Sender<CommandMessage>,
     supports_steer: bool,
     mode: RuntimeMode,
-    interaction_mode: InteractionMode,
     computer_use: Option<super::support::HeadlessComputerUseRuntime>,
 }
 
@@ -115,11 +118,10 @@ impl AcpDriver {
             binary,
             cwd,
             mode,
-            interaction_mode,
             model,
             reasoning_effort,
-            service_tier: _,
-            context_window: _,
+            service_tier,
+            context_window,
             agent_preset: _,
             computer_use_enabled,
             provider_cursor,
@@ -178,9 +180,10 @@ impl AcpDriver {
                     provider,
                     cwd,
                     mode,
-                    interaction_mode,
                     model,
                     reasoning_effort,
+                    service_tier,
+                    context_window,
                     resume_session_id,
                     fork_context,
                     grok_title_home,
@@ -201,7 +204,6 @@ impl AcpDriver {
             commands,
             supports_steer: provider != ProviderKind::Fx,
             mode,
-            interaction_mode,
             computer_use,
         })
     }
@@ -253,6 +255,21 @@ fn sdk_agent(
         }
         lines.push(line.to_owned());
     }))
+}
+
+/// Builds a short-lived ACP process for session discovery or history replay.
+///
+/// Catalog work runs on the daemon request thread, never a render path. It
+/// intentionally shares the production launch contract so provider argv and
+/// environment quirks cannot drift between a resumed task and the picker that
+/// discovered it.
+pub(crate) fn catalog_agent(
+    provider: ProviderKind,
+    binary: &Path,
+    cwd: &Path,
+) -> anyhow::Result<AcpAgent> {
+    let launch = launch_for(provider, None)?;
+    sdk_agent(binary, cwd, launch, None, Arc::new(Mutex::new(Vec::new())))
 }
 
 type PermissionResponder = Responder<RequestPermissionResponse>;
@@ -327,9 +344,10 @@ async fn run_sdk_connection(
     provider: ProviderKind,
     cwd: std::path::PathBuf,
     mode: RuntimeMode,
-    interaction_mode: InteractionMode,
     model: Option<String>,
     reasoning_effort: Option<String>,
+    service_tier: Option<String>,
+    context_window: Option<String>,
     resume_session_id: Option<String>,
     fork_context: Option<String>,
     grok_title_home: Option<std::path::PathBuf>,
@@ -492,7 +510,7 @@ async fn run_sdk_connection(
             )
             .await?;
 
-            if let Some(mode_id) = desired_mode(provider, modes.as_ref(), mode, interaction_mode) {
+            if let Some(mode_id) = desired_access_mode(provider, modes.as_ref(), mode) {
                 // Mode selection is opportunistic: an agent can advertise a
                 // mode but reject a later transition without invalidating the
                 // session itself.
@@ -511,6 +529,8 @@ async fn run_sdk_connection(
 
             let mut current_model = model;
             let mut current_effort = reasoning_effort;
+            let mut current_tier = service_tier;
+            let mut current_window = context_window;
             apply_model(
                 &connection,
                 provider,
@@ -518,6 +538,8 @@ async fn run_sdk_connection(
                 config_options.as_deref(),
                 current_model.as_deref(),
                 current_effort.as_deref(),
+                current_tier.as_deref(),
+                current_window.as_deref(),
                 &events,
             )
             .await;
@@ -622,11 +644,14 @@ async fn run_sdk_connection(
                     }
                     CommandMessage::Options(options) => {
                         if options.model != current_model
-                            || (provider == ProviderKind::Grok
-                                && options.reasoning_effort != current_effort)
+                            || options.reasoning_effort != current_effort
+                            || options.service_tier != current_tier
+                            || options.context_window != current_window
                         {
                             current_model = options.model;
                             current_effort = options.reasoning_effort;
+                            current_tier = options.service_tier;
+                            current_window = options.context_window;
                             apply_model(
                                 &connection,
                                 provider,
@@ -634,6 +659,8 @@ async fn run_sdk_connection(
                                 config_options.as_deref(),
                                 current_model.as_deref(),
                                 current_effort.as_deref(),
+                                current_tier.as_deref(),
+                                current_window.as_deref(),
                                 &events,
                             )
                             .await;
@@ -702,31 +729,46 @@ async fn establish_session(
     Ok((response.session_id, response.modes, response.config_options))
 }
 
-fn desired_mode(
+fn desired_access_mode(
     provider: ProviderKind,
     modes: Option<&SessionModeState>,
     mode: RuntimeMode,
-    interaction_mode: InteractionMode,
 ) -> Option<SessionModeId> {
     let modes = modes?;
     let desired = if provider == ProviderKind::Fx {
-        if mode == RuntimeMode::Ask {
+        let desired = if mode == RuntimeMode::Ask {
             "ask"
         } else {
             "code"
-        }
+        };
+        modes
+            .available_modes
+            .iter()
+            .find(|mode| mode.id.to_string().eq_ignore_ascii_case(desired))?
+            .id
+            .clone()
     } else {
-        if interaction_mode != InteractionMode::Plan && mode != RuntimeMode::Plan {
+        // Sessions created before the interaction toggle was removed may
+        // retain the provider's read-only mode. Return only those sessions to
+        // the provider's ordinary execution mode; otherwise leave externally
+        // selected native modes untouched.
+        if !modes
+            .current_mode_id
+            .to_string()
+            .eq_ignore_ascii_case("plan")
+        {
             return None;
         }
-        "plan"
+        modes
+            .available_modes
+            .iter()
+            .find(|mode| {
+                let id = mode.id.to_string();
+                id.eq_ignore_ascii_case("agent") || id.eq_ignore_ascii_case("default")
+            })?
+            .id
+            .clone()
     };
-    let desired = modes
-        .available_modes
-        .iter()
-        .find(|mode| mode.id.to_string().eq_ignore_ascii_case(desired))?
-        .id
-        .clone();
     (modes.current_mode_id != desired).then_some(desired)
 }
 
@@ -739,12 +781,6 @@ fn reasoning_effort_config_id(provider: ProviderKind) -> &'static str {
         ProviderKind::Kimi => "thinking",
         _ => "mode",
     }
-}
-
-#[derive(Debug, Eq, PartialEq)]
-struct CursorModelSelection {
-    value: String,
-    suffix: String,
 }
 
 fn session_config_select_values(option: &SessionConfigOption) -> Vec<&str> {
@@ -765,114 +801,185 @@ fn session_config_select_values(option: &SessionConfigOption) -> Vec<&str> {
     }
 }
 
-fn cursor_model_aliases(requested: &str) -> Vec<String> {
-    let mut aliases = vec![requested.to_owned()];
-    if let Some(alias) = requested.strip_prefix("cursor-") {
-        aliases.push(alias.to_owned());
-    }
-
-    // Cursor's CLI spells a few aliases as `claude-4.6-sonnet-*`, while ACP
-    // advertises the same family as `claude-sonnet-4-6`.
-    if let Some(rest) = requested.strip_prefix("claude-")
-        && let Some((version, family_and_suffix)) = rest.split_once('-')
-    {
-        let (family, suffix) = family_and_suffix
-            .split_once('-')
-            .map_or((family_and_suffix, ""), |(family, suffix)| (family, suffix));
-        if matches!(family, "haiku" | "opus" | "sonnet") {
-            let mut alias = format!("claude-{family}-{}", version.replace('.', "-"));
-            if !suffix.is_empty() {
-                alias.push('-');
-                alias.push_str(suffix);
-            }
-            if !aliases.contains(&alias) {
-                aliases.push(alias);
-            }
-        }
-    }
-    aliases
-}
-
-/// Resolves Cursor's CLI-facing model aliases against the base values its
-/// parameterized ACP picker advertises. The unconsumed suffix carries values
-/// such as `thinking`, `xhigh`, and `fast` for the dynamic options returned
-/// after the base model changes.
 fn cursor_model_selection(
     option: &SessionConfigOption,
     requested: &str,
 ) -> Option<CursorModelSelection> {
-    let values = session_config_select_values(option);
-    let aliases = cursor_model_aliases(requested);
+    resolve_cursor_model(session_config_select_values(option), requested)
+}
 
-    for alias in &aliases {
-        if let Some(value) = values.iter().find(|value| **value == alias) {
-            return Some(CursorModelSelection {
-                value: (*value).to_owned(),
-                suffix: String::new(),
-            });
-        }
-    }
-    if requested == "auto"
-        && let Some(value) = values.iter().find(|value| **value == "default")
-    {
-        return Some(CursorModelSelection {
-            value: (*value).to_owned(),
-            suffix: String::new(),
-        });
-    }
+fn cursor_option_id(option: &SessionConfigOption) -> String {
+    option.id.to_string().to_ascii_lowercase()
+}
 
-    aliases
+fn cursor_option_name(option: &SessionConfigOption) -> String {
+    option.name.to_ascii_lowercase()
+}
+
+fn is_cursor_thinking_option(option: &SessionConfigOption) -> bool {
+    option.category == Some(SessionConfigOptionCategory::ModelConfig) && {
+        let id = cursor_option_id(option);
+        let name = cursor_option_name(option);
+        id == "thinking" || name.contains("thinking")
+    }
+}
+
+fn is_cursor_fast_option(option: &SessionConfigOption) -> bool {
+    option.category == Some(SessionConfigOptionCategory::ModelConfig) && {
+        let id = cursor_option_id(option);
+        let name = cursor_option_name(option);
+        id == "fast" || name == "fast" || name.contains("fast mode")
+    }
+}
+
+fn is_cursor_context_option(option: &SessionConfigOption) -> bool {
+    option.category == Some(SessionConfigOptionCategory::ModelConfig) && {
+        let id = cursor_option_id(option);
+        let name = cursor_option_name(option);
+        id == "context" || id == "context_size" || name.contains("context")
+    }
+}
+
+fn is_cursor_effort_option(option: &SessionConfigOption) -> bool {
+    if !matches!(option.kind, SessionConfigKind::Select(_)) {
+        return false;
+    }
+    let id = cursor_option_id(option);
+    let name = cursor_option_name(option);
+    id == "effort"
+        || id == "reasoning"
+        || name == "effort"
+        || name == "reasoning"
+        || name.contains("effort")
+        || name.contains("reasoning")
+}
+
+fn find_cursor_effort_option(options: &[SessionConfigOption]) -> Option<&SessionConfigOption> {
+    let candidates: Vec<&SessionConfigOption> = options
         .iter()
-        .flat_map(|alias| {
-            values.iter().filter_map(move |value| {
-                alias
-                    .strip_prefix(*value)
-                    .and_then(|suffix| suffix.strip_prefix('-'))
-                    .map(|suffix| CursorModelSelection {
-                        value: (*value).to_owned(),
-                        suffix: suffix.to_owned(),
-                    })
-            })
+        .filter(|option| is_cursor_effort_option(option))
+        .collect();
+    candidates
+        .iter()
+        .copied()
+        .find(|option| {
+            matches!(
+                option.category.as_ref(),
+                Some(SessionConfigOptionCategory::Other(value))
+                    if value.eq_ignore_ascii_case("model_option")
+            )
         })
-        .max_by_key(|selection| selection.value.len())
+        .or_else(|| {
+            candidates
+                .iter()
+                .copied()
+                .find(|option| option.id.to_string().eq_ignore_ascii_case("effort"))
+        })
+        .or_else(|| {
+            candidates
+                .iter()
+                .copied()
+                .find(|option| option.category == Some(SessionConfigOptionCategory::ThoughtLevel))
+        })
+        .or_else(|| candidates.first().copied())
 }
 
-fn cursor_suffix_has(suffix: &str, value: &str) -> bool {
-    suffix.split('-').any(|part| part == value)
+fn cursor_matching_select_value<'a>(values: &[&'a str], requested: &str) -> Option<&'a str> {
+    let normalized = normalize_cursor_reasoning_effort(requested);
+    values
+        .iter()
+        .find(|value| normalize_cursor_reasoning_effort(value) == normalized)
+        .copied()
 }
 
-fn cursor_desired_select_value(
+fn cursor_desired_effort_value(
     option: &SessionConfigOption,
     selection: &CursorModelSelection,
     reasoning_effort: Option<&str>,
 ) -> Option<String> {
     let values = session_config_select_values(option);
-    match option.category.as_ref()? {
-        SessionConfigOptionCategory::ThoughtLevel => {
-            if let Some(effort) = reasoning_effort
-                && values.contains(&effort)
-            {
-                return Some(effort.to_owned());
-            }
-            if selection.suffix.contains("extra-high") && values.contains(&"xhigh") {
-                return Some("xhigh".to_owned());
-            }
-            values
-                .iter()
-                .find(|value| cursor_suffix_has(&selection.suffix, value))
-                .map(|value| (*value).to_owned())
-        }
-        SessionConfigOptionCategory::ModelConfig => {
-            let id = option.id.to_string().to_ascii_lowercase();
-            let enabled = match id.as_str() {
-                "fast" => cursor_suffix_has(&selection.suffix, "fast"),
-                "thinking" => cursor_suffix_has(&selection.suffix, "thinking"),
-                _ => return None,
-            };
+    if let Some(effort) = reasoning_effort.filter(|effort| !effort.is_empty())
+        && let Some(value) = cursor_matching_select_value(&values, effort)
+    {
+        return Some(value.to_owned());
+    }
+    if selection.suffix.contains("extra-high")
+        && let Some(value) = values
+            .iter()
+            .find(|value| normalize_cursor_reasoning_effort(value) == "xhigh")
+    {
+        return Some((*value).to_owned());
+    }
+    values
+        .iter()
+        .find(|value| cursor_suffix_has(&selection.suffix, value))
+        .map(|value| (*value).to_owned())
+}
+
+fn cursor_desired_thinking(
+    selection: &CursorModelSelection,
+    reasoning_effort: Option<&str>,
+) -> Option<bool> {
+    if let Some(effort) = reasoning_effort {
+        return Some(normalize_cursor_reasoning_effort(effort) != "none");
+    }
+    cursor_suffix_has(&selection.suffix, "thinking").then_some(true)
+}
+
+fn cursor_desired_fast(
+    selection: &CursorModelSelection,
+    service_tier: Option<&str>,
+) -> Option<bool> {
+    match service_tier {
+        Some("fast") => Some(true),
+        Some(_) => Some(false),
+        None if cursor_suffix_has(&selection.suffix, "fast") => Some(true),
+        None => None,
+    }
+}
+
+fn cursor_desired_context_value(
+    option: &SessionConfigOption,
+    context_window: Option<&str>,
+) -> Option<String> {
+    let requested = context_window.filter(|value| !value.is_empty())?;
+    let values = session_config_select_values(option);
+    let normalized = requested.replace(['_', ' '], "-");
+    values
+        .iter()
+        .find(|value| {
+            value.eq_ignore_ascii_case(requested)
+                || value
+                    .replace(['_', ' '], "-")
+                    .eq_ignore_ascii_case(&normalized)
+        })
+        .map(|value| (*value).to_owned())
+}
+
+fn cursor_flag_request_value(
+    option: &SessionConfigOption,
+    enabled: bool,
+) -> Option<SessionConfigOptionValue> {
+    match &option.kind {
+        SessionConfigKind::Boolean(_) => Some(SessionConfigOptionValue::boolean(enabled)),
+        SessionConfigKind::Select(_) => {
             let value = if enabled { "true" } else { "false" };
-            values.contains(&value).then(|| value.to_owned())
+            session_config_select_values(option)
+                .contains(&value)
+                .then(|| SessionConfigOptionValue::value_id(value))
         }
         _ => None,
+    }
+}
+
+fn cursor_flag_matches(option: &SessionConfigOption, enabled: bool) -> bool {
+    match &option.kind {
+        SessionConfigKind::Boolean(boolean) => boolean.current_value == enabled,
+        SessionConfigKind::Select(_) => {
+            let value = if enabled { "true" } else { "false" };
+            session_config_current_value(option) == Some(value)
+        }
+        _ => false,
     }
 }
 
@@ -889,36 +996,77 @@ async fn apply_cursor_variant_configs(
     mut options: Vec<SessionConfigOption>,
     selection: &CursorModelSelection,
     reasoning_effort: Option<&str>,
+    service_tier: Option<&str>,
+    context_window: Option<&str>,
 ) -> agent_client_protocol::Result<()> {
     // Thinking can reveal a thought-level option, so apply it first and use
     // each response's refreshed option set for the next selection.
-    for target in ["thinking", "thought_level", "fast"] {
-        let Some(option) = options.iter().find(|option| match target {
+    for target in ["thinking", "effort", "context", "fast"] {
+        let Some(option) = (match target {
+            "thinking" => options
+                .iter()
+                .find(|option| is_cursor_thinking_option(option)),
+            "effort" => find_cursor_effort_option(&options),
+            "context" => options
+                .iter()
+                .find(|option| is_cursor_context_option(option)),
+            "fast" => options.iter().find(|option| is_cursor_fast_option(option)),
+            _ => None,
+        })
+        .cloned() else {
+            continue;
+        };
+        let value = match target {
             "thinking" => {
-                option.category == Some(SessionConfigOptionCategory::ModelConfig)
-                    && option.id.to_string().eq_ignore_ascii_case("thinking")
+                let Some(enabled) = cursor_desired_thinking(selection, reasoning_effort) else {
+                    continue;
+                };
+                if cursor_flag_matches(&option, enabled) {
+                    continue;
+                }
+                let Some(value) = cursor_flag_request_value(&option, enabled) else {
+                    continue;
+                };
+                value
             }
-            "thought_level" => option.category == Some(SessionConfigOptionCategory::ThoughtLevel),
+            "effort" => {
+                let Some(value) = cursor_desired_effort_value(&option, selection, reasoning_effort)
+                else {
+                    continue;
+                };
+                if session_config_current_value(&option) == Some(value.as_str()) {
+                    continue;
+                }
+                SessionConfigOptionValue::value_id(value)
+            }
+            "context" => {
+                let Some(value) = cursor_desired_context_value(&option, context_window) else {
+                    continue;
+                };
+                if session_config_current_value(&option) == Some(value.as_str()) {
+                    continue;
+                }
+                SessionConfigOptionValue::value_id(value)
+            }
             "fast" => {
-                option.category == Some(SessionConfigOptionCategory::ModelConfig)
-                    && option.id.to_string().eq_ignore_ascii_case("fast")
+                let Some(enabled) = cursor_desired_fast(selection, service_tier) else {
+                    continue;
+                };
+                if cursor_flag_matches(&option, enabled) {
+                    continue;
+                }
+                let Some(value) = cursor_flag_request_value(&option, enabled) else {
+                    continue;
+                };
+                value
             }
-            _ => false,
-        }) else {
-            continue;
+            _ => continue,
         };
-        let Some(value) = cursor_desired_select_value(option, selection, reasoning_effort) else {
-            continue;
-        };
-        if session_config_current_value(option) == Some(value.as_str()) {
-            continue;
-        }
-        let config_id = option.id.clone();
         options = connection
             .send_request(SetSessionConfigOptionRequest::new(
                 session_id.clone(),
-                config_id,
-                value.as_str(),
+                option.id,
+                value,
             ))
             .block_task()
             .await?
@@ -982,6 +1130,7 @@ fn set_model_params(
     params
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn apply_model(
     connection: &ConnectionTo<Agent>,
     provider: ProviderKind,
@@ -989,6 +1138,8 @@ async fn apply_model(
     config_options: Option<&[SessionConfigOption]>,
     model: Option<&str>,
     reasoning_effort: Option<&str>,
+    service_tier: Option<&str>,
+    context_window: Option<&str>,
     events: &DriverEventSender,
 ) {
     let Some(model) = model else {
@@ -1017,6 +1168,8 @@ async fn apply_model(
                     response.config_options,
                     &selection,
                     reasoning_effort,
+                    service_tier,
+                    context_window,
                 )
                 .await
                 {
@@ -1845,7 +1998,13 @@ fn tool_activity(update: &Value, events: &impl DriverEventSink, state: &mut AcpS
         .filter(|value| !value.is_null())
         .or_else(|| update.get("rawOutput").filter(|value| !value.is_null()));
     let item =
-        activity::tool_activity(id, kind, title, arguments, output, output, failed, complete);
+        activity::tool_activity(id, kind, title, arguments, output, output, failed, complete)
+            .with_tool_name(
+                arguments
+                    .and_then(|input| input.get("tool_name"))
+                    .and_then(Value::as_str)
+                    .or_else(|| wire_title.filter(|title| title.starts_with("mcp__"))),
+            );
     let _ = events.send(DriverEvent::RichActivity(item));
 }
 
@@ -1898,7 +2057,7 @@ impl DriverControl for AcpDriver {
     }
 
     fn apply_options(&self, options: SessionOptions) -> bool {
-        if options.mode != self.mode || options.interaction_mode != self.interaction_mode {
+        if options.mode != self.mode {
             return false;
         }
         self.commands
@@ -2051,32 +2210,19 @@ mod tests {
     }
 
     #[test]
-    fn plan_mode_selects_the_advertised_plan_mode() {
+    fn legacy_read_only_sessions_return_to_the_advertised_agent_mode() {
         let modes = SessionModeState::new(
-            "agent",
+            "plan",
             vec![
                 SessionMode::new("agent", "Agent"),
                 SessionMode::new("plan", "Plan"),
             ],
         );
+
         assert_eq!(
-            desired_mode(
-                ProviderKind::Cursor,
-                Some(&modes),
-                RuntimeMode::FullAccess,
-                InteractionMode::Plan
-            )
-            .map(|mode| mode.to_string()),
-            Some("plan".to_owned())
-        );
-        assert!(
-            desired_mode(
-                ProviderKind::Cursor,
-                Some(&modes),
-                RuntimeMode::FullAccess,
-                InteractionMode::Build
-            )
-            .is_none()
+            desired_access_mode(ProviderKind::Cursor, Some(&modes), RuntimeMode::FullAccess)
+                .map(|mode| mode.to_string()),
+            Some("agent".to_owned())
         );
     }
 
@@ -2090,23 +2236,12 @@ mod tests {
             ],
         );
         assert_eq!(
-            desired_mode(
-                ProviderKind::Fx,
-                Some(&modes),
-                RuntimeMode::Ask,
-                InteractionMode::Build
-            )
-            .map(|mode| mode.to_string()),
+            desired_access_mode(ProviderKind::Fx, Some(&modes), RuntimeMode::Ask)
+                .map(|mode| mode.to_string()),
             Some("ask".to_owned())
         );
         assert!(
-            desired_mode(
-                ProviderKind::Fx,
-                Some(&modes),
-                RuntimeMode::FullAccess,
-                InteractionMode::Build
-            )
-            .is_none()
+            desired_access_mode(ProviderKind::Fx, Some(&modes), RuntimeMode::FullAccess).is_none()
         );
     }
 
@@ -2211,35 +2346,64 @@ mod tests {
             "high",
             &["low", "medium", "high", "xhigh"],
         );
-        let thinking = select_config_option(
-            "thinking",
-            SessionConfigOptionCategory::ModelConfig,
-            "false",
-            &["false", "true"],
+        let extra_high = select_config_option(
+            "reasoning",
+            SessionConfigOptionCategory::ThoughtLevel,
+            "high",
+            &["low", "medium", "high", "extra-high"],
         );
-        let fast = select_config_option(
-            "fast",
+        let context = select_config_option(
+            "context",
             SessionConfigOptionCategory::ModelConfig,
-            "false",
-            &["false", "true"],
+            "272k",
+            &["272k", "1m"],
         );
 
         assert_eq!(
-            cursor_desired_select_value(&effort, &selection, None).as_deref(),
+            cursor_desired_effort_value(&effort, &selection, None).as_deref(),
             Some("xhigh")
         );
         assert_eq!(
-            cursor_desired_select_value(&thinking, &selection, None).as_deref(),
-            Some("true")
+            cursor_desired_effort_value(&extra_high, &selection, Some("xhigh")).as_deref(),
+            Some("extra-high")
         );
+        assert_eq!(cursor_desired_thinking(&selection, None), Some(true));
+        assert_eq!(cursor_desired_fast(&selection, None), Some(true));
         assert_eq!(
-            cursor_desired_select_value(&fast, &selection, None).as_deref(),
-            Some("true")
-        );
-        assert_eq!(
-            cursor_desired_select_value(&effort, &selection, Some("low")).as_deref(),
+            cursor_desired_effort_value(&effort, &selection, Some("low")).as_deref(),
             Some("low")
         );
+        assert_eq!(
+            cursor_desired_fast(&selection, Some("default")),
+            Some(false)
+        );
+        assert_eq!(
+            cursor_desired_context_value(&context, Some("1m")).as_deref(),
+            Some("1m")
+        );
+        assert_eq!(
+            cursor_desired_thinking(&selection, Some("none")),
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn cursor_prefers_model_option_effort_over_thought_level() {
+        let thought = select_config_option(
+            "reasoning",
+            SessionConfigOptionCategory::ThoughtLevel,
+            "high",
+            &["low", "medium", "high"],
+        );
+        let effort = select_config_option(
+            "effort",
+            SessionConfigOptionCategory::Other("model_option".into()),
+            "max",
+            &["low", "medium", "high", "max"],
+        );
+        let options = [thought, effort];
+        let selected = find_cursor_effort_option(&options).unwrap();
+        assert_eq!(selected.id.to_string(), "effort");
     }
 
     #[test]
@@ -2469,7 +2633,6 @@ mod tests {
                 binary,
                 cwd: std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")),
                 mode: RuntimeMode::FullAccess,
-                interaction_mode: InteractionMode::Build,
                 model: Some("grok-4.5".into()),
                 reasoning_effort: None,
                 service_tier: None,
@@ -2523,7 +2686,6 @@ mod tests {
                 binary,
                 cwd: std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")),
                 mode: RuntimeMode::FullAccess,
-                interaction_mode: InteractionMode::Build,
                 model: Some("cursor-grok-4.6-xhigh".into()),
                 reasoning_effort: None,
                 service_tier: None,
@@ -2582,7 +2744,6 @@ mod tests {
                 binary,
                 cwd: std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")),
                 mode: RuntimeMode::FullAccess,
-                interaction_mode: InteractionMode::Build,
                 model: None,
                 reasoning_effort: None,
                 service_tier: None,

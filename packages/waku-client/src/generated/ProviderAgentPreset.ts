@@ -3,8 +3,7 @@
 /**
  * One provider-owned agent composition available when a task starts.
  *
- * DeepSeek Harness calls these agent presets. They are intentionally kept
- * separate from [`InteractionMode`]: a preset chooses the tools and prompt
- * composition, while Build/Plan controls what that composition should do.
+ * DeepSeek Harness calls these agent presets. A preset chooses the tools and
+ * prompt composition for a session.
  */
 export type ProviderAgentPreset = { id: string, name: string, description?: string | null, is_default: boolean, is_custom: boolean, };

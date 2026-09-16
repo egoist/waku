@@ -7,11 +7,15 @@
 //! empty answer and calls it a success. Reading the wire log is what lets Waku
 //! name the real cause instead.
 
+use std::collections::HashSet;
+use std::fs;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use serde_json::Value;
+
+use crate::model::{ProviderResumeCursor, ProviderSessionSummary};
 
 /// Kimi appends the turn record just after the ACP response returns — about
 /// 50ms in practice — so the lookup has to outlast that gap without stalling a
@@ -30,6 +34,122 @@ pub fn session_home() -> Option<PathBuf> {
         Some(home) if !home.is_empty() => Some(PathBuf::from(home)),
         _ => dirs::home_dir().map(|home| home.join(".kimi-code")),
     }
+}
+
+fn provider_timestamp(value: Option<&Value>) -> u64 {
+    value
+        .and_then(Value::as_u64)
+        .map(|value| {
+            if value > 100_000_000_000 {
+                value / 1_000
+            } else {
+                value
+            }
+        })
+        .unwrap_or_default()
+}
+
+fn catalog_title(state: &Value, session_id: &str, cwd: &Path) -> String {
+    ["title", "lastPrompt"]
+        .into_iter()
+        .find_map(|key| {
+            state
+                .get(key)
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(|value| value.lines().next().unwrap_or(value))
+                .map(|value| value.chars().take(120).collect::<String>())
+        })
+        .or_else(|| {
+            cwd.file_name()
+                .and_then(|name| name.to_str())
+                .filter(|name| !name.is_empty())
+                .map(str::to_owned)
+        })
+        .unwrap_or_else(|| {
+            format!(
+                "Kimi session {}",
+                session_id.chars().take(8).collect::<String>()
+            )
+        })
+}
+
+fn catalog_summary(state_path: &Path) -> Option<ProviderSessionSummary> {
+    // Do not follow a provider-store symlink into an arbitrary workspace. The
+    // catalog must remain confined to Kimi's own hidden data directory.
+    if !fs::symlink_metadata(state_path).ok()?.file_type().is_file() {
+        return None;
+    }
+    let state = serde_json::from_slice::<Value>(&fs::read(state_path).ok()?).ok()?;
+    if state.get("archived").and_then(Value::as_bool) == Some(true) {
+        return None;
+    }
+    let session_id = state
+        .get("id")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())?
+        .to_owned();
+    let cwd = PathBuf::from(state.get("cwd").and_then(Value::as_str)?);
+    if !cwd.is_absolute() {
+        return None;
+    }
+    let created_at = provider_timestamp(state.get("createdAt"));
+    let updated_at = provider_timestamp(state.get("updatedAt")).max(created_at);
+    Some(ProviderSessionSummary {
+        cursor: ProviderResumeCursor::Kimi {
+            session_id: session_id.clone(),
+        },
+        title: catalog_title(&state, &session_id, &cwd),
+        cwd,
+        created_at,
+        updated_at,
+    })
+}
+
+fn list_provider_sessions_in(home: &Path, limit: usize) -> Vec<ProviderSessionSummary> {
+    let Ok(workspaces) = fs::read_dir(home.join("sessions")) else {
+        return Vec::new();
+    };
+    let mut seen = HashSet::new();
+    let mut sessions = Vec::new();
+    for workspace in workspaces.flatten() {
+        if !workspace.file_type().is_ok_and(|kind| kind.is_dir()) {
+            continue;
+        }
+        let Ok(entries) = fs::read_dir(workspace.path()) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            if !entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+                continue;
+            }
+            let Some(summary) = catalog_summary(&entry.path().join("state.json")) else {
+                continue;
+            };
+            if seen.insert(summary.cursor.native_id().to_owned()) {
+                sessions.push(summary);
+            }
+        }
+    }
+    sessions.sort_by(|left, right| right.updated_at.cmp(&left.updated_at));
+    sessions.truncate(limit);
+    sessions
+}
+
+/// Read Kimi's provider-owned state files without opening any recorded cwd.
+/// ACP `session/list` is workspace-scoped and makes the agent inspect each
+/// historical project, which can trigger macOS Desktop/Downloads/Documents
+/// permission dialogs just by opening Waku's Resume picker.
+pub fn list_provider_sessions(limit: usize) -> anyhow::Result<Vec<ProviderSessionSummary>> {
+    if limit == 0 {
+        return Ok(Vec::new());
+    }
+    let Some(home) = session_home() else {
+        return Ok(Vec::new());
+    };
+    Ok(list_provider_sessions_in(&home, limit))
 }
 
 /// Where the current length of a session's wire log is read, so a later
@@ -182,5 +302,38 @@ mod tests {
 
         assert!(failure.is_none());
         assert!(started.elapsed() < Duration::from_secs(2));
+    }
+
+    #[test]
+    fn lists_kimi_owned_state_without_opening_the_recorded_workspace() {
+        let root = std::env::temp_dir().join(format!("waku-kimi-catalog-{}", uuid::Uuid::new_v4()));
+        let session = root.join("sessions/wd-protected/session-native");
+        let recorded_cwd = std::env::temp_dir().join(format!(
+            "waku-kimi-protected-workspace-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir_all(&session).unwrap();
+        fs::write(
+            session.join("state.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "id": "session-native",
+                "title": "Protected workspace session",
+                "cwd": recorded_cwd,
+                "createdAt": 1_700_000_000_000_u64,
+                "updatedAt": 1_700_000_100_000_u64,
+                "archived": false
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let sessions = list_provider_sessions_in(&root, 10);
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].cursor.native_id(), "session-native");
+        assert_eq!(sessions[0].created_at, 1_700_000_000);
+        assert_eq!(sessions[0].updated_at, 1_700_000_100);
+        assert_eq!(sessions[0].cwd, recorded_cwd);
+
+        let _ = fs::remove_dir_all(root);
     }
 }

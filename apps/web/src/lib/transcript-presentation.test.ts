@@ -178,6 +178,22 @@ describe('desktop transcript language', () => {
     expect(formatMessageTime(seconds(2024, 7, 4, 11, 0), now, 'en-US')).toBe('Aug 4th 2024, 11:00 AM')
   })
 
+  test('formats message times without Intl.Locale and Intl.RelativeTimeFormat (Hermes)', () => {
+    const globalIntl = Intl as unknown as Record<string, unknown>
+    const savedLocale = globalIntl.Locale
+    const savedRelative = globalIntl.RelativeTimeFormat
+    globalIntl.Locale = undefined
+    globalIntl.RelativeTimeFormat = undefined
+    try {
+      const now = new Date(2026, 7, 9, 16, 0)
+      expect(formatMessageTime(seconds(2026, 7, 8, 17, 0), now, 'en-US')).toBe('Yesterday 5:00 PM')
+      expect(formatMessageTime(seconds(2026, 4, 12, 23, 0), now, 'en-US')).toBe('May 12th, 11:00 PM')
+    } finally {
+      globalIntl.Locale = savedLocale
+      globalIntl.RelativeTimeFormat = savedRelative
+    }
+  })
+
   test('puts one footer on the terminal answer and copies every visible part', () => {
     const session = transcriptSession()
     const footers = assistantResponseFooters(session)
@@ -247,7 +263,6 @@ function transcriptSession(): AgentSession {
     project_id: 'project',
     provider: 'codex',
     runtime_mode: 'fullAccess',
-    interaction_mode: 'build',
     status: 'idle',
     created_at: 10,
     updated_at: 200,

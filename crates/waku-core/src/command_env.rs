@@ -4,7 +4,7 @@ use std::collections::HashSet;
 use std::ffi::{OsStr, OsString};
 use std::io;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Output, Stdio};
+use std::process::{Child, Command, ExitStatus, Output, Stdio};
 use std::sync::{OnceLock, RwLock};
 
 use std::fs::{self, OpenOptions};
@@ -327,11 +327,12 @@ const WINDOWS_NO_PROFILE_ENV_TIMEOUT: Duration = Duration::from_secs(2);
 /// result. `[Environment]::GetEnvironmentVariable` reads the child's
 /// *process* environment, which includes whatever the profile did to
 /// `$env:PATH`; the two-argument form reads the fresh registry blocks, which
-/// the inherited `PATH` may be older than.
+/// the inherited `PATH` may be older than. Use .NET methods directly so the
+/// probe does not need to auto-load a PowerShell module for `New-Object`.
 #[cfg(windows)]
 const WINDOWS_ENV_CAPTURE_COMMAND: &str = "\
 $ErrorActionPreference = 'Continue'
-$entries = New-Object System.Collections.Generic.List[string]
+$entries = [System.Collections.Generic.List[string]]::new()
 foreach ($name in @('PATH', 'FNM_DIR', 'FNM_MULTISHELL_PATH')) {
   $value = [Environment]::GetEnvironmentVariable($name)
   if ($value) { $entries.Add($name + '=' + $value) }
@@ -404,7 +405,7 @@ fn capture_windows_environment(
         .stdout(Stdio::null())
         .stderr(Stdio::null());
     let mut child = spawn(&mut command).ok()?;
-    if !wait_for_child(&mut child, timeout) {
+    if !wait_for_child(&mut child, timeout).ok()?.success() {
         return None;
     }
     parse_shell_environment(&fs::read(capture.path()).ok()?)
@@ -738,7 +739,7 @@ fn capture_shell_environment(
     command.process_group(0);
 
     let mut child = spawn(&mut command).ok()?;
-    if !wait_for_child(&mut child, timeout) {
+    if !wait_for_child(&mut child, timeout).ok()?.success() {
         return None;
     }
     parse_shell_environment(&fs::read(capture.path()).ok()?)
@@ -793,17 +794,24 @@ fn os_string_from_bytes(bytes: &[u8]) -> Option<OsString> {
     }
 }
 
-fn wait_for_child(child: &mut Child, timeout: Duration) -> bool {
+fn wait_for_child(child: &mut Child, timeout: Duration) -> io::Result<ExitStatus> {
     let started_at = Instant::now();
     loop {
         match child.try_wait() {
-            Ok(Some(status)) => return status.success(),
+            Ok(Some(status)) => return Ok(status),
             Ok(None) if started_at.elapsed() < timeout => {
                 std::thread::sleep(Duration::from_millis(10));
             }
-            Ok(None) | Err(_) => {
+            Ok(None) => {
                 terminate_shell_capture(child);
-                return false;
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    format!("child process did not exit within {timeout:?}"),
+                ));
+            }
+            Err(error) => {
+                terminate_shell_capture(child);
+                return Err(error);
             }
         }
     }
@@ -905,6 +913,52 @@ mod tests {
 
         assert_eq!(output.stdout, b"stdout");
         assert_eq!(output.stderr, b"stderr");
+    }
+
+    #[test]
+    fn child_wait_distinguishes_exit_status_from_timeout_and_reaps_the_child() {
+        const CHILD_MODE: &str = "WAKU_CHILD_WAIT_TEST_MODE";
+        if let Some(mode) = std::env::var_os(CHILD_MODE) {
+            match mode.to_str().expect("child mode") {
+                "success" => std::process::exit(0),
+                "failure" => std::process::exit(23),
+                "hang" => loop {
+                    std::thread::park();
+                },
+                _ => panic!("unknown child mode"),
+            }
+        }
+
+        for mode in ["success", "failure", "hang"] {
+            let mut command = Command::new(std::env::current_exe().expect("test executable"));
+            command
+                .args([
+                    "--exact",
+                    "command_env::tests::child_wait_distinguishes_exit_status_from_timeout_and_reaps_the_child",
+                ])
+                .env(CHILD_MODE, mode)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null());
+            #[cfg(unix)]
+            command.process_group(0);
+            let mut child = spawn(&mut command).expect("spawn child fixture");
+            if mode == "hang" {
+                let error = wait_for_child(&mut child, Duration::ZERO).expect_err("timeout");
+                assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+                assert!(
+                    !child
+                        .try_wait()
+                        .expect("read killed child status")
+                        .unwrap()
+                        .success()
+                );
+            } else {
+                let status = wait_for_child(&mut child, Duration::from_secs(60))
+                    .expect("child fixture should exit");
+                assert_eq!(status.code(), Some(if mode == "success" { 0 } else { 23 }));
+            }
+        }
     }
 
     #[cfg(target_os = "macos")]
@@ -1046,18 +1100,27 @@ mod tests {
     #[test]
     fn windows_environment_probe_captures_the_inherited_path_without_a_profile() {
         let capture = ShellEnvironmentCapture::create().expect("create capture file");
+        let diagnostics = ShellEnvironmentCapture::create().expect("create diagnostics file");
+        let output = fs::File::create(diagnostics.path()).expect("open diagnostics file");
         let mut command = Command::new("powershell.exe");
         command
             .args(["-NoLogo", "-NoProfile", "-NonInteractive", "-Command"])
             .arg(WINDOWS_ENV_CAPTURE_COMMAND)
             .env("WAKU_SHELL_ENV_CAPTURE_FILE", capture.path())
             .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null());
+            // A file preserves diagnostics without a pipe buffer blocking the probe.
+            .stdout(output.try_clone().expect("clone diagnostics handle"))
+            .stderr(output);
         let mut child = spawn(&mut command).expect("spawn PowerShell probe");
+        let started_at = Instant::now();
+        // This checks the script's output, not PowerShell's cold-start latency
+        // on a busy CI runner. Production probes keep their short deadlines.
+        let result = wait_for_child(&mut child, Duration::from_secs(60));
         assert!(
-            wait_for_child(&mut child, Duration::from_secs(10)),
-            "PowerShell probe did not finish in time"
+            matches!(&result, Ok(status) if status.success()),
+            "PowerShell probe failed after {:?}: {result:?}\n{}",
+            started_at.elapsed(),
+            String::from_utf8_lossy(&fs::read(diagnostics.path()).expect("read probe diagnostics"))
         );
         let environment =
             parse_shell_environment(&fs::read(capture.path()).expect("capture file written"))

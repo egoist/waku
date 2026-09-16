@@ -2,6 +2,21 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use ts_rs::TS;
 
+/// Whether this build may run Computer Use.
+///
+/// The feature is experimental, so only development builds expose it. Release
+/// builds refuse it even when a client asks, which keeps a stale setting, a
+/// hand-edited settings file, or a third-party daemon client from turning it on
+/// in production.
+pub const fn is_available() -> bool {
+    cfg!(debug_assertions)
+}
+
+/// Clamp a requested Computer Use enablement to what this build ships.
+pub const fn resolve_enabled(requested: bool) -> bool {
+    requested && is_available()
+}
+
 #[derive(Clone, Debug)]
 pub struct ComputerToolRequest {
     pub call_id: String,
@@ -67,7 +82,7 @@ pub struct ComputerPermissions {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct ComputerTarget {
-    pub window_id: u32,
+    pub window_id: u64,
     pub bundle_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub team_id: Option<String>,
@@ -115,4 +130,16 @@ pub struct ComputerUseState {
     pub phase: ComputerUsePhase,
     pub visible: bool,
     pub image_url: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{is_available, resolve_enabled};
+
+    #[test]
+    fn computer_use_is_development_only() {
+        assert_eq!(is_available(), cfg!(debug_assertions));
+        assert!(!resolve_enabled(false));
+        assert_eq!(resolve_enabled(true), is_available());
+    }
 }

@@ -44,6 +44,8 @@ jobs:
             libvulkan1 \
             libwayland-dev \
             libx11-xcb-dev \
+            libxi-dev \
+            libxtst-dev \
             libxkbcommon-x11-dev \
             pkg-config \
             xdg-desktop-portal
@@ -61,6 +63,12 @@ jobs:
 
       - name: Run tests
         run: cargo test --locked
+
+      - name: Verify in-process Cua SDK and REPL lifecycle
+        run: |
+          cargo build --locked --package waku --bin waku_js_repl --package waku-computer-use --bin waku_computer_use
+          bun scripts/cua-driver.ts bundle target/debug target/debug/resources debug
+          bun scripts/test-computer-use.ts
 
       # The generated protocol and browser client are platform-independent, so
       # one runner is enough to catch a drifted checked-in artifact.

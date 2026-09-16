@@ -52,6 +52,7 @@ import {
   detectComposerTrigger,
   expandedComposerSubmission,
   isFastModeToggleSubmission,
+  isResumeSubmission,
   mergeComposerCommands,
   parseGoalSubmission,
   replaceComposerTrigger,
@@ -129,6 +130,7 @@ export function Composer({
   onComposerDraftSubmitted,
   onAddProject,
   onProjectless,
+  onResume,
   onFocusSignalHandled,
   onModelPickerSignalHandled,
   onUsagePanelSignalHandled,
@@ -150,6 +152,7 @@ export function Composer({
   onComposerDraftSubmitted?: () => void
   onAddProject?: () => void
   onProjectless?: () => void
+  onResume?: () => void
   onFocusSignalHandled?: () => void
   onModelPickerSignalHandled?: () => void
   onUsagePanelSignalHandled?: () => void
@@ -199,7 +202,7 @@ export function Composer({
   const mounted = useRef(true)
   const draftChange = useRef(onComposerDraftChange)
   draftChange.current = onComposerDraftChange
-  const busy = ['connecting', 'working', 'waiting'].includes(session.status)
+  const busy = ['connecting', 'working', 'waiting', 'background'].includes(session.status)
   const runningTurnId = [...session.turns].reverse().find((turn) => turn.status === 'running')?.id
   const escapeStopTarget = `${session.id}:${runningTurnId ?? ''}`
   const escapeStopArmed = busy && isEscapeStopArmed(escapeStopArm, escapeStopTarget, Date.now())
@@ -368,7 +371,9 @@ export function Composer({
   }
 
   function executeLocalComposerCommand(submittedPrompt = prompt): boolean {
-    return executeFastModeToggle(submittedPrompt) || executeGoalCommand(submittedPrompt)
+    return executeResumeCommand(submittedPrompt)
+      || executeFastModeToggle(submittedPrompt)
+      || executeGoalCommand(submittedPrompt)
   }
 
   function clearComposerDraft() {
@@ -376,6 +381,13 @@ export function Composer({
     setCursor(0)
     setDismissedAutocomplete(null)
     setAutocompleteSelection({ key: '', index: 0 })
+  }
+
+  function executeResumeCommand(submittedPrompt: string): boolean {
+    if (!onResume || !isResumeSubmission(submittedPrompt)) return false
+    clearComposerDraft()
+    onResume()
+    return true
   }
 
   function executeFastModeToggle(submittedPrompt: string): boolean {
@@ -797,7 +809,6 @@ export function Composer({
               onPatch={savePatch}
             />
             <AccessControl returnFocus={composerInput} session={session} onPatch={savePatch} />
-            <InteractionModeControl session={session} onPatch={savePatch} />
             <GoalControl
               busy={busy}
               session={session}
@@ -1223,7 +1234,7 @@ function AutocompleteRowContents({ row }: { row: ComposerAutocompleteRow }) {
           {command.description}
         </span>
         <span className="flex h-4 shrink-0 items-center rounded border px-1.5 text-[9px] font-semibold text-[var(--text-tertiary)]">
-          {command.scope}
+          {command.scope === 'Waku' ? 'waku' : command.scope}
         </span>
       </>
     )
@@ -1494,10 +1505,7 @@ function AgentPresetControl({
         label: `${agentPresetLabel(preset, t)}${preset.is_custom ? ` · ${t('agent_preset.custom')}` : ''}`,
         description: agentPresetDescription(preset, t) ?? t('agent_preset.no_description'),
         selected: preset.id === selected?.id,
-        onSelect: () => onPatch({
-          agent_preset: preset.id,
-          ...(preset.id === 'minimal' ? { interaction_mode: 'build' as const } : {}),
-        }),
+        onSelect: () => onPatch({ agent_preset: preset.id }),
       }))}
       label={selected ? agentPresetLabel(selected, t) : t('agent_preset.standard')}
       menuClassName="w-80"
@@ -1507,7 +1515,7 @@ function AgentPresetControl({
 }
 
 const ACCESS_MODES: Array<{
-  id: Exclude<AgentSession['runtime_mode'], 'plan'>
+  id: AgentSession['runtime_mode']
   labelKey: string
   descriptionKey: string
   icon: 'lock' | 'pencil' | 'sparkle' | 'lockOpen'
@@ -1528,8 +1536,7 @@ function AccessControl({
   returnFocus: RefObject<HTMLElement | null>
 }) {
   const { t } = useI18n()
-  const selectedId = session.runtime_mode === 'plan' ? 'ask' : session.runtime_mode
-  const selected = ACCESS_MODES.find((mode) => mode.id === selectedId) ?? ACCESS_MODES[3]!
+  const selected = ACCESS_MODES.find((mode) => mode.id === session.runtime_mode) ?? ACCESS_MODES[3]!
   return (
     <ControlMenu
       caret={false}
@@ -1546,41 +1553,6 @@ function AccessControl({
       menuClassName="w-[304px]"
       returnFocus={returnFocus}
     />
-  )
-}
-
-function InteractionModeControl({
-  session,
-  onPatch,
-}: {
-  session: AgentSession
-  onPatch: (patch: Partial<AgentSession>) => void
-}) {
-  const { t } = useI18n()
-  const plan = session.interaction_mode === 'plan'
-  const minimal = session.provider === 'deepSeek' && session.agent_preset === 'minimal'
-  const supportsPlan = session.provider !== 'fx' && !minimal
-  const interactive = plan || supportsPlan
-  return (
-    <button
-      aria-label={t('mode.switch_to', { mode: t(plan ? 'mode.build' : 'mode.plan') })}
-      className={cn(
-        'flex h-6 shrink-0 items-center gap-1.5 rounded-md px-[7px] text-[11.5px] text-[var(--text-secondary)] outline-none focus-visible:ring-1 focus-visible:ring-ring',
-        plan && 'text-ring',
-        interactive ? 'hover:bg-accent' : 'opacity-50',
-      )}
-      disabled={!interactive}
-      title={
-        !interactive
-          ? t(session.provider === 'fx' ? 'mode.plan_not_supported' : 'agent_preset.minimal_no_plan')
-          : undefined
-      }
-      type="button"
-      onClick={() => onPatch({ interaction_mode: plan ? 'build' : 'plan' })}
-    >
-      <WakuIcon className={cn('size-[10.5px] text-[var(--text-tertiary)]', plan && 'text-ring')} name={plan ? 'list' : 'wrench'} />
-      {t(plan ? 'mode.plan' : 'mode.build')}
-    </button>
   )
 }
 

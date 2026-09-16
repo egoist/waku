@@ -279,7 +279,11 @@ const OPEN_IN_CATALOG: &[(&str, &str, &[&str])] = &[
     ("ghostty", "Ghostty", &["com.mitchellh.ghostty"]),
     ("warp", "Warp", &["dev.warp.Warp-Stable", "dev.warp.Warp"]),
     ("xcode", "Xcode", &["com.apple.dt.Xcode"]),
-    ("android-studio", "Android Studio", &["com.google.android.studio"]),
+    (
+        "android-studio",
+        "Android Studio",
+        &["com.google.android.studio"],
+    ),
 ];
 
 /// Resolve which catalog apps are installed, with their icons.

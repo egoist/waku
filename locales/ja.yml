@@ -34,13 +34,24 @@ updater.up_to_date: Waku は最新です
 updater.failed: "アップデートに失敗しました：%{error}"
 
 command_palette.placeholder: タスクを検索、またはコマンドを実行…
+command_palette.resume_placeholder: ターミナルセッションを検索…
+command_palette.resume_provider_placeholder: プロバイダーを選択…
 command_palette.suggested: おすすめ
 command_palette.tasks: タスク
+command_palette.sessions: ターミナルセッション
+command_palette.providers: プロバイダー
 command_palette.commands: コマンド
 command_palette.settings: 設定
 command_palette.new_task: 新規タスク
+command_palette.resume: 再開…
+command_palette.change_provider: プロバイダーを変更
+command_palette.current_provider: 現在のプロバイダー
 command_palette.open_project: プロジェクトを開く…
 command_palette.choose_model: モデルを選択…
+command_palette.copy_task_id: タスク ID をコピー
+command_palette.copy_agent_cli_thread_id: エージェント CLI スレッド ID をコピー
+command_palette.task_id_copied: タスク ID をコピーしました
+command_palette.agent_cli_thread_id_copied: エージェント CLI スレッド ID をコピーしました
 command_palette.collapse_sidebar_groups: サイドバーのすべてのグループを折りたたむ
 command_palette.show_sidebar: サイドバーを表示
 command_palette.hide_sidebar: サイドバーを隠す
@@ -51,6 +62,13 @@ command_palette.you: あなた
 command_palette.agent: エージェント
 command_palette.no_results: 一致するタスクやコマンドはありません
 command_palette.no_results_hint: タスク名、メッセージ、プロジェクト、設定、コマンドで検索してください
+command_palette.no_matching_providers: 一致するプロバイダーはありません
+command_palette.loading_sessions: ターミナルセッションを読み込み中…
+command_palette.no_resume_sessions: 再開できるターミナルセッションはありません
+command_palette.no_resume_sessions_hint: Waku にすでにあるセッションは表示されません。エージェント CLI でセッションを開始して、もう一度お試しください。
+command_palette.could_not_load_sessions: ターミナルセッションを読み込めませんでした
+command_palette.loading_selected_session: 会話を読み込み中…
+command_palette.resume_failed: "セッションを再開できませんでした：%{error}"
 
 language.title: 言語
 language.system: システム
@@ -62,9 +80,9 @@ settings.providers: プロバイダー
 settings.usage: 使用状況
 settings.daemon: デーモン
 settings.computer_use: コンピュータ操作
-settings.general_keywords: 一般 ローカル プロジェクト 会話 プライバシー 分析 テレメトリ 匿名 共有 アップデート 自動 バージョン
+settings.general_keywords: 一般 ローカル プロジェクト 会話 プライバシー 分析 テレメトリ 匿名 共有 アップデート 自動 バージョン 数学 数式 math latex
 settings.appearance_keywords: 外観 テーマ システム ライト ダーク 言語 英語 中国語 簡体字 日本語 フォント サイズ 文字 エディタ
-settings.providers_keywords: プロバイダー エージェント モデル CLI バージョン インストール 検出 claude codex cursor opencode amp grok pi
+settings.providers_keywords: プロバイダー エージェント モデル CLI バージョン インストール 検出 claude codex cursor opencode opencode2 amp grok pi
 settings.skills: スキル
 settings.skills_keywords: スキル ライブラリ エージェント 無効 有効 削除 claude codex cursor opencode pi amp 共有
 settings.usage_keywords: 使用状況 トークン コスト 支出 キャッシュ 日別 グラフ モデル 内訳 履歴 claude codex
@@ -143,6 +161,8 @@ settings.ui_font_size: UI のフォントサイズ
 settings.ui_font_size_description: インターフェース全体とメッセージの文字サイズ
 settings.code_font_size: コードのフォントサイズ
 settings.code_font_size_description: ファイルエディタ、差分表示、コードブロック、ツール出力の文字サイズ
+settings.render_math: 数式を描画
+settings.render_math_description: Markdown の数式を整形して表示します。オフにすると LaTeX ソースを表示します。
 settings.theme_system: システム
 settings.theme_light: ライト
 settings.theme_dark: ダーク
@@ -197,7 +217,7 @@ providers.checked_minutes_ago: "%{count} 分前に確認済み"
 providers.checked_hours_ago: "%{count} 時間前に確認済み"
 
 computer_use.allow_apps: Waku にアプリの操作を許可
-computer_use.availability: コンピュータ操作は Codex、OpenCode、Grok、Pi で利用できます
+computer_use.availability: コンピュータ操作は Codex、OpenCode、OpenCode 2、Grok、Pi で利用できます
 computer_use.macos_access: macOS のアクセス権
 computer_use.helper_access: Waku の分離された操作ヘルパー %{helper} にアクセスを許可してください
 computer_use.screen_recording: 画面収録
@@ -247,6 +267,7 @@ sidebar.add_project: リモートプロジェクトを追加
 sidebar.resize: サイドバーの幅を変更
 sidebar.status_working: 作業中
 sidebar.status_waiting: 待機中
+sidebar.status_background: バックグラウンドタスク待ち
 sidebar.status_failed: 失敗
 
 project.new_project: 新規プロジェクト…
@@ -272,6 +293,7 @@ common.copy_message_title: メッセージをコピー
 common.copy_selection: 選択範囲をコピー
 common.copy_to_composer: 入力欄にコピー
 common.copy_code: コードをコピー
+common.copy_expression: 数式をコピー
 common.cancel: キャンセル
 common.send: 送信
 
@@ -311,6 +333,8 @@ activity.action_plan: 計画
 activity.action_use: 使用
 activity.ask_questions: 質問する
 activity.arguments: 引数
+activity.tool_name: ツール
+activity.mcp_server: MCP サーバー
 activity.output: 出力
 activity.image_output: 画像出力
 activity.open_file: ファイルを開く
@@ -401,19 +425,14 @@ activity.plan_steps: プランのステップ
 activity.tool_call: ツール呼び出し
 activity.tool_calls: ツール呼び出し
 
-mode.build: 実装
-mode.plan: プラン
 mode.supervised: 監督モード
 mode.auto_accept_edits: 編集を自動承認
 mode.auto: 自動
 mode.full_access: フルアクセス
-mode.plan_description: 変更を加えずに調査してプランを作成します
-mode.plan_not_supported: このエージェントはプランモードに対応していません
 mode.supervised_description: コマンドの実行とファイル変更の前に確認します
 mode.auto_accept_edits_description: 編集は自動承認し、その他の操作は事前に確認します
 mode.auto_description: 通常の操作は AI レビュアーが承認し、リスクのある操作は事前に確認します
 mode.full_access_description: 確認なしでコマンドの実行と編集を許可します
-mode.switch_to: "%{mode}に切り替える"
 
 agent_preset.standard: 標準モード
 agent_preset.code: コードモード
@@ -425,7 +444,6 @@ agent_preset.minimal_description: 永続 bash と str_replace_editor の二つ�
 agent_preset.creator_description: カスタムエージェントプリセットの作成向けです。標準モードの全機能に加え、ランタイム検査、プラグイン実験、プリセット作成ガイドを備えます。
 agent_preset.custom: カスタム
 agent_preset.no_description: 説明はありません。
-agent_preset.minimal_no_plan: ミニマルモードにはプラン機能がありません
 
 computer_use.allow_for_task: このタスクで許可
 computer_use.always_allow_app: このアプリを常に許可
@@ -437,7 +455,6 @@ computer_use.no_bundle_id: このアプリには Bundle ID がないため、常
 computer_use.stopped: 停止しました
 computer_use.controlling: 操作中
 computer_use.captured: キャプチャ済み
-computer_use.take_control: 操作を引き継ぐ
 computer_use.preparing_preview: プレビューを準備中…
 
 common.deny: 拒否
@@ -497,6 +514,7 @@ command_scope.project: プロジェクト
 command_scope.user: ユーザー
 command_scope.skill: スキル
 command_scope.builtin: 組み込み
+command_scope.waku: waku
 
 skills.search: スキルを検索…
 skills.count_one: 1 個のスキル
@@ -547,6 +565,7 @@ commands.fast_description: 高速モードを切り替え
 commands.fast_enabled: 高速モードを有効にしました
 commands.fast_disabled: 高速モードを無効にしました
 commands.goal_description: このタスクが継続して追求するゴールを設定
+commands.resume_description: ターミナルのエージェントセッションを再開
 goal.title: ゴール
 goal.objective_placeholder: このタスクは何を目指し続けるべきですか？
 goal.set: ゴールを設定
@@ -619,6 +638,8 @@ errors.remote_project_picker: デーモンホスト上のプロジェクトを�
 
 session.stopped: 停止しました
 session.turn_completed: ターンが完了しました
+session.turn_waiting_background: バックグラウンドタスクを待っています
+transcript.waiting_background: バックグラウンドタスクを待っています
 session.stopped_before_response: エージェントは回答を返す前に停止しました
 session.codex_exited_before_response: Codex app-server は回答を返す前に終了しました
 session.steer_rejected: エージェントに追加の指示を送れませんでした（%{error}）。メッセージはフォローアップとしてキューに追加されました
@@ -750,6 +771,8 @@ environment.summary: 環境とバックグラウンド作業
 environment.changes: 変更
 environment.commit_or_push: コミットまたはプッシュ
 environment.compare_branch: ブランチを比較
+environment.task_id: タスク ID
+environment.agent_cli_thread_id: エージェント CLI スレッド ID
 
 commit.message_placeholder: コミットメッセージ（空欄の場合は自動生成）…
 commit.message: コミットメッセージ
@@ -1062,6 +1085,7 @@ usage_error.read_file: "%{path} を読み込めませんでした"
 usage_error.codex_auth_invalid: Codex の auth.json は有効な JSON ではありません
 usage_error.codex_access_token_missing: Codex の auth.json にアクセストークンがありません。`codex login` を実行してください
 usage_error.opencode_go_key_rejected: OpenCode Go API キーでは使用量を取得できません（HTTP %{status}）。OpenCode Go に再接続してください
+usage_error.opencode_go_not_entitled: OpenCode Go の使用量には有効な OpenCode Go サブスクリプションが必要です
 usage_error.no_rate_limit_windows: 使用量 API からレート制限期間が返されませんでした
 usage_error.start_grok_probe: "`grok agent stdio` を起動できませんでした"
 usage_error.grok_stdin_unavailable: Grok の標準入力を利用できません

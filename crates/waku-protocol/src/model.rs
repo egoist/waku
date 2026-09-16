@@ -18,6 +18,7 @@ pub enum ProviderKind {
     DeepSeek,
     Fx,
     OpenCode,
+    OpenCode2,
     Grok,
     Kimi,
     OhMyPi,
@@ -25,7 +26,7 @@ pub enum ProviderKind {
 }
 
 impl ProviderKind {
-    pub const ALL: [Self; 11] = [
+    pub const ALL: [Self; 12] = [
         Self::Amp,
         Self::Claude,
         Self::Codex,
@@ -33,6 +34,7 @@ impl ProviderKind {
         Self::DeepSeek,
         Self::Fx,
         Self::OpenCode,
+        Self::OpenCode2,
         Self::Grok,
         Self::Kimi,
         Self::OhMyPi,
@@ -48,6 +50,7 @@ impl ProviderKind {
             Self::DeepSeek => "deepseek",
             Self::Fx => "fx",
             Self::OpenCode => "opencode",
+            Self::OpenCode2 => "opencode2",
             Self::Grok => "grok",
             Self::Kimi => "kimi",
             Self::OhMyPi => "ohmypi",
@@ -64,6 +67,7 @@ impl ProviderKind {
             Self::DeepSeek => "DeepSeek Harness",
             Self::Fx => "Fx",
             Self::OpenCode => "OpenCode",
+            Self::OpenCode2 => "OpenCode 2",
             Self::Grok => "Grok Build",
             Self::Kimi => "Kimi Code",
             Self::OhMyPi => "Oh My Pi",
@@ -80,6 +84,7 @@ impl ProviderKind {
             Self::DeepSeek => "DeepSeek",
             Self::Fx => "Fx",
             Self::OpenCode => "OpenCode",
+            Self::OpenCode2 => "OpenCode 2",
             Self::Grok => "Grok",
             Self::Kimi => "Kimi",
             Self::OhMyPi => "Oh My Pi",
@@ -98,6 +103,7 @@ impl ProviderKind {
             Self::DeepSeek => "dsh",
             Self::Fx => "fx",
             Self::OpenCode => "opencode",
+            Self::OpenCode2 => "opencode2",
             Self::Grok => "grok",
             Self::Kimi => "kimi",
             Self::OhMyPi => "omp",
@@ -119,6 +125,7 @@ impl ProviderKind {
                 | Self::Cursor
                 | Self::DeepSeek
                 | Self::OpenCode
+                | Self::OpenCode2
                 | Self::Grok
                 | Self::OhMyPi
                 | Self::Pi
@@ -134,6 +141,7 @@ impl ProviderKind {
                 | Self::Cursor
                 | Self::DeepSeek
                 | Self::OpenCode
+                | Self::OpenCode2
                 | Self::Grok
                 | Self::OhMyPi
                 | Self::Pi
@@ -143,11 +151,13 @@ impl ProviderKind {
     pub fn supports_model_discovery(self) -> bool {
         matches!(
             self,
-            Self::Codex
+            Self::Claude
+                | Self::Codex
                 | Self::Cursor
                 | Self::DeepSeek
                 | Self::Fx
                 | Self::OpenCode
+                | Self::OpenCode2
                 | Self::Grok
                 | Self::Kimi
                 | Self::OhMyPi
@@ -183,6 +193,11 @@ pub enum ProviderResumeCursor {
     },
     OpenCode {
         session_id: String,
+    },
+    OpenCode2 {
+        session_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        directory: Option<String>,
     },
     DeepSeek {
         session_id: String,
@@ -227,6 +242,10 @@ impl ProviderResumeCursor {
             ProviderKind::DeepSeek => Self::DeepSeek { session_id: id },
             ProviderKind::Fx => Self::Fx { session_id: id },
             ProviderKind::OpenCode => Self::OpenCode { session_id: id },
+            ProviderKind::OpenCode2 => Self::OpenCode2 {
+                session_id: id,
+                directory: None,
+            },
             ProviderKind::Grok => Self::Grok { session_id: id },
             ProviderKind::Kimi => Self::Kimi { session_id: id },
             ProviderKind::OhMyPi => Self::OhMyPi {
@@ -249,6 +268,7 @@ impl ProviderResumeCursor {
             Self::DeepSeek { .. } => ProviderKind::DeepSeek,
             Self::Fx { .. } => ProviderKind::Fx,
             Self::OpenCode { .. } => ProviderKind::OpenCode,
+            Self::OpenCode2 { .. } => ProviderKind::OpenCode2,
             Self::Grok { .. } => ProviderKind::Grok,
             Self::Kimi { .. } => ProviderKind::Kimi,
             Self::OhMyPi { .. } => ProviderKind::OhMyPi,
@@ -264,6 +284,7 @@ impl ProviderResumeCursor {
             | Self::DeepSeek { session_id }
             | Self::Fx { session_id }
             | Self::OpenCode { session_id }
+            | Self::OpenCode2 { session_id, .. }
             | Self::Grok { session_id }
             | Self::Kimi { session_id }
             | Self::OhMyPi { session_id, .. }
@@ -273,16 +294,34 @@ impl ProviderResumeCursor {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, TS)]
 #[serde(rename_all = "camelCase")]
 pub enum RuntimeMode {
-    /// Legacy combined mode. State migration moves this to `interaction_mode`.
-    Plan,
+    /// Older state files used `plan` as a combined read-only mode. Keep those
+    /// sessions readable without retaining it as a product mode.
     Ask,
     AutoAcceptEdits,
     Auto,
     #[default]
     FullAccess,
+}
+
+impl<'de> Deserialize<'de> for RuntimeMode {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        match String::deserialize(deserializer)?.as_str() {
+            "plan" | "ask" => Ok(Self::Ask),
+            "autoAcceptEdits" => Ok(Self::AutoAcceptEdits),
+            "auto" => Ok(Self::Auto),
+            "fullAccess" => Ok(Self::FullAccess),
+            other => Err(<D::Error as serde::de::Error>::unknown_variant(
+                other,
+                &["ask", "autoAcceptEdits", "auto", "fullAccess"],
+            )),
+        }
+    }
 }
 
 impl RuntimeMode {
@@ -295,7 +334,6 @@ impl RuntimeMode {
 
     pub fn label(self) -> String {
         match self {
-            Self::Plan => tr!("mode.plan"),
             Self::Ask => tr!("mode.supervised"),
             Self::AutoAcceptEdits => tr!("mode.auto_accept_edits"),
             Self::Auto => tr!("mode.auto"),
@@ -305,7 +343,6 @@ impl RuntimeMode {
 
     pub fn description(self) -> String {
         match self {
-            Self::Plan => tr!("mode.plan_description"),
             Self::Ask => tr!("mode.supervised_description"),
             Self::AutoAcceptEdits => tr!("mode.auto_accept_edits_description"),
             Self::Auto => tr!("mode.auto_description"),
@@ -315,27 +352,10 @@ impl RuntimeMode {
 
     pub fn icon(self) -> &'static str {
         match self {
-            Self::Plan | Self::Ask => "icons/lock.svg",
+            Self::Ask => "icons/lock.svg",
             Self::AutoAcceptEdits => "icons/pencil.svg",
             Self::Auto => "icons/sparkle.svg",
             Self::FullAccess => "icons/lock-open.svg",
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize, TS)]
-#[serde(rename_all = "camelCase")]
-pub enum InteractionMode {
-    #[default]
-    Build,
-    Plan,
-}
-
-impl InteractionMode {
-    pub fn label(self) -> String {
-        match self {
-            Self::Build => tr!("mode.build"),
-            Self::Plan => tr!("mode.plan"),
         }
     }
 }
@@ -399,9 +419,8 @@ pub struct FavoriteModel {
 
 /// One provider-owned agent composition available when a task starts.
 ///
-/// DeepSeek Harness calls these agent presets. They are intentionally kept
-/// separate from [`InteractionMode`]: a preset chooses the tools and prompt
-/// composition, while Build/Plan controls what that composition should do.
+/// DeepSeek Harness calls these agent presets. A preset chooses the tools and
+/// prompt composition for a session.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
 pub struct ProviderAgentPreset {
     pub id: String,
@@ -544,6 +563,15 @@ impl ProviderProbe {
             .or_else(|| self.models.first())
     }
 
+    pub fn model(&self, requested: &str) -> Option<&ProviderModel> {
+        if self.provider == ProviderKind::Cursor {
+            crate::model_catalog::cursor_catalog_model(&self.models, requested)
+                .map(|matched| matched.model)
+        } else {
+            self.models.iter().find(|model| model.id == requested)
+        }
+    }
+
     pub fn preferred_agent_preset(&self) -> Option<&ProviderAgentPreset> {
         self.agent_presets
             .iter()
@@ -666,12 +694,22 @@ pub enum SessionStatus {
     Connecting,
     Working,
     Waiting,
+    /// The turn is parked: the provider's reply ended, but detached work it
+    /// will wake the session for is still running — Claude Code re-enters the
+    /// model with a task notification once a backgrounded command, subagent
+    /// or monitor settles. The turn stays open for that wake. Busy, but the
+    /// provider is idle, so a new message steers straight in rather than
+    /// waiting in the follow-up queue.
+    Background,
     Failed,
 }
 
 impl SessionStatus {
     pub fn is_busy(self) -> bool {
-        matches!(self, Self::Connecting | Self::Working | Self::Waiting)
+        matches!(
+            self,
+            Self::Connecting | Self::Working | Self::Waiting | Self::Background
+        )
     }
 }
 
@@ -820,6 +858,38 @@ impl ThreadGoalStatus {
     }
 }
 
+/// A resumable conversation discovered in a provider CLI's own history.
+///
+/// This is deliberately lightweight: the command palette can list hundreds of
+/// native sessions without moving their transcripts over the daemon protocol.
+/// [`ProviderSessionHistory`] is fetched only after the user chooses one.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+pub struct ProviderSessionSummary {
+    pub cursor: ProviderResumeCursor,
+    pub title: String,
+    pub cwd: PathBuf,
+    pub created_at: u64,
+    pub updated_at: u64,
+}
+
+impl ProviderSessionSummary {
+    pub fn provider(&self) -> ProviderKind {
+        self.cursor.provider()
+    }
+}
+
+/// The displayable portion of a provider-native conversation imported into a
+/// Waku task. Provider history remains authoritative; unsupported native
+/// items such as private reasoning or provider-only control records are
+/// intentionally absent.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, TS)]
+pub struct ProviderSessionHistory {
+    #[serde(default)]
+    pub messages: Vec<Message>,
+    #[serde(default)]
+    pub turns: Vec<AgentTurn>,
+}
+
 /// A provider-persisted objective the agent keeps pursuing across turns.
 /// Field names follow the Codex app-server payload so its `goal` objects
 /// deserialize directly.
@@ -840,7 +910,11 @@ pub struct ThreadGoal {
 /// come back asynchronously as [`DriverEvent::GoalUpdated`]; failures surface
 /// through [`DriverEvent::Error`].
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize, TS)]
-#[serde(tag = "kind", rename_all = "camelCase", rename_all_fields = "camelCase")]
+#[serde(
+    tag = "kind",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
 pub enum GoalOperation {
     /// Re-read the provider's current goal without changing it.
     Refresh,
@@ -886,8 +960,6 @@ pub struct AgentSession {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
     pub runtime_mode: RuntimeMode,
-    #[serde(default)]
-    pub interaction_mode: InteractionMode,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning_effort: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -896,8 +968,8 @@ pub struct AgentSession {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_window: Option<String>,
     /// Provider-owned agent composition selected before the first turn.
-    /// Currently populated by DeepSeek Harness; unlike Build/Plan, Harness
-    /// locks this value once conversation history exists.
+    /// Currently populated by DeepSeek Harness, which locks this value once
+    /// conversation history exists.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_preset: Option<String>,
     pub status: SessionStatus,
@@ -970,7 +1042,6 @@ impl AgentSession {
             provider,
             model: None,
             runtime_mode: RuntimeMode::FullAccess,
-            interaction_mode: InteractionMode::Build,
             reasoning_effort: None,
             service_tier: None,
             context_window: None,
@@ -1008,7 +1079,6 @@ impl AgentSession {
             provider: self.provider,
             model: self.model.clone(),
             runtime_mode: RuntimeMode::default(),
-            interaction_mode: InteractionMode::default(),
             reasoning_effort: None,
             service_tier: None,
             context_window: None,
@@ -1056,6 +1126,31 @@ impl AgentSession {
             || !self.turns.is_empty()
             || !self.messages.is_empty()
             || self.provider_cursor.is_some()
+    }
+
+    /// Drops the loaded transcript so the session returns to its skeleton
+    /// state, releasing the heap its messages, blocks and turns occupied.
+    ///
+    /// A session must be fully persisted and unmodified before this runs —
+    /// callers check the store's dirty set — because the released fields are
+    /// gone until the next store `hydrate` reloads them. The session keeps
+    /// its list columns and cursors, and a later save of the skeleton only
+    /// touches those columns, never the untouched detail row.
+    pub fn release_transcript(&mut self) {
+        self.messages = Vec::new();
+        self.transcript_blocks = Vec::new();
+        self.turns = Vec::new();
+        self.queued_messages = Vec::new();
+        self.detail_loaded = false;
+    }
+
+    /// Identifier owned by the underlying agent CLI, once its native session
+    /// has been established.
+    pub fn provider_native_id(&self) -> Option<&str> {
+        self.provider_cursor
+            .as_ref()
+            .map(ProviderResumeCursor::native_id)
+            .filter(|id| !id.trim().is_empty())
     }
 
     pub fn display_title(&self) -> &str {
@@ -1120,10 +1215,6 @@ impl AgentSession {
     }
 
     pub fn migrate_legacy_state(&mut self) {
-        if self.runtime_mode == RuntimeMode::Plan {
-            self.runtime_mode = RuntimeMode::Ask;
-            self.interaction_mode = InteractionMode::Plan;
-        }
         if self.provider_cursor.is_none()
             && let Some(id) = self.provider_session_id.take()
         {
@@ -1290,6 +1381,57 @@ impl AgentSession {
         self.last_reply_at = Some(now);
         self.updated_at = now;
         id
+    }
+
+    /// Mirror a prompt submitted to this session's runtime, possibly by
+    /// another client.
+    ///
+    /// The submitting client already holds the turn and its user message, so
+    /// a running turn that has a user message is left alone — that covers the
+    /// submitter's own echo and a client that hydrated after the submission
+    /// was saved. A running turn without one is a provider-started turn this
+    /// client was following; the submission becomes its prompt. With no
+    /// running turn the submission opens one here exactly as it did on the
+    /// submitting client, reusing that client's ids so the projections every
+    /// client saves agree on the rows. Returns whether the session changed.
+    pub fn adopt_submitted_prompt(
+        &mut self,
+        message: &str,
+        turn_id: Uuid,
+        message_id: Uuid,
+    ) -> bool {
+        let now = unix_time();
+        if let Some(active) = self.active_turn_id() {
+            let has_prompt = self.messages.iter().any(|candidate| {
+                candidate.turn_id == Some(active) && candidate.role == MessageRole::User
+            });
+            if has_prompt {
+                return false;
+            }
+            let mut prompt = Message::new_for_turn(MessageRole::User, message, active);
+            prompt.id = message_id;
+            self.messages.push(prompt);
+            self.updated_at = now;
+            return true;
+        }
+        self.set_title_from_prompt(message);
+        self.turns.push(AgentTurn {
+            id: turn_id,
+            turn_count: self.turns.len() + 1,
+            status: TurnStatus::Running,
+            provider_turn_started: false,
+            provider_resume_at: None,
+            started_at: now,
+            completed_at: None,
+            checkpoint: None,
+        });
+        let mut prompt = Message::new_for_turn(MessageRole::User, message, turn_id);
+        prompt.id = message_id;
+        self.messages.push(prompt);
+        self.status = SessionStatus::Connecting;
+        self.last_reply_at = Some(now);
+        self.updated_at = now;
+        true
     }
 
     /// Whether the running turn is a provider-initiated one whose pursuit has
@@ -1722,7 +1864,21 @@ pub enum DriverEvent {
     /// Authoritative over filesystem discovery, which cannot see plugin or
     /// dynamically registered commands.
     AvailableCommands(Vec<ReportedCommand>),
+    /// A client submitted a prompt to this runtime. The daemon publishes it
+    /// ahead of the provider's `TurnStarted` so every attached client — not
+    /// only the one that typed it — carries the user message and the turn it
+    /// opens. The projections those clients save then describe the same
+    /// transcript; see [`AgentSession::adopt_submitted_prompt`].
+    PromptSubmitted {
+        message: String,
+        turn_id: Uuid,
+        message_id: Uuid,
+    },
     TurnStarted,
+    /// The provider's turn ended while detached work it will wake the
+    /// session for is still running. The turn stays open — the wake's
+    /// `TurnStarted` continues it — and the session shows it is waiting.
+    TurnParked,
     TextDelta(String),
     ReasoningDelta(String),
     Activity {
@@ -2044,6 +2200,12 @@ pub struct ActivityItem {
     pub source_id: Option<String>,
     pub kind: ActivityKind,
     pub title: String,
+    /// Native tool identity, separate from the human-readable activity title.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_name: Option<String>,
+    /// MCP server identity, kept separate so clients need not parse tool names.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mcp_server: Option<String>,
     pub detail: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub arguments: Option<String>,
@@ -2092,6 +2254,8 @@ impl ActivityItem {
             source_id,
             kind,
             title,
+            tool_name: None,
+            mcp_server: None,
             detail,
             arguments: None,
             output: None,
@@ -2110,6 +2274,30 @@ impl ActivityItem {
             reasoning: Some(reasoning),
             ..Self::new(None, ActivityKind::Reasoning, "Reasoning", None, complete)
         }
+    }
+
+    pub fn with_tool_name(mut self, name: Option<&str>) -> Self {
+        if let Some(name) = name.map(str::trim).filter(|name| !name.is_empty()) {
+            if let Some((server, tool)) = name
+                .strip_prefix("mcp__")
+                .and_then(|name| name.split_once("__"))
+                && !server.is_empty()
+                && !tool.is_empty()
+            {
+                self.mcp_server = Some(server.to_owned());
+                self.tool_name = Some(tool.to_owned());
+            } else {
+                self.tool_name = Some(name.to_owned());
+            }
+        }
+        self
+    }
+
+    pub fn with_mcp_server(mut self, server: Option<&str>) -> Self {
+        if let Some(server) = server.map(str::trim).filter(|server| !server.is_empty()) {
+            self.mcp_server = Some(server.to_owned());
+        }
+        self
     }
 
     pub fn with_arguments(mut self, arguments: Option<String>) -> Self {
@@ -3336,6 +3524,14 @@ mod tests {
     use super::*;
 
     #[test]
+    fn legacy_plan_access_mode_loads_as_supervised() {
+        let mode: RuntimeMode = serde_json::from_str(r#""plan""#).unwrap();
+
+        assert_eq!(mode, RuntimeMode::Ask);
+        assert_eq!(serde_json::to_string(&mode).unwrap(), r#""ask""#);
+    }
+
+    #[test]
     fn background_work_snapshots_have_serializable_named_items() {
         let item = BackgroundWorkItem::new(
             BackgroundWorkKind::Process,
@@ -3380,6 +3576,26 @@ mod tests {
         assert_eq!(message.content, "compare this @/tmp/reference.png");
         assert_eq!(message.visible_content(), "compare this");
         assert_eq!(message.attachments, vec![attachment]);
+    }
+
+    #[test]
+    fn activity_tool_identity_preserves_names_and_separates_mcp_servers() {
+        let mcp = ActivityItem::new(None, ActivityKind::Tool, "Read notes", None, true)
+            .with_tool_name(Some("mcp__filesystem__read_file"));
+        assert_eq!(mcp.title, "Read notes");
+        assert_eq!(mcp.tool_name.as_deref(), Some("read_file"));
+        assert_eq!(mcp.mcp_server.as_deref(), Some("filesystem"));
+        let regular = ActivityItem::new(None, ActivityKind::Tool, "Read notes", None, true)
+            .with_tool_name(Some("read_file"));
+        assert_eq!(regular.tool_name.as_deref(), Some("read_file"));
+        assert_eq!(regular.mcp_server, None);
+        let legacy: ActivityItem = serde_json::from_value(serde_json::json!({
+            "id": Uuid::nil(), "kind": "tool", "title": "Read notes", "detail": null,
+            "complete": true,
+        }))
+        .unwrap();
+        assert!(legacy.tool_name.is_none());
+        assert!(legacy.mcp_server.is_none());
     }
 
     #[test]
@@ -3935,6 +4151,8 @@ mod tests {
         assert_eq!(ProviderKind::DeepSeek.command(), "dsh");
         assert_eq!(ProviderKind::Fx.command(), "fx");
         assert_eq!(ProviderKind::OpenCode.command(), "opencode");
+        assert_eq!(ProviderKind::OpenCode2.id(), "opencode2");
+        assert_eq!(ProviderKind::OpenCode2.command(), "opencode2");
         assert_eq!(ProviderKind::Grok.command(), "grok");
         assert_eq!(ProviderKind::Pi.command(), "pi");
     }
@@ -3948,6 +4166,7 @@ mod tests {
             ProviderKind::Cursor,
             ProviderKind::DeepSeek,
             ProviderKind::OpenCode,
+            ProviderKind::OpenCode2,
             ProviderKind::Grok,
             ProviderKind::Pi,
         ] {
@@ -3963,14 +4182,65 @@ mod tests {
     #[test]
     fn only_dynamic_provider_catalogs_are_discovered() {
         assert!(!ProviderKind::Amp.supports_model_discovery());
-        assert!(!ProviderKind::Claude.supports_model_discovery());
+        assert!(ProviderKind::Claude.supports_model_discovery());
         assert!(ProviderKind::Codex.supports_model_discovery());
         assert!(ProviderKind::Cursor.supports_model_discovery());
         assert!(ProviderKind::DeepSeek.supports_model_discovery());
         assert!(ProviderKind::Fx.supports_model_discovery());
         assert!(ProviderKind::OpenCode.supports_model_discovery());
+        assert!(ProviderKind::OpenCode2.supports_model_discovery());
         assert!(ProviderKind::Grok.supports_model_discovery());
         assert!(ProviderKind::Pi.supports_model_discovery());
+    }
+
+    #[test]
+    fn opencode2_cursor_round_trips_with_its_wire_tag() {
+        let cursor =
+            ProviderResumeCursor::from_session_id(ProviderKind::OpenCode2, "ses_abc".into());
+        let json = serde_json::to_string(&cursor).unwrap();
+        assert!(json.contains("\"provider\":\"openCode2\""), "{json}");
+        assert!(json.contains("\"sessionId\":\"ses_abc\""), "{json}");
+        assert_eq!(cursor.provider(), ProviderKind::OpenCode2);
+        assert_eq!(cursor.native_id(), "ses_abc");
+        assert_eq!(
+            serde_json::to_value(ProviderKind::OpenCode2).unwrap(),
+            serde_json::json!("openCode2")
+        );
+    }
+
+    /// OpenCode 2 must not share v1's cursor variant: every driver asserts
+    /// `cursor.provider() == provider` before resuming, and a shared variant
+    /// would let a v1 session resume against the v2 server.
+    #[test]
+    fn opencode_cursors_are_distinct_per_major_version() {
+        let v1 = ProviderResumeCursor::from_session_id(ProviderKind::OpenCode, "ses_x".into());
+        let v2 = ProviderResumeCursor::from_session_id(ProviderKind::OpenCode2, "ses_x".into());
+        assert_ne!(v1.provider(), v2.provider());
+        assert_ne!(
+            serde_json::to_value(&v1).unwrap(),
+            serde_json::to_value(&v2).unwrap()
+        );
+    }
+
+    #[test]
+    fn all_contains_every_provider_kind() {
+        assert_eq!(ProviderKind::ALL.len(), 12);
+        let ids: std::collections::HashSet<_> =
+            ProviderKind::ALL.iter().map(|kind| kind.id()).collect();
+        assert_eq!(
+            ids.len(),
+            ProviderKind::ALL.len(),
+            "duplicate ProviderKind::id()"
+        );
+        let commands: std::collections::HashSet<_> = ProviderKind::ALL
+            .iter()
+            .map(|kind| kind.command())
+            .collect();
+        assert_eq!(
+            commands.len(),
+            ProviderKind::ALL.len(),
+            "duplicate ProviderKind::command()"
+        );
     }
 
     #[test]
@@ -4471,6 +4741,62 @@ mod tests {
         let checkpoint = session.turns[0].checkpoint.as_ref().unwrap();
         assert_eq!((checkpoint.additions, checkpoint.deletions), (10, 7));
         assert!(checkpoint.totals_are_current());
+    }
+
+    #[test]
+    fn a_follower_adopts_another_clients_submission_under_its_ids() {
+        let mut session = AgentSession::new(Uuid::new_v4(), ProviderKind::Codex);
+        session.begin_turn("first");
+        session.push_message(MessageRole::Assistant, "done");
+        session.finish_active_turn(TurnStatus::Completed);
+        session.status = SessionStatus::Idle;
+        let turn_id = Uuid::new_v4();
+        let message_id = Uuid::new_v4();
+
+        assert!(session.adopt_submitted_prompt("second", turn_id, message_id));
+
+        assert_eq!(session.status, SessionStatus::Connecting);
+        assert_eq!(session.active_turn_id(), Some(turn_id));
+        let turn = session.turns.last().unwrap();
+        assert_eq!(turn.turn_count, 2);
+        assert!(!turn.provider_turn_started);
+        let prompt = session.messages.last().unwrap();
+        assert_eq!(prompt.id, message_id);
+        assert_eq!(prompt.turn_id, Some(turn_id));
+        assert_eq!(prompt.role, MessageRole::User);
+        assert_eq!(prompt.content, "second");
+    }
+
+    #[test]
+    fn the_submitters_own_echo_changes_nothing() {
+        let mut session = AgentSession::new(Uuid::new_v4(), ProviderKind::Codex);
+        let turn_id = session.begin_turn("first");
+        session.status = SessionStatus::Connecting;
+        let message_id = session.messages[0].id;
+
+        assert!(!session.adopt_submitted_prompt("first", turn_id, message_id));
+
+        assert_eq!(session.turns.len(), 1);
+        assert_eq!(session.messages.len(), 1);
+        assert_eq!(session.status, SessionStatus::Connecting);
+    }
+
+    #[test]
+    fn a_provider_started_turn_takes_the_submitted_prompt_as_its_own() {
+        let mut session = AgentSession::new(Uuid::new_v4(), ProviderKind::Claude);
+        let provider_turn = session.begin_provider_turn();
+        session.mark_active_turn_provider_started();
+        session.status = SessionStatus::Working;
+        let message_id = Uuid::new_v4();
+
+        assert!(session.adopt_submitted_prompt("continue", Uuid::new_v4(), message_id));
+
+        assert_eq!(session.turns.len(), 1);
+        let prompt = session.messages.last().unwrap();
+        assert_eq!(prompt.id, message_id);
+        assert_eq!(prompt.turn_id, Some(provider_turn));
+        assert_eq!(prompt.role, MessageRole::User);
+        assert_eq!(session.status, SessionStatus::Working);
     }
 
     #[test]

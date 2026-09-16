@@ -1,0 +1,15 @@
+[package]
+name = "waku-computer-use"
+version = "0.1.0"
+edition = "2024"
+license = "GPL-3.0-only"
+description = "Waku's in-process Cua Driver SDK host"
+
+[[bin]]
+name = "waku_computer_use"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+libloading = "0.8"
+serde_json = "1"

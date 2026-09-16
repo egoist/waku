@@ -6,12 +6,20 @@ use std::process::Stdio;
 use std::sync::mpsc::{self, Receiver};
 use std::time::{Duration, Instant};
 
-use serde_json::{Value, json};
+use agent_client_protocol::schema::ProtocolVersion;
+use agent_client_protocol::schema::v1::{ClientCapabilities, Implementation, InitializeRequest};
+use agent_client_protocol::{Agent, Client, ConnectionTo, UntypedMessage};
+use serde_json::{Map, Value, json};
 
 use crate::model::{ProviderAgentPreset, ProviderKind, ProviderModel, ProviderModelOption};
+use waku_protocol::model_catalog::normalize_cursor_reasoning_effort;
 
 const CODEX_RPC_TIMEOUT: Duration = Duration::from_secs(5);
-const PI_RPC_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// The probe answers only after the agent has finished loading its extensions,
+/// resources and model catalog, which can outlast a live request's budget.
+const PI_RPC_TIMEOUT: Duration = Duration::from_secs(30);
+const CURSOR_ACP_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(15);
 
 pub fn fallback_models(provider: ProviderKind) -> Vec<ProviderModel> {
     match provider {
@@ -66,9 +74,9 @@ pub fn fallback_models(provider: ProviderKind) -> Vec<ProviderModel> {
             )),
             ProviderModel::new("claude-haiku-4-5", "Claude Haiku 4.5"),
         ],
-        // Cursor's full catalog is account-specific and exposed by the
-        // installed CLI. Auto remains the provider-owned default and keeps
-        // older CLIs selectable if model discovery is unavailable.
+        // Cursor's full catalog is account-specific and comes from ACP
+        // `cursor/list_available_models`. Auto remains the provider-owned
+        // default and keeps older CLIs selectable if discovery is unavailable.
         ProviderKind::Cursor => {
             vec![ProviderModel::new("auto", tr!("model_option.auto")).default()]
         }
@@ -79,7 +87,9 @@ pub fn fallback_models(provider: ProviderKind) -> Vec<ProviderModel> {
         // subscription login. An invented fallback could expose an unusable
         // route, so discovery is authoritative.
         ProviderKind::Fx => Vec::new(),
-        ProviderKind::OpenCode => Vec::new(),
+        // Discovery through the adopted v2 service is authoritative; a
+        // fabricated catalog would offer models the server rejects.
+        ProviderKind::OpenCode | ProviderKind::OpenCode2 => Vec::new(),
         // Grok's catalog comes from `grok models`, which includes any custom
         // model the user configured. An invented fallback would offer a model
         // the CLI rejects, so discovery is authoritative.
@@ -120,14 +130,12 @@ pub fn discover_catalog(
         // the picker aligned with the modes advertised by the current CLI.
         ProviderKind::Amp => (Vec::new(), None),
         ProviderKind::Codex => (discover_codex_models(binary), None),
-        // Claude Code accepts model aliases and full IDs but does not expose a
-        // model inventory command. Keep this catalog aligned with the
-        // version-gated list used by T3 Code.
-        ProviderKind::Claude => (Vec::new(), None),
+        ProviderKind::Claude => (discover_claude_models(binary), None),
         ProviderKind::Cursor => (discover_cursor_models(binary), None),
         ProviderKind::DeepSeek => discover_deepseek_catalog(binary),
         ProviderKind::Fx => (discover_fx_models(binary), None),
         ProviderKind::OpenCode => (discover_opencode_models(binary), None),
+        ProviderKind::OpenCode2 => crate::opencode2_session::discover_catalog(binary),
         ProviderKind::Grok => (discover_grok_models(binary), None),
         ProviderKind::Kimi => (discover_kimi_models(binary), None),
         ProviderKind::Pi => (discover_pi_models(binary, PiDialect::Pi), None),
@@ -194,7 +202,94 @@ fn write_models_file(path: &Path, models: &[ProviderModel]) -> std::io::Result<(
     std::fs::rename(temporary, path)
 }
 
+/// Claude Code's sessionless SDK initialization response carries the exact
+/// catalog behind `/model`. Unlike a fixed Anthropic list, it reflects account
+/// availability and role mappings supplied by tools such as CC Switch.
+fn discover_claude_models(binary: &Path) -> Vec<ProviderModel> {
+    crate::claude_metadata::initialize(binary, None, "user")
+        .map(|value| parse_claude_models(&value))
+        .unwrap_or_default()
+}
+
+fn parse_claude_models(value: &Value) -> Vec<ProviderModel> {
+    value
+        .pointer("/response/response/models")
+        .or_else(|| value.get("models"))
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|entry| {
+            let id = entry
+                .get("value")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|id| !id.is_empty())?;
+            let resolved = entry
+                .get("resolvedModel")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|model| !model.is_empty());
+            let name = entry
+                .get("displayName")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|name| !name.is_empty())
+                .map(str::to_owned)
+                .or_else(|| resolved.map(display_name_from_slug))
+                .unwrap_or_else(|| display_name_from_slug(id));
+
+            let mut model = ProviderModel::new(id, name);
+            model.is_default =
+                id == "default" || entry.get("isDefault").and_then(Value::as_bool) == Some(true);
+            if entry.get("supportsEffort").and_then(Value::as_bool) != Some(false) {
+                model.reasoning_efforts = entry
+                    .get("supportedEffortLevels")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .filter_map(Value::as_str)
+                    .map(str::trim)
+                    .filter(|effort| !effort.is_empty())
+                    .map(|effort| ProviderModelOption::new(effort, reasoning_effort_label(effort)))
+                    .collect();
+                // `ultracode` is Waku's orchestration effort. Claude accepts
+                // it wherever the provider metadata says xhigh is supported.
+                if model
+                    .reasoning_efforts
+                    .iter()
+                    .any(|option| option.id == "xhigh")
+                {
+                    model.reasoning_efforts.push(ProviderModelOption::new(
+                        "ultracode",
+                        reasoning_effort_label("ultracode"),
+                    ));
+                }
+                model.default_reasoning_effort = ["high", "medium"]
+                    .into_iter()
+                    .find(|preferred| {
+                        model
+                            .reasoning_efforts
+                            .iter()
+                            .any(|option| option.id == *preferred)
+                    })
+                    .or_else(|| {
+                        model
+                            .reasoning_efforts
+                            .first()
+                            .map(|option| option.id.as_str())
+                    })
+                    .map(str::to_owned);
+            }
+            Some(model)
+        })
+        .collect()
+}
+
 fn discover_cursor_models(binary: &Path) -> Vec<ProviderModel> {
+    let discovered = discover_cursor_models_via_acp(binary);
+    if !discovered.is_empty() {
+        return discovered;
+    }
     let mut command = crate::command_env::command(binary);
     let command = command.arg("models");
     let Ok(output) = crate::command_env::output(command) else {
@@ -206,6 +301,309 @@ fn discover_cursor_models(binary: &Path) -> Vec<ProviderModel> {
         String::from_utf8_lossy(&output.stderr)
     );
     parse_cursor_models(&combined)
+}
+
+/// Cursor's parameterized picker is an ACP extension: `cursor-agent models`
+/// still prints exploded CLI aliases, while `cursor/list_available_models`
+/// returns the base slug plus per-model config options (effort, fast, context).
+fn discover_cursor_models_via_acp(binary: &Path) -> Vec<ProviderModel> {
+    let Ok(cwd) = crate::acp_session::catalog_working_directory() else {
+        return Vec::new();
+    };
+    let Ok(agent) = crate::driver::catalog_agent(ProviderKind::Cursor, binary, &cwd) else {
+        return Vec::new();
+    };
+    let request = Client
+        .builder()
+        .name("waku-cursor-model-discovery")
+        .connect_with(agent, async move |connection: ConnectionTo<Agent>| {
+            let mut capabilities = ClientCapabilities::new().terminal(false);
+            let mut meta = Map::new();
+            meta.insert("parameterizedModelPicker".to_owned(), Value::Bool(true));
+            capabilities = capabilities.meta(meta);
+            connection
+                .send_request(
+                    InitializeRequest::new(ProtocolVersion::V1)
+                        .client_capabilities(capabilities)
+                        .client_info(Implementation::new("waku", env!("CARGO_PKG_VERSION"))),
+                )
+                .block_task()
+                .await?;
+            let request = UntypedMessage::new("cursor/list_available_models", json!({}))?;
+            connection.send_request(request).block_task().await
+        });
+    let response = smol::block_on(smol::future::race(
+        async move { request.await.map_err(|_| ()) },
+        async move {
+            smol::Timer::after(CURSOR_ACP_DISCOVERY_TIMEOUT).await;
+            Err(())
+        },
+    ));
+    response
+        .ok()
+        .map(|value| parse_cursor_available_models(&value))
+        .unwrap_or_default()
+}
+
+fn parse_cursor_available_models(value: &Value) -> Vec<ProviderModel> {
+    value
+        .get("models")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(parse_cursor_available_model)
+        .collect()
+}
+
+fn parse_cursor_available_model(entry: &Value) -> Option<ProviderModel> {
+    let value = entry
+        .get("value")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|id| !id.is_empty())?;
+    let name = entry
+        .get("name")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .map(str::to_owned)
+        .unwrap_or_else(|| display_name_from_slug(value));
+    let id = if value == "default" { "auto" } else { value };
+    let mut model = ProviderModel::new(id, name);
+    if id == "auto" || value == "default" {
+        model = model.default();
+    }
+    let config_options = entry
+        .get("configOptions")
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or(&[]);
+    Some(with_cursor_config_options(model, config_options))
+}
+
+fn with_cursor_config_options(mut model: ProviderModel, options: &[Value]) -> ProviderModel {
+    if let Some(effort) = find_cursor_effort_json(options) {
+        let mut efforts = Vec::new();
+        for (id, name) in json_select_choices(effort) {
+            let id = normalize_cursor_reasoning_effort(&id);
+            if id.is_empty()
+                || efforts
+                    .iter()
+                    .any(|option: &ProviderModelOption| option.id == id)
+            {
+                continue;
+            }
+            let label = cursor_select_label(&id, &name);
+            efforts.push(ProviderModelOption::new(id, label));
+        }
+        if !efforts.is_empty() {
+            let current =
+                json_current_string(effort).map(|value| normalize_cursor_reasoning_effort(&value));
+            let default = current
+                .filter(|id| efforts.iter().any(|option| option.id == *id))
+                .or_else(|| {
+                    ["high", "medium"]
+                        .into_iter()
+                        .find(|preferred| efforts.iter().any(|option| option.id == *preferred))
+                        .map(str::to_owned)
+                })
+                .or_else(|| efforts.first().map(|option| option.id.clone()));
+            if let Some(default) = default {
+                model = model.reasoning(efforts, default);
+            }
+        }
+    }
+    if let Some(fast) = options.iter().find(|option| is_cursor_fast_json(option)) {
+        let default = if json_current_bool(fast) == Some(true) {
+            "fast"
+        } else {
+            "default"
+        };
+        model = model.service_tiers(
+            [ProviderModelOption::new("fast", tr!("model_option.fast"))
+                .description(tr!("model_option.fast_description"))],
+            default,
+        );
+    }
+    if let Some(context) = options.iter().find(|option| is_cursor_context_json(option)) {
+        let windows: Vec<_> = json_select_choices(context)
+            .into_iter()
+            .filter(|(id, _)| !id.is_empty())
+            .map(|(id, name)| {
+                let label = if name.trim().is_empty() || name.contains(":icon-") {
+                    id.clone()
+                } else {
+                    name
+                };
+                ProviderModelOption::new(id, label)
+            })
+            .collect();
+        if !windows.is_empty() {
+            let default = json_current_string(context)
+                .filter(|id| windows.iter().any(|option| option.id == *id))
+                .or_else(|| windows.first().map(|option| option.id.clone()));
+            if let Some(default) = default {
+                model = model.context_windows(windows, default);
+            }
+        }
+    }
+    model
+}
+
+fn find_cursor_effort_json(options: &[Value]) -> Option<&Value> {
+    let candidates: Vec<&Value> = options
+        .iter()
+        .filter(|option| is_cursor_effort_json(option))
+        .collect();
+    candidates
+        .iter()
+        .copied()
+        .find(|option| json_option_category(option).eq_ignore_ascii_case("model_option"))
+        .or_else(|| {
+            candidates
+                .iter()
+                .copied()
+                .find(|option| json_option_id(option).eq_ignore_ascii_case("effort"))
+        })
+        .or_else(|| {
+            candidates
+                .iter()
+                .copied()
+                .find(|option| json_option_category(option).eq_ignore_ascii_case("thought_level"))
+        })
+        .or_else(|| candidates.first().copied())
+}
+
+fn is_cursor_effort_json(option: &Value) -> bool {
+    if !json_option_type(option).eq_ignore_ascii_case("select") {
+        return false;
+    }
+    let id = json_option_id(option).to_ascii_lowercase();
+    let name = json_option_name(option).to_ascii_lowercase();
+    id == "effort"
+        || id == "reasoning"
+        || name == "effort"
+        || name == "reasoning"
+        || name.contains("effort")
+        || name.contains("reasoning")
+}
+
+fn is_cursor_fast_json(option: &Value) -> bool {
+    if !json_option_category(option).eq_ignore_ascii_case("model_config") {
+        return false;
+    }
+    let id = json_option_id(option).to_ascii_lowercase();
+    let name = json_option_name(option).to_ascii_lowercase();
+    id == "fast" || name == "fast" || name.contains("fast mode")
+}
+
+fn is_cursor_context_json(option: &Value) -> bool {
+    if !json_option_category(option).eq_ignore_ascii_case("model_config") {
+        return false;
+    }
+    let id = json_option_id(option).to_ascii_lowercase();
+    let name = json_option_name(option).to_ascii_lowercase();
+    id == "context" || id == "context_size" || name.contains("context")
+}
+
+fn json_option_id(option: &Value) -> &str {
+    option
+        .get("id")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .unwrap_or_default()
+}
+
+fn json_option_name(option: &Value) -> &str {
+    option
+        .get("name")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .unwrap_or_default()
+}
+
+fn json_option_category(option: &Value) -> &str {
+    option
+        .get("category")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .unwrap_or_default()
+}
+
+fn json_option_type(option: &Value) -> &str {
+    option
+        .get("type")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .unwrap_or_default()
+}
+
+fn json_current_string(option: &Value) -> Option<String> {
+    match option.get("currentValue") {
+        Some(Value::String(value)) => Some(value.clone()),
+        Some(Value::Bool(value)) => Some(value.to_string()),
+        _ => None,
+    }
+}
+
+fn json_current_bool(option: &Value) -> Option<bool> {
+    match option.get("currentValue") {
+        Some(Value::Bool(value)) => Some(*value),
+        Some(Value::String(value)) if value.eq_ignore_ascii_case("true") => Some(true),
+        Some(Value::String(value)) if value.eq_ignore_ascii_case("false") => Some(false),
+        _ => None,
+    }
+}
+
+fn json_select_choices(option: &Value) -> Vec<(String, String)> {
+    let Some(entries) = option.get("options").and_then(Value::as_array) else {
+        return Vec::new();
+    };
+    let mut choices = Vec::new();
+    for entry in entries {
+        if let Some(value) = entry
+            .get("value")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            let name = entry.get("name").and_then(Value::as_str).unwrap_or(value);
+            choices.push((value.to_owned(), name.to_owned()));
+            continue;
+        }
+        let Some(nested) = entry.get("options").and_then(Value::as_array) else {
+            continue;
+        };
+        for nested_entry in nested {
+            let Some(value) = nested_entry
+                .get("value")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+            else {
+                continue;
+            };
+            let name = nested_entry
+                .get("name")
+                .and_then(Value::as_str)
+                .unwrap_or(value);
+            choices.push((value.to_owned(), name.to_owned()));
+        }
+    }
+    choices
+}
+
+fn cursor_select_label(id: &str, name: &str) -> String {
+    let name = name.trim();
+    if name.is_empty() || name.contains(":icon-") {
+        if id.is_empty() {
+            name.to_owned()
+        } else {
+            reasoning_effort_label(id)
+        }
+    } else {
+        name.to_owned()
+    }
 }
 
 fn parse_cursor_models(output: &str) -> Vec<ProviderModel> {
@@ -261,11 +659,75 @@ fn parse_cursor_models(output: &str) -> Vec<ProviderModel> {
 
 fn discover_opencode_models(binary: &Path) -> Vec<ProviderModel> {
     let mut command = crate::command_env::command(binary);
-    let command = command.arg("models");
+    // `--verbose` prints each model's full metadata as JSON, which is the only
+    // place the CLI exposes `variants` — the reasoning-effort ladder. The bare
+    // listing is ids alone, so parsing it left every OpenCode model without an
+    // effort control.
+    let command = command.args(["models", "--verbose"]);
     let Ok(output) = crate::command_env::output(command) else {
         return Vec::new();
     };
-    parse_opencode_models(&String::from_utf8_lossy(&output.stdout))
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let verbose = parse_opencode_verbose_models(&stdout);
+    if verbose.is_empty() {
+        // An older CLI without `--verbose` still prints the plain listing.
+        return parse_opencode_models(&stdout);
+    }
+    verbose
+}
+
+/// Reads the JSON blocks `opencode models --verbose` prints, one per model.
+///
+/// Each block is preceded by a `provider/model` heading, but the block itself
+/// carries `providerID` and `id`, so the headings are ignored and only
+/// balanced top-level objects are decoded. A block that fails to parse is
+/// skipped rather than failing the whole catalogue.
+fn parse_opencode_verbose_models(output: &str) -> Vec<ProviderModel> {
+    let cleaned = strip_ansi(output);
+    let mut models = Vec::new();
+    let mut block = String::new();
+    let mut depth = 0_usize;
+    for line in cleaned.lines() {
+        let trimmed = line.trim_end();
+        if depth == 0 && trimmed.trim() != "{" {
+            continue;
+        }
+        depth += trimmed.matches('{').count();
+        depth = depth.saturating_sub(trimmed.matches('}').count());
+        block.push_str(trimmed);
+        block.push('\n');
+        if depth == 0 {
+            if let Some(model) = parse_opencode_verbose_model(&block) {
+                models.push(model);
+            }
+            block.clear();
+        }
+    }
+    models
+}
+
+fn parse_opencode_verbose_model(block: &str) -> Option<ProviderModel> {
+    let value: Value = serde_json::from_str(block).ok()?;
+    let provider = value.get("providerID").and_then(Value::as_str)?.trim();
+    let id = value.get("id").and_then(Value::as_str)?.trim();
+    if provider.is_empty() || id.is_empty() {
+        return None;
+    }
+    let name = value
+        .get("name")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .map(str::to_owned)
+        .unwrap_or_else(|| display_name_from_slug(id));
+    let model = ProviderModel::new(format!("{provider}/{id}"), name)
+        .sub_provider(display_name_from_slug(provider));
+    let variants = value
+        .get("variants")
+        .and_then(Value::as_object)
+        .map(|variants| variants.keys().map(String::as_str).collect::<Vec<_>>())
+        .unwrap_or_default();
+    Some(with_variant_efforts(model, variants))
 }
 
 fn discover_deepseek_catalog(
@@ -985,6 +1447,52 @@ fn reasoning_effort_label(effort: &str) -> String {
     }
 }
 
+/// Attaches a model's OpenCode "variants" as its reasoning-effort ladder.
+///
+/// Both OpenCode majors express reasoning effort as a per-model variant whose
+/// id is drawn from the same vocabulary Waku already labels
+/// (`none`/`minimal`/`low`/`medium`/`high`/`xhigh`/`max`, plus provider-specific
+/// ones such as `thinking`), and the chosen id is sent verbatim — as the v1
+/// message body's `variant` and as v2's `ModelRef::variant`. Models with no
+/// variants keep an empty ladder, which is what hides the control.
+///
+/// The default is the strongest offered rather than the weakest: a variant
+/// list is opt-in per model, so a model that publishes one is a reasoning
+/// model and the ladder's top is the reason to pick it.
+pub(crate) fn with_variant_efforts<'a>(
+    model: ProviderModel,
+    variants: impl IntoIterator<Item = &'a str>,
+) -> ProviderModel {
+    const STRENGTH: [&str; 8] = [
+        "none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra",
+    ];
+    let ids: Vec<String> = variants
+        .into_iter()
+        .map(str::trim)
+        .filter(|variant| !variant.is_empty())
+        .map(str::to_owned)
+        .collect();
+    if ids.is_empty() {
+        return model;
+    }
+    let rank = |id: &str| STRENGTH.iter().position(|known| *known == id);
+    // Preserve the provider's own ordering; only the default is ranked, and a
+    // ladder of entirely unknown ids falls back to the last one offered.
+    let default = ids
+        .iter()
+        .filter(|id| rank(id).is_some())
+        .max_by_key(|id| rank(id))
+        .or_else(|| ids.last())
+        .cloned();
+    let options = ids
+        .iter()
+        .map(|id| ProviderModelOption::new(id.clone(), reasoning_effort_label(id)));
+    match default {
+        Some(default) => model.reasoning(options, default),
+        None => model,
+    }
+}
+
 fn reasoning_options<const N: usize>(efforts: [&str; N]) -> Vec<ProviderModelOption> {
     efforts
         .into_iter()
@@ -1091,7 +1599,7 @@ fn normalize_codex_name(name: &str) -> String {
         .collect()
 }
 
-fn display_name_from_slug(slug: &str) -> String {
+pub(crate) fn display_name_from_slug(slug: &str) -> String {
     let words = slug
         .split(['-', '_'])
         .filter(|part| !part.is_empty())
@@ -1150,11 +1658,11 @@ mod tests {
     use super::*;
 
     #[cfg(unix)]
-    fn write_fake_pi(name: &str, contents: &str) -> PathBuf {
+    fn write_fake_model_cli(name: &str, contents: &str) -> PathBuf {
         use std::os::unix::fs::PermissionsExt as _;
 
         let path = std::env::temp_dir().join(format!(
-            "waku-{name}-{}-pi-model-discovery.sh",
+            "waku-{name}-{}-model-discovery.sh",
             std::process::id()
         ));
         std::fs::write(&path, contents).unwrap();
@@ -1231,11 +1739,152 @@ mod tests {
     }
 
     #[test]
+    fn parses_claude_initialization_models_without_repeating_resolved_ids() {
+        let models = parse_claude_models(&json!({
+            "type": "control_response",
+            "response": {"response": {"models": [
+                {
+                    "value": "default",
+                    "resolvedModel": "deepseek-v4-pro",
+                    "displayName": "DeepSeek V4 Pro",
+                    "supportsEffort": true,
+                    "supportedEffortLevels": ["low", "medium", "high", "xhigh", "max"]
+                },
+                {
+                    "value": "sonnet",
+                    "resolvedModel": "claude-sonnet-5",
+                    "displayName": "Sonnet",
+                    "supportsEffort": false
+                },
+                {"value": "  ", "displayName": "ignored"}
+            ]}}
+        }));
+
+        assert_eq!(models.len(), 2);
+        assert_eq!(models[0].id, "default");
+        assert_eq!(models[0].name, "DeepSeek V4 Pro");
+        assert!(models[0].is_default);
+        assert_eq!(
+            models[0]
+                .reasoning_efforts
+                .iter()
+                .map(|option| option.id.as_str())
+                .collect::<Vec<_>>(),
+            ["low", "medium", "high", "xhigh", "max", "ultracode"]
+        );
+        assert_eq!(models[0].default_reasoning_effort.as_deref(), Some("high"));
+        assert_eq!(models[1].name, "Sonnet");
+        assert!(models[1].reasoning_efforts.is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn discovers_claude_models_from_sessionless_initialization() {
+        let binary = write_fake_model_cli(
+            "claude",
+            r#"#!/bin/sh
+read -r request
+printf '%s\n' '{"type":"control_response","response":{"request_id":"waku-initialize-catalog","response":{"models":[{"value":"cc-switch-model","resolvedModel":"cc-switch-model","displayName":"CC Switch Model"}]}}}'
+"#,
+        );
+
+        let models = discover_claude_models(&binary);
+
+        let _ = std::fs::remove_file(binary);
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0].id, "cc-switch-model");
+        assert_eq!(models[0].name, "CC Switch Model");
+    }
+
+    #[test]
     fn cursor_catalog_falls_back_to_provider_owned_auto() {
         let models = fallback_models(ProviderKind::Cursor);
         assert_eq!(models.len(), 1);
         assert_eq!(models[0].id, "auto");
         assert!(models[0].is_default);
+    }
+
+    /// The exact shape `opencode models --verbose` prints, trimmed to the
+    /// fields Waku reads. `variants` is the reasoning-effort ladder and is the
+    /// only reason to parse the verbose form at all.
+    #[test]
+    fn opencode_verbose_models_expose_their_variants_as_reasoning_efforts() {
+        let output = r#"opencode-go/deepseek-v4-flash
+{
+  "id": "deepseek-v4-flash",
+  "providerID": "opencode-go",
+  "name": "DeepSeek V4 Flash",
+  "variants": {
+    "low": { "reasoningEffort": "low" },
+    "high": { "reasoningEffort": "high" },
+    "max": { "reasoningEffort": "max" }
+  }
+}
+opencode/big-pickle
+{
+  "id": "big-pickle",
+  "providerID": "opencode",
+  "name": "Big Pickle",
+  "variants": {}
+}
+"#;
+        let models = parse_opencode_verbose_models(output);
+        assert_eq!(models.len(), 2, "{models:?}");
+
+        let flash = &models[0];
+        assert_eq!(flash.id, "opencode-go/deepseek-v4-flash");
+        assert_eq!(flash.name, "DeepSeek V4 Flash");
+        assert_eq!(
+            flash
+                .reasoning_efforts
+                .iter()
+                .map(|effort| effort.id.as_str())
+                .collect::<Vec<_>>(),
+            ["low", "high", "max"],
+            "provider ordering is preserved"
+        );
+        assert_eq!(flash.default_reasoning_effort.as_deref(), Some("max"));
+
+        // A model with no ladder keeps none, which is what hides the control.
+        assert!(models[1].reasoning_efforts.is_empty());
+        assert!(models[1].default_reasoning_effort.is_none());
+    }
+
+    /// A CLI too old for `--verbose` still prints the plain listing, so the
+    /// parser must not turn that into an empty catalogue.
+    #[test]
+    fn opencode_verbose_parsing_ignores_a_plain_listing() {
+        assert!(
+            parse_opencode_verbose_models(
+                "opencode-go/deepseek-v4-flash
+"
+            )
+            .is_empty()
+        );
+        assert_eq!(
+            parse_opencode_models(
+                "opencode-go/deepseek-v4-flash
+"
+            )
+            .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn variant_efforts_default_to_the_strongest_offered() {
+        let model = with_variant_efforts(ProviderModel::new("a/b", "B"), ["none", "thinking"]);
+        assert_eq!(
+            model
+                .reasoning_efforts
+                .iter()
+                .map(|effort| effort.id.as_str())
+                .collect::<Vec<_>>(),
+            ["none", "thinking"]
+        );
+        // `thinking` is not on the known strength ladder, so the only ranked
+        // id wins; an unranked id never becomes the default while one ranks.
+        assert_eq!(model.default_reasoning_effort.as_deref(), Some("none"));
     }
 
     #[test]
@@ -1404,6 +2053,146 @@ mod tests {
         assert_eq!(models[1].name, "Codex 5.3 Low");
         assert_eq!(models[2].name, "Composer 2.5");
         assert!(!models[2].is_default);
+    }
+
+    #[test]
+    fn parses_cursor_acp_available_models_with_effort_fast_and_context() {
+        let models = parse_cursor_available_models(&json!({
+            "models": [
+                {
+                    "value": "default",
+                    "name": "Auto",
+                    "configOptions": []
+                },
+                {
+                    "value": "gpt-5.4",
+                    "name": "GPT-5.4",
+                    "configOptions": [
+                        {
+                            "id": "reasoning",
+                            "name": "Reasoning",
+                            "category": "thought_level",
+                            "type": "select",
+                            "currentValue": "medium",
+                            "options": [
+                                {"value": "none", "name": "None"},
+                                {"value": "low", "name": "Low"},
+                                {"value": "medium", "name": "Medium"},
+                                {"value": "high", "name": "High"},
+                                {"value": "extra-high", "name": "Extra High"}
+                            ]
+                        },
+                        {
+                            "id": "context",
+                            "name": "Context",
+                            "category": "model_config",
+                            "type": "select",
+                            "currentValue": "272k",
+                            "options": [
+                                {"value": "272k", "name": "272K"},
+                                {"value": "1m", "name": "1M"}
+                            ]
+                        },
+                        {
+                            "id": "fast",
+                            "name": "Fast",
+                            "category": "model_config",
+                            "type": "select",
+                            "currentValue": "false",
+                            "options": [
+                                {"value": "false", "name": "Off"},
+                                {"value": "true", "name": "Fast"}
+                            ]
+                        }
+                    ]
+                },
+                {
+                    "value": "claude-opus-4-6",
+                    "name": "Opus 4.6",
+                    "configOptions": [
+                        {
+                            "id": "reasoning",
+                            "name": "Reasoning",
+                            "category": "thought_level",
+                            "type": "select",
+                            "currentValue": "high",
+                            "options": [
+                                {"value": "low", "name": "Low"},
+                                {"value": "medium", "name": "Medium"},
+                                {"value": "high", "name": "High"}
+                            ]
+                        },
+                        {
+                            "id": "effort",
+                            "name": "Effort",
+                            "category": "model_option",
+                            "type": "select",
+                            "currentValue": "max",
+                            "options": [
+                                {"value": "low", "name": "Low"},
+                                {"value": "medium", "name": "Medium"},
+                                {"value": "high", "name": "High"},
+                                {"value": "max", "name": "Max"}
+                            ]
+                        },
+                        {
+                            "id": "fast",
+                            "name": "Fast",
+                            "category": "model_config",
+                            "type": "select",
+                            "currentValue": "true",
+                            "options": [
+                                {"value": "false", "name": "Off"},
+                                {"value": "true", "name": "Fast"}
+                            ]
+                        }
+                    ]
+                }
+            ]
+        }));
+
+        assert_eq!(
+            models
+                .iter()
+                .map(|model| model.id.as_str())
+                .collect::<Vec<_>>(),
+            ["auto", "gpt-5.4", "claude-opus-4-6"]
+        );
+        assert!(models[0].is_default);
+        assert!(models[0].reasoning_efforts.is_empty());
+        assert_eq!(
+            models[1]
+                .reasoning_efforts
+                .iter()
+                .map(|option| option.id.as_str())
+                .collect::<Vec<_>>(),
+            ["none", "low", "medium", "high", "xhigh"]
+        );
+        assert_eq!(
+            models[1].default_reasoning_effort.as_deref(),
+            Some("medium")
+        );
+        assert_eq!(models[1].service_tiers[0].id, "fast");
+        assert_eq!(models[1].default_service_tier.as_deref(), Some("default"));
+        assert_eq!(
+            models[1]
+                .context_windows
+                .iter()
+                .map(|option| option.id.as_str())
+                .collect::<Vec<_>>(),
+            ["272k", "1m"]
+        );
+        assert_eq!(models[1].default_context_window.as_deref(), Some("272k"));
+        assert_eq!(
+            models[2]
+                .reasoning_efforts
+                .iter()
+                .map(|option| option.id.as_str())
+                .collect::<Vec<_>>(),
+            ["low", "medium", "high", "max"]
+        );
+        assert_eq!(models[2].default_reasoning_effort.as_deref(), Some("max"));
+        assert_eq!(models[2].default_service_tier.as_deref(), Some("fast"));
     }
 
     #[test]
@@ -1599,7 +2388,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn pi_rpc_discovery_keeps_model_provider_extensions_enabled() {
-        let binary = write_fake_pi(
+        let binary = write_fake_model_cli(
             "extensions",
             r#"#!/bin/sh
 for argument in "$@"; do
@@ -1699,5 +2488,42 @@ done
                     .join(",")
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod opencode_effort_smoke {
+    /// Proves against the real CLI that the effort ladder is populated, which
+    /// canned JSON cannot.
+    #[test]
+    #[ignore = "requires an installed, authenticated opencode"]
+    fn discovers_reasoning_efforts_from_the_installed_cli() {
+        let models = super::discover_opencode_models(std::path::Path::new("opencode"));
+        let with_efforts: Vec<_> = models
+            .iter()
+            .filter(|model| !model.reasoning_efforts.is_empty())
+            .collect();
+        println!(
+            "models={} with efforts={}",
+            models.len(),
+            with_efforts.len()
+        );
+        for model in with_efforts.iter().take(4) {
+            println!(
+                "  {} -> {:?} (default {:?})",
+                model.id,
+                model
+                    .reasoning_efforts
+                    .iter()
+                    .map(|effort| effort.id.as_str())
+                    .collect::<Vec<_>>(),
+                model.default_reasoning_effort
+            );
+        }
+        assert!(!models.is_empty(), "expected a catalogue");
+        assert!(
+            !with_efforts.is_empty(),
+            "expected some models to expose variants"
+        );
     }
 }

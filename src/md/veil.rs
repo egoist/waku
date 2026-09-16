@@ -299,7 +299,7 @@ mod tests {
     }
 
     #[test]
-    fn cadence_curve_matches_comet() {
+    fn cadence_curve_matches_spec() {
         assert_eq!(veil_duration_ms(160.0), 400.0);
         assert_eq!(veil_duration_ms(30.0), 120.0);
         assert_eq!(veil_boost(2), 1.0);

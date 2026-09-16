@@ -551,6 +551,11 @@ impl Render for ConversationNavigationRail {
             .tab_index(0)
             .tab_group()
             .tab_stop(false)
+            // The rail is an independent scroll surface over the transcript.
+            // Its list handles the wheel first; stop the same gesture here so
+            // it never falls through to the transcript, including when the
+            // rail is already at either end.
+            .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
             .child(tick_list)
             .when(show_top_fade, |rail| {
                 rail.child(
@@ -1156,6 +1161,7 @@ impl Waku {
         animate_streaming: bool,
     ) -> MarkdownCtx<'a> {
         MarkdownCtx::new(row, palette, metrics, self.transcript_selection.clone())
+            .with_math_enabled(self.state.render_math)
             .with_link_handler(self.markdown_link_handler.clone())
             .with_streaming_animation(animate_streaming)
     }
@@ -1287,19 +1293,28 @@ impl Waku {
                         .collect();
                     let attachments_can_reveal = !self.daemon.is_remote();
                     let menu = self.menu_handle(format!("message-{}", message.id), cx);
-                    let metrics = self.scaled_markdown_metrics(if message.role == MessageRole::User
-                    {
-                        MarkdownMetrics::USER_MESSAGE
-                    } else {
-                        MarkdownMetrics::BODY
+                    let user_message_viewport = (message.role == MessageRole::User).then(|| {
+                        self.user_message_viewports
+                            .borrow_mut()
+                            .entry(message.id)
+                            .or_default()
+                            .clone()
                     });
+                    let metrics =
+                        self.scaled_markdown_metrics(if message.role == MessageRole::User {
+                            MarkdownMetrics::USER_MESSAGE
+                        } else {
+                            MarkdownMetrics::BODY
+                        });
                     let animate_streaming = message.streaming && !cx.reduce_motion();
-                    let mut ctx = self.markdown_ctx(
-                        format!("message-{}", message.id),
-                        &palette,
-                        metrics,
-                        animate_streaming,
-                    );
+                    let mut ctx = self
+                        .markdown_ctx(
+                            format!("message-{}", message.id),
+                            &palette,
+                            metrics,
+                            animate_streaming,
+                        )
+                        .with_context_menu(menu.clone());
                     if let Some(highlights) = self.transcript_search_highlights(message_index) {
                         ctx = ctx.with_search_highlights(highlights);
                     }
@@ -1322,6 +1337,7 @@ impl Waku {
                             copied,
                             assistant_message_action,
                             user_message_action,
+                            user_message_viewport: user_message_viewport.as_ref(),
                             message_edit_input,
                             attachment_menus,
                             attachment_images,
@@ -1790,12 +1806,21 @@ impl Waku {
     /// produced a single chunk — and stays below whatever streams in until
     /// the turn settles into its "Worked for N" fold.
     fn render_working_indicator_row(&self, theme: &Theme) -> AnyElement {
-        let elapsed = self
-            .selected_session()
+        let session = self.selected_session();
+        let elapsed = session
             .and_then(|session| session.turns.last())
             .filter(|turn| turn.status == TurnStatus::Running)
             .map(|turn| unix_time().saturating_sub(turn.started_at))
             .unwrap_or(0);
+        // A parked turn is waiting on detached work, not working.
+        let label = if session.is_some_and(|session| session.status == SessionStatus::Background) {
+            tr!("transcript.waiting_background")
+        } else {
+            tr!(
+                "transcript.working_for",
+                duration = format_working_elapsed(elapsed)
+            )
+        };
         div()
             .h(px(22.0))
             .flex()
@@ -1808,10 +1833,7 @@ impl Waku {
                     .line_height(sp(18.0))
                     .font_weight(FontWeight::MEDIUM)
                     .text_color(theme.text_tertiary)
-                    .child(SharedString::from(tr!(
-                        "transcript.working_for",
-                        duration = format_working_elapsed(elapsed)
-                    ))),
+                    .child(SharedString::from(label)),
             )
             .into_any_element()
     }
@@ -2167,12 +2189,14 @@ impl Waku {
                 let mut palette = MarkdownPalette::from_theme(theme);
                 palette.text = theme.text_secondary;
                 palette.secondary = theme.text_tertiary;
-                let ctx = self.markdown_ctx(
-                    format!("reasoning-{id}"),
-                    &palette,
-                    self.scaled_markdown_metrics(MarkdownMetrics::COMPACT),
-                    reasoning_live && !cx.reduce_motion(),
-                );
+                let ctx = self
+                    .markdown_ctx(
+                        format!("reasoning-{id}"),
+                        &palette,
+                        self.scaled_markdown_metrics(MarkdownMetrics::COMPACT),
+                        reasoning_live && !cx.reduce_motion(),
+                    )
+                    .with_math_context_menu(self.menu_handle(format!("reasoning-math-{id}"), cx));
                 let reasoning_viewport = self
                     .activity_scroll_viewports
                     .borrow_mut()
@@ -2235,14 +2259,14 @@ impl Waku {
                                     });
                                 }),
                         )
-                        .child(activity_scroll_fade(
+                        .child(scrollbar::edge_fade(
                             reasoning_viewport.scroll_handle.clone(),
-                            ActivityScrollFadeSide::Top,
+                            scrollbar::FadeEdge::Top,
                             activity_surface,
                         ))
-                        .child(activity_scroll_fade(
+                        .child(scrollbar::edge_fade(
                             reasoning_viewport.scroll_handle.clone(),
-                            ActivityScrollFadeSide::Bottom,
+                            scrollbar::FadeEdge::Bottom,
                             activity_surface,
                         ))
                         .child(scrollbar::vertical(
@@ -2295,6 +2319,31 @@ impl Waku {
                 for section in sections {
                     let section_kind = section.kind;
                     let content = section.content;
+                    if matches!(
+                        section_kind,
+                        ActivityDisclosureSectionKind::McpServer
+                            | ActivityDisclosureSectionKind::ToolName
+                    ) {
+                        detail_card = detail_card.child(
+                            div()
+                                .w_full()
+                                .min_w_0()
+                                .flex()
+                                .items_start()
+                                .gap(px(8.0))
+                                .child(div().flex_none().text_color(theme.text_tertiary).child(
+                                    format!("{}:", section_kind.label().unwrap_or_default()),
+                                ))
+                                .child(div().flex_1().min_w_0().child(md::render::plain_text(
+                                    content,
+                                    md::render::MONO_FAMILY,
+                                    FontWeight::NORMAL,
+                                    theme.text_secondary,
+                                    &ctx,
+                                ))),
+                        );
+                        continue;
+                    }
                     let mut section_view = div().w_full().min_w_0().flex().flex_col().gap(px(3.0));
                     if let Some(label) = section_kind.label() {
                         let copy_content = content.clone();
@@ -2408,14 +2457,14 @@ impl Waku {
                                                 });
                                             }),
                                     )
-                                    .child(activity_scroll_fade(
+                                    .child(scrollbar::edge_fade(
                                         output_viewport.scroll_handle.clone(),
-                                        ActivityScrollFadeSide::Top,
+                                        scrollbar::FadeEdge::Top,
                                         activity_surface,
                                     ))
-                                    .child(activity_scroll_fade(
+                                    .child(scrollbar::edge_fade(
                                         output_viewport.scroll_handle.clone(),
-                                        ActivityScrollFadeSide::Bottom,
+                                        scrollbar::FadeEdge::Bottom,
                                         activity_surface,
                                     ))
                                     .child(scrollbar::vertical(
@@ -2428,18 +2477,15 @@ impl Waku {
                                     )),
                             );
                         } else {
-                            section_view = section_view.child(
-                                div()
-                                    .w_full()
-                                    .min_w_0()
-                                    .child(md::render::plain_text(
-                                        content.clone(),
-                                        md::render::MONO_FAMILY,
-                                        FontWeight::NORMAL,
-                                        theme.text_secondary,
-                                        &ctx,
-                                    )),
-                            );
+                            section_view = section_view.child(div().w_full().min_w_0().child(
+                                md::render::plain_text(
+                                    content.clone(),
+                                    md::render::MONO_FAMILY,
+                                    FontWeight::NORMAL,
+                                    theme.text_secondary,
+                                    &ctx,
+                                ),
+                            ));
                         }
                     }
                     detail_card = detail_card.child(section_view);
@@ -2530,14 +2576,14 @@ impl Waku {
             .border_t_1()
             .border_color(theme.border_strong)
             .child(rows)
-            .child(activity_scroll_fade(
+            .child(scrollbar::edge_fade(
                 viewport.scroll_handle.clone(),
-                ActivityScrollFadeSide::Top,
+                scrollbar::FadeEdge::Top,
                 surface,
             ))
-            .child(activity_scroll_fade(
+            .child(scrollbar::edge_fade(
                 viewport.scroll_handle.clone(),
-                ActivityScrollFadeSide::Bottom,
+                scrollbar::FadeEdge::Bottom,
                 surface,
             ))
             .child(scrollbar::vertical(
@@ -2667,12 +2713,6 @@ fn activity_diff_break_row(label: Option<String>, theme: &Theme) -> AnyElement {
         .into_any_element()
 }
 
-#[derive(Clone, Copy)]
-enum ActivityScrollFadeSide {
-    Top,
-    Bottom,
-}
-
 fn activity_scroll_at_bottom(scroll: &ScrollHandle) -> bool {
     let scrolled = -scroll.offset().y;
     scroll.max_offset().y - scrolled <= px(0.5)
@@ -2784,54 +2824,6 @@ fn activity_scroll_guard(viewport: ActivityScrollViewport, live: bool) -> impl I
     .h(px(0.0))
 }
 
-fn activity_scroll_fade(
-    scroll: ScrollHandle,
-    side: ActivityScrollFadeSide,
-    surface: Hsla,
-) -> impl IntoElement {
-    canvas(
-        move |bounds, _, _| {
-            let scrolled = -scroll.offset().y;
-            let max_offset = scroll.max_offset().y;
-            let visible = match side {
-                ActivityScrollFadeSide::Top => scrolled > px(0.5),
-                ActivityScrollFadeSide::Bottom => max_offset - scrolled > px(0.5),
-            };
-            visible.then(|| {
-                let transparent = surface.opacity(0.0);
-                let background = match side {
-                    ActivityScrollFadeSide::Top => linear_gradient(
-                        180.0,
-                        linear_color_stop(surface, 0.0),
-                        linear_color_stop(transparent, 1.0),
-                    ),
-                    ActivityScrollFadeSide::Bottom => linear_gradient(
-                        180.0,
-                        linear_color_stop(transparent, 0.0),
-                        linear_color_stop(surface, 1.0),
-                    ),
-                };
-                fill(bounds, background)
-            })
-        },
-        |_, fade, window, _| {
-            if let Some(fade) = fade {
-                window.paint_quad(fade);
-            }
-        },
-    )
-    .absolute()
-    .left_0()
-    .w_full()
-    .h(px(18.0))
-    .when(matches!(side, ActivityScrollFadeSide::Top), |element| {
-        element.top_0()
-    })
-    .when(matches!(side, ActivityScrollFadeSide::Bottom), |element| {
-        element.bottom_0()
-    })
-}
-
 fn render_activity_image(
     image_url: &str,
     image: Option<Arc<gpui::Image>>,
@@ -2894,6 +2886,113 @@ fn decode_activity_image(image_url: &str) -> Option<std::sync::Arc<gpui::Image>>
         .decode(encoded)
         .ok()?;
     (!bytes.is_empty()).then(|| std::sync::Arc::new(gpui::Image::from_bytes(format, bytes)))
+}
+
+#[cfg(test)]
+mod navigation_rail_scroll_tests {
+    use gpui::{
+        Context, Entity, IntoElement, ListAlignment, ListState, Render, ScrollDelta,
+        ScrollWheelEvent, TestAppContext, Window, div, list, point, px,
+    };
+
+    use super::*;
+
+    struct NavigationRailScrollHarness {
+        rail: Entity<ConversationNavigationRail>,
+        transcript: ListState,
+    }
+
+    impl Render for NavigationRailScrollHarness {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div()
+                .size_full()
+                .relative()
+                .child(
+                    list(self.transcript.clone(), |_, _, _| {
+                        div().h(px(24.0)).w_full().into_any_element()
+                    })
+                    .size_full(),
+                )
+                .child(self.rail.clone())
+        }
+    }
+
+    #[gpui::test]
+    fn scrolling_the_navigation_rail_does_not_scroll_the_transcript(cx: &mut TestAppContext) {
+        let transcript =
+            ListState::new(100, ListAlignment::Top, px(24.0)).with_uniform_item_height(px(24.0));
+        transcript.scroll_to(ListOffset {
+            item_ix: 20,
+            offset_in_item: px(0.0),
+        });
+        let transcript_for_view = transcript.clone();
+        let (harness, cx) = cx.add_window_view(move |_, cx| {
+            let turns = (0..100)
+                .map(|index| TranscriptNavigationTurn {
+                    message_id: Uuid::new_v4(),
+                    message_index: index,
+                    row_index: index,
+                    prompt: format!("Prompt {index}"),
+                    response: String::new(),
+                })
+                .collect::<Vec<_>>();
+            let rail = cx.new(|cx| {
+                let mut rail = ConversationNavigationRail::new();
+                rail.set_snapshot(
+                    ConversationNavigationRailSnapshot {
+                        visible: true,
+                        turns: Rc::new(turns),
+                        viewport_height: 600.0,
+                        active_turn: None,
+                        reset_generation: 0,
+                        theme_is_dark: true,
+                    },
+                    cx,
+                );
+                rail
+            });
+            NavigationRailScrollHarness {
+                rail,
+                transcript: transcript_for_view,
+            }
+        });
+        let rail = cx.read_entity(&harness, |harness, _| harness.rail.clone());
+        let transcript_offset = transcript.logical_scroll_top();
+
+        cx.simulate_event(ScrollWheelEvent {
+            position: point(px(20.0), px(300.0)),
+            delta: ScrollDelta::Pixels(point(px(0.0), px(60.0))),
+            ..Default::default()
+        });
+
+        let transcript_offset_after_boundary_scroll = transcript.logical_scroll_top();
+        assert!(
+            transcript_offset_after_boundary_scroll.item_ix == transcript_offset.item_ix
+                && transcript_offset_after_boundary_scroll.offset_in_item
+                    == transcript_offset.offset_in_item,
+            "a gesture at the rail boundary must not move the transcript",
+        );
+
+        cx.simulate_event(ScrollWheelEvent {
+            position: point(px(20.0), px(300.0)),
+            delta: ScrollDelta::Pixels(point(px(0.0), px(-60.0))),
+            ..Default::default()
+        });
+
+        let rail_offset =
+            cx.read_entity(&rail, |rail, _| rail.turn_list_state.logical_scroll_top());
+        assert!(
+            rail_offset.item_ix > 0 || rail_offset.offset_in_item > px(0.0),
+            "the wheel gesture should still scroll the navigation rail",
+        );
+        let transcript_offset_after_rail_scroll = transcript.logical_scroll_top();
+        assert!(
+            transcript_offset_after_rail_scroll.item_ix == transcript_offset.item_ix
+                && transcript_offset_after_rail_scroll.offset_in_item
+                    == transcript_offset.offset_in_item,
+            "the navigation rail must contain the gesture instead of scrolling the transcript",
+        );
+    }
 }
 
 #[cfg(test)]

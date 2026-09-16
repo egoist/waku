@@ -7,6 +7,7 @@ pub enum CommandScope {
     User,
     Skill,
     Builtin,
+    Waku,
 }
 
 impl CommandScope {
@@ -15,7 +16,7 @@ impl CommandScope {
     /// commands with the same name.
     pub const fn display_rank(self) -> u8 {
         match self {
-            Self::Builtin => 0,
+            Self::Builtin | Self::Waku => 0,
             Self::Project => 1,
             Self::User => 2,
             Self::Skill => 3,
@@ -28,6 +29,7 @@ impl CommandScope {
             Self::User => tr!("command_scope.user"),
             Self::Skill => tr!("command_scope.skill"),
             Self::Builtin => tr!("command_scope.builtin"),
+            Self::Waku => tr!("command_scope.waku"),
         }
     }
 }

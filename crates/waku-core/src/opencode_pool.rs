@@ -118,6 +118,38 @@ pub(crate) fn acquire(binary: &Path, cwd: &Path) -> anyhow::Result<PooledServer>
     acquire_with_start(binary, cwd, || OpenCodeServer::start(binary, cwd))
 }
 
+/// Returns a live resident server for `binary`, whichever workspace owns it.
+///
+/// Reads of OpenCode's global store — the cross-project session catalog —
+/// do not care which workspace the server was started for, so an already
+/// running one answers immediately where starting a transient server would
+/// cost a process launch plus its health probe. `None` when no server is
+/// running; this never starts one.
+pub(crate) fn any_live(binary: &Path) -> Option<PooledServer> {
+    let slots = {
+        let pool = pool().lock().unwrap();
+        pool.iter()
+            .filter(|((pooled_binary, _), _)| pooled_binary == binary)
+            .map(|(_, slot)| Arc::clone(slot))
+            .collect::<Vec<_>>()
+    };
+    slots.into_iter().find_map(|slot| {
+        let upgraded = {
+            let state = slot.state.lock().unwrap();
+            match &*state {
+                PoolState::Running(server) => server.upgrade(),
+                PoolState::Vacant | PoolState::Starting | PoolState::Stopping => None,
+            }
+        };
+        // The slot guard is released before this handle can drop: if the
+        // process exited and this was its generation's last strong reference,
+        // the destructor takes that same slot lock to reap it.
+        upgraded
+            .filter(|inner| inner.server.is_alive())
+            .map(|inner| PooledServer { inner })
+    })
+}
+
 fn acquire_with_start(
     binary: &Path,
     cwd: &Path,

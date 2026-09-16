@@ -86,6 +86,35 @@ pub fn close_hanging(text: &str) -> Option<String> {
             continue;
         }
 
+        if ch == '$' {
+            // TeX brackets, underscores and backticks are not Markdown
+            // delimiters. Never synthesize a closer inside unfinished math.
+            let run = run_length(&chars, index).min(2);
+            let mut scan = index + run;
+            let mut closed = false;
+            while scan < chars.len() {
+                if at(scan) == Some('\\') {
+                    scan += 2;
+                    continue;
+                }
+                if at(scan) == Some('$') && run_length(&chars, scan) >= run {
+                    index = scan + run;
+                    last_content = Some(index - 1);
+                    closed = true;
+                    break;
+                }
+                scan += 1;
+            }
+            if closed {
+                continue;
+            }
+            if run == 2
+                || at(index + 1).is_some_and(|ch| !ch.is_whitespace() && !ch.is_ascii_digit())
+            {
+                return None;
+            }
+        }
+
         match ch {
             '*' | '_' | '~' => {
                 let run = run_length(&chars, index);
@@ -325,6 +354,10 @@ mod tests {
         assert_eq!(close_hanging("an _em").as_deref(), Some("an _em_"));
         assert_eq!(close_hanging("__strong").as_deref(), Some("__strong__"));
         assert_eq!(close_hanging("~~struck").as_deref(), Some("~~struck~~"));
+        assert_eq!(
+            close_hanging("It costs $5, **cheap").as_deref(),
+            Some("It costs $5, **cheap**")
+        );
     }
 
     #[test]

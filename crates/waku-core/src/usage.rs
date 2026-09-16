@@ -178,11 +178,21 @@ pub fn fetch_opencode_go_plan_usage() -> anyhow::Result<Option<PlanUsage>> {
     )?;
     match status {
         200 => {}
-        401 | 403 => {
+        // 401 and 403 mean different things here and lead to different fixes.
+        // The key is rejected only on 401; a 403 is a valid key whose account
+        // is not entitled ("OpenCode Go subscription required."), and telling
+        // that user to reconnect sends them round a loop that cannot help.
+        401 => {
             return Err(anyhow!(tr!(
                 "usage_error.opencode_go_key_rejected",
                 status = status
             )));
+        }
+        403 => {
+            return Err(anyhow!(
+                usage_error_detail(&body)
+                    .unwrap_or_else(|| tr!("usage_error.opencode_go_not_entitled"))
+            ));
         }
         429 => return Err(anyhow!(tr!("usage_error.rate_limited"))),
         other => return Err(anyhow!(tr!("usage_error.http_status", status = other))),
@@ -191,6 +201,21 @@ pub fn fetch_opencode_go_plan_usage() -> anyhow::Result<Option<PlanUsage>> {
     parse_opencode_go_plan_usage(&body)
         .map(Some)
         .ok_or_else(|| anyhow!(tr!("usage_error.no_rate_limit_windows")))
+}
+
+/// The endpoint's own sentence, when it sent one.
+///
+/// These bodies are `{"type":"error","error":{"type":..,"message":..}}`, and
+/// the message is the only part that says what to actually do — an
+/// `EntitlementError` and a revoked key are both HTTP 403 otherwise.
+fn usage_error_detail(body: &str) -> Option<String> {
+    serde_json::from_str::<Value>(body)
+        .ok()?
+        .pointer("/error/message")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|message| !message.is_empty())
+        .map(str::to_owned)
 }
 
 /// Match OpenCode's credential precedence closely enough for its Go provider:
@@ -976,6 +1001,27 @@ mod tests {
                 .collect::<Vec<_>>(),
             [("Weekly limit", 99.0), ("Weekly · GPT-5.3-Codex", 12.0),]
         );
+    }
+
+    /// The verbatim 403 body opencode.ai/zen/go/v1/usage returns for a valid
+    /// key on an account without the subscription. Reporting this as a
+    /// rejected key sent the user to reconnect, which cannot fix an
+    /// entitlement.
+    #[test]
+    fn usage_error_detail_reads_the_endpoints_own_sentence() {
+        let body = r#"{"type":"error","error":{"type":"EntitlementError","message":"OpenCode Go subscription required."}}"#;
+        assert_eq!(
+            usage_error_detail(body).as_deref(),
+            Some("OpenCode Go subscription required.")
+        );
+    }
+
+    #[test]
+    fn usage_error_detail_ignores_a_bodyless_or_shapeless_error() {
+        assert_eq!(usage_error_detail(""), None);
+        assert_eq!(usage_error_detail("not json"), None);
+        assert_eq!(usage_error_detail(r#"{"error":{"type":"X"}}"#), None);
+        assert_eq!(usage_error_detail(r#"{"error":{"message":"   "}}"#), None);
     }
 
     #[test]

@@ -1,8 +1,8 @@
-//! Windows executable resources.
+//! Platform build metadata.
 //!
-//! Explorer, the taskbar, and the Programs list all read the icon and version
-//! block out of the PE image itself — there is no bundle or desktop entry to
-//! carry them. Every other platform builds without a script.
+//! Every native updater verifies the public release key exported here. On
+//! Windows, Explorer, the taskbar, and the Programs list also read the icon
+//! and version block out of the PE image itself.
 
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
@@ -20,9 +20,10 @@ fn main() {
 /// Republish `SUPublicEDKey` from the macOS Info.plist as a compile-time
 /// constant.
 ///
-/// The Windows updater verifies the same EdDSA signatures `generate_appcast`
-/// writes, against the same key. Reading the plist here rather than repeating
-/// the key in Rust means the two cannot drift into a feed the app rejects.
+/// The Linux and Windows updaters verify the same EdDSA signatures
+/// `generate_appcast` writes, against the same key. Reading the plist here
+/// rather than repeating the key in Rust means the platforms cannot drift
+/// into a feed the app rejects.
 fn export_sparkle_public_key() {
     const PLIST: &str = "resources/Info.plist";
     const KEY: &str = "<key>SUPublicEDKey</key>";

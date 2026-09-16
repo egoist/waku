@@ -77,6 +77,8 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
+      - uses: oven-sh/setup-bun@v2
+
       - name: Install Rust
         run: |
           rustup toolchain install 1.96.0 --profile minimal
@@ -92,6 +94,8 @@ jobs:
             libvulkan1 \
             libwayland-dev \
             libx11-xcb-dev \
+            libxi-dev \
+            libxtst-dev \
             libxkbcommon-x11-dev \
             pkg-config \
             xdg-desktop-portal
@@ -113,6 +117,9 @@ jobs:
         run: rm -f target/release/waku-*.tar.gz
 
       - name: Bundle
+        env:
+          WAKU_ANALYTICS_ENDPOINT: ${{ secrets.WAKU_ANALYTICS_ENDPOINT }}
+          WAKU_ANALYTICS_WEBSITE_ID: ${{ secrets.WAKU_ANALYTICS_WEBSITE_ID }}
         run: ./scripts/bundle-linux.sh
 
       - uses: actions/upload-artifact@v7
@@ -133,6 +140,8 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
+      - uses: oven-sh/setup-bun@v2
+
       - name: Install Rust
         run: |
           rustup toolchain install 1.96.0 --profile minimal
@@ -148,6 +157,8 @@ jobs:
             libvulkan1 \
             libwayland-dev \
             libx11-xcb-dev \
+            libxi-dev \
+            libxtst-dev \
             libxkbcommon-x11-dev \
             pkg-config \
             xdg-desktop-portal
@@ -169,6 +180,9 @@ jobs:
         run: rm -f target/release/waku-*.tar.gz
 
       - name: Bundle
+        env:
+          WAKU_ANALYTICS_ENDPOINT: ${{ secrets.WAKU_ANALYTICS_ENDPOINT }}
+          WAKU_ANALYTICS_WEBSITE_ID: ${{ secrets.WAKU_ANALYTICS_WEBSITE_ID }}
         run: ./scripts/bundle-linux.sh
 
       - uses: actions/upload-artifact@v7
@@ -215,6 +229,8 @@ jobs:
 
       - name: Bundle
         env:
+          WAKU_ANALYTICS_ENDPOINT: ${{ secrets.WAKU_ANALYTICS_ENDPOINT }}
+          WAKU_ANALYTICS_WEBSITE_ID: ${{ secrets.WAKU_ANALYTICS_WEBSITE_ID }}
           WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
           WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
         run: bun scripts/bundle-windows.ts
@@ -265,6 +281,8 @@ jobs:
 
       - name: Bundle
         env:
+          WAKU_ANALYTICS_ENDPOINT: ${{ secrets.WAKU_ANALYTICS_ENDPOINT }}
+          WAKU_ANALYTICS_WEBSITE_ID: ${{ secrets.WAKU_ANALYTICS_WEBSITE_ID }}
           WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
           WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
         run: bun scripts/bundle-windows.ts
@@ -386,20 +404,23 @@ jobs:
           echo "$VERSION" > artifacts/latest-linux.txt
           echo "$VERSION" > artifacts/latest-windows.txt
 
-      # Signed here rather than on the Windows runners: this is the only job
-      # that holds both installers, and the signing key stays in one place.
-      - name: Sign the Windows update feeds
+      # Signed here rather than on platform runners: this is the only job that
+      # holds every native artifact, and the signing key stays in one place.
+      - name: Sign the Linux and Windows update feeds
         env:
           VERSION: ${{ needs.version.outputs.version }}
           SPARKLE_PRIVATE_KEY: ${{ secrets.SPARKLE_PRIVATE_KEY }}
         run: |
           # Merge into the live feeds so previously published releases keep
           # their entries; a first run simply starts from nothing.
-          for arch in x86_64 aarch64; do
-            curl -fsSL --max-time 30 \
-              "https://releases.waku.sh/appcast-windows-$arch.xml" \
-              -o "artifacts/appcast-windows-$arch.xml" || true
+          for platform in linux windows; do
+            for arch in x86_64 aarch64; do
+              curl -fsSL --max-time 30 \
+                "https://releases.waku.sh/appcast-$platform-$arch.xml" \
+                -o "artifacts/appcast-$platform-$arch.xml" || true
+            done
           done
+          bun scripts/appcast-linux.ts artifacts "$VERSION"
           bun scripts/appcast-windows.ts artifacts "$VERSION"
 
       - name: Write release notes
@@ -436,6 +457,7 @@ jobs:
             artifacts/*.zip
             artifacts/*.exe
             artifacts/appcast.xml
+            artifacts/appcast-linux-*.xml
             artifacts/appcast-windows-*.xml
             artifacts/latest-linux.txt
             artifacts/latest-windows.txt

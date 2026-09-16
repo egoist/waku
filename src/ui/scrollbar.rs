@@ -14,8 +14,9 @@ use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use gpui::{
-    App, BorderStyle, Bounds, IntoElement, ListState, MouseButton, MouseDownEvent, MouseMoveEvent,
-    MouseUpEvent, Pixels, Point, ScrollHandle, Styled, Window, canvas, point, px, quad, size,
+    App, BorderStyle, Bounds, Hsla, IntoElement, ListState, MouseButton, MouseDownEvent,
+    MouseMoveEvent, MouseUpEvent, Pixels, Point, ScrollHandle, Styled, Window, canvas, fill,
+    linear_color_stop, linear_gradient, point, prelude::*, px, quad, size,
 };
 
 use crate::theme::Theme;
@@ -220,11 +221,61 @@ fn arm_fade_wake(state: &Rc<ScrollbarState>, view: gpui::EntityId, delay: Durati
     .detach();
 }
 
+#[derive(Clone, Copy)]
+pub enum FadeEdge {
+    Top,
+    Bottom,
+}
+
+/// A paint-only cue at an edge with content outside the viewport. Place after
+/// the scrollable child so its freshly laid-out bounds decide visibility.
+pub fn edge_fade(scroll: ScrollHandle, side: FadeEdge, surface: Hsla) -> impl IntoElement {
+    canvas(
+        move |bounds, _, _| {
+            let scrolled = -scroll.offset().y;
+            let max_offset = scroll.max_offset().y;
+            let visible = match side {
+                FadeEdge::Top => scrolled > px(0.5),
+                FadeEdge::Bottom => max_offset - scrolled > px(0.5),
+            };
+            visible.then(|| {
+                let transparent = surface.opacity(0.0);
+                let background = match side {
+                    FadeEdge::Top => linear_gradient(
+                        180.0,
+                        linear_color_stop(surface, 0.0),
+                        linear_color_stop(transparent, 1.0),
+                    ),
+                    FadeEdge::Bottom => linear_gradient(
+                        180.0,
+                        linear_color_stop(transparent, 0.0),
+                        linear_color_stop(surface, 1.0),
+                    ),
+                };
+                fill(bounds, background)
+            })
+        },
+        |_, fade, window, _| {
+            if let Some(fade) = fade {
+                window.paint_quad(fade);
+            }
+        },
+    )
+    .absolute()
+    .left_0()
+    .w_full()
+    .h(px(18.0))
+    .when(matches!(side, FadeEdge::Top), |element| element.top_0())
+    .when(matches!(side, FadeEdge::Bottom), |element| {
+        element.bottom_0()
+    })
+}
+
 /// An overlay vertical scrollbar pinned to the right edge of its parent.
 ///
 /// The parent must be `relative()`; this element positions itself absolutely
 /// and never participates in layout, so adding it cannot change content size.
-pub fn vertical<S>(surface: &S, state: &Rc<ScrollbarState>) -> impl IntoElement + use<S>
+pub fn vertical<S>(surface: &S, state: &Rc<ScrollbarState>) -> impl IntoElement + Styled + use<S>
 where
     S: Scrollable + Clone + 'static,
 {

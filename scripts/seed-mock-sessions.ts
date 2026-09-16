@@ -858,7 +858,6 @@ function buildSession(
     provider: profile.provider,
     model: profile.model,
     runtime_mode: "fullAccess",
-    interaction_mode: "build",
     status: "idle",
     created_at: createdAt,
     updated_at: updatedAt,

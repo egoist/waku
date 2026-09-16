@@ -19,7 +19,7 @@ mod platform {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::thread::JoinHandle;
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     use alacritty_terminal::event::{OnResize as _, WindowSize};
     use alacritty_terminal::tty::{self, EventedPty as _, EventedReadWrite as _, Shell};
@@ -34,6 +34,7 @@ mod platform {
     const CELL_HEIGHT: u16 = 16;
     const MIN_COLUMNS: u16 = 2;
     const MIN_ROWS: u16 = 1;
+    const SHELL_SHUTDOWN_GRACE: Duration = Duration::from_millis(250);
 
     pub struct DaemonTerminal {
         pty: Arc<Mutex<tty::Pty>>,
@@ -48,6 +49,24 @@ mod platform {
             rows: u16,
             events: EventSink,
         ) -> anyhow::Result<Self> {
+            let shell = crate::command_env::default_terminal_shell();
+            let shell_args = crate::command_env::default_terminal_shell_args(&shell);
+            Self::open_with_shell(
+                cwd,
+                cols,
+                rows,
+                events,
+                Shell::new(shell.to_string_lossy().into_owned(), shell_args),
+            )
+        }
+
+        pub(crate) fn open_with_shell(
+            cwd: &std::path::Path,
+            cols: u16,
+            rows: u16,
+            events: EventSink,
+            shell: Shell,
+        ) -> anyhow::Result<Self> {
             if !cwd.is_dir() {
                 bail!(
                     "terminal working directory does not exist: {}",
@@ -55,10 +74,8 @@ mod platform {
                 );
             }
 
-            let shell = crate::command_env::default_terminal_shell();
-            let shell_args = crate::command_env::default_terminal_shell_args(&shell);
             let mut options = tty::Options {
-                shell: Some(Shell::new(shell.to_string_lossy().into_owned(), shell_args)),
+                shell: Some(shell),
                 working_directory: Some(cwd.to_owned()),
                 drain_on_exit: false,
                 ..Default::default()
@@ -163,19 +180,56 @@ mod platform {
     impl Drop for DaemonTerminal {
         fn drop(&mut self) {
             self.stopped.store(true, Ordering::Release);
-            // The output reader may be blocked in `read` while the shell is
-            // idle. Alacritty hangs the child up when its PTY is dropped, but
-            // the reader owns another `Arc` to that PTY, so waiting for the
-            // reader first would keep both the child and its slave fd alive.
-            // Terminate the shell before joining so the master read wakes and
-            // the reader can observe `stopped`.
-            let child_pid = self.pty.lock().child().id() as libc::pid_t;
-            unsafe {
-                libc::kill(child_pid, libc::SIGHUP);
-            }
+            // Alacritty's PTY destructor sends SIGHUP and then waits for the
+            // child without a timeout. A shell can ignore or defer SIGHUP,
+            // so bound its grace period before either join or PTY drop.
+            // Hold the lock so the reader cannot reap the child between our
+            // exit check and signal delivery.
+            terminate_shell(&self.pty.lock());
             if let Some(reader) = self.reader.take() {
                 let _ = reader.join();
             }
+        }
+    }
+
+    fn terminate_shell(pty: &tty::Pty) {
+        let child_pid = pty.child().id() as libc::pid_t;
+        if child_has_exited(child_pid) {
+            return;
+        }
+        unsafe {
+            libc::kill(child_pid, libc::SIGHUP);
+        }
+        let deadline = Instant::now() + SHELL_SHUTDOWN_GRACE;
+        while !child_has_exited(child_pid) {
+            if Instant::now() >= deadline {
+                unsafe {
+                    libc::kill(child_pid, libc::SIGKILL);
+                }
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(4));
+        }
+    }
+
+    fn child_has_exited(child_pid: libc::pid_t) -> bool {
+        // WNOWAIT leaves reaping to Alacritty's Child, keeping the PID owned
+        // until its destructor has finished sending signals and waiting.
+        let mut status: libc::siginfo_t = unsafe { std::mem::zeroed() };
+        let result = unsafe {
+            libc::waitid(
+                libc::P_PID,
+                child_pid as libc::id_t,
+                &mut status,
+                libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
+            )
+        };
+        if result == 0 {
+            unsafe { status.si_pid() != 0 }
+        } else {
+            // The output reader may already have reaped a naturally exited
+            // shell via next_child_event before shutdown began.
+            std::io::Error::last_os_error().raw_os_error() == Some(libc::ECHILD)
         }
     }
 

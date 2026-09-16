@@ -124,6 +124,9 @@ pub struct Snapshot {
     pub additions: u64,
     pub deletions: u64,
     pub truncated: bool,
+    /// File-header rows in paint order, retained for constant-time-ish sticky
+    /// header lookup while the virtualized list scrolls.
+    file_header_lines: Vec<usize>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -133,6 +136,20 @@ pub struct GapExpansion {
 }
 
 impl Snapshot {
+    /// Return the file header at or before `line_index` and the header after
+    /// it. Header indices are cached when the snapshot is parsed so a scroll
+    /// frame only performs a binary search rather than scanning the diff.
+    pub fn file_headers_around(&self, line_index: usize) -> Option<(usize, Option<usize>)> {
+        let next_position = self
+            .file_header_lines
+            .partition_point(|&header_index| header_index <= line_index);
+        let current_position = next_position.checked_sub(1)?;
+        Some((
+            self.file_header_lines[current_position],
+            self.file_header_lines.get(next_position).copied(),
+        ))
+    }
+
     /// Reveal retained context without touching Git or the filesystem. The
     /// returned replacement count feeds `ListState::splice`, which keeps the
     /// viewport anchored while the separator turns into ordinary code rows.
@@ -228,6 +245,11 @@ impl Snapshot {
                     && *diff_line > line_index
                 {
                     *diff_line = diff_line.saturating_add(inserted);
+                }
+            }
+            for header_index in &mut self.file_header_lines {
+                if *header_index > line_index {
+                    *header_index = header_index.saturating_add(inserted);
                 }
             }
         }
@@ -529,7 +551,7 @@ fn parse(source: Source, numstat: &str, patch: &str, complete_context: bool) -> 
         lines
     };
     let (lines, truncated) = cap_visible_lines(lines);
-    recompute_diff_lines(&mut files, &lines);
+    let file_header_lines = recompute_diff_lines(&mut files, &lines);
     let additions = files.iter().map(|file| file.additions).sum();
     let deletions = files.iter().map(|file| file.deletions).sum();
     Snapshot {
@@ -539,6 +561,7 @@ fn parse(source: Source, numstat: &str, patch: &str, complete_context: bool) -> 
         additions,
         deletions,
         truncated,
+        file_header_lines,
     }
 }
 
@@ -669,17 +692,20 @@ fn cap_visible_lines(lines: Vec<Line>) -> (Vec<Line>, bool) {
     (visible, truncated)
 }
 
-fn recompute_diff_lines(files: &mut [File], lines: &[Line]) {
+fn recompute_diff_lines(files: &mut [File], lines: &[Line]) -> Vec<usize> {
     for file in files.iter_mut() {
         file.diff_line = None;
     }
+    let mut file_header_lines = Vec::new();
     for (line_index, line) in lines.iter().enumerate() {
         if line.kind == LineKind::FileHeader
             && let Some(file) = files.get_mut(line.file_index)
         {
             file.diff_line.get_or_insert(line_index);
+            file_header_lines.push(line_index);
         }
     }
+    file_header_lines
 }
 
 fn push_line(lines: &mut Vec<Line>, line: Line) -> bool {
@@ -930,5 +956,53 @@ index 1111111..2222222 100644
         };
         assert_eq!(gap.count(), 17);
         assert_eq!(snapshot.lines[gap_index + 101].new_line, Some(118));
+    }
+
+    #[test]
+    fn file_header_lookup_tracks_gap_expansion() {
+        let patch = format!(
+            "{}diff --git a/src/other.rs b/src/other.rs\n\
+             index 3333333..4444444 100644\n\
+             --- a/src/other.rs\n\
+             +++ b/src/other.rs\n\
+             @@ -1 +1 @@\n\
+             -old\n\
+             +new\n",
+            full_patch(30, &[20]),
+        );
+        let mut snapshot = parse(
+            Source::Uncommitted,
+            "1\t1\tsrc/lib.rs\n1\t1\tsrc/other.rs\n",
+            &patch,
+            true,
+        );
+        let second_header = snapshot.files[1].diff_line.unwrap();
+        assert_eq!(
+            snapshot.file_headers_around(0),
+            Some((0, Some(second_header)))
+        );
+        assert_eq!(
+            snapshot.file_headers_around(second_header),
+            Some((second_header, None))
+        );
+
+        let gap_index = snapshot
+            .lines
+            .iter()
+            .position(|line| line.file_index == 0 && matches!(line.kind, LineKind::Gap(_)))
+            .unwrap();
+        let expansion = snapshot
+            .expand_gap(gap_index, ExpansionDirection::All)
+            .unwrap();
+        let shifted_second_header = second_header + expansion.replacement_count - 1;
+        assert_eq!(snapshot.files[1].diff_line, Some(shifted_second_header));
+        assert_eq!(
+            snapshot.file_headers_around(shifted_second_header - 1),
+            Some((0, Some(shifted_second_header)))
+        );
+        assert_eq!(
+            snapshot.file_headers_around(shifted_second_header),
+            Some((shifted_second_header, None))
+        );
     }
 }

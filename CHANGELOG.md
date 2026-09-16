@@ -16,6 +16,34 @@ the original feature bullet instead of adding separate entries for them.
 
 ## [unreleased]
 
+## [0.1.19]
+
+- Render inline and block LaTeX math in Markdown, with a Copy Expression action and a setting to show the source
+- Fix OpenCode 2 context usage to reflect the latest request instead of cumulative session totals, and cap the meter at 100%
+- Clear model search when selecting a provider or Favorites tab
+- Make loading spinners smoother with animations at up to 60 FPS
+
+## [0.1.18]
+
+- Fix Codex session forking
+- Add OpenCode 2 support, add reasoning effort option for both OpenCode and OpenCode 2
+- Fix memory usage for long-running sessions
+
+## [0.1.17]
+
+- Fix the OpenCode Resume list showing only sessions started outside a git checkout; it now lists sessions from every project
+- Hold Claude's turn open while it waits on background work
+
+## [0.1.16]
+
+- Import and continue conversations started in agent CLIs with `/resume` or the command palette across every provider, in both Waku and Waku Web
+- Linux: add signed in-app updates with clean relaunch and automatic rollback
+- Copy Waku task IDs and agent CLI thread IDs from task info or the command palette
+- Keep each response's actions and changed-file summary after its final tool activity
+- Keep the selected task visible when navigating the sidebar
+- Let nested transcript and command-output scrollers hand wheel gestures to the page only at their boundaries
+- Keep multiline background-work titles on one line in summaries and panel headers
+
 ## [0.1.15]
 
 - Codex thread goals: type /goal to set a persistent objective the task keeps pursuing — before or after the first message — with its autonomous pursuit streaming into the transcript, a status chip showing live budget or elapsed time, and a dialog to edit, pause, resume, or clear the goal (also in Waku Web)
@@ -61,6 +89,7 @@ the original feature bullet instead of adding separate entries for them.
 - macOS: Add "Open in.." button to open project folder in selected application
 
 ## [0.1.10]
+
 - Add Kimi Code support
 - Add Oh My Pi support
 - Fix markdown table rendering
@@ -127,8 +156,7 @@ the original feature bullet instead of adding separate entries for them.
   nvm and fnm
 - Show models registered by Pi extensions
 - Fix the model picker closing when entering a space in search
-- Fix duplicate transcript history and lost interaction mode when resuming ACP
-  sessions
+- Fix duplicate transcript history when resuming ACP sessions
 
 ## [0.0.10]
 

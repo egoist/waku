@@ -18,7 +18,10 @@ use crate::{Command, DaemonExposureSettings, DaemonSettings, DaemonSupervisor, R
 use waku_protocol::computer_use::ComputerAppGrant;
 use waku_protocol::i18n::AppLanguage;
 use waku_protocol::identity::DATA_DIRECTORY_NAME;
-use waku_protocol::model::{AgentSession, FavoriteModel, Project, ProviderKind, RuntimeMode};
+use waku_protocol::model::{
+    AgentSession, FavoriteModel, Project, ProviderKind, ProviderResumeCursor,
+    ProviderSessionHistory, ProviderSessionSummary, RuntimeMode,
+};
 use waku_protocol::theme::ThemePreference;
 
 pub use waku_protocol::persistence::{
@@ -68,6 +71,10 @@ fn default_ui_font_size() -> f32 {
 
 fn default_code_font_size() -> f32 {
     DEFAULT_CODE_FONT_SIZE
+}
+
+fn default_render_math() -> bool {
+    true
 }
 
 fn default_analytics_enabled() -> bool {
@@ -249,6 +256,7 @@ pub struct AppSettings {
     /// and tool output — in pixels. Hand-edited values are clamped when
     /// applied.
     pub code_font_size: f32,
+    pub render_math: bool,
     pub daemon_exposure: DaemonExposureSettings,
     /// Preferred target of the header's "open project in app" control, by
     /// catalog id. `None` — and an id no longer installed — fall back to the
@@ -265,6 +273,7 @@ impl Default for AppSettings {
             language: AppLanguage::default(),
             ui_font_size: DEFAULT_UI_FONT_SIZE,
             code_font_size: DEFAULT_CODE_FONT_SIZE,
+            render_math: true,
             daemon_exposure: DaemonExposureSettings::default(),
             open_in_app: None,
         }
@@ -368,6 +377,8 @@ pub struct PersistedState {
     pub ui_font_size: f32,
     #[serde(default = "default_code_font_size")]
     pub code_font_size: f32,
+    #[serde(default = "default_render_math")]
+    pub render_math: bool,
     #[serde(default)]
     pub daemon_exposure: DaemonExposureSettings,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -441,6 +452,7 @@ impl PersistedState {
             language: AppLanguage::default(),
             ui_font_size: DEFAULT_UI_FONT_SIZE,
             code_font_size: DEFAULT_CODE_FONT_SIZE,
+            render_math: true,
             daemon_exposure: DaemonExposureSettings::default(),
             open_in_app: None,
             sidebar_visible: true,
@@ -549,7 +561,11 @@ impl PersistedState {
     }
 
     pub fn apply_daemon_settings(&mut self, settings: DaemonSettings) {
-        self.computer_use_enabled = settings.computer_use_enabled;
+        // Computer Use is experimental, so a release build must not let a
+        // setting written by a development build leave this client believing
+        // it is on.
+        self.computer_use_enabled =
+            crate::computer_use::resolve_enabled(settings.computer_use_enabled);
         self.computer_use_allowed_apps = settings.computer_use_allowed_apps;
         self.disabled_providers = settings.disabled_providers;
         self.provider_binary_overrides = settings.provider_binary_overrides;
@@ -564,6 +580,7 @@ impl PersistedState {
             language: self.language,
             ui_font_size: self.ui_font_size,
             code_font_size: self.code_font_size,
+            render_math: self.render_math,
             daemon_exposure: self.daemon_exposure.clone(),
             open_in_app: self.open_in_app.clone(),
         }
@@ -600,6 +617,7 @@ impl PersistedState {
         self.language = settings.language;
         self.ui_font_size = sanitized_ui_font_size(settings.ui_font_size);
         self.code_font_size = sanitized_code_font_size(settings.code_font_size);
+        self.render_math = settings.render_math;
         self.daemon_exposure = settings.daemon_exposure;
         self.open_in_app = settings.open_in_app;
     }
@@ -858,6 +876,50 @@ impl StateStore {
         }
     }
 
+    pub fn provider_sessions(
+        &self,
+        provider: ProviderKind,
+        limit: usize,
+    ) -> impl FnOnce() -> io::Result<Vec<ProviderSessionSummary>> + Send + 'static {
+        let daemon = self.daemon.clone();
+        move || match daemon
+            .client()
+            .request(
+                Uuid::nil(),
+                Uuid::nil(),
+                Command::ListProviderSessions { provider, limit },
+            )
+            .map_err(to_io_error)?
+        {
+            ResponsePayload::ProviderSessions { sessions } => Ok(sessions),
+            _ => Err(io::Error::other(
+                "Waku daemon returned an invalid provider-session response",
+            )),
+        }
+    }
+
+    pub fn provider_session_history(
+        &self,
+        cursor: ProviderResumeCursor,
+        cwd: PathBuf,
+    ) -> impl FnOnce() -> io::Result<ProviderSessionHistory> + Send + 'static {
+        let daemon = self.daemon.clone();
+        move || match daemon
+            .client()
+            .request(
+                Uuid::nil(),
+                Uuid::nil(),
+                Command::LoadProviderSession { cursor, cwd },
+            )
+            .map_err(to_io_error)?
+        {
+            ResponsePayload::ProviderSessionHistory { history } => Ok(history),
+            _ => Err(io::Error::other(
+                "Waku daemon returned an invalid provider-session history response",
+            )),
+        }
+    }
+
     pub fn load_or_fresh(&self, cwd: PathBuf) -> PersistedState {
         let mut state = match self.load() {
             Ok(state) => {
@@ -1073,6 +1135,26 @@ fn restore_task_state_skeletons(sessions: &mut [AgentSession]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn math_rendering_defaults_on_and_persists_as_an_app_preference() {
+        let defaults: AppSettings = serde_json::from_str("{}").unwrap();
+        assert!(defaults.render_math);
+        let mut state = PersistedState::empty();
+        assert!(state.render_math);
+        state.render_math = false;
+        let settings = serde_json::to_value(state.app_settings()).unwrap();
+        assert_eq!(settings["render_math"], false);
+        assert!(
+            serde_json::to_value(state.app_state())
+                .unwrap()
+                .get("render_math")
+                .is_none()
+        );
+        let mut restored = PersistedState::empty();
+        restored.apply_app_settings(serde_json::from_value(settings).unwrap());
+        assert!(!restored.render_math);
+    }
 
     #[test]
     fn desktop_settings_paths_are_build_specific() {

@@ -335,7 +335,7 @@ async function verifyJavaScriptRepl(executable: string): Promise<void> {
       method: "tools/call",
       params: {
         name: "js",
-        arguments: { code: "nodeRepl.write(typeof sky);" },
+        arguments: { code: "jsRepl.write(typeof cua);" },
       },
     },
   ];

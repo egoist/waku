@@ -109,7 +109,7 @@ export function sessionTimeLabel(
 ): string | null {
   const turn = session.turns.at(-1)
   if (
-    (session.status === 'connecting' || session.status === 'working' || session.status === 'waiting')
+    (session.status === 'connecting' || session.status === 'working' || session.status === 'waiting' || session.status === 'background')
       && turn?.status === 'running'
   ) {
     const elapsed = Math.max(0, nowSeconds - turn.started_at)
@@ -130,7 +130,7 @@ export function nextSidebarUpdateDelay(
   for (const session of sessions) {
     const turn = session.turns.at(-1)
     if (
-      (session.status === 'connecting' || session.status === 'working' || session.status === 'waiting')
+      (session.status === 'connecting' || session.status === 'working' || session.status === 'waiting' || session.status === 'background')
         && turn?.status === 'running'
     ) {
       return 1

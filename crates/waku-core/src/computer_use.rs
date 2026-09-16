@@ -1,21 +1,28 @@
 //! Headless Computer Use state and helper lifecycle.
 
 use std::fs;
+#[cfg(target_os = "macos")]
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
+#[cfg(target_os = "macos")]
 use std::process::{Command, Stdio};
+#[cfg(target_os = "macos")]
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use anyhow::{Context as _, anyhow, bail};
 use base64::Engine as _;
 use serde::Deserialize;
-use serde_json::{Value, json};
+use serde_json::Value;
+#[cfg(target_os = "macos")]
+use serde_json::json;
 use uuid::Uuid;
 
+#[cfg(target_os = "macos")]
 const MAX_HELPER_OUTPUT_BYTES: usize = 24 * 1024 * 1024;
 
 pub use waku_protocol::computer_use::{
     ComputerAppGrant, ComputerPermissions, ComputerTarget, ComputerUsePhase, ComputerUseState,
+    is_available, resolve_enabled,
 };
 
 #[derive(Clone, Debug)]
@@ -113,6 +120,7 @@ pub struct PendingComputerApproval {
     pub sensitive: bool,
 }
 
+#[cfg(target_os = "macos")]
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct HelperResponse {
@@ -123,7 +131,13 @@ struct HelperResponse {
     permissions: Option<ComputerPermissions>,
 }
 
+#[cfg(target_os = "macos")]
 pub fn probe_permissions(prompt: bool) -> anyhow::Result<ComputerPermissions> {
+    // A release daemon never installs or launches the helper app, not even to
+    // read permission status, so production never opens its TCC prompts.
+    if !is_available() {
+        bail!("Waku Computer Use is not available in this build");
+    }
     let operation = if prompt {
         json!({"operation": "requestPermissions"})
     } else {
@@ -143,6 +157,14 @@ pub fn probe_permissions(prompt: bool) -> anyhow::Result<ComputerPermissions> {
     Ok(response.permissions.unwrap_or_default())
 }
 
+#[cfg(not(target_os = "macos"))]
+pub fn probe_permissions(_prompt: bool) -> anyhow::Result<ComputerPermissions> {
+    bail!(
+        "Use Cua Driver check_permissions to inspect this desktop's capture and input capabilities"
+    )
+}
+
+#[cfg(target_os = "macos")]
 fn invoke_helper_direct(
     helper: &Path,
     operation: &Value,
@@ -215,6 +237,12 @@ pub fn helper_display_name() -> String {
 }
 
 pub fn mcp_server_command() -> anyhow::Result<PathBuf> {
+    if !cfg!(target_os = "macos") {
+        return packaged_file(
+            &host_executable_path()?.with_file_name(helper_executable_name()),
+            "Cua Driver helper",
+        );
+    }
     let bundled_helper = helper_app_path()?;
     let helper = install_helper_app(&bundled_helper)?;
     let executable = helper
@@ -223,37 +251,56 @@ pub fn mcp_server_command() -> anyhow::Result<PathBuf> {
     Ok(helper.join("Contents").join("MacOS").join(executable))
 }
 
+fn helper_executable_name() -> &'static str {
+    if cfg!(windows) {
+        "waku_computer_use.exe"
+    } else {
+        "waku_computer_use"
+    }
+}
+
+fn resources_directory(executable: &Path, os: &str) -> anyhow::Result<PathBuf> {
+    let directory = executable
+        .parent()
+        .ok_or_else(|| anyhow!("Waku executable has no parent"))?;
+    Ok(match os {
+        "macos" => directory
+            .parent()
+            .ok_or_else(|| anyhow!("Waku app bundle is malformed"))?
+            .join("Resources"),
+        "linux" if directory.file_name().is_some_and(|name| name == "bin") => directory
+            .parent()
+            .ok_or_else(|| anyhow!("Waku installation is malformed"))?
+            .join("share/waku"),
+        _ => directory.join("resources"),
+    })
+}
+
+fn packaged_file(path: &Path, name: &str) -> anyhow::Result<PathBuf> {
+    if !path.is_file() {
+        bail!("{name} is missing from this Waku build: {}", path.display());
+    }
+    Ok(path.to_path_buf())
+}
+
 pub fn js_repl_server_path() -> anyhow::Result<PathBuf> {
     let executable = host_executable_path()?;
-    let macos = executable
-        .parent()
-        .ok_or_else(|| anyhow!("Waku executable has no parent directory"))?;
-    let contents = macos
-        .parent()
-        .ok_or_else(|| anyhow!("Waku app bundle is malformed"))?;
-    let path = contents.join("Resources").join("waku_js_repl");
-    if !path.is_file() {
-        bail!("Waku JavaScript REPL is missing from this Waku build")
-    }
-    Ok(path)
+    let path = if cfg!(target_os = "macos") {
+        resources_directory(&executable, "macos")?.join("waku_js_repl")
+    } else {
+        executable.with_file_name(if cfg!(windows) {
+            "waku_js_repl.exe"
+        } else {
+            "waku_js_repl"
+        })
+    };
+    packaged_file(&path, "Waku JavaScript REPL")
 }
 
 pub fn pi_extension_path() -> anyhow::Result<PathBuf> {
-    let executable = host_executable_path()?;
-    let macos = executable
-        .parent()
-        .ok_or_else(|| anyhow!("Waku executable has no parent directory"))?;
-    let contents = macos
-        .parent()
-        .ok_or_else(|| anyhow!("Waku app bundle is malformed"))?;
-    let path = contents
-        .join("Resources")
-        .join("computer-use")
-        .join("pi-extension.ts");
-    if !path.is_file() {
-        bail!("Waku Pi Computer Use extension is missing from this Waku build")
-    }
-    Ok(path)
+    let path = resources_directory(&host_executable_path()?, std::env::consts::OS)?
+        .join("computer-use/pi-extension.ts");
+    packaged_file(&path, "Waku Pi Computer Use extension")
 }
 
 /// Install the bundled helper as an independent, stable runtime service.
@@ -336,17 +383,11 @@ fn copy_directory(source: &Path, destination: &Path) -> anyhow::Result<()> {
 }
 
 pub fn skill_root_path() -> anyhow::Result<PathBuf> {
-    let executable = host_executable_path()?;
-    let macos = executable
-        .parent()
-        .ok_or_else(|| anyhow!("Waku executable has no parent directory"))?;
-    let contents = macos
-        .parent()
-        .ok_or_else(|| anyhow!("Waku app bundle is malformed"))?;
-    let path = contents.join("Resources").join("skills");
-    if !path.join("waku-computer-use").join("SKILL.md").is_file() {
-        bail!("Waku Computer Use skill is missing from this Waku build")
-    }
+    let path = resources_directory(&host_executable_path()?, std::env::consts::OS)?.join("skills");
+    packaged_file(
+        &path.join("waku-computer-use/SKILL.md"),
+        "Waku Computer Use skill",
+    )?;
     Ok(path)
 }
 
@@ -361,6 +402,29 @@ fn host_executable_path() -> anyhow::Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn packaged_resources_follow_each_platform_layout() {
+        for (executable, os, resources) in [
+            (
+                "/Applications/Waku.app/Contents/MacOS/Waku",
+                "macos",
+                "/Applications/Waku.app/Contents/Resources",
+            ),
+            ("/opt/waku/bin/waku", "linux", "/opt/waku/share/waku"),
+            (
+                "/dev/waku/target/debug/waku",
+                "linux",
+                "/dev/waku/target/debug/resources",
+            ),
+            ("/Waku/waku.exe", "windows", "/Waku/resources"),
+        ] {
+            assert_eq!(
+                resources_directory(Path::new(executable), os).unwrap(),
+                PathBuf::from(resources)
+            );
+        }
+    }
 
     #[test]
     fn app_grants_preserve_bundle_identity() {

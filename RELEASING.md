@@ -1,11 +1,11 @@
 # Releasing Waku
 
-Waku auto-updates with [Sparkle](https://sparkle-project.org). Releases live in
-a **Cloudflare R2** bucket served at **`https://releases.waku.sh`**. New users
-download a notarized **`.dmg`**; existing users get smaller in-app updates
-(binary deltas when available) via Sparkle, which reads the appcast at
-`https://releases.waku.sh/appcast.xml`, verifies each build's EdDSA signature,
-and installs it. One release command produces and publishes both.
+Waku ships signed in-app updates on macOS, Linux, and Windows. Releases live in
+a **Cloudflare R2** bucket served at **`https://releases.waku.sh`**. macOS uses
+[Sparkle](https://sparkle-project.org), including binary deltas when available;
+the native Linux and Windows updaters read architecture-specific feeds and
+verify artifacts with the same EdDSA key. One release workflow produces all
+platform artifacts and feeds.
 
 Once set up, cutting a release is:
 
@@ -14,11 +14,10 @@ bun run release
 ```
 
 - Updater code: [`src/updater.rs`](src/updater.rs) — loads the embedded
-  Sparkle.framework at runtime and starts `SPUUpdater` with Waku's custom user
-  driver. Available updates appear in the sidebar footer; download, signature
-  verification, install, and relaunch remain owned by Sparkle. **Check for
-  Updates…** lives in the app menu, and the **Automatic updates** toggle in
-  Settings → General mirrors Sparkle's persisted setting.
+  Sparkle.framework on macOS and owns the signed native flows on Linux and
+  Windows. Available updates appear in the sidebar footer; **Check for
+  Updates…** lives in the app menu, and **Automatic updates** lives in
+  Settings → General.
 - Feed URL + public key: [`resources/Info.plist`](resources/Info.plist)
   (`SUFeedURL`, `SUPublicEDKey`).
 - Framework embedding + pinned Sparkle version:
@@ -157,6 +156,7 @@ Linux CI adds:
 
 - `waku-<version>-x86_64-unknown-linux-gnu.tar.gz`
 - `waku-<version>-aarch64-unknown-linux-gnu.tar.gz`
+- `appcast-linux-x86_64.xml`, `appcast-linux-aarch64.xml`
 - `latest-linux.txt` — the version `install.sh` resolves "latest" to
 
 Windows CI adds:
@@ -182,23 +182,26 @@ SmartScreen warning.
 existing install; a new one turns every update into a second copy in
 Add/Remove Programs.
 
-#### The Windows update feed
+#### The native Windows and Linux update feeds
 
-Windows has no Sparkle, so [`src/updater.rs`](src/updater.rs) runs the same
-contract itself: fetch the appcast, compare versions, download, verify the
-EdDSA signature, and hand the installer to Inno Setup with `/SILENT`. The
-installer closes Waku, replaces it, and starts it again.
+Windows and Linux have no Sparkle, so [`src/updater.rs`](src/updater.rs) runs
+the same contract itself: fetch the appcast, compare versions, download, and
+verify the EdDSA signature. Windows hands the installer to Inno Setup with
+`/SILENT`. Linux safely unpacks the tarball beside the managed user-local
+prefix, then `waku-updater` swaps it after the app's normal quit saves and
+rolls back if the replacement cannot open its main window.
 
 - **One feed per architecture.** A Sparkle appcast cannot say which binary an
   item is for, and the client picks its feed at compile time.
 - **Same key as macOS.** `build.rs` reads `SUPublicEDKey` out of
-  `resources/Info.plist` and compiles it in, so the two platforms cannot drift
-  onto different keys.
-- [`scripts/appcast-windows.ts`](scripts/appcast-windows.ts) signs the feeds in
-  the draft-release job — the only one holding both installers. There is no
-  `sign_update` on Linux, so it signs with Node's Ed25519 over the same
-  `SPARKLE_PRIVATE_KEY`, and refuses to run when the key does not derive
-  `SUPublicEDKey` (signing with the wrong key ships a feed the app rejects).
+  `resources/Info.plist` and compiles it in, so the three platforms cannot
+  drift onto different keys.
+- [`scripts/appcast-windows.ts`](scripts/appcast-windows.ts) and
+  [`scripts/appcast-linux.ts`](scripts/appcast-linux.ts) sign the feeds in the
+  draft-release job — the only one holding all native artifacts. They sign
+  with Node's Ed25519 over the same `SPARKLE_PRIVATE_KEY`, and refuse to run
+  when the key does not derive `SUPublicEDKey` (signing with the wrong key
+  ships a feed the app rejects).
 - The step pulls the live feeds down first and merges, so previously published
   releases keep their entries.
 
@@ -210,11 +213,12 @@ older.
 
 The workflow opens (or updates) a **draft** GitHub release with those files and
 the matching `CHANGELOG.md` section. Publishing the GitHub release syncs the
-assets — including the signed `appcast.xml` — to R2.
+assets — including every signed update feed — to R2.
 
-`appcast.xml`, `latest-linux.txt`, and `latest-windows.txt` are the bucket's
-mutable pointers and upload with a short cache lifetime; everything else is
-versioned and cached forever. Linux users install from that bucket via
+`appcast.xml`, the architecture-specific Linux/Windows appcasts,
+`latest-linux.txt`, and `latest-windows.txt` are the bucket's mutable pointers
+and upload with a short cache lifetime; everything else is versioned and
+cached forever. Linux users install from that bucket via
 [`website/public/install.sh`](website/public/install.sh), served at
 `https://waku.sh/install.sh` — see [docs/linux.md](docs/linux.md).
 
@@ -224,8 +228,8 @@ secrets first:
 
 | Secret | Purpose |
 | --- | --- |
-| `WAKU_ANALYTICS_ENDPOINT` | embedded in the macOS CI build |
-| `WAKU_ANALYTICS_WEBSITE_ID` | embedded in the macOS CI build |
+| `WAKU_ANALYTICS_ENDPOINT` | embedded in every desktop CI build |
+| `WAKU_ANALYTICS_WEBSITE_ID` | embedded in every desktop CI build |
 | `WAKU_SIGNING_IDENTITY` | Developer ID identity selector |
 | `APPLE_CERTIFICATE` | base64-encoded Developer ID Application `.p12` |
 | `APPLE_CERTIFICATE_PASSWORD` | password for that `.p12` |
@@ -295,10 +299,9 @@ secrets first:
   Linux CI releases produce `waku-<v>-<target>.tar.gz` with
   `scripts/bundle-linux.sh`, Windows CI produces `waku-<v>-<target>.zip` with
   `scripts/bundle-windows.ts`, and both land in GitHub Releases, then R2 via
-  the sync workflow. Windows also ships `Waku-<v>-<arch>-Setup.exe` and updates
-  itself from `appcast-windows-<arch>.xml`. Automatic Linux updates are still
-  not wired — re-running `install.sh` is the upgrade path, and
-  `latest-linux.txt` is how a client learns what "latest" means.
-  `src/updater.rs` is the per-platform seam, and everything
+  the sync workflow. Windows also ships `Waku-<v>-<arch>-Setup.exe`; each
+  native client updates from `appcast-<platform>-<arch>.xml` while the Linux
+  installer resolves `latest-linux.txt`. `src/updater.rs` is the per-platform
+  seam, and everything
   mac-specific in the existing release pipeline lives behind the Darwin guard
   in `scripts/release.ts` plus `scripts/bundle.sh`.

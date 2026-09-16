@@ -41,6 +41,7 @@ impl Waku {
         {
             return;
         }
+        self.reveal_sidebar_session(session_id);
         let needs_hydration = self
             .state
             .sessions
@@ -814,6 +815,7 @@ impl Waku {
         self.expanded_turns.clear();
         self.expanded_changed_files.clear();
         self.transcript_control_focuses.borrow_mut().clear();
+        self.user_message_viewports.borrow_mut().clear();
         self.hovered_response_row = None;
         // Selection belongs to the session being left.
         self.transcript_selection.selection.borrow_mut().clear();
@@ -1015,6 +1017,23 @@ impl Waku {
         }
     }
 
+    /// A sidebar rail click is an explicit "show me this tab": it exits search
+    /// mode even when the clicked tab is already selected. A live query spans
+    /// every provider and hides which tab is selected, so a click that left
+    /// the query in place would visibly do nothing — `select_model_picker_tab`
+    /// also bails when the tab is unchanged, which is exactly the state that
+    /// query leaves it in. Clearing the field first emits an edit, which
+    /// resets the keyboard highlight and re-reveals the current model under
+    /// the now-unfiltered list.
+    pub(super) fn select_model_picker_tab_from_rail(
+        &mut self,
+        tab: ModelPickerTab,
+        cx: &mut Context<Self>,
+    ) {
+        self.model_search.update(cx, |input, cx| input.clear(cx));
+        self.select_model_picker_tab(tab, cx);
+    }
+
     pub(super) fn toggle_favorite_model(
         &mut self,
         provider: ProviderKind,
@@ -1038,9 +1057,6 @@ impl Waku {
     }
 
     pub(super) fn set_runtime_mode(&mut self, mode: RuntimeMode, cx: &mut Context<Self>) {
-        if mode == RuntimeMode::Plan {
-            return;
-        }
         let Some((session_id, session_changed)) = self
             .selected_session()
             .map(|session| (session.id, session.runtime_mode != mode))
@@ -1056,18 +1072,6 @@ impl Waku {
         }
         if session_changed || remembered_changed {
             self.state.last_runtime_mode = mode;
-            self.save();
-            cx.notify();
-        }
-    }
-
-    pub(super) fn set_interaction_mode(&mut self, mode: InteractionMode, cx: &mut Context<Self>) {
-        if let Some(session) = self.selected_session_mut()
-            && session.interaction_mode != mode
-        {
-            let session_id = session.id;
-            session.interaction_mode = mode;
-            self.apply_session_options(session_id, cx);
             self.save();
             cx.notify();
         }
@@ -1134,9 +1138,6 @@ impl Waku {
             && session.agent_preset.as_deref() != Some(agent_preset.as_str())
         {
             let session_id = session.id;
-            if agent_preset == "minimal" {
-                session.interaction_mode = InteractionMode::Build;
-            }
             session.agent_preset = Some(agent_preset);
             // A provider cursor makes a session started, so this is normally a
             // no-op. It also closes the narrow race where a blank runtime was
@@ -1538,7 +1539,7 @@ impl Waku {
         cx.notify();
     }
 
-    pub(super) fn bring_computer_use_to_front(&mut self, window_id: u32, cx: &mut Context<Self>) {
+    pub(super) fn bring_computer_use_to_front(&mut self, window_id: u64, cx: &mut Context<Self>) {
         if let Some(runtime) = self
             .state
             .selected_session
@@ -1556,18 +1557,24 @@ impl Waku {
         cx.notify();
     }
 
-    pub(super) fn dismiss_computer_use(&mut self, window_id: u32, cx: &mut Context<Self>) {
+    pub(super) fn dismiss_computer_use(&mut self, window_id: u64, cx: &mut Context<Self>) {
         if let Some(runtime) = self
             .state
             .selected_session
             .and_then(|session_id| self.runtimes.get_mut(&session_id))
         {
-            runtime.computer_use_previews.retain(|preview| {
+            if let Some(preview) = runtime.computer_use_previews.iter_mut().find(|preview| {
                 preview
                     .target
                     .as_ref()
-                    .is_none_or(|target| target.window_id != window_id)
-            });
+                    .is_some_and(|target| target.window_id == window_id)
+            }) {
+                // Keep the hidden entry until the turn ends so the next
+                // screenshot cannot reopen a preview the user just closed.
+                preview.visible = false;
+                preview.decode_task = None;
+                preview.frames = Default::default();
+            }
         }
         cx.notify();
     }

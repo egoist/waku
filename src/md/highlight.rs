@@ -1146,7 +1146,10 @@ fn markdown_fence_open(line: &str, tokens: &mut Vec<Token>) -> Option<Carry> {
     if delimiter != b'`' && delimiter != b'~' {
         return None;
     }
-    let run = trimmed.bytes().take_while(|byte| *byte == delimiter).count();
+    let run = trimmed
+        .bytes()
+        .take_while(|byte| *byte == delimiter)
+        .count();
     if run < 3 {
         return None;
     }
@@ -1166,8 +1169,8 @@ fn markdown_fence_open(line: &str, tokens: &mut Vec<Token>) -> Option<Carry> {
     // comma-separated word names the language. Markdown-in-markdown stays
     // plain: the carry is deliberately too flat to nest fences.
     let word = tag.split_whitespace().next().unwrap_or("");
-    let lang = lang_for_tag(word.split(',').next().unwrap_or(""))
-        .filter(|lang| *lang != Lang::Markdown);
+    let lang =
+        lang_for_tag(word.split(',').next().unwrap_or("")).filter(|lang| *lang != Lang::Markdown);
     Some(Carry::Fence(FenceCarry {
         lang,
         tilde: delimiter == b'~',
@@ -1182,7 +1185,10 @@ fn markdown_fenced_line(line: &str, fence: FenceCarry) -> (Vec<Token>, Carry) {
     let trimmed = line.trim_start_matches(' ');
     let indent = line.len() - trimmed.len();
     let delimiter = if fence.tilde { b'~' } else { b'`' };
-    let run = trimmed.bytes().take_while(|byte| *byte == delimiter).count();
+    let run = trimmed
+        .bytes()
+        .take_while(|byte| *byte == delimiter)
+        .count();
     if indent <= 3 && run >= fence.len as usize && trimmed[run..].trim().is_empty() {
         let mut tokens = Vec::new();
         push(&mut tokens, indent..indent + run, TokenClass::Meta);
@@ -1223,16 +1229,11 @@ fn markdown_container_markers(line: &str, tokens: &mut Vec<Token>) -> usize {
     // One list marker: `- `, `* `, `+ `, `1. `, `1) `. Nested lists mark one
     // level per line anyway — deeper levels are indentation.
     let marker_end = match bytes.get(index) {
-        Some(b'-' | b'*' | b'+')
-            if matches!(bytes.get(index + 1), None | Some(b' ' | b'\t')) =>
-        {
+        Some(b'-' | b'*' | b'+') if matches!(bytes.get(index + 1), None | Some(b' ' | b'\t')) => {
             Some(index + 1)
         }
         Some(b'0'..=b'9') => {
-            let digits = line[index..]
-                .bytes()
-                .take_while(u8::is_ascii_digit)
-                .count();
+            let digits = line[index..].bytes().take_while(u8::is_ascii_digit).count();
             (digits <= 9
                 && matches!(bytes.get(index + digits), Some(b'.' | b')'))
                 && matches!(bytes.get(index + digits + 1), None | Some(b' ' | b'\t')))
@@ -1334,7 +1335,10 @@ fn code_span_close(line: &str, mut index: usize, run: usize) -> Option<usize> {
     let bytes = line.as_bytes();
     while index < bytes.len() {
         if bytes[index] == b'`' {
-            let length = line[index..].bytes().take_while(|byte| *byte == b'`').count();
+            let length = line[index..]
+                .bytes()
+                .take_while(|byte| *byte == b'`')
+                .count();
             if length == run {
                 return Some(index + length);
             }
@@ -1662,10 +1666,7 @@ mod tests {
         let doc = "# Doc\n```rust\nlet s = \"x\"; // note\n```\ntail `code`";
         let lines = tokenize(Lang::Markdown, doc);
         assert_eq!(
-            lines[1]
-                .iter()
-                .map(|token| token.class)
-                .collect::<Vec<_>>(),
+            lines[1].iter().map(|token| token.class).collect::<Vec<_>>(),
             vec![TokenClass::Meta, TokenClass::Type],
         );
         let rust = "let s = \"x\"; // note";
@@ -1678,10 +1679,7 @@ mod tests {
         assert!(classes.contains(&("// note", TokenClass::Comment)));
         // The closing fence ends the block; markdown resumes after it.
         assert_eq!(
-            lines[4]
-                .iter()
-                .map(|token| token.class)
-                .collect::<Vec<_>>(),
+            lines[4].iter().map(|token| token.class).collect::<Vec<_>>(),
             vec![TokenClass::String],
         );
     }
@@ -1690,9 +1688,27 @@ mod tests {
     fn markdown_fences_carry_embedded_state_across_lines() {
         let doc = "```c\n/* open\nstill */\n```";
         let lines = tokenize(Lang::Markdown, doc);
-        assert_eq!(lines[1], vec![Token { range: 0..7, class: TokenClass::Comment }]);
-        assert_eq!(lines[2], vec![Token { range: 0..8, class: TokenClass::Comment }]);
-        assert_eq!(lines[3], vec![Token { range: 0..3, class: TokenClass::Meta }]);
+        assert_eq!(
+            lines[1],
+            vec![Token {
+                range: 0..7,
+                class: TokenClass::Comment
+            }]
+        );
+        assert_eq!(
+            lines[2],
+            vec![Token {
+                range: 0..8,
+                class: TokenClass::Comment
+            }]
+        );
+        assert_eq!(
+            lines[3],
+            vec![Token {
+                range: 0..3,
+                class: TokenClass::Meta
+            }]
+        );
     }
 
     #[test]
@@ -1702,10 +1718,26 @@ mod tests {
         let doc = "~~~python\n```\nx = 1\n~~~\n````\ncode\n```\n````";
         let lines = tokenize(Lang::Markdown, doc);
         assert_eq!(lines[1], vec![]);
-        assert!(lines[2].iter().any(|token| token.class == TokenClass::Number));
-        assert_eq!(lines[3], vec![Token { range: 0..3, class: TokenClass::Meta }]);
+        assert!(
+            lines[2]
+                .iter()
+                .any(|token| token.class == TokenClass::Number)
+        );
+        assert_eq!(
+            lines[3],
+            vec![Token {
+                range: 0..3,
+                class: TokenClass::Meta
+            }]
+        );
         assert_eq!(lines[6], vec![]);
-        assert_eq!(lines[7], vec![Token { range: 0..4, class: TokenClass::Meta }]);
+        assert_eq!(
+            lines[7],
+            vec![Token {
+                range: 0..4,
+                class: TokenClass::Meta
+            }]
+        );
     }
 
     #[test]

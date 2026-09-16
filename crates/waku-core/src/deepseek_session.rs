@@ -22,10 +22,255 @@ use parking_lot::Mutex;
 use serde_json::{Value, json};
 use uuid::Uuid;
 
+use crate::model::{
+    AgentTurn, Message, MessageRole, ProviderResumeCursor, ProviderSessionHistory,
+    ProviderSessionSummary, TurnStatus,
+};
+
 const SERVER_START_TIMEOUT: Duration = Duration::from_secs(20);
 const RPC_TIMEOUT: Duration = Duration::from_secs(30);
 const STREAM_RETRY_DELAY: Duration = Duration::from_millis(200);
 const MAX_WEBSOCKET_MESSAGE_BYTES: usize = 32 * 1024 * 1024;
+
+fn provider_timestamp(value: &Value) -> u64 {
+    value
+        .as_u64()
+        .map(|value| {
+            if value > 100_000_000_000 {
+                value / 1000
+            } else {
+                value
+            }
+        })
+        .unwrap_or_default()
+}
+
+fn parse_provider_summaries(value: &Value, limit: usize) -> Vec<ProviderSessionSummary> {
+    value
+        .get("items")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|item| {
+            item.get("blank").and_then(Value::as_bool) != Some(true)
+                && item.get("parentSessionId").is_none_or(Value::is_null)
+                && item.get("origin").and_then(Value::as_str) != Some("subagent")
+        })
+        .filter_map(|item| {
+            let session_id = item.get("sessionId").and_then(Value::as_str)?.trim();
+            if session_id.is_empty() {
+                return None;
+            }
+            let cwd = std::path::PathBuf::from(item.get("cwd").and_then(Value::as_str)?);
+            if !cwd.is_absolute() {
+                return None;
+            }
+            let updated_at = provider_timestamp(item.get("updatedAt").unwrap_or(&Value::Null));
+            let title = item
+                .pointer("/projections/values/title")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|title| !title.is_empty())
+                .map(str::to_owned)
+                .or_else(|| {
+                    cwd.file_name()
+                        .and_then(|name| name.to_str())
+                        .filter(|name| !name.is_empty())
+                        .map(str::to_owned)
+                })
+                .unwrap_or_else(|| {
+                    format!(
+                        "DeepSeek session {}",
+                        session_id.chars().take(8).collect::<String>()
+                    )
+                });
+            Some(ProviderSessionSummary {
+                cursor: ProviderResumeCursor::DeepSeek {
+                    session_id: session_id.to_owned(),
+                },
+                title,
+                cwd,
+                created_at: updated_at,
+                updated_at,
+            })
+        })
+        .take(limit)
+        .collect()
+}
+
+pub fn list_provider_sessions(
+    binary: &Path,
+    limit: usize,
+) -> anyhow::Result<Vec<ProviderSessionSummary>> {
+    if limit == 0 {
+        return Ok(Vec::new());
+    }
+    let server = crate::deepseek_pool::acquire(binary)?;
+    let value = server.rpc("session.list", json!({}))?;
+    Ok(parse_provider_summaries(&value, limit))
+}
+
+fn visible_text(value: &Value) -> Option<String> {
+    let text = value
+        .as_array()?
+        .iter()
+        .filter(|part| part.get("type").and_then(Value::as_str) == Some("text"))
+        .filter_map(|part| part.get("text").and_then(Value::as_str))
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    (!text.trim().is_empty()).then_some(text)
+}
+
+fn start_import_turn(history: &mut ProviderSessionHistory, timestamp: u64) -> Uuid {
+    let id = Uuid::new_v4();
+    history.turns.push(AgentTurn {
+        id,
+        turn_count: history.turns.len() + 1,
+        status: TurnStatus::Interrupted,
+        provider_turn_started: true,
+        provider_resume_at: None,
+        started_at: timestamp,
+        completed_at: None,
+        checkpoint: None,
+    });
+    id
+}
+
+fn parse_provider_history(entries: &[Value]) -> ProviderSessionHistory {
+    let mut ordered = entries.to_vec();
+    ordered.sort_by_key(|entry| {
+        entry
+            .pointer("/event/seq")
+            .or_else(|| entry.get("seq"))
+            .and_then(Value::as_u64)
+            .unwrap_or(u64::MAX)
+    });
+    let mut history = ProviderSessionHistory::default();
+    let mut current_has_user = false;
+
+    for entry in ordered {
+        let event = entry.get("event").unwrap_or(&entry);
+        let kind = event.get("type").and_then(Value::as_str);
+        let timestamp = provider_timestamp(event.get("time").unwrap_or(&Value::Null));
+        let data = event.get("data").unwrap_or(&Value::Null);
+        match kind {
+            Some("turn/start") => {
+                if !current_has_user {
+                    start_import_turn(&mut history, timestamp);
+                } else if let Some(turn) = history.turns.last_mut() {
+                    turn.started_at = turn.started_at.min(timestamp);
+                }
+            }
+            Some("user/message")
+                if data.pointer("/source/kind").and_then(Value::as_str) == Some("user") =>
+            {
+                if history.turns.is_empty() || current_has_user {
+                    start_import_turn(&mut history, timestamp);
+                }
+                current_has_user = true;
+                let Some(text) = visible_text(data.get("content").unwrap_or(&Value::Null)) else {
+                    continue;
+                };
+                let turn_id = history.turns.last().expect("started above").id;
+                let mut message = Message::new_for_turn(MessageRole::User, text, turn_id);
+                message.created_at = timestamp;
+                history.messages.push(message);
+            }
+            Some("assistant/message") => {
+                let Some(turn) = history.turns.last_mut() else {
+                    continue;
+                };
+                let Some(text) =
+                    visible_text(data.pointer("/message/content").unwrap_or(&Value::Null))
+                else {
+                    continue;
+                };
+                if let Some(previous) = history.messages.last_mut().filter(|message| {
+                    message.role == MessageRole::Assistant && message.turn_id == Some(turn.id)
+                }) {
+                    if !previous.content.is_empty() {
+                        previous.content.push_str("\n\n");
+                    }
+                    previous.content.push_str(&text);
+                    previous.created_at = previous.created_at.max(timestamp);
+                } else {
+                    let mut message = Message::new_for_turn(MessageRole::Assistant, text, turn.id);
+                    message.created_at = timestamp;
+                    history.messages.push(message);
+                }
+            }
+            Some("turn/end") => {
+                let Some(turn) = history.turns.last_mut() else {
+                    continue;
+                };
+                turn.status = match data.pointer("/reason/kind").and_then(Value::as_str) {
+                    Some("completed" | "max-tokens") => TurnStatus::Completed,
+                    Some("aborted" | "cancelled" | "interrupted") => TurnStatus::Interrupted,
+                    _ => TurnStatus::Failed,
+                };
+                turn.completed_at = Some(timestamp.max(turn.started_at));
+                current_has_user = false;
+            }
+            _ => {}
+        }
+    }
+    history
+}
+
+pub fn provider_session_history(
+    binary: &Path,
+    session_id: &str,
+    visible_turn_limit: usize,
+) -> anyhow::Result<ProviderSessionHistory> {
+    let server = crate::deepseek_pool::acquire(binary)?;
+    let mut entries = Vec::new();
+    let mut before_seq = None;
+    let mut seen = std::collections::HashSet::new();
+    loop {
+        let mut payload = json!({"sessionId": session_id, "maxMessages": 200});
+        if let Some(before_seq) = before_seq {
+            payload["beforeSeq"] = json!(before_seq);
+        }
+        let page = server.rpc("session.history", payload)?;
+        let page_entries = page
+            .get("events")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        let oldest = page_entries
+            .iter()
+            .filter_map(|entry| entry.pointer("/event/seq").or_else(|| entry.get("seq")))
+            .filter_map(Value::as_u64)
+            .min();
+        entries.extend(page_entries);
+        if !page
+            .get("hasMore")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+        {
+            break;
+        }
+        let Some(oldest) = oldest.filter(|oldest| *oldest > 0) else {
+            break;
+        };
+        if !seen.insert(oldest) {
+            break;
+        }
+        before_seq = Some(oldest);
+    }
+    let mut history = parse_provider_history(&entries);
+    let retained = history
+        .turns
+        .iter()
+        .rev()
+        .take(visible_turn_limit)
+        .map(|turn| turn.id)
+        .collect::<std::collections::HashSet<_>>();
+    history
+        .messages
+        .retain(|message| message.turn_id.is_some_and(|id| retained.contains(&id)));
+    Ok(history)
+}
 
 // The development watcher terminates the app with SIGTERM, which does not run
 // Rust destructors. Keep one pipe open in Waku and let this wrapper terminate
@@ -147,6 +392,7 @@ impl DeepSeekServer {
 
     fn start_with_dsh_home(binary: &Path, dsh_home: Option<&Path>) -> anyhow::Result<Self> {
         let supports_no_open = web_supports_no_open(binary, dsh_home);
+        let catalog_cwd = crate::acp_session::catalog_working_directory()?;
         #[cfg(unix)]
         let mut command = {
             let mut command = crate::command_env::command("/bin/sh");
@@ -169,6 +415,7 @@ impl DeepSeekServer {
             command
         };
         command
+            .current_dir(&catalog_cwd)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
@@ -432,6 +679,9 @@ fn parse_ready_port(line: &str) -> Option<u16> {
 fn web_supports_no_open(binary: &Path, dsh_home: Option<&Path>) -> bool {
     let mut command = crate::command_env::command(binary);
     command.args(["web", "--help"]);
+    if let Ok(cwd) = crate::acp_session::catalog_working_directory() {
+        command.current_dir(cwd);
+    }
     if let Some(dsh_home) = dsh_home {
         command.env("DSH_HOME", dsh_home);
     }
@@ -735,6 +985,51 @@ mod tests {
         hub.publish(stream_error("broken".into()));
         assert!(first.try_recv().is_ok());
         assert!(second.try_recv().is_ok());
+    }
+
+    #[test]
+    fn maps_deepseek_catalog_and_visible_history() {
+        let cwd = std::env::temp_dir().join("project");
+        let summaries = parse_provider_summaries(
+            &json!({"items":[
+                {
+                    "sessionId":"session-1",
+                    "cwd":cwd,
+                    "updatedAt":1_700_000_000_000_u64,
+                    "blank":false,
+                    "projections":{"values":{"title":"Resume DeepSeek"}}
+                },
+                {"sessionId":"blank","cwd":std::env::temp_dir(),"blank":true,"updatedAt":2},
+                {"sessionId":"child","cwd":std::env::temp_dir(),"parentSessionId":"parent","updatedAt":3}
+            ]}),
+            10,
+        );
+        assert_eq!(summaries.len(), 1);
+        assert_eq!(summaries[0].title, "Resume DeepSeek");
+        assert_eq!(summaries[0].updated_at, 1_700_000_000);
+
+        let history = parse_provider_history(&[
+            json!({"type":"event","event":{"type":"turn/start","seq":1,"time":1000,"data":{"turn":1}}}),
+            json!({"type":"event","event":{"type":"user/message","seq":2,"time":2000,"data":{"source":{"kind":"user"},"content":[{"type":"text","text":"question"}]}}}),
+            json!({"type":"event","event":{"type":"assistant/message","seq":3,"time":3000,"data":{"message":{"content":[{"type":"reasoning","text":"private"},{"type":"text","text":"answer"}]}}}}),
+            json!({"type":"event","event":{"type":"turn/end","seq":4,"time":4000,"data":{"reason":{"kind":"completed"}}}}),
+        ]);
+        assert_eq!(history.turns.len(), 1);
+        assert_eq!(history.turns[0].status, TurnStatus::Completed);
+        assert_eq!(history.messages.len(), 2);
+        assert_eq!(history.messages[1].content, "answer");
+    }
+
+    #[test]
+    fn a_queued_user_event_before_turn_start_does_not_create_an_empty_turn() {
+        let history = parse_provider_history(&[
+            json!({"event":{"type":"user/message","seq":1,"time":1000,"data":{"source":{"kind":"user"},"content":[{"type":"text","text":"queued"}]}}}),
+            json!({"event":{"type":"turn/start","seq":2,"time":2000,"data":{"turn":1}}}),
+            json!({"event":{"type":"turn/end","seq":3,"time":3000,"data":{"reason":{"kind":"aborted"}}}}),
+        ]);
+        assert_eq!(history.turns.len(), 1);
+        assert_eq!(history.turns[0].status, TurnStatus::Interrupted);
+        assert_eq!(history.messages[0].content, "queued");
     }
 
     /// Exercises Waku's HTTP envelope, WebSocket handshakes, and process-tree

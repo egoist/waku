@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use super::*;
 
 const TAB_SCROLL_FADE_WIDTH: f32 = 24.0;
+const REVIEW_DIFF_FILE_HEADER_HEIGHT: f32 = 36.0;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct WorkingTreeEntry {
@@ -493,6 +494,7 @@ fn review_diff_flat_text(line: &crate::review_diff::Line, theme: &Theme) -> md::
         runs,
         links: Vec::new(),
         code_ranges: Vec::new(),
+        math: None,
     }
 }
 
@@ -914,7 +916,7 @@ impl RightPanelSurface {
 }
 
 fn right_panel_tab_label(surface: &RightPanelSurface, files_selected_path: Option<&str>) -> String {
-    match surface {
+    let label = match surface {
         RightPanelSurface::Files => files_selected_path
             .and_then(|path| Path::new(path).file_name())
             .and_then(|name| name.to_str())
@@ -922,7 +924,8 @@ fn right_panel_tab_label(surface: &RightPanelSurface, files_selected_path: Optio
             .map(str::to_owned)
             .unwrap_or_else(|| tr!("right_panel.files")),
         _ => surface.label(),
-    }
+    };
+    single_line_label(&label)
 }
 
 fn right_panel_tab_icon(
@@ -1604,6 +1607,15 @@ mod tests {
 
         assert!(header.contains(".truncate()"));
         assert!(!header.contains(".line_clamp(1)"));
+
+        let background = RightPanelSurface::BackgroundWork {
+            key: BackgroundWorkKey::new(BackgroundWorkKind::Process, "process-1"),
+            title: "node -e '\n  const value = 1'".into(),
+        };
+        assert_eq!(
+            right_panel_tab_label(&background, None),
+            "node -e ' const value = 1'"
+        );
     }
 
     #[test]
@@ -2254,6 +2266,13 @@ impl Waku {
     /// the live page swaps for a frozen snapshot.
     fn any_overlay_open(&self, cx: &App) -> bool {
         self.menus.borrow().values().any(ContextMenuHandle::is_open)
+            || self.selected_runtime().is_some_and(|runtime| {
+                runtime.computer_use_previews.iter().any(|preview| {
+                    preview.visible
+                        && preview.target.is_some()
+                        && preview.phase != ComputerUsePhase::AwaitingApproval
+                })
+            })
             || self.command_palette.is_open()
             || self.task_switcher.is_open()
             || self.commit_dialog.is_some()
@@ -3002,14 +3021,11 @@ impl Waku {
         .detach();
 
         let focused_path = relative_path.to_owned();
-        cx.subscribe(
-            &state,
-            move |this: &mut Self, _, event: &InputEvent, cx| {
-                if matches!(event, InputEvent::Focus) {
-                    this.reload_right_panel_file_if_clean(focused_path.as_str(), cx);
-                }
-            },
-        )
+        cx.subscribe(&state, move |this: &mut Self, _, event: &InputEvent, cx| {
+            if matches!(event, InputEvent::Focus) {
+                this.reload_right_panel_file_if_clean(focused_path.as_str(), cx);
+            }
+        })
         .detach();
 
         self.read_right_panel_file_into_editor(relative_path.to_owned(), cx);
@@ -3285,6 +3301,8 @@ impl Waku {
             MarkdownMetrics::document(self.state.ui_font_size, self.state.code_font_size),
             self.file_preview_selection.clone(),
         )
+        .with_math_enabled(self.state.render_math)
+        .with_math_context_menu(self.menu_handle("file-preview-math", cx))
         .with_link_handler(self.markdown_link_handler.clone());
         let document = md::render::markdown(view, &ctx);
 
@@ -3674,12 +3692,14 @@ impl Waku {
                 )
                 .into_any_element();
         }
+        let sticky_header = self.render_right_panel_diff_sticky_header(&snapshot, cx);
         let entity = cx.entity().downgrade();
         div()
             .flex_1()
             .min_h_0()
             .min_w_0()
             .relative()
+            .overflow_hidden()
             .child(
                 list(
                     self.right_panel_diff_list_state.clone(),
@@ -3696,10 +3716,102 @@ impl Waku {
                 )
                 .size_full(),
             )
+            .when_some(sticky_header, |container, header| container.child(header))
             .child(scrollbar::vertical(
                 &self.right_panel_diff_list_state,
                 &self.right_panel_diff_scrollbar,
             ))
+            .into_any_element()
+    }
+
+    fn render_right_panel_diff_sticky_header(
+        &self,
+        snapshot: &ReviewDiffSnapshot,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let scroll_top = self.right_panel_diff_list_state.logical_scroll_top();
+        let (header_index, next_header_index) = snapshot.file_headers_around(scroll_top.item_ix)?;
+        let needs_sticky = header_index < scroll_top.item_ix
+            || (header_index == scroll_top.item_ix && scroll_top.offset_in_item > px(0.));
+        if !needs_sticky {
+            return None;
+        }
+
+        let line = snapshot.lines.get(header_index)?;
+        let file = snapshot.files.get(line.file_index)?;
+        let top_offset = next_header_index
+            .and_then(|next_header_index| {
+                let bounds = self
+                    .right_panel_diff_list_state
+                    .bounds_for_item(next_header_index)?;
+                let viewport = self.right_panel_diff_list_state.viewport_bounds();
+                let y_in_viewport = bounds.origin.y - viewport.origin.y;
+                (y_in_viewport < bounds.size.height).then_some(y_in_viewport - bounds.size.height)
+            })
+            .unwrap_or(px(0.));
+
+        Some(
+            div()
+                .absolute()
+                .top(top_offset)
+                .left_0()
+                .w_full()
+                .child(self.render_right_panel_diff_file_header(header_index, file, true, cx))
+                .into_any_element(),
+        )
+    }
+
+    fn render_right_panel_diff_file_header(
+        &self,
+        index: usize,
+        file: &crate::review_diff::File,
+        sticky: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let theme = Theme::current(cx);
+        let id_prefix = if sticky {
+            "review-diff-sticky-file"
+        } else {
+            "review-diff-file"
+        };
+        div()
+            .id(SharedString::from(format!("{id_prefix}-{index}")))
+            .w_full()
+            .min_w_0()
+            .h(px(REVIEW_DIFF_FILE_HEADER_HEIGHT))
+            .px(px(12.0))
+            .flex()
+            .items_center()
+            .gap(px(8.0))
+            .border_b_1()
+            .border_color(theme.border)
+            .bg(theme.surface)
+            .when(sticky, |header| header.block_mouse_except_scroll())
+            .child(file_icon(file_icon_for_path(&file.path), 14.0))
+            .child(
+                div()
+                    .id(SharedString::from(format!("{id_prefix}-path-{index}")))
+                    .min_w_0()
+                    .flex_1()
+                    .truncate()
+                    .text_size(px(12.5))
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(theme.text_secondary)
+                    .tooltip(Tooltip::text(file.path.clone()))
+                    .child(file.path.clone()),
+            )
+            .child(
+                div()
+                    .text_size(px(12.5))
+                    .text_color(theme.success)
+                    .child(format!("+{}", file.additions)),
+            )
+            .child(
+                div()
+                    .text_size(px(12.5))
+                    .text_color(theme.danger)
+                    .child(format!("-{}", file.deletions)),
+            )
             .into_any_element()
     }
 
@@ -3719,44 +3831,9 @@ impl Waku {
         let gutter_width = style.gutter_width();
 
         match &line.kind {
-            crate::review_diff::LineKind::FileHeader => div()
-                .id(SharedString::from(format!("review-diff-file-{index}")))
-                .w_full()
-                .min_w_0()
-                .h(px(36.0))
-                .px(px(12.0))
-                .flex()
-                .items_center()
-                .gap(px(8.0))
-                .border_b_1()
-                .border_color(theme.border)
-                .bg(theme.surface)
-                .child(file_icon(file_icon_for_path(&file.path), 14.0))
-                .child(
-                    div()
-                        .id(SharedString::from(format!("review-diff-file-path-{index}")))
-                        .min_w_0()
-                        .flex_1()
-                        .truncate()
-                        .text_size(px(12.5))
-                        .font_weight(FontWeight::MEDIUM)
-                        .text_color(theme.text_secondary)
-                        .tooltip(Tooltip::text(file.path.clone()))
-                        .child(file.path.clone()),
-                )
-                .child(
-                    div()
-                        .text_size(px(12.5))
-                        .text_color(theme.success)
-                        .child(format!("+{}", file.additions)),
-                )
-                .child(
-                    div()
-                        .text_size(px(12.5))
-                        .text_color(theme.danger)
-                        .child(format!("-{}", file.deletions)),
-                )
-                .into_any_element(),
+            crate::review_diff::LineKind::FileHeader => {
+                self.render_right_panel_diff_file_header(index, file, false, cx)
+            }
             crate::review_diff::LineKind::Gap(gap) => {
                 let expandable = gap.is_expandable();
                 let chunked = gap.count() > crate::review_diff::DEFAULT_EXPANSION_LINE_COUNT as u32;

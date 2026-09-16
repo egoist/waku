@@ -38,7 +38,8 @@
   virtualized with `list()`, and a row builder must not rebuild whole-session
   state; hoist that to a cache refreshed once per frame.
 - Streaming CPU is governed by two cadences — stream commits at ≤ ~8.3 Hz and
-  pulse-clock ticks at ≤ ~30 Hz — and by what one frame can see. Read
+  pulse-clock ticks at ≤ 60 Hz (spinners; other pulses stay at ≤ ~30 Hz) —
+  and by what one frame can see. Read
   [docs/performance.md](docs/performance.md) before touching the event pump,
   the pulse clock (`src/ui/motion.rs`), veils, overlay scrollbars, pane
   caching, or anything else a streaming frame reaches; it also records the
@@ -91,6 +92,10 @@
   native macOS conventions.
 - Explicit user screenshots and feedback override a previous or merely
   "consistent" treatment.
+- GPUI's `overflow_hidden` clips descendants to a rectangle, not the parent's
+  rounded corners. Give child backgrounds, hover overlays, and images that
+  reach a rounded edge their own matching corner radii, accounting for the
+  parent's border inset. Parent rounding alone does not clip child paint.
 - For provider-native content such as citations, reasoning, and tool events,
   verify the real provider payload and preserve its ordering. Never expose
   private provider control markers in the transcript.

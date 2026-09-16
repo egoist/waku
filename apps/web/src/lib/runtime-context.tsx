@@ -302,7 +302,6 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
               type: 'applyOptions',
               options: {
                 mode: session.runtime_mode,
-                interactionMode: session.interaction_mode,
                 model: session.model ?? null,
                 reasoningEffort: session.reasoning_effort ?? null,
                 serviceTier: session.service_tier ?? null,
@@ -649,6 +648,12 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
 
       let session = beginTurn(currentSession, prompt, attachments)
       cacheSession(session)
+      // The ids ride along with the prompt so every other client attached to
+      // the runtime mirrors this turn and its user message under the same rows.
+      const submittedTurn = session.turns.at(-1)
+      const submittedMessage = session.messages.find(
+        (message) => message.turn_id === submittedTurn?.id && message.role === 'user',
+      )
 
       let project: Project
       let runtime = entries.current.get(currentSession.id)
@@ -729,7 +734,6 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
                 binary: startup!.probe.path!,
                 cwd: sessionCwd(session, project),
                 mode: session.runtime_mode,
-                interactionMode: session.interaction_mode,
                 model: session.model ?? null,
                 reasoningEffort: session.reasoning_effort ?? null,
                 serviceTier: session.service_tier ?? null,
@@ -756,7 +760,12 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
           }))
         }
         await client.request(
-          { type: 'prompt', prompt: providerPrompt },
+          {
+            type: 'prompt',
+            prompt: providerPrompt,
+            turnId: submittedTurn?.id ?? null,
+            messageId: submittedMessage?.id ?? null,
+          },
           session.id,
           runtime.runtimeId,
         )
@@ -813,7 +822,7 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
       // unwound pursuit.
       const activating = operation.kind === 'set' && operation.status === 'active'
       const objective = operation.kind === 'set' ? operation.objective : null
-      const idle = !['connecting', 'working', 'waiting'].includes(currentSession.status)
+      const idle = !['connecting', 'working', 'waiting', 'background'].includes(currentSession.status)
         && currentSession.turns.at(-1)?.status !== 'running'
       const now = Math.floor(Date.now() / 1_000)
       let restoreOnFailure: AgentSession | null = null
@@ -950,7 +959,6 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
               binary: providerProbe.path,
               cwd: sessionCwd(session, project),
               mode: session.runtime_mode,
-              interactionMode: session.interaction_mode,
               model: session.model ?? null,
               reasoningEffort: session.reasoning_effort ?? null,
               serviceTier: session.service_tier ?? null,
@@ -1386,7 +1394,6 @@ function mergeSessionSummary(previous: AgentSession, next: AgentSession): AgentS
     provider: next.provider,
     model: next.model,
     runtime_mode: next.runtime_mode,
-    interaction_mode: next.interaction_mode,
     reasoning_effort: next.reasoning_effort,
     service_tier: next.service_tier,
     agent_preset: next.agent_preset,
@@ -1442,6 +1449,7 @@ function providerName(provider: AgentSession['provider']) {
       deepSeek: 'DeepSeek Harness',
       fx: 'Fx',
       openCode: 'OpenCode',
+      openCode2: 'OpenCode 2',
       grok: 'Grok',
       kimi: 'Kimi',
       ohMyPi: 'Oh My Pi',

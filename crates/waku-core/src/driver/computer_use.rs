@@ -153,12 +153,15 @@ pub(super) fn stop_registered_processes(directory: &Path, helper_executable: &Pa
         fs::canonicalize(helper_executable).unwrap_or_else(|_| helper_executable.to_path_buf());
     for (pid, registration) in registered_processes(directory) {
         if process_executable(pid).as_deref() == Some(expected_executable.as_path()) {
-            // Unreachable off unix, where `process_executable` never resolves
-            // and the loop only clears stale registration files.
-            #[cfg(unix)]
+            // macOS owns a Launch Services bridge; closing it interrupts the
+            // native SDK. Portable hosts poll a cancellation marker so they
+            // can cancel the operation and await SDK shutdown on both OSes.
+            #[cfg(target_os = "macos")]
             unsafe {
                 libc::kill(pid, libc::SIGTERM);
             }
+            #[cfg(not(target_os = "macos"))]
+            let _ = fs::write(directory.join(format!("cancel-{pid}")), b"");
         }
         let _ = fs::remove_file(registration);
     }
@@ -202,7 +205,29 @@ pub(super) fn process_executable(pid: i32) -> Option<PathBuf> {
     fs::read_link(format!("/proc/{pid}/exe")).ok()
 }
 
-#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+#[cfg(target_os = "windows")]
+pub(super) fn process_executable(pid: i32) -> Option<PathBuf> {
+    use std::os::windows::ffi::OsStringExt;
+    use windows_sys::Win32::Foundation::CloseHandle;
+    use windows_sys::Win32::System::Threading::{
+        OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW,
+    };
+    unsafe {
+        let process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid as u32);
+        if process.is_null() {
+            return None;
+        }
+        let mut buffer = vec![0u16; 32768];
+        let mut len = buffer.len() as u32;
+        let success = QueryFullProcessImageNameW(process, 0, buffer.as_mut_ptr(), &mut len);
+        CloseHandle(process);
+        (success != 0)
+            .then(|| PathBuf::from(std::ffi::OsString::from_wide(&buffer[..len as usize])))
+            .and_then(|path| fs::canonicalize(path).ok())
+    }
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
 pub(super) fn process_executable(_: i32) -> Option<PathBuf> {
     None
 }
