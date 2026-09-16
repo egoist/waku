@@ -115,8 +115,9 @@ pub fn detect_trigger(text: &str, cursor: usize) -> Option<Trigger> {
 /// - Oh My Pi: the same layout under its own root — commands in
 ///   `.omp/commands` and `~/.omp/agent/commands`, skills in `.omp/skills`
 ///   and `~/.omp/agent/skills`.
-/// - Amp registers commands through TypeScript plugins and Grok publishes no
-///   file convention, so neither has a native command scan; Amp's skills in
+/// - Grok reads `.grok/skills` and `.grok/commands` in the project, then
+///   `skills` and `commands` under `$GROK_HOME` (default `~/.grok`).
+/// - Amp registers commands through TypeScript plugins; its skills in
 ///   `~/.config/agents/skills` are listed.
 ///
 /// Skills — `SKILL.md` directories in each ecosystem's locations and the
@@ -321,7 +322,25 @@ fn assemble_slash_commands(
         // Harness commands are session-scoped and reported live by the Host,
         // and Kimi Code likewise publishes its whole command set over ACP
         // rather than from files Waku could scan.
-        ProviderKind::DeepSeek | ProviderKind::Grok | ProviderKind::Kimi => {}
+        ProviderKind::DeepSeek | ProviderKind::Kimi => {}
+        ProviderKind::Grok => {
+            scan_command_files(
+                &project_root.join(".grok/commands"),
+                CommandScope::Project,
+                false,
+                &mut commands,
+            );
+            scan_skill_files(provider, &project_root.join(".grok/skills"), &mut commands);
+            if let Ok(home) = crate::grok_session::grok_home_directory() {
+                scan_command_files(
+                    &home.join("commands"),
+                    CommandScope::User,
+                    false,
+                    &mut commands,
+                );
+                scan_skill_files(provider, &home.join("skills"), &mut commands);
+            }
+        }
     }
     // The cross-tool skill standard, read by Amp and OpenCode among others;
     // Waku lists it for every provider.
@@ -506,6 +525,9 @@ fn scan_skill_files(provider: ProviderKind, root: &Path, commands: &mut Vec<Slas
             continue;
         };
         let front = parse_frontmatter(&contents);
+        if provider == ProviderKind::Grok && !front.user_invocable {
+            continue;
+        }
         let short_name = front.name.unwrap_or(dir_name);
         let plugin_name = (provider == ProviderKind::Codex)
             .then(|| codex_plugin_name(&entry.path()))
@@ -553,6 +575,7 @@ fn codex_plugin_name(skill_dir: &Path) -> Option<String> {
 }
 
 struct Frontmatter<'a> {
+    user_invocable: bool,
     name: Option<String>,
     description: Option<String>,
     argument_hint: Option<String>,
@@ -564,12 +587,14 @@ struct Frontmatter<'a> {
 /// skips unsupported lines so an extra key never costs the command its listing.
 fn parse_frontmatter(contents: &str) -> Frontmatter<'_> {
     let mut front = Frontmatter {
+        user_invocable: true,
         name: None,
         description: None,
         argument_hint: None,
         body: contents,
     };
     front.body = crate::frontmatter::parse_frontmatter_fields(contents, |key, value| match key {
+        "user-invocable" => front.user_invocable = value != "false",
         "name" => front.name = Some(value),
         "description" => front.description = Some(value),
         "argument-hint" => front.argument_hint = Some(value),
@@ -1371,6 +1396,152 @@ mod tests {
     }
 
     #[test]
+    fn grok_skills_and_commands_follow_configured_roots() {
+        const CHILD_ROOT: &str = "WAKU_GROK_DISCOVERY_TEST_ROOT";
+        if let Some(root) = std::env::var_os(CHILD_ROOT) {
+            let root = PathBuf::from(root);
+            let project = root.join("project");
+            let grok_home = crate::grok_session::grok_home_directory().unwrap();
+            for (dir, text) in [
+                (
+                    project.join(".grok/skills/review"),
+                    "---\nname: review\ndescription: Project review\n---\nProject",
+                ),
+                (
+                    grok_home.join("skills/review"),
+                    "---\nname: review\ndescription: User review\n---\nUser",
+                ),
+                (
+                    grok_home.join("skills/user-only"),
+                    "---\nname: user-only\n---\nUser",
+                ),
+            ] {
+                std::fs::create_dir_all(&dir).unwrap();
+                std::fs::write(dir.join("SKILL.md"), text).unwrap();
+            }
+            for (dir, name) in [
+                (project.join(".grok/commands"), "project-command"),
+                (grok_home.join("commands"), "user-command"),
+            ] {
+                std::fs::create_dir_all(&dir).unwrap();
+                std::fs::write(dir.join(format!("{name}.md")), "Native $ARGUMENTS").unwrap();
+            }
+            let locations = crate::skills::skill_locations(&[("project".into(), project.clone())]);
+            let grok_locations: Vec<_> = locations
+                .into_iter()
+                .filter(|location| {
+                    location.source == crate::skills::SkillSource::Provider(ProviderKind::Grok)
+                })
+                .collect();
+            assert_eq!(grok_locations.len(), 2);
+            assert!(
+                grok_locations
+                    .iter()
+                    .any(|location| location.root == grok_home.join("skills"))
+            );
+            let catalog = crate::skills::scan_skills(&grok_locations);
+            assert_eq!(catalog.skills.len(), 3);
+            let hidden = grok_home.join("skills/automatic-only");
+            std::fs::create_dir_all(&hidden).unwrap();
+            std::fs::write(
+                hidden.join("SKILL.md"),
+                "---\nname: automatic-only\nuser-invocable: false\n---\nAutomatic",
+            )
+            .unwrap();
+            let commands = assemble_slash_commands(ProviderKind::Grok, &project, Vec::new());
+            for name in ["review", "user-only", "project-command", "user-command"] {
+                let command = commands
+                    .iter()
+                    .find(|command| command.name == name)
+                    .unwrap();
+                assert!(
+                    command.template.is_none(),
+                    "Grok resolves its own native commands"
+                );
+                assert_eq!(
+                    resolved_submission(ProviderKind::Grok, &format!("/{name} staging"), &commands),
+                    None
+                );
+            }
+            assert!(
+                !commands
+                    .iter()
+                    .any(|command| command.name == "automatic-only")
+            );
+            assert!(
+                crate::skills::scan_skills(&grok_locations)
+                    .skills
+                    .iter()
+                    .any(|skill| skill.name == "automatic-only")
+            );
+            let reviews: Vec<_> = commands
+                .iter()
+                .filter(|command| command.name == "review")
+                .collect();
+            assert_eq!(reviews.len(), 1);
+            assert_eq!(reviews[0].description, "Project review");
+            let skill_dir = grok_home.join("skills/user-only");
+            crate::skills::set_skill_enabled(&skill_dir, false).unwrap();
+            assert!(
+                !assemble_slash_commands(ProviderKind::Grok, &project, Vec::new())
+                    .iter()
+                    .any(|command| command.name == "user-only")
+            );
+            let catalog = crate::skills::scan_skills(&grok_locations);
+            assert!(
+                !catalog
+                    .skills
+                    .iter()
+                    .find(|skill| skill.name == "user-only")
+                    .unwrap()
+                    .enabled
+            );
+            crate::skills::set_skill_enabled(&skill_dir, true).unwrap();
+            assert!(
+                assemble_slash_commands(ProviderKind::Grok, &project, Vec::new())
+                    .iter()
+                    .any(|command| command.name == "user-only")
+            );
+            return;
+        }
+        // Each process has an isolated home; never mutate the parallel test runner's environment.
+        for custom_home in [None, Some(""), Some("custom-grok")] {
+            let root =
+                std::env::temp_dir().join(format!("waku-grok-skills-{}", uuid::Uuid::new_v4()));
+            std::fs::create_dir_all(root.join("home")).unwrap();
+            let mut child = std::process::Command::new(std::env::current_exe().unwrap());
+            child
+                .args([
+                    "--exact",
+                    "composer_complete::tests::grok_skills_and_commands_follow_configured_roots",
+                    "--nocapture",
+                ])
+                .env(CHILD_ROOT, &root)
+                .env("HOME", root.join("home"))
+                .env("USERPROFILE", root.join("home"))
+                .env_remove("GROK_HOME");
+            if let Some(home) = custom_home {
+                child.env(
+                    "GROK_HOME",
+                    if home.is_empty() {
+                        PathBuf::new()
+                    } else {
+                        root.join(home)
+                    },
+                );
+            }
+            let output = child.output().unwrap();
+            std::fs::remove_dir_all(root).unwrap();
+            assert!(
+                output.status.success(),
+                "Grok discovery failed for {custom_home:?}:\n{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+    }
+
+    #[test]
     fn shared_skills_are_listed_raw_on_every_provider() {
         let root = std::env::temp_dir().join(format!("waku-skills-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
@@ -1418,6 +1589,7 @@ mod tests {
             (ProviderKind::Cursor, ".cursor/skills"),
             (ProviderKind::Fx, "skills"),
             (ProviderKind::OpenCode, ".opencode/skills"),
+            (ProviderKind::Grok, ".grok/skills"),
             (ProviderKind::Pi, ".pi/skills"),
             (ProviderKind::OhMyPi, ".omp/skills"),
         ] {
