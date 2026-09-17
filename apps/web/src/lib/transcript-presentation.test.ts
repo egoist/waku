@@ -75,6 +75,10 @@ describe('desktop transcript language', () => {
       ...activity('tool', true),
       title: 'Tool',
     }
+    const multiline = {
+      ...activity('tool', true),
+      title: "set -euo pipefail\necho 'first'\n\techo 'second'",
+    }
 
     expect(activityActionLabel(named)).toBe('Tool')
     expect(activityRowDetail(named)).toBe('Create thread')
@@ -84,6 +88,8 @@ describe('desktop transcript language', () => {
     expect(activityActionLabel(question)).toBe('Ask questions')
     expect(activityRowDetail(question)).toBe('')
     expect(activityDisplayTitle(question)).toBe('Ask questions')
+    expect(activityRowDetail(multiline)).toBe("set -euo pipefail echo 'first' echo 'second'")
+    expect(activityDisplayTitle(multiline)).toBe("set -euo pipefail echo 'first' echo 'second'")
   })
 
   test('derives the same provider-neutral activity titles as desktop', () => {
