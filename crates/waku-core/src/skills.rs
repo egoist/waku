@@ -22,7 +22,7 @@
 //! them at once while keeping the directory and its supporting files intact —
 //! the same move people make by hand, made reversible with one toggle.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use crate::model::ProviderKind;
@@ -41,15 +41,19 @@ const SKILL_FILE_MAX_BYTES: u64 = 256 * 1024;
 const DIR_WALK_MAX_DEPTH: usize = 6;
 const DIR_WALK_MAX_FILES: usize = 500;
 
+/// Claude's config root: `$CLAUDE_CONFIG_DIR` when absolute, else `~/.claude`.
+pub fn claude_config_dir() -> Option<PathBuf> {
+    std::env::var("CLAUDE_CONFIG_DIR")
+        .ok()
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute())
+        .or_else(|| dirs::home_dir().map(|home| home.join(".claude")))
+}
+
 /// Every user-scope skill root, present on disk or not. Path joins only — no
 /// filesystem access — so this is safe to call while building a frame.
 pub fn user_skill_locations() -> Vec<SkillLocation> {
     let home = dirs::home_dir();
-    let claude_config_dir = std::env::var("CLAUDE_CONFIG_DIR")
-        .ok()
-        .map(PathBuf::from)
-        .filter(|path| path.is_absolute())
-        .or_else(|| home.as_deref().map(|home| home.join(".claude")));
     let mut locations = Vec::new();
     let mut push = |source: SkillSource, root: Option<PathBuf>| {
         if let Some(root) = root {
@@ -58,6 +62,7 @@ pub fn user_skill_locations() -> Vec<SkillLocation> {
                 scope: SkillScope::User,
                 root,
                 project: None,
+                plugin: None,
             });
         }
     };
@@ -65,7 +70,7 @@ pub fn user_skill_locations() -> Vec<SkillLocation> {
     push(SkillSource::Shared, home_join(".agents/skills"));
     push(
         SkillSource::Provider(ProviderKind::Claude),
-        claude_config_dir.map(|dir| dir.join("skills")),
+        claude_config_dir().map(|dir| dir.join("skills")),
     );
     push(
         SkillSource::Provider(ProviderKind::Codex),
@@ -125,18 +130,81 @@ pub fn project_skill_locations(project_root: &Path, project_name: &str) -> Vec<S
         scope: SkillScope::Project,
         root: project_root.join(suffix),
         project: Some(project_name.to_owned()),
+        plugin: None,
     })
     .collect()
 }
 
+/// Resolve skill roots contributed by installed, enabled Claude plugins.
+fn claude_plugin_locations_in(config_dir: &Path) -> Vec<SkillLocation> {
+    let read_json = |path: PathBuf| {
+        std::fs::read_to_string(path)
+            .ok()
+            .and_then(|contents| serde_json::from_str::<serde_json::Value>(&contents).ok())
+    };
+    let Some(installed) = read_json(config_dir.join("plugins/installed_plugins.json")) else {
+        return Vec::new();
+    };
+    let settings = read_json(config_dir.join("settings.json"));
+    let enabled = settings
+        .as_ref()
+        .and_then(|settings| settings.get("enabledPlugins"));
+    let Some(plugins) = installed
+        .get("plugins")
+        .and_then(serde_json::Value::as_object)
+    else {
+        return Vec::new();
+    };
+    let mut locations = Vec::new();
+    let mut roots = HashSet::new();
+    for (name, installs) in plugins {
+        if enabled
+            .and_then(|plugins| plugins.get(name))
+            .and_then(serde_json::Value::as_bool)
+            == Some(false)
+        {
+            continue;
+        }
+        let plugin = name.split('@').next().unwrap_or(name);
+        for install in installs.as_array().into_iter().flatten() {
+            let Some(path) = install
+                .get("installPath")
+                .and_then(serde_json::Value::as_str)
+            else {
+                continue;
+            };
+            let root = Path::new(path).join("skills");
+            if roots.insert(root.clone()) {
+                locations.push(SkillLocation {
+                    source: SkillSource::Provider(ProviderKind::Claude),
+                    scope: SkillScope::User,
+                    root,
+                    project: None,
+                    plugin: Some(plugin.to_owned()),
+                });
+            }
+        }
+    }
+    locations
+}
+
 /// All roots the scan walks for the given projects: user scope plus each
 /// project's trees, in scan order.
-pub fn skill_locations(projects: &[(String, PathBuf)]) -> Vec<SkillLocation> {
+fn skill_locations(projects: &[(String, PathBuf)]) -> Vec<SkillLocation> {
     let mut locations = user_skill_locations();
     for (name, path) in projects {
         locations.extend(project_skill_locations(path, name));
     }
     locations
+}
+
+/// Scan static skill roots and installed Claude plugin roots in one pass.
+pub fn scan_skill_catalog(projects: &[(String, PathBuf)]) -> SkillsCatalog {
+    let mut locations = skill_locations(projects);
+    if let Some(config_dir) = claude_config_dir() {
+        locations.extend(claude_plugin_locations_in(&config_dir));
+    }
+    scan_skills(&locations)
 }
 
 /// One skill directory as found on disk, before grouping.
@@ -145,6 +213,7 @@ struct RawSkill {
     description: String,
     scope: SkillScope,
     project: Option<String>,
+    plugin: Option<String>,
     install: SkillInstall,
     allowed_tools: Option<String>,
     body: String,
@@ -155,7 +224,7 @@ struct RawSkill {
 
 /// Walk every location and build the catalog. Filesystem work throughout —
 /// background executor only.
-pub fn scan_skills(locations: &[SkillLocation]) -> SkillsCatalog {
+fn scan_skills(locations: &[SkillLocation]) -> SkillsCatalog {
     let mut raw = Vec::new();
     for location in locations {
         scan_location(location, &mut raw);
@@ -167,9 +236,9 @@ pub fn scan_skills(locations: &[SkillLocation]) -> SkillsCatalog {
     // One entry per (scope group, name): the same skill installed into
     // several ecosystems' roots — copied or symlinked — is one skill.
     let mut skills: Vec<SkillEntry> = Vec::new();
-    let mut by_identity: HashMap<(Option<String>, String), usize> = HashMap::new();
+    let mut by_identity: HashMap<(Option<String>, Option<String>, String), usize> = HashMap::new();
     for raw in raw {
-        let key = (raw.project.clone(), raw.name.clone());
+        let key = (raw.project.clone(), raw.plugin.clone(), raw.name.clone());
         match by_identity.get(&key) {
             Some(&index) => {
                 let entry = &mut skills[index];
@@ -193,6 +262,7 @@ pub fn scan_skills(locations: &[SkillLocation]) -> SkillsCatalog {
                     description: raw.description,
                     scope: raw.scope,
                     project: raw.project,
+                    plugin: raw.plugin,
                     enabled: raw.install.enabled,
                     installs: vec![raw.install],
                     allowed_tools: raw.allowed_tools,
@@ -283,6 +353,7 @@ fn scan_location(location: &SkillLocation, raw: &mut Vec<RawSkill>) {
             description: front.description.unwrap_or_default(),
             scope: location.scope,
             project: location.project.clone(),
+            plugin: location.plugin.clone(),
             install: SkillInstall {
                 source: location.source,
                 dir,
@@ -422,6 +493,7 @@ mod tests {
             scope: SkillScope::User,
             root: root.to_path_buf(),
             project: None,
+            plugin: None,
         }
     }
 
@@ -545,6 +617,7 @@ mod tests {
                 scope: SkillScope::Project,
                 root: project_root.clone(),
                 project: Some("waku".into()),
+                plugin: None,
             },
         ];
         let catalog = scan_skills(&locations);
@@ -596,6 +669,76 @@ mod tests {
         let contents = std::fs::read_to_string(dir.join(SKILL_FILE)).unwrap();
         assert!(contents.contains("name: deploy"));
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn plugin_locations_use_install_records_and_enablement() {
+        let config = temp_root("plugins");
+        std::fs::create_dir_all(config.join("plugins")).unwrap();
+        std::fs::write(
+            config.join("plugins/installed_plugins.json"),
+            r#"{
+              "version": 2,
+              "plugins": {
+                "github-dev@market": [
+                  {"scope": "user", "installPath": "/cache/github-dev/2.7.1"},
+                  {"scope": "project", "installPath": "/cache/github-dev/2.7.1"}
+                ],
+                "dropped@market": [
+                  {"scope": "user", "installPath": "/cache/dropped/1.0.0"}
+                ],
+                "broken@market": [{"scope": "user"}]
+              }
+            }"#,
+        )
+        .unwrap();
+        std::fs::write(
+            config.join("settings.json"),
+            r#"{"enabledPlugins": {"dropped@market": false, "github-dev@market": true}}"#,
+        )
+        .unwrap();
+
+        let locations = claude_plugin_locations_in(&config);
+        assert_eq!(locations.len(), 1);
+        assert_eq!(
+            locations[0].root,
+            PathBuf::from("/cache/github-dev/2.7.1/skills")
+        );
+        assert_eq!(
+            locations[0].source,
+            SkillSource::Provider(ProviderKind::Claude)
+        );
+        assert_eq!(locations[0].scope, SkillScope::User);
+        assert_eq!(locations[0].project, None);
+        assert_eq!(locations[0].plugin.as_deref(), Some("github-dev"));
+
+        std::fs::remove_file(config.join("settings.json")).unwrap();
+        assert_eq!(claude_plugin_locations_in(&config).len(), 2);
+        assert!(claude_plugin_locations_in(&config.join("missing")).is_empty());
+        let _ = std::fs::remove_dir_all(&config);
+    }
+
+    #[test]
+    fn same_named_plugin_skills_stay_separate() {
+        let first = temp_root("plugin-first");
+        let second = temp_root("plugin-second");
+        write_skill(&first, "review", "---\nname: review\n---\nFirst");
+        write_skill(&second, "review", "---\nname: review\n---\nSecond");
+        let mut locations = vec![
+            user_location(SkillSource::Provider(ProviderKind::Claude), &first),
+            user_location(SkillSource::Provider(ProviderKind::Claude), &second),
+        ];
+        locations[0].plugin = Some("first-plugin".into());
+        locations[1].plugin = Some("second-plugin".into());
+
+        let catalog = scan_skills(&locations);
+        assert_eq!(catalog.skills.len(), 2);
+        assert_eq!(catalog.skills[0].plugin.as_deref(), Some("first-plugin"));
+        assert_eq!(catalog.skills[1].plugin.as_deref(), Some("second-plugin"));
+        assert!(catalog.skills.iter().all(|skill| skill.duplicates == 1));
+
+        let _ = std::fs::remove_dir_all(&first);
+        let _ = std::fs::remove_dir_all(&second);
     }
 
     #[test]
