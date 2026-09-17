@@ -95,6 +95,12 @@ pub fn user_skill_locations() -> Vec<SkillLocation> {
         SkillSource::Provider(ProviderKind::Amp),
         home_join(".config/agents/skills"),
     );
+    push(
+        SkillSource::Provider(ProviderKind::Grok),
+        crate::grok_session::grok_home_directory()
+            .ok()
+            .map(|home| home.join("skills")),
+    );
     locations
 }
 
@@ -116,6 +122,7 @@ pub fn project_skill_locations(project_root: &Path, project_name: &str) -> Vec<S
             ".cursor/skills",
         ),
         (SkillSource::Provider(ProviderKind::Fx), "skills"),
+        (SkillSource::Provider(ProviderKind::Grok), ".grok/skills"),
         (SkillSource::Provider(ProviderKind::Pi), ".pi/skills"),
         (SkillSource::Provider(ProviderKind::OhMyPi), ".omp/skills"),
     ]
@@ -626,6 +633,7 @@ mod tests {
             ".opencode/skills",
             ".cursor/skills",
             ".pi/skills",
+            ".grok/skills",
         ] {
             let expected = project_root.join(expected);
             assert!(

@@ -548,6 +548,7 @@ impl Waku {
             SkillSource::Provider(ProviderKind::Pi),
             SkillSource::Provider(ProviderKind::OhMyPi),
             SkillSource::Provider(ProviderKind::Amp),
+            SkillSource::Provider(ProviderKind::Grok),
         ];
         dropdown_menu(
             MenuChip::new("skills-source-filter")
