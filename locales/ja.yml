@@ -1107,3 +1107,9 @@ usage_error.curl_did_not_finish: curl がリクエストを完了しませんで
 usage_error.curl_failed: "curl に失敗しました：%{error}"
 usage_error.unknown_error: 不明なエラー
 usage_error.curl_no_status: curl から HTTP ステータス行が返されませんでした
+
+models.discovery_auth: 認証が必要です。`%{command} login` を実行してから再試行してください。
+models.discovery_failed: モデルを読み込めませんでした。プロバイダーの CLI が動作することを確認して再試行してください。
+models.discovery_empty: プロバイダーからモデルが返されませんでした。設定を確認して再試行してください。
+models.discovery_cached: 前回のキャッシュを表示しています。最新でない可能性があります。
+models.discovery_fallback: アカウントのモデル一覧ではなく、フォールバックモデルを表示しています。

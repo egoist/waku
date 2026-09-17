@@ -1924,6 +1924,7 @@ fn switched_off_providers_leave_the_picker_except_for_their_locked_session() {
     use crate::model::{FavoriteModel, ProviderModel, ProviderProbe};
 
     let probe = |provider: ProviderKind, model: &str| ProviderProbe {
+        model_discovery: None,
         provider,
         installed: true,
         path: Some(std::path::PathBuf::from(format!("/bin/{}", provider.id()))),
@@ -2013,6 +2014,7 @@ fn tab_cycle_walks_favorites_then_usable_providers_in_rail_order() {
     use crate::model::{ProviderModel, ProviderProbe};
 
     let probe = |provider: ProviderKind, installed: bool| ProviderProbe {
+        model_discovery: None,
         provider,
         installed,
         path: installed.then(|| std::path::PathBuf::from(format!("/bin/{}", provider.id()))),
@@ -2061,6 +2063,7 @@ fn the_picker_is_empty_only_once_detection_has_answered() {
     use crate::model::{ProviderModel, ProviderProbe};
 
     let probe = |provider: ProviderKind, installed: bool| ProviderProbe {
+        model_discovery: None,
         provider,
         installed,
         path: installed.then(|| std::path::PathBuf::from(format!("/bin/{}", provider.id()))),
@@ -2108,6 +2111,7 @@ fn the_rail_draws_only_installed_providers_the_settings_left_on() {
     use crate::model::{ProviderModel, ProviderProbe};
 
     let probe = |provider: ProviderKind, installed: bool| ProviderProbe {
+        model_discovery: None,
         provider,
         installed,
         path: installed.then(|| std::path::PathBuf::from(format!("/bin/{}", provider.id()))),
@@ -2152,4 +2156,36 @@ fn the_rail_draws_only_installed_providers_the_settings_left_on() {
         Some(ProviderKind::Claude),
         ProviderKind::Claude
     ));
+}
+
+#[test]
+fn model_discovery_warning_distinguishes_cached_fallback_and_live_results() {
+    use waku_protocol::model::{
+        ModelCatalogSource, ModelDiscovery, ModelDiscoveryError, ProviderProbe,
+    };
+    let mut probe = ProviderProbe {
+        provider: ProviderKind::Cursor,
+        installed: true,
+        path: None,
+        models: Vec::new(),
+        agent_presets: Vec::new(),
+        model_discovery: Some(ModelDiscovery {
+            source: ModelCatalogSource::Cached,
+            error: Some(ModelDiscoveryError::AuthenticationRequired),
+        }),
+    };
+    let warning = super::composer::model_discovery_notice(&probe).unwrap();
+    assert!(warning.contains("cursor-agent login"));
+    assert!(warning.contains(&tr!("models.discovery_cached")));
+    probe.model_discovery.as_mut().unwrap().source = ModelCatalogSource::Fallback;
+    assert!(
+        super::composer::model_discovery_notice(&probe)
+            .unwrap()
+            .contains(&tr!("models.discovery_fallback"))
+    );
+    probe.model_discovery = Some(ModelDiscovery {
+        source: ModelCatalogSource::Live,
+        error: None,
+    });
+    assert!(super::composer::model_discovery_notice(&probe).is_none());
 }

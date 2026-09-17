@@ -10,6 +10,7 @@ pub fn provider_probe(provider: ProviderKind, binary_override: Option<&str>) -> 
         None => crate::command_env::find_executable(provider.command()),
     };
     ProviderProbe {
+        model_discovery: None,
         provider,
         installed: path.is_some(),
         path,
@@ -40,6 +41,10 @@ fn apply_cached_models(
         && let Some(models) = cached_models
     {
         probe.models = models;
+        probe.model_discovery = Some(ModelDiscovery {
+            source: ModelCatalogSource::Cached,
+            error: None,
+        });
     }
     probe
 }
@@ -48,9 +53,11 @@ pub fn discover_provider_models(mut probe: ProviderProbe) -> ProviderProbe {
     if probe.provider.supports_model_discovery()
         && let Some(path) = probe.path.as_deref()
     {
-        let (models, agent_presets) = crate::model_catalog::discover_catalog(probe.provider, path);
+        let (models, agent_presets, discovery) =
+            crate::model_catalog::discover_catalog(probe.provider, path);
         probe.models = models;
         probe.agent_presets = agent_presets;
+        probe.model_discovery = Some(discovery);
     }
     probe
 }
@@ -77,6 +84,7 @@ mod tests {
     #[test]
     fn cached_catalog_replaces_fallback_before_live_discovery() {
         let probe = ProviderProbe {
+            model_discovery: None,
             provider: ProviderKind::Codex,
             installed: true,
             path: Some("/usr/bin/codex".into()),

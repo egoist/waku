@@ -1413,7 +1413,24 @@ impl Waku {
                     },
                 ) {
                     Ok(waku_client::ResponsePayload::ProviderProbe { probe, .. }) => probe,
-                    _ => probe,
+                    _ => {
+                        use waku_protocol::model::{
+                            ModelCatalogSource, ModelDiscovery, ModelDiscoveryError,
+                        };
+                        let mut probe = probe;
+                        let source =
+                            match probe.model_discovery.as_ref().map(|status| status.source) {
+                                Some(ModelCatalogSource::Live | ModelCatalogSource::Cached) => {
+                                    ModelCatalogSource::Cached
+                                }
+                                _ => ModelCatalogSource::Fallback,
+                            };
+                        probe.model_discovery = Some(ModelDiscovery {
+                            source,
+                            error: Some(ModelDiscoveryError::Failed),
+                        });
+                        probe
+                    }
                 };
                 if provider_probe_tx.send(discovered).is_ok() {
                     signal_event_pump(&event_wake);
@@ -1529,6 +1546,7 @@ impl Waku {
                     let probe = match response {
                         Ok(waku_client::ResponsePayload::ProviderProbe { probe, .. }) => probe,
                         _ => ProviderProbe {
+                            model_discovery: None,
                             provider,
                             installed: false,
                             path: None,

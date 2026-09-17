@@ -885,6 +885,12 @@ impl Waku {
         let probes = self.probes.clone();
         let disabled_providers = self.state.disabled_providers.clone();
         let pending_discoveries = self.provider_model_discoveries_pending.clone();
+        let discovery_provider = match selected_tab {
+            ModelPickerTab::Provider(kind) => kind,
+            ModelPickerTab::Favorites => provider,
+        };
+        let retry_focus = self.transcript_control_focus("model-discovery-retry".to_owned(), cx);
+
         let favorites = self.state.favorite_models.clone();
         let weak = cx.entity().downgrade();
         let search = self.model_search.clone();
@@ -962,6 +968,13 @@ impl Waku {
                     });
                 }
             })
+        };
+
+        let discovery_notice = if handle.is_open() {
+            self.provider_probe(discovery_provider)
+                .and_then(model_discovery_notice)
+        } else {
+            None
         };
 
         // Only while the panel is open: this clones every installed provider's
@@ -1149,6 +1162,76 @@ impl Waku {
                             .child(icon("icons/search.svg", 15.0, theme.text_secondary))
                             .child(div().flex_1().min_w_0().child(search.clone())),
                     );
+
+                let notice = discovery_notice.as_ref().map(|message| {
+                    let retry_weak = weak.clone();
+                    let key_weak = weak.clone();
+                    let confirm_retry_weak = weak.clone();
+                    let pending = pending_discoveries.contains(&discovery_provider);
+                    div()
+                        .px(px(12.0))
+                        .pb(px(8.0))
+                        .flex_none()
+                        .flex()
+                        .flex_col()
+                        .gap(px(4.0))
+                        .text_size(sp(11.0))
+                        .text_color(theme.text_secondary)
+                        .child(SharedString::from(message.clone()))
+                        .child(
+                            div()
+                                .id("model-discovery-retry")
+                                .track_focus(&retry_focus)
+                                .tab_index(0)
+                                .tab_stop(!pending)
+                                .px(px(6.0))
+                                .py(px(4.0))
+                                .rounded(px(4.0))
+                                .border_1()
+                                .border_color(theme.border)
+                                .focus_visible(|style| style.border_color(theme.accent))
+                                .child(if pending {
+                                    tr!("models.loading")
+                                } else {
+                                    tr!("common.retry")
+                                })
+                                .on_click(move |_, _, cx| {
+                                    if !pending {
+                                        let _ = retry_weak.update(cx, |this, cx| {
+                                            this.refresh_provider_model_discovery(
+                                                discovery_provider,
+                                            );
+                                            cx.notify();
+                                        });
+                                    }
+                                    cx.stop_propagation();
+                                })
+                                .on_action(move |_: &ConfirmEntry, _, cx| {
+                                    if !pending {
+                                        let _ = confirm_retry_weak.update(cx, |this, cx| {
+                                            this.refresh_provider_model_discovery(
+                                                discovery_provider,
+                                            );
+                                            cx.notify();
+                                        });
+                                    }
+                                    cx.stop_propagation();
+                                })
+                                .on_key_down(move |event, _, cx| {
+                                    if !pending
+                                        && matches!(event.keystroke.key.as_str(), "enter" | "space")
+                                    {
+                                        let _ = key_weak.update(cx, |this, cx| {
+                                            this.refresh_provider_model_discovery(
+                                                discovery_provider,
+                                            );
+                                            cx.notify();
+                                        });
+                                        cx.stop_propagation();
+                                    }
+                                }),
+                        )
+                });
 
                 let mut rows = div()
                     .id("model-picker-list")
@@ -1365,6 +1448,7 @@ impl Waku {
                             .rounded_br(px(12.0))
                             .bg(theme.surface)
                             .child(search_input)
+                            .children(notice)
                             .child(
                                 div()
                                     .flex_1()
@@ -4001,4 +4085,27 @@ pub(super) fn visible_picker_models(
         });
     }
     models
+}
+
+/// Only reads the last daemon result; discovery and cache I/O stay off render.
+pub(super) fn model_discovery_notice(probe: &ProviderProbe) -> Option<String> {
+    use waku_protocol::model::{ModelCatalogSource, ModelDiscoveryError};
+    let discovery = probe.model_discovery.as_ref()?;
+    let error = discovery.error?;
+    let reason = match error {
+        ModelDiscoveryError::AuthenticationRequired => {
+            tr!("models.discovery_auth", command = probe.provider.command())
+        }
+        ModelDiscoveryError::Failed => tr!("models.discovery_failed"),
+        ModelDiscoveryError::Empty => tr!("models.discovery_empty"),
+    };
+    let source = match discovery.source {
+        ModelCatalogSource::Cached => tr!("models.discovery_cached"),
+        ModelCatalogSource::Fallback => tr!("models.discovery_fallback"),
+        ModelCatalogSource::Live => return None,
+    };
+    Some(format!(
+        "{}: {reason} {source}",
+        probe.provider.display_name()
+    ))
 }

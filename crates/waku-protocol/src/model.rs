@@ -544,8 +544,34 @@ impl ProviderModel {
     }
 }
 
+/// Provenance of the usable catalog, independent of the latest probe's outcome.
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq, TS)]
+#[serde(rename_all = "snake_case")]
+pub enum ModelCatalogSource {
+    Live,
+    Cached,
+    Fallback,
+}
+
+/// Classify failures instead of forwarding provider output that may contain credentials.
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq, TS)]
+#[serde(rename_all = "snake_case")]
+pub enum ModelDiscoveryError {
+    AuthenticationRequired,
+    Failed,
+    Empty,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq, TS)]
+pub struct ModelDiscovery {
+    pub source: ModelCatalogSource,
+    pub error: Option<ModelDiscoveryError>,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize, TS)]
 pub struct ProviderProbe {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_discovery: Option<ModelDiscovery>,
     pub provider: ProviderKind,
     pub installed: bool,
     pub path: Option<PathBuf>,
@@ -3522,6 +3548,39 @@ pub fn compact_path(path: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn provider_probe_accepts_older_peers_without_discovery_status() {
+        let probe: ProviderProbe = serde_json::from_value(serde_json::json!({
+            "provider": "cursor", "installed": true, "path": null,
+            "models": [], "agent_presets": []
+        }))
+        .unwrap();
+        assert!(probe.model_discovery.is_none());
+        assert!(
+            serde_json::to_value(probe)
+                .unwrap()
+                .get("model_discovery")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn discovery_failure_round_trips_with_catalog_provenance() {
+        let status = ModelDiscovery {
+            source: ModelCatalogSource::Cached,
+            error: Some(ModelDiscoveryError::AuthenticationRequired),
+        };
+        let value = serde_json::to_value(&status).unwrap();
+        assert_eq!(
+            value,
+            serde_json::json!({"source": "cached", "error": "authentication_required"})
+        );
+        assert_eq!(
+            serde_json::from_value::<ModelDiscovery>(value).unwrap(),
+            status
+        );
+    }
 
     #[test]
     fn legacy_plan_access_mode_loads_as_supervised() {

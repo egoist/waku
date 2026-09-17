@@ -2180,6 +2180,7 @@ impl Waku {
         let probes = ProviderKind::ALL
             .into_iter()
             .map(|provider| ProviderProbe {
+                model_discovery: None,
                 provider,
                 installed: false,
                 path: None,
