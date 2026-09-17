@@ -2182,22 +2182,40 @@ impl EntityInputHandler for TextInput {
         _: &mut Window,
         _: &mut Context<Self>,
     ) -> Option<Bounds<Pixels>> {
-        let layout = self.last_layout.as_ref()?;
-        let range = self.range_from_utf16(&range_utf16);
-        let start = layout.position_for_index(range.start)?;
-        let end = layout.position_for_index(range.end)?;
+        let layout = match self.last_layout.as_ref() {
+            Some(l) => l,
+            None => return Some(Bounds::new(bounds.origin, size(px(2.0), px(22.0)))),
+        };
+
         let line_height = layout.line_height();
-        if start.y == end.y {
-            Some(Bounds::from_corners(
-                start,
-                point(end.x, end.y + line_height),
-            ))
+        let range = self.range_from_utf16(&range_utf16);
+        let layout_len = layout.len();
+
+        let start_idx = range.start.min(layout_len);
+        let end_idx = range.end.min(layout_len);
+
+        let start = layout
+            .position_for_index(start_idx)
+            .unwrap_or(bounds.origin);
+        let end = if start_idx == end_idx {
+            start
         } else {
-            Some(Bounds::from_corners(
-                point(bounds.left(), start.y),
-                point(bounds.right(), end.y + line_height),
-            ))
-        }
+            layout
+                .position_for_index(end_idx)
+                .unwrap_or(start)
+        };
+
+        let res = if start.y == end.y {
+            let width = (end.x - start.x).max(px(2.0));
+            Bounds::new(start, size(width, line_height))
+        } else {
+            Bounds::from_corners(
+                start,
+                point(bounds.right(), start.y + line_height),
+            )
+        };
+
+        Some(res)
     }
 
     fn character_index_for_point(
