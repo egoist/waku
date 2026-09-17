@@ -14,6 +14,9 @@ upgrade manually; the installed app also keeps itself current.
 
 Waku expects:
 
+- **A graphical session:** Wayland, or X11 with a running window manager.
+  Launch the desktop app with `WAYLAND_DISPLAY` or `DISPLAY` set by that
+  session. For an X11 virtual display, see the setup below.
 - **glibc 2.35 or newer** — Ubuntu 22.04, Debian 12, Fedora 36, and anything
   more recent. Releases are built on Ubuntu 22.04, so older distributions must
   build from source.
@@ -25,6 +28,28 @@ Waku expects:
 - `curl` or `wget` for installation and update downloads.
 
 Set `WAKU_VERSION` to install a specific version rather than the latest.
+
+## Displays and headless servers
+
+`waku` is the desktop app. An SSH shell without display forwarding, a
+headless container, or a system service usually has neither `DISPLAY` nor
+`WAYLAND_DISPLAY`. Run the app from a graphical session; setting a display
+name alone does not create an X server or Wayland compositor. Also unset
+`ZED_HEADLESS`, which forces GPUI's headless backend even when a display is
+configured. Use the separate `waku-daemon` executable to run only the agent
+backend on a headless server.
+
+On a bare X server such as Xvfb, start a window manager as well. Without one,
+the app can create a mapped window that stays blank. `xvfb-run` starts the X
+server, but does not start a window manager. For example, with `xvfb`,
+`xauth`, and `openbox` installed:
+
+```sh
+xvfb-run -a -s '-screen 0 1600x1000x24' sh -c 'openbox >/dev/null 2>&1 & exec waku'
+```
+
+The virtual display still needs a working graphics driver (including a
+software renderer); Xvfb and Openbox do not provide one.
 
 ## Installing manually
 
@@ -133,5 +158,15 @@ If the app dies on its first frame in a VM, check `coredumpctl info` for a
 backtrace through `libvulkan_lvp.so` or `libgallium`. The reliable fix is to
 give the guest a real GL driver — on UTM that means the QEMU backend with
 virtio-gpu-gl (virgl) rather than Apple Virtualization, which offers Linux
-guests no 3D at all. `VK_DRIVER_FILES=/nonexistent.json` hides the software
-Vulkan driver so wgpu takes the GL path instead.
+guests no 3D at all. Hiding the Vulkan drivers lets wgpu try the GL path:
+
+```sh
+VK_DRIVER_FILES=/nonexistent.json VK_ICD_FILENAMES=/nonexistent.json waku
+```
+
+Set both spellings for compatibility: older Vulkan loaders, including
+Ubuntu 22.04's 1.3.204, ignore `VK_DRIVER_FILES` and require
+`VK_ICD_FILENAMES`. Newer loaders prefer `VK_DRIVER_FILES` when both are set;
+the older spelling is deprecated but still supported. See the
+[Vulkan loader's driver override documentation](https://github.com/KhronosGroup/Vulkan-Loader/blob/main/docs/LoaderDriverInterface.md#overriding-the-default-driver-discovery).
+This selects a fallback path, not a replacement for a working GL driver.

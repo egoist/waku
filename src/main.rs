@@ -7,5 +7,16 @@
 )]
 
 fn main() {
+    // GPUI's headless backend has no desktop window. Reject it before
+    // waku::run() starts the companion daemon and enters the event loop.
+    #[cfg(target_os = "linux")]
+    if gpui::guess_compositor() == "Headless" {
+        eprintln!(
+            "Waku requires an X11 or Wayland display. Launch it from a graphical session \
+             with DISPLAY or WAYLAND_DISPLAY set and ZED_HEADLESS unset. \
+             For a headless server, run waku-daemon instead."
+        );
+        std::process::exit(1);
+    }
     waku::run();
 }
