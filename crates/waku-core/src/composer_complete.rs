@@ -253,6 +253,13 @@ fn assemble_slash_commands(
                 scan_skill_files(provider, &home.join(".cursor/skills"), &mut commands);
             }
         }
+        ProviderKind::Devin => {
+            scan_skill_files(provider, &project_root.join(".devin/skills"), &mut commands);
+            let user_skills = dirs::config_dir().map(|dir| dir.join("devin/skills"));
+            if let Some(path) = user_skills {
+                scan_skill_files(provider, &path, &mut commands);
+            }
+        }
         ProviderKind::Fx => {
             // Fx discovers plain `skills/` plus compatibility roots from the
             // workspace, and keeps managed installs under ~/.fx/skills.
@@ -1416,6 +1423,7 @@ mod tests {
         for (provider, dir) in [
             (ProviderKind::Codex, ".codex/skills"),
             (ProviderKind::Cursor, ".cursor/skills"),
+            (ProviderKind::Devin, ".devin/skills"),
             (ProviderKind::Fx, "skills"),
             (ProviderKind::OpenCode, ".opencode/skills"),
             (ProviderKind::Pi, ".pi/skills"),

@@ -9,6 +9,7 @@ export const PROVIDER_MENU_ICONS: Record<ProviderKind, ImageSourcePropType> = {
   codex: require('@/assets/images/providers/codex.png'),
   cursor: require('@/assets/images/providers/cursor.png'),
   deepSeek: require('@/assets/images/providers/deepSeek.png'),
+  devin: require('@/assets/images/providers/devin.png'),
   fx: require('@/assets/images/providers/fx.png'),
   openCode: require('@/assets/images/providers/openCode.png'),
   openCode2: require('@/assets/images/providers/openCode2.png'),

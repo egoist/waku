@@ -4,7 +4,7 @@
 //! unknown-method errors, stdio lifetime, and protocol type validation. Waku
 //! only adapts typed ACP messages to its provider-neutral [`DriverEvent`]s.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -13,13 +13,14 @@ use std::time::Duration;
 
 use agent_client_protocol::schema::ProtocolVersion;
 use agent_client_protocol::schema::v1::{
-    CancelNotification, ClientCapabilities, ContentBlock, Implementation, InitializeRequest,
-    InitializeResponse, LoadSessionRequest, NewSessionRequest, PermissionOptionKind, PromptRequest,
-    PromptResponse, RequestId, RequestPermissionOutcome, RequestPermissionRequest,
-    RequestPermissionResponse, ResumeSessionRequest, SelectedPermissionOutcome, SessionConfigKind,
-    SessionConfigOption, SessionConfigOptionCategory, SessionConfigOptionValue,
-    SessionConfigSelectOptions, SessionId, SessionModeId, SessionModeState, SessionNotification,
-    SetSessionConfigOptionRequest, SetSessionModeRequest, StopReason, TextContent,
+    CancelNotification, ClientCapabilities, ContentBlock, DeleteSessionRequest, Implementation,
+    InitializeRequest, InitializeResponse, LoadSessionRequest, NewSessionRequest,
+    PermissionOptionKind, PromptRequest, PromptResponse, RequestId, RequestPermissionOutcome,
+    RequestPermissionRequest, RequestPermissionResponse, ResumeSessionRequest,
+    SelectedPermissionOutcome, SessionConfigKind, SessionConfigOption, SessionConfigOptionCategory,
+    SessionConfigOptionValue, SessionConfigSelectOptions, SessionId, SessionModeId,
+    SessionModeState, SessionNotification, SetSessionConfigOptionRequest, SetSessionModeRequest,
+    StopReason, TextContent,
 };
 use agent_client_protocol::{
     AcpAgent, AcpAgentConfig, Agent, Client, ConnectionTo, Handled, LineDirection, Responder,
@@ -34,8 +35,8 @@ use crate::driver::{
     DriverControl, DriverEventSender, DriverEventSink, DriverStartOptions, SessionOptions,
 };
 use crate::model::{
-    ActivityKind, DriverEvent, PermissionOption, ProviderKind, ProviderResumeCursor, RuntimeMode,
-    UserInputAnswer, UserInputOption, UserInputQuestion,
+    ActivityKind, DriverEvent, PermissionOption, ProviderKind, ProviderModel, ProviderResumeCursor,
+    RuntimeMode, UserInputAnswer, UserInputOption, UserInputQuestion,
 };
 use waku_protocol::model_catalog::{
     CursorModelSelection, cursor_suffix_has, normalize_cursor_reasoning_effort,
@@ -89,6 +90,10 @@ fn launch_for(provider: ProviderKind, reasoning_effort: Option<&str>) -> anyhow:
                 env: vec![("GROK_OAUTH2_REFERRER".into(), "waku".into())],
             })
         }
+        ProviderKind::Devin => Ok(AcpLaunch {
+            args: vec!["acp".into()],
+            env: Vec::new(),
+        }),
         ProviderKind::Fx => Ok(AcpLaunch {
             args: vec!["acp".into()],
             env: Vec::new(),
@@ -272,6 +277,54 @@ pub(crate) fn catalog_agent(
     sdk_agent(binary, cwd, launch, None, Arc::new(Mutex::new(Vec::new())))
 }
 
+const DEVIN_ACP_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// Devin's ACP session advertises the models it will actually accept. The CLI
+/// `devin models list` catalog is the interactive product list and includes
+/// ids such as `adaptive` that this agent rejects with "Model not found".
+pub(crate) fn discover_devin_models_via_acp(binary: &Path) -> Vec<ProviderModel> {
+    let Ok(cwd) = crate::acp_session::catalog_working_directory() else {
+        return Vec::new();
+    };
+    let Ok(agent) = catalog_agent(ProviderKind::Devin, binary, &cwd) else {
+        return Vec::new();
+    };
+    let request = Client
+        .builder()
+        .name("waku-devin-model-discovery")
+        .connect_with(agent, async move |connection: ConnectionTo<Agent>| {
+            connection
+                .send_request(
+                    InitializeRequest::new(ProtocolVersion::V1)
+                        .client_capabilities(ClientCapabilities::new().terminal(false))
+                        .client_info(Implementation::new("waku", env!("CARGO_PKG_VERSION"))),
+                )
+                .block_task()
+                .await?;
+            let response = connection
+                .send_request(NewSessionRequest::new(cwd.clone()))
+                .block_task()
+                .await?;
+            let models = models_from_session_config_options(
+                response.config_options.as_deref().unwrap_or_default(),
+            );
+            let _ = connection
+                .send_request(DeleteSessionRequest::new(response.session_id))
+                .block_task()
+                .await;
+            Ok(models)
+        });
+    smol::block_on(smol::future::race(
+        async move { request.await.map_err(|_| ()) },
+        async move {
+            smol::Timer::after(DEVIN_ACP_DISCOVERY_TIMEOUT).await;
+            Err(())
+        },
+    ))
+    .ok()
+    .unwrap_or_default()
+}
+
 type PermissionResponder = Responder<RequestPermissionResponse>;
 type PendingPermissions = Arc<Mutex<HashMap<String, PermissionResponder>>>;
 
@@ -360,6 +413,7 @@ async fn run_sdk_connection(
     let pending_user_inputs: PendingAcpUserInputs = Arc::new(Mutex::new(HashMap::new()));
     let prompt_requests = Arc::new(Mutex::new(PendingPrompts::default()));
     let title_refresh = super::title_refresh::NativeTitleRefresh::default();
+    let first_prompt = Arc::new(Mutex::new(None::<String>));
     let auto_approve = mode != RuntimeMode::Ask;
 
     Client
@@ -370,6 +424,7 @@ async fn run_sdk_connection(
                 let events = events.clone();
                 let suppress_session_updates = suppress_session_updates.clone();
                 let stream_state = stream_state.clone();
+                let first_prompt = first_prompt.clone();
                 async move |notification: SessionNotification, _connection| {
                     if !suppress_session_updates.load(Ordering::Acquire) {
                         handle_session_update(
@@ -377,6 +432,7 @@ async fn run_sdk_connection(
                             notification,
                             &events,
                             &mut stream_state.lock(),
+                            first_prompt.lock().as_deref(),
                         )?;
                     }
                     Ok(())
@@ -390,6 +446,7 @@ async fn run_sdk_connection(
                 let prompt_requests = prompt_requests.clone();
                 let grok_title_home = grok_title_home.clone();
                 let title_refresh = title_refresh.clone();
+                let first_prompt = first_prompt.clone();
                 async move |notification: UntypedMessage, _connection| {
                     if notification.method() == "_x.ai/session/prompt_complete" {
                         if let Some(session_id) = finish_xai_prompt_complete(
@@ -403,6 +460,17 @@ async fn run_sdk_connection(
                                 &title_refresh,
                                 events.clone(),
                             );
+                        }
+                    }
+                    if let Some(title) = crate::devin_session::title_from_notification(
+                        notification.method(),
+                        notification.params(),
+                    ) {
+                        if !crate::devin_session::is_placeholder_title(
+                            &title,
+                            first_prompt.lock().as_deref(),
+                        ) {
+                            let _ = events.send(DriverEvent::AutoTitleUpdated(Some(title)));
                         }
                     }
                     Ok(())
@@ -526,6 +594,9 @@ async fn run_sdk_connection(
                     native_session_id.clone(),
                 )),
             });
+            if provider == ProviderKind::Devin && resume_session_id.is_some() {
+                start_devin_title_refresh(&native_session_id, None, &title_refresh, events.clone());
+            }
 
             let mut current_model = model;
             let mut current_effort = reasoning_effort;
@@ -554,6 +625,21 @@ async fn run_sdk_connection(
                                 crate::cursor_session::prompt_with_fork_context(&context, &text)
                             })
                             .unwrap_or(text);
+                        let title_placeholder = if provider == ProviderKind::Devin {
+                            let mut first = first_prompt.lock();
+                            if first.is_none() {
+                                *first = Some(text.clone());
+                                start_devin_title_refresh(
+                                    &native_session_id,
+                                    first.clone(),
+                                    &title_refresh,
+                                    events.clone(),
+                                );
+                            }
+                            first.clone()
+                        } else {
+                            None
+                        };
                         let _ = events.send(DriverEvent::TurnStarted);
                         if let Err(error) = send_prompt(
                             &connection,
@@ -564,6 +650,7 @@ async fn run_sdk_connection(
                             provider,
                             &native_session_id,
                             grok_title_home.clone(),
+                            title_placeholder,
                             title_refresh.clone(),
                             stream_state.clone(),
                         ) {
@@ -594,6 +681,7 @@ async fn run_sdk_connection(
                             provider,
                             &native_session_id,
                             grok_title_home.clone(),
+                            first_prompt.lock().clone(),
                             title_refresh.clone(),
                             stream_state.clone(),
                         ) {
@@ -775,7 +863,9 @@ fn desired_access_mode(
 /// Which session config option carries reasoning effort. ACP leaves the id to
 /// the agent: Kimi Code exposes it as its `thinking` level, while the other
 /// agents Waku drives keep it on `mode`. Grok does not use this path: its
-/// effort rides on `session/set_model` as `_meta.reasoningEffort`.
+/// effort rides on `session/set_model` as `_meta.reasoningEffort`. Devin is
+/// excluded from the generic call because its `mode` option is a permission
+/// mode, not effort.
 fn reasoning_effort_config_id(provider: ProviderKind) -> &'static str {
     match provider {
         ProviderKind::Kimi => "thinking",
@@ -783,22 +873,29 @@ fn reasoning_effort_config_id(provider: ProviderKind) -> &'static str {
     }
 }
 
-fn session_config_select_values(option: &SessionConfigOption) -> Vec<&str> {
+fn session_config_select_entries(option: &SessionConfigOption) -> Vec<(&str, &str)> {
     let SessionConfigKind::Select(select) = &option.kind else {
         return Vec::new();
     };
     match &select.options {
         SessionConfigSelectOptions::Ungrouped(options) => options
             .iter()
-            .map(|option| option.value.0.as_ref())
+            .map(|option| (option.value.0.as_ref(), option.name.as_str()))
             .collect(),
         SessionConfigSelectOptions::Grouped(groups) => groups
             .iter()
             .flat_map(|group| group.options.iter())
-            .map(|option| option.value.0.as_ref())
+            .map(|option| (option.value.0.as_ref(), option.name.as_str()))
             .collect(),
         _ => Vec::new(),
     }
+}
+
+fn session_config_select_values(option: &SessionConfigOption) -> Vec<&str> {
+    session_config_select_entries(option)
+        .into_iter()
+        .map(|(value, _)| value)
+        .collect()
 }
 
 fn cursor_model_selection(
@@ -1091,6 +1188,103 @@ fn fx_model_option(config_options: &[SessionConfigOption]) -> Option<&SessionCon
     })
 }
 
+/// The advertised model selector for agents that speak session config options
+/// rather than `session/set_model`. Prefers an option whose id is `model` or
+/// `models` (category optional), then the first `category: model` option that
+/// is not a provider/account switch.
+fn advertised_model_option(config_options: &[SessionConfigOption]) -> Option<&SessionConfigOption> {
+    config_options
+        .iter()
+        .find(|option| {
+            let id = option.id.to_string();
+            id.eq_ignore_ascii_case("model") || id.eq_ignore_ascii_case("models")
+        })
+        .or_else(|| {
+            config_options.iter().find(|option| {
+                option.category == Some(SessionConfigOptionCategory::Model)
+                    && !option.id.to_string().eq_ignore_ascii_case("provider")
+            })
+        })
+        .or_else(|| {
+            config_options
+                .iter()
+                .find(|option| option.name.eq_ignore_ascii_case("model"))
+        })
+}
+
+fn advertised_model_config_id(config_options: &[SessionConfigOption]) -> String {
+    advertised_model_option(config_options)
+        .map(|option| option.id.to_string())
+        .unwrap_or_else(|| "model".to_owned())
+}
+
+fn models_from_session_config_options(
+    config_options: &[SessionConfigOption],
+) -> Vec<ProviderModel> {
+    let Some(option) = advertised_model_option(config_options) else {
+        return Vec::new();
+    };
+    let current = session_config_current_value(option);
+    let mut models = Vec::new();
+    let mut seen = HashSet::new();
+    for (id, name) in session_config_select_entries(option) {
+        if !seen.insert(id) {
+            continue;
+        }
+        let mut model = ProviderModel::new(id, name);
+        if current == Some(id) {
+            model = model.default();
+        }
+        models.push(model);
+    }
+    if !models.iter().any(|model| model.is_default)
+        && let Some(first) = models.first_mut()
+    {
+        first.is_default = true;
+    }
+    models
+}
+
+fn is_devin_auto_model(requested: &str) -> bool {
+    requested.eq_ignore_ascii_case("adaptive")
+        || requested.eq_ignore_ascii_case("auto")
+        || requested.eq_ignore_ascii_case("default")
+}
+
+fn resolve_devin_model(option: Option<&SessionConfigOption>, requested: &str) -> Option<String> {
+    let Some(option) = option else {
+        return (!is_devin_auto_model(requested)).then(|| requested.to_owned());
+    };
+    let values = session_config_select_values(option);
+    if let Some(value) = values
+        .iter()
+        .find(|value| value.eq_ignore_ascii_case(requested))
+    {
+        return Some((*value).to_owned());
+    }
+    if is_devin_auto_model(requested) {
+        return session_config_current_value(option)
+            .map(str::to_owned)
+            .or_else(|| values.first().map(|value| (*value).to_owned()));
+    }
+    None
+}
+
+/// Devin (and some other ACP agents) reject the removed `session/set_model`
+/// method with JSON-RPC `-32601`, or with `-32002` carrying a "method not
+/// found" message. Either means the method is absent, not that the chosen
+/// model is invalid.
+fn is_missing_acp_method(error: &agent_client_protocol::Error) -> bool {
+    if error.code == agent_client_protocol::ErrorCode::MethodNotFound {
+        return true;
+    }
+    let message = error.message.to_ascii_lowercase();
+    message.contains("method not found")
+        || message.contains("unknown method")
+        || message.contains("method not supported")
+        || message.contains("unsupported method")
+}
+
 fn fx_model_provider_switch<'a>(
     config_options: &'a [SessionConfigOption],
     model: &str,
@@ -1243,9 +1437,47 @@ async fn apply_model(
         return;
     }
 
+    if provider == ProviderKind::Devin {
+        let options = config_options.unwrap_or_default();
+        let option = advertised_model_option(options);
+        if let Some(resolved) = resolve_devin_model(option, model) {
+            if option.and_then(session_config_current_value) == Some(resolved.as_str()) {
+                return;
+            }
+            match connection
+                .send_request(SetSessionConfigOptionRequest::new(
+                    session_id.clone(),
+                    advertised_model_config_id(options),
+                    resolved.as_str(),
+                ))
+                .block_task()
+                .await
+            {
+                Ok(_) => return,
+                Err(error) if is_missing_acp_method(&error) => {}
+                Err(error) => {
+                    let _ = events.send(DriverEvent::Error(tr!(
+                        "errors.select_model",
+                        error = error
+                    )));
+                    return;
+                }
+            }
+        } else {
+            if option.is_some() && !is_devin_auto_model(model) {
+                let _ = events.send(DriverEvent::Error(tr!(
+                    "errors.select_model",
+                    error = format!("Devin did not advertise model {model}")
+                )));
+            }
+            return;
+        }
+    }
+
     // Grok, Kimi, OpenCode, and Cursor agents that do not advertise a model
-    // config option retain the legacy request unchanged. Fx intentionally
-    // stays on session/set_config_option, its documented model API.
+    // config option retain the legacy request unchanged. Devin prefers
+    // session/set_config_option above and only reaches this fallback when
+    // that method is itself missing. Fx stays on session/set_config_option.
     let request = match UntypedMessage::new(
         "session/set_model",
         set_model_params(session_id, model, reasoning_effort, provider),
@@ -1260,13 +1492,16 @@ async fn apply_model(
         }
     };
     if let Err(error) = connection.send_request(request).block_task().await {
-        let _ = events.send(DriverEvent::Error(tr!(
-            "errors.select_model",
-            error = error
-        )));
+        if !is_missing_acp_method(&error) {
+            let _ = events.send(DriverEvent::Error(tr!(
+                "errors.select_model",
+                error = error
+            )));
+        }
         return;
     }
     if provider != ProviderKind::Grok
+        && provider != ProviderKind::Devin
         && let Some(effort) = reasoning_effort
     {
         // Reasoning effort is an optional config extension and is deliberately
@@ -1292,6 +1527,7 @@ fn send_prompt(
     provider: ProviderKind,
     native_session_id: &str,
     grok_title_home: Option<std::path::PathBuf>,
+    title_placeholder: Option<String>,
     title_refresh: super::title_refresh::NativeTitleRefresh,
     stream_state: Arc<Mutex<AcpStreamState>>,
 ) -> agent_client_protocol::Result<()> {
@@ -1331,10 +1567,17 @@ fn send_prompt(
                 .filter(|_| !stream_state.lock().produced_content)
                 .and_then(|offset| crate::kimi_session::turn_failure(&native_session_id, offset));
             let success = finish_prompt(result, native_failure, &callback_events);
-            if provider == ProviderKind::Grok && success {
+            if success && provider == ProviderKind::Grok {
                 start_grok_title_refresh(
                     grok_title_home.as_deref(),
                     &native_session_id,
+                    &title_refresh,
+                    callback_events,
+                );
+            } else if success && provider == ProviderKind::Devin {
+                start_devin_title_refresh(
+                    &native_session_id,
+                    title_placeholder,
                     &title_refresh,
                     callback_events,
                 );
@@ -1403,6 +1646,33 @@ fn start_grok_title_refresh(
             Some(home) => crate::grok_session::generated_title_in(home, &native_session_id),
             None => crate::grok_session::generated_title(&native_session_id),
         },
+    );
+}
+
+fn start_devin_title_refresh(
+    native_session_id: &str,
+    placeholder: Option<String>,
+    title_refresh: &super::title_refresh::NativeTitleRefresh,
+    events: DriverEventSender,
+) {
+    let native_session_id = native_session_id.to_owned();
+    // Devin's generator runs after session/prompt returns (~300ms when it
+    // succeeds) and writes the CLI sqlite store. It also stores the first
+    // prompt immediately; that is a placeholder, filtered in the lookup.
+    title_refresh.start(
+        "waku-devin-title",
+        vec![
+            Duration::ZERO,
+            Duration::from_millis(250),
+            Duration::from_millis(750),
+            Duration::from_millis(1_500),
+            Duration::from_secs(3),
+            Duration::from_secs(5),
+            Duration::from_millis(7_500),
+            Duration::from_secs(10),
+        ],
+        events,
+        move || crate::devin_session::generated_title(&native_session_id, placeholder.as_deref()),
     );
 }
 
@@ -1794,6 +2064,7 @@ fn handle_session_update(
     notification: SessionNotification,
     events: &impl DriverEventSink,
     state: &mut AcpStreamState,
+    title_placeholder: Option<&str>,
 ) -> agent_client_protocol::Result<()> {
     let update = serde_json::to_value(notification.update)?;
     let kind = update.get("sessionUpdate").and_then(Value::as_str);
@@ -1878,7 +2149,13 @@ fn handle_session_update(
                     .get("title")
                     .and_then(Value::as_str)
                     .map(str::to_owned);
-                let _ = events.send(DriverEvent::AutoTitleUpdated(title));
+                let skip_placeholder = provider == ProviderKind::Devin
+                    && title.as_deref().is_some_and(|title| {
+                        crate::devin_session::is_placeholder_title(title, title_placeholder)
+                    });
+                if !skip_placeholder {
+                    let _ = events.send(DriverEvent::AutoTitleUpdated(title));
+                }
             }
         }
         Some("usage_update") => {
@@ -2253,6 +2530,120 @@ mod tests {
     }
 
     #[test]
+    fn devin_launches_its_documented_acp_subcommand() {
+        let launch = launch_for(ProviderKind::Devin, None).unwrap();
+        assert_eq!(launch.args, ["acp"]);
+        assert!(launch.env.is_empty());
+    }
+
+    #[test]
+    fn advertised_model_option_prefers_model_id_over_provider_switch() {
+        let provider = select_config_option(
+            "provider",
+            SessionConfigOptionCategory::Model,
+            "gateway",
+            &["gateway", "codex"],
+        );
+        let model = select_config_option(
+            "model",
+            SessionConfigOptionCategory::Model,
+            "adaptive",
+            &["adaptive", "claude-opus-4-6-thinking"],
+        );
+
+        assert_eq!(
+            advertised_model_option(&[provider, model]).map(|option| option.id.to_string()),
+            Some("model".to_owned())
+        );
+    }
+
+    #[test]
+    fn advertised_model_option_accepts_category_less_models_id() {
+        let option = SessionConfigOption::select(
+            "models".to_owned(),
+            "Model".to_owned(),
+            "adaptive".to_owned(),
+            vec![SessionConfigSelectOption::new(
+                "adaptive".to_owned(),
+                "adaptive",
+            )],
+        );
+
+        assert_eq!(
+            advertised_model_option(&[option]).map(|option| option.id.to_string()),
+            Some("models".to_owned())
+        );
+    }
+
+    #[test]
+    fn advertised_model_config_id_falls_back_to_model() {
+        assert_eq!(advertised_model_config_id(&[]), "model");
+    }
+
+    #[test]
+    fn missing_acp_method_matches_standard_and_devin_error_shapes() {
+        assert!(is_missing_acp_method(
+            &agent_client_protocol::Error::method_not_found()
+        ));
+        assert!(is_missing_acp_method(&agent_client_protocol::Error::new(
+            -32002,
+            "Method not found"
+        )));
+        assert!(!is_missing_acp_method(
+            &agent_client_protocol::Error::invalid_params()
+        ));
+        assert!(!is_missing_acp_method(&agent_client_protocol::Error::new(
+            -32602,
+            "unknown model"
+        )));
+    }
+
+    #[test]
+    fn devin_catalog_uses_the_advertised_model_option() {
+        let mode = select_config_option(
+            "mode",
+            SessionConfigOptionCategory::Mode,
+            "accept-edits",
+            &["accept-edits", "ask"],
+        );
+        let model = select_config_option(
+            "model",
+            SessionConfigOptionCategory::Model,
+            "swe-1-6-slow",
+            &["swe-1-6-slow"],
+        );
+        let models = models_from_session_config_options(&[mode, model]);
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0].id, "swe-1-6-slow");
+        assert_eq!(models[0].name, "swe-1-6-slow");
+        assert!(models[0].is_default);
+    }
+
+    #[test]
+    fn devin_maps_adaptive_to_the_advertised_current_model() {
+        let option = select_config_option(
+            "model",
+            SessionConfigOptionCategory::Model,
+            "swe-1-6-slow",
+            &["swe-1-6-slow", "swe-1-6"],
+        );
+        assert_eq!(
+            resolve_devin_model(Some(&option), "adaptive").as_deref(),
+            Some("swe-1-6-slow")
+        );
+        assert_eq!(
+            resolve_devin_model(Some(&option), "swe-1-6").as_deref(),
+            Some("swe-1-6")
+        );
+        assert_eq!(resolve_devin_model(Some(&option), "opus"), None);
+        assert_eq!(resolve_devin_model(None, "adaptive"), None);
+        assert_eq!(
+            resolve_devin_model(None, "swe-1-6-slow").as_deref(),
+            Some("swe-1-6-slow")
+        );
+    }
+
+    #[test]
     fn fx_model_option_ignores_provider_selector_in_same_category() {
         let provider = select_config_option(
             "provider",
@@ -2523,6 +2914,7 @@ mod tests {
                 SessionNotification::new("s", update),
                 &events,
                 &mut state,
+                None,
             )
             .unwrap();
         }
@@ -2565,6 +2957,7 @@ mod tests {
                 SessionNotification::new("s", update),
                 &events,
                 &mut state,
+                None,
             )
             .unwrap();
         }
@@ -2574,6 +2967,50 @@ mod tests {
         assert!(matches!(&seen[0], DriverEvent::TextDelta(text) if text == "Hi! How can I help?"));
         assert!(matches!(&seen[1], DriverEvent::TextDelta(text) if text.starts_with("[context]")));
         assert!(state.produced_content);
+    }
+
+    #[test]
+    fn session_info_update_forwards_a_generated_title() {
+        let (events, event_rx) = crossbeam_channel::unbounded();
+        let mut state = AcpStreamState::default();
+        let update = serde_json::from_value(json!({
+            "sessionUpdate": "session_info_update",
+            "title": "  Polish the native agent interface  "
+        }))
+        .unwrap();
+        handle_session_update(
+            ProviderKind::Devin,
+            SessionNotification::new("s", update),
+            &events,
+            &mut state,
+            Some("build a really polished local agent interface for rust"),
+        )
+        .unwrap();
+        assert!(matches!(
+            event_rx.try_recv().unwrap(),
+            DriverEvent::AutoTitleUpdated(Some(title))
+                if title.trim() == "Polish the native agent interface"
+        ));
+    }
+
+    #[test]
+    fn session_info_update_skips_devins_first_prompt_placeholder() {
+        let (events, event_rx) = crossbeam_channel::unbounded();
+        let mut state = AcpStreamState::default();
+        let update = serde_json::from_value(json!({
+            "sessionUpdate": "session_info_update",
+            "title": "hi"
+        }))
+        .unwrap();
+        handle_session_update(
+            ProviderKind::Devin,
+            SessionNotification::new("s", update),
+            &events,
+            &mut state,
+            Some("hi"),
+        )
+        .unwrap();
+        assert!(event_rx.try_recv().is_err());
     }
 
     #[test]

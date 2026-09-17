@@ -286,6 +286,19 @@ fn agent_arguments(
             push(&mut args, "--profile");
             push(&mut args, "headless");
         }
+        // Non-interactive `--print` cannot show Devin's workspace-trust prompt,
+        // so the trust check is skipped. `--print --` keeps the subject as a
+        // trailing positional rather than `--print`'s optional value.
+        ProviderKind::Devin => {
+            if let Some(model) = model {
+                push(&mut args, "--model");
+                push(&mut args, model);
+            }
+            push(&mut args, "--respect-workspace-trust");
+            push(&mut args, "false");
+            push(&mut args, "--print");
+            push(&mut args, "--");
+        }
         ProviderKind::Fx => {
             push(&mut args, "ask");
             push(&mut args, "--no-save");
@@ -791,6 +804,12 @@ mod tests {
                 }
                 ProviderKind::DeepSeek => {
                     assert!(has_pair(&args, "--profile", "headless"));
+                }
+                ProviderKind::Devin => {
+                    assert!(has_pair(&args, "--respect-workspace-trust", "false"));
+                    assert!(has(&args, "--print"));
+                    assert!(has(&args, "--"));
+                    assert!(has_pair(&args, "--model", "model"));
                 }
                 ProviderKind::Fx => {
                     assert_eq!(args.first().and_then(|arg| arg.to_str()), Some("ask"));
