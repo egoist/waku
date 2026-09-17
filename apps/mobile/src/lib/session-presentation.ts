@@ -169,6 +169,7 @@ export function providerLabel(provider: ProviderKind): string {
     codex: 'Codex',
     cursor: 'Cursor',
     deepSeek: 'DeepSeek',
+    droid: 'Droid',
     fx: 'Fx',
     openCode: 'OpenCode',
     openCode2: 'OpenCode 2',
