@@ -209,6 +209,9 @@ providers.checked_minutes_ago: "%{count} 分钟前检查过"
 providers.checked_hours_ago: "%{count} 小时前检查过"
 computer_use.allow_apps: 允许 Waku 操作其他应用
 computer_use.availability: Codex、OpenCode、OpenCode 2、Grok 和 Pi 支持电脑操作功能
+computer_use.desktop_access: 桌面权限
+computer_use.windows_access_description: 操作当前 Windows 桌面会话中的应用。Windows 可能会限制对提权应用和安全桌面的访问
+computer_use.linux_access_description: 操作当前 Linux 桌面会话中的应用。截取和输入功能的支持情况取决于合成器和辅助功能服务
 computer_use.macos_access: macOS 权限
 computer_use.helper_access: 请向 Waku 的独立控制助手 %{helper} 授予权限
 computer_use.screen_recording: 屏幕录制
@@ -386,6 +389,11 @@ activity.plan_update_failed: 更新计划失败
 activity.activity: 操作
 activity.tool: 工具
 activity.plan_updated: 计划已更新
+activity.compacting_context: 正在压缩上下文
+activity.compacted_context: 已压缩上下文
+activity.compaction_failed: 上下文压缩失败
+activity.provider_retrying: 正在重试请求
+activity.background_shell: 后台 Shell
 activity.output_truncated: "\n\n… 输出已截断"
 activity.thought: 思考
 activity.thoughts: 思考
