@@ -80,6 +80,10 @@ pub fn user_skill_locations() -> Vec<SkillLocation> {
         home_join(".cursor/skills"),
     );
     push(
+        SkillSource::Provider(ProviderKind::Devin),
+        dirs::config_dir().map(|dir| dir.join("devin/skills")),
+    );
+    push(
         SkillSource::Provider(ProviderKind::Fx),
         home_join(".fx/skills"),
     );
@@ -115,6 +119,7 @@ pub fn project_skill_locations(project_root: &Path, project_name: &str) -> Vec<S
             SkillSource::Provider(ProviderKind::Cursor),
             ".cursor/skills",
         ),
+        (SkillSource::Provider(ProviderKind::Devin), ".devin/skills"),
         (SkillSource::Provider(ProviderKind::Fx), "skills"),
         (SkillSource::Provider(ProviderKind::Pi), ".pi/skills"),
         (SkillSource::Provider(ProviderKind::OhMyPi), ".omp/skills"),
@@ -609,6 +614,7 @@ mod tests {
             ".codex/skills",
             ".config/opencode/skills",
             ".cursor/skills",
+            "devin/skills",
             ".pi/agent/skills",
             ".config/agents/skills",
         ] {
@@ -625,6 +631,7 @@ mod tests {
             ".codex/skills",
             ".opencode/skills",
             ".cursor/skills",
+            ".devin/skills",
             ".pi/skills",
         ] {
             let expected = project_root.join(expected);

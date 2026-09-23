@@ -543,6 +543,7 @@ impl Waku {
             SkillSource::Provider(ProviderKind::Claude),
             SkillSource::Provider(ProviderKind::Codex),
             SkillSource::Provider(ProviderKind::Cursor),
+            SkillSource::Provider(ProviderKind::Devin),
             SkillSource::Provider(ProviderKind::Fx),
             SkillSource::Provider(ProviderKind::OpenCode),
             SkillSource::Provider(ProviderKind::Pi),

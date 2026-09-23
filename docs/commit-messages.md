@@ -74,6 +74,7 @@ argument**; `NO_COLOR=1` and `CI=1` are set for all of them.
 | Codex CLI | `codex exec` | `--sandbox read-only --ephemeral --color never --skip-git-repo-check` | pinned `gpt-5.6-luna` | pinned `none`, via `-c` |
 | Cursor CLI | `cursor-agent` | `--print --output-format text --mode ask --sandbox enabled --trust` | `--model` | — |
 | DeepSeek Harness | `dsh` | `--profile headless` | — | — |
+| Devin CLI | `devin` | `--respect-workspace-trust false --print --` | `--model` | — |
 | Fx | `fx ask` | `--no-save --no-color --` | — | — |
 | OpenCode | `opencode run` | `--pure --agent plan` | `--model` | `--variant` |
 | Grok Build | `grok` | `--single <prompt> --output-format plain --permission-mode plan --tools "" --no-memory --no-subagents --disable-web-search --verbatim` | `--model` | `--reasoning-effort` |
@@ -102,6 +103,11 @@ Where a provider is not simply "flags plus prompt":
 - **DeepSeek** gets only `--profile headless`, Harness's one-shot stdout-only
   client. It has no tool switch — the prompt's "do not call tools" is the whole
   guard, which holds because all context is inlined.
+- **Devin** is prompt-last after `--`. `--print` cannot show the
+  workspace-trust prompt, so `--respect-workspace-trust false` skips it. There
+  is no tool or session switch to turn off; the prompt's "do not call tools" is
+  the guard, as with DeepSeek and Kimi. `--sandbox` is a research-preview flag
+  and is not passed.
 - **Grok** is the exception to prompt-last: the prompt is the value of
   `--single` and the function returns early, so it is never appended twice
   ([git_commit.rs:303](../crates/waku-core/src/git_commit.rs#L303)).
