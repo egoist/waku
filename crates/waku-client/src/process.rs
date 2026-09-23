@@ -17,7 +17,7 @@ use uuid::Uuid;
 use crate::DaemonClient;
 use waku_protocol::{
     APP_EXECUTABLE_ENV, Command, DAEMON_TOKEN_ENV, DaemonReady, DaemonSettings, PROTOCOL_VERSION,
-    ResponsePayload,
+    ReplayCursor, ResponsePayload,
 };
 const START_TIMEOUT: Duration = Duration::from_secs(15);
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(1);
@@ -129,6 +129,7 @@ pub fn parse_allowed_origins(text: &str) -> anyhow::Result<Vec<String>> {
 pub struct DaemonProcess {
     client: DaemonClient,
     child: Child,
+    address: String,
 }
 
 impl DaemonProcess {
@@ -232,11 +233,41 @@ impl DaemonProcess {
                 return Err(error);
             }
         };
-        Ok(Self { client, child })
+        Ok(Self {
+            client,
+            child,
+            address: client_address,
+        })
     }
 
     pub fn client(&self) -> DaemonClient {
         self.client.clone()
+    }
+
+    pub fn address(&self) -> &str {
+        &self.address
+    }
+
+    pub(crate) fn replace_client(&mut self, client: DaemonClient) {
+        self.client = client;
+    }
+
+    #[cfg(test)]
+    fn for_test(client: DaemonClient, address: String) -> Self {
+        #[cfg(unix)]
+        let child = std::process::Command::new("true")
+            .spawn()
+            .expect("`true` is required for tests");
+        #[cfg(windows)]
+        let child = std::process::Command::new("cmd")
+            .args(["/c", "exit", "0"])
+            .spawn()
+            .expect("cmd is required for tests");
+        Self {
+            client,
+            child,
+            address,
+        }
     }
 
     fn has_exited(&mut self) -> bool {
@@ -310,7 +341,11 @@ struct SupervisorInner {
 }
 
 enum DaemonTarget {
-    Local(DaemonProcess),
+    Local {
+        process: DaemonProcess,
+        address: String,
+        token: String,
+    },
     Restarting(DaemonClient),
     Remote {
         client: DaemonClient,
@@ -322,7 +357,7 @@ enum DaemonTarget {
 impl DaemonTarget {
     fn client(&self) -> DaemonClient {
         match self {
-            Self::Local(process) => process.client(),
+            Self::Local { process, .. } => process.client(),
             Self::Restarting(client) => client.clone(),
             Self::Remote { client, .. } => client.clone(),
         }
@@ -354,8 +389,14 @@ impl DaemonSupervisor {
         let process = DaemonProcess::spawn_configured(executable, exposure.clone())?;
         let settings = read_settings(&process.client())?;
         let initial_stamp = ExecutableStamp::read(executable)?;
+        let address = process.address().to_owned();
+        let token = exposure.token.clone();
         let supervisor = Self::from_target(
-            DaemonTarget::Local(process),
+            DaemonTarget::Local {
+                process,
+                address,
+                token,
+            },
             Some(executable.to_owned()),
             Some(exposure),
             settings,
@@ -503,6 +544,40 @@ impl Drop for DaemonSupervisor {
     }
 }
 
+fn local_reconnect_params(target: &DaemonTarget) -> Option<(String, String, Vec<ReplayCursor>)> {
+    match target {
+        DaemonTarget::Local {
+            process,
+            address,
+            token,
+        } if process.client().is_disconnected() => Some((
+            address.clone(),
+            token.clone(),
+            process.client().last_sequences(),
+        )),
+        _ => None,
+    }
+}
+
+fn replace_local_client(target: &mut DaemonTarget, replacement: DaemonClient) -> bool {
+    match target {
+        DaemonTarget::Local { process, .. } => {
+            process.replace_client(replacement);
+            true
+        }
+        _ => false,
+    }
+}
+
+fn try_local_reconnect(
+    target: &mut DaemonTarget,
+    connect: &mut impl FnMut(&str, String, Vec<ReplayCursor>) -> anyhow::Result<DaemonClient>,
+) -> Option<DaemonClient> {
+    let (address, token, resume_from) = local_reconnect_params(target)?;
+    let replacement = connect(&address, token, resume_from).ok()?;
+    replace_local_client(target, replacement.clone()).then_some(replacement)
+}
+
 fn monitor_daemon(
     weak_inner: std::sync::Weak<SupervisorInner>,
     mut active_stamp: Option<ExecutableStamp>,
@@ -558,8 +633,41 @@ fn monitor_daemon(
                 .retain(|subscriber| subscriber.send(replacement.clone()).is_ok());
             continue;
         }
+        let local_reconnect = {
+            let _restart = inner.restart.lock();
+            let mut target = inner.target.lock();
+            let disconnected = match &*target {
+                DaemonTarget::Local { process, .. } if process.client().is_disconnected() => {
+                    Some(process.client().clone())
+                }
+                _ => None,
+            };
+            let Some(disconnected) = disconnected else {
+                continue;
+            };
+            let still_current = matches!(
+                &*target,
+                DaemonTarget::Local { process, .. }
+                    if process.client().same_connection(&disconnected)
+                        && process.client().is_disconnected()
+            );
+            if !still_current {
+                continue;
+            }
+            let mut connect = |address: &str, token: String, resume_from: Vec<ReplayCursor>| {
+                DaemonClient::connect_with_resume(address, token, resume_from)
+            };
+            try_local_reconnect(&mut *target, &mut connect)
+        };
+        if let Some(replacement) = local_reconnect {
+            inner
+                .client_updates
+                .lock()
+                .retain(|subscriber| subscriber.send(replacement.clone()).is_ok());
+            continue;
+        }
         let process_exited = match &mut *inner.target.lock() {
-            DaemonTarget::Local(process) => process.has_exited(),
+            DaemonTarget::Local { process, .. } => process.has_exited(),
             DaemonTarget::Restarting(_) => true,
             DaemonTarget::Remote { .. } => continue,
         };
@@ -604,12 +712,12 @@ fn replace_local_daemon(
                 bail!("the connected daemon is managed outside Waku Desktop")
             }
             DaemonTarget::Restarting(_) => None,
-            DaemonTarget::Local(process) => {
+            DaemonTarget::Local { process, .. } => {
                 let disconnected = process.client();
                 let previous =
                     std::mem::replace(&mut *target, DaemonTarget::Restarting(disconnected));
                 match previous {
-                    DaemonTarget::Local(process) => Some(process),
+                    DaemonTarget::Local { process, .. } => Some(process),
                     _ => unreachable!("local daemon target changed while locked"),
                 }
             }
@@ -620,7 +728,13 @@ fn replace_local_daemon(
     drop(previous);
     let replacement = DaemonProcess::spawn_configured(executable, exposure.clone())?;
     let client = replacement.client();
-    *inner.target.lock() = DaemonTarget::Local(replacement);
+    let address = replacement.address().to_owned();
+    let token = exposure.token.clone();
+    *inner.target.lock() = DaemonTarget::Local {
+        process: replacement,
+        address,
+        token,
+    };
     inner
         .client_updates
         .lock()
@@ -710,5 +824,115 @@ mod tests {
             "127.0.0.1:34123"
         );
         assert_eq!(desktop_client_address("[::]:34123").unwrap(), "[::1]:34123");
+    }
+
+    #[test]
+    fn local_reconnect_params_requires_disconnected_client() {
+        let disconnected = DaemonClient::disconnected_for_test(vec![ReplayCursor {
+            session_id: Uuid::from_u128(1),
+            runtime_id: Uuid::from_u128(2),
+            epoch: Uuid::from_u128(3),
+            sequence: 5,
+        }]);
+        let local = DaemonTarget::Local {
+            process: DaemonProcess::for_test(disconnected.clone(), "127.0.0.1:1234".into()),
+            address: "127.0.0.1:1234".into(),
+            token: "token-a".into(),
+        };
+        let (address, token, resume_from) = local_reconnect_params(&local).unwrap();
+        assert_eq!(address, "127.0.0.1:1234");
+        assert_eq!(token, "token-a");
+        assert_eq!(resume_from.len(), 1);
+        assert_eq!(resume_from[0].session_id, Uuid::from_u128(1));
+        assert_eq!(resume_from[0].runtime_id, Uuid::from_u128(2));
+        assert_eq!(resume_from[0].epoch, Uuid::from_u128(3));
+        assert_eq!(resume_from[0].sequence, 5);
+    }
+
+    #[test]
+    fn local_reconnect_params_skips_connected_and_remote_targets() {
+        // Remote target is never considered for local reconnect.
+        let remote = DaemonTarget::Remote {
+            client: DaemonClient::disconnected_for_test(Vec::new()),
+            address: "127.0.0.1:1234".into(),
+            token: "token-a".into(),
+        };
+        assert!(local_reconnect_params(&remote).is_none());
+    }
+
+    #[test]
+    fn replace_local_client_swaps_the_client() {
+        let original = DaemonClient::disconnected_for_test(Vec::new());
+        let replacement = DaemonClient::disconnected_for_test(Vec::new());
+        let mut local = DaemonTarget::Local {
+            process: DaemonProcess::for_test(original.clone(), "127.0.0.1:1234".into()),
+            address: "127.0.0.1:1234".into(),
+            token: "token-a".into(),
+        };
+        assert!(replace_local_client(&mut local, replacement.clone()));
+        match local {
+            DaemonTarget::Local { process, .. } => {
+                assert!(process.client().same_connection(&replacement));
+                assert!(!process.client().same_connection(&original));
+            }
+            _ => panic!("expected local target"),
+        }
+    }
+
+    #[test]
+    fn try_local_reconnect_uses_injected_connector() {
+        let session_id = Uuid::from_u128(1);
+        let runtime_id = Uuid::from_u128(2);
+        let epoch = Uuid::from_u128(3);
+        let original = DaemonClient::disconnected_for_test(vec![ReplayCursor {
+            session_id,
+            runtime_id,
+            epoch,
+            sequence: 5,
+        }]);
+        let replacement = DaemonClient::disconnected_for_test(Vec::new());
+        let mut local = DaemonTarget::Local {
+            process: DaemonProcess::for_test(original.clone(), "127.0.0.1:1234".into()),
+            address: "127.0.0.1:1234".into(),
+            token: "token-a".into(),
+        };
+
+        let mut calls: Vec<(String, String, Vec<ReplayCursor>)> = Vec::new();
+        let replacement_to_return = replacement.clone();
+        let mut connect = |address: &str, token: String, resume_from: Vec<ReplayCursor>| {
+            calls.push((address.to_string(), token, resume_from));
+            Ok(replacement_to_return.clone())
+        };
+
+        let result = try_local_reconnect(&mut local, &mut connect).unwrap();
+        assert!(result.same_connection(&replacement));
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, "127.0.0.1:1234");
+        assert_eq!(calls[0].1, "token-a");
+        assert_eq!(calls[0].2.len(), 1);
+        assert_eq!(calls[0].2[0].session_id, session_id);
+        assert_eq!(calls[0].2[0].sequence, 5);
+
+        match local {
+            DaemonTarget::Local { process, .. } => {
+                assert!(process.client().same_connection(&replacement));
+            }
+            _ => panic!("expected local target"),
+        }
+    }
+
+    #[test]
+    fn try_local_reconnect_returns_none_when_already_connected() {
+        // We cannot create a genuinely connected client without a server, but we
+        // can simulate the "no reconnect needed" case by using a Remote target.
+        let mut remote = DaemonTarget::Remote {
+            client: DaemonClient::disconnected_for_test(Vec::new()),
+            address: "127.0.0.1:1234".into(),
+            token: "token-a".into(),
+        };
+        let mut connect = |_address: &str, _token: String, _resume_from: Vec<ReplayCursor>| {
+            panic!("connector should not be called")
+        };
+        assert!(try_local_reconnect(&mut remote, &mut connect).is_none());
     }
 }
