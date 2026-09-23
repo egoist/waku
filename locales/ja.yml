@@ -218,6 +218,9 @@ providers.checked_hours_ago: "%{count} 時間前に確認済み"
 
 computer_use.allow_apps: Waku にアプリの操作を許可
 computer_use.availability: コンピュータ操作は Codex、OpenCode、OpenCode 2、Grok、Pi で利用できます
+computer_use.desktop_access: デスクトップのアクセス権
+computer_use.windows_access_description: 現在の Windows デスクトップセッションのアプリを操作します。管理者権限で実行中のアプリやセキュアデスクトップへのアクセスは Windows によって制限される場合があります
+computer_use.linux_access_description: 現在の Linux デスクトップセッションのアプリを操作します。画面の取り込みと入力への対応は、コンポジターとアクセシビリティサービスによって異なります
 computer_use.macos_access: macOS のアクセス権
 computer_use.helper_access: Waku の分離された操作ヘルパー %{helper} にアクセスを許可してください
 computer_use.screen_recording: 画面収録
@@ -404,6 +407,11 @@ activity.plan_update_failed: プランの更新に失敗しました
 activity.activity: アクティビティ
 activity.tool: ツール
 activity.plan_updated: プランを更新しました
+activity.compacting_context: コンテキストを圧縮中
+activity.compacted_context: コンテキストを圧縮しました
+activity.compaction_failed: コンテキストの圧縮に失敗しました
+activity.provider_retrying: リクエストを再試行中
+activity.background_shell: バックグラウンドシェル
 activity.output_truncated: "\n\n… 出力は省略されました"
 activity.thought: 思考
 activity.thoughts: 思考
