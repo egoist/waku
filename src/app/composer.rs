@@ -861,10 +861,12 @@ impl Waku {
                 .flex()
                 .items_center()
                 .gap(px(6.0))
+                // Same 12px mark the MenuChip trigger renders, so the control
+                // does not visibly resize when a busy session locks the picker.
                 .child(provider_mark(
                     &theme,
                     provider,
-                    10.5,
+                    12.0,
                     provider_color(&theme, provider).opacity(0.9),
                 ))
                 .child(

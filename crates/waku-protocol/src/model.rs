@@ -16,6 +16,7 @@ pub enum ProviderKind {
     Codex,
     Cursor,
     DeepSeek,
+    Droid,
     Fx,
     OpenCode,
     OpenCode2,
@@ -26,12 +27,13 @@ pub enum ProviderKind {
 }
 
 impl ProviderKind {
-    pub const ALL: [Self; 12] = [
+    pub const ALL: [Self; 13] = [
         Self::Amp,
         Self::Claude,
         Self::Codex,
         Self::Cursor,
         Self::DeepSeek,
+        Self::Droid,
         Self::Fx,
         Self::OpenCode,
         Self::OpenCode2,
@@ -48,6 +50,7 @@ impl ProviderKind {
             Self::Codex => "codex",
             Self::Cursor => "cursor",
             Self::DeepSeek => "deepseek",
+            Self::Droid => "droid",
             Self::Fx => "fx",
             Self::OpenCode => "opencode",
             Self::OpenCode2 => "opencode2",
@@ -65,6 +68,7 @@ impl ProviderKind {
             Self::Codex => "Codex CLI",
             Self::Cursor => "Cursor CLI",
             Self::DeepSeek => "DeepSeek Harness",
+            Self::Droid => "Droid",
             Self::Fx => "Fx",
             Self::OpenCode => "OpenCode",
             Self::OpenCode2 => "OpenCode 2",
@@ -82,6 +86,7 @@ impl ProviderKind {
             Self::Codex => "Codex",
             Self::Cursor => "Cursor",
             Self::DeepSeek => "DeepSeek",
+            Self::Droid => "Droid",
             Self::Fx => "Fx",
             Self::OpenCode => "OpenCode",
             Self::OpenCode2 => "OpenCode 2",
@@ -101,6 +106,7 @@ impl ProviderKind {
             // shared by other CLIs. The backward-compatible alias is unambiguous.
             Self::Cursor => "cursor-agent",
             Self::DeepSeek => "dsh",
+            Self::Droid => "droid",
             Self::Fx => "fx",
             Self::OpenCode => "opencode",
             Self::OpenCode2 => "opencode2",
@@ -155,6 +161,7 @@ impl ProviderKind {
                 | Self::Codex
                 | Self::Cursor
                 | Self::DeepSeek
+                | Self::Droid
                 | Self::Fx
                 | Self::OpenCode
                 | Self::OpenCode2
@@ -202,6 +209,9 @@ pub enum ProviderResumeCursor {
     DeepSeek {
         session_id: String,
     },
+    Droid {
+        session_id: String,
+    },
     Fx {
         session_id: String,
     },
@@ -240,6 +250,7 @@ impl ProviderResumeCursor {
                 fork_context: None,
             },
             ProviderKind::DeepSeek => Self::DeepSeek { session_id: id },
+            ProviderKind::Droid => Self::Droid { session_id: id },
             ProviderKind::Fx => Self::Fx { session_id: id },
             ProviderKind::OpenCode => Self::OpenCode { session_id: id },
             ProviderKind::OpenCode2 => Self::OpenCode2 {
@@ -266,6 +277,7 @@ impl ProviderResumeCursor {
             Self::Codex { .. } => ProviderKind::Codex,
             Self::Cursor { .. } => ProviderKind::Cursor,
             Self::DeepSeek { .. } => ProviderKind::DeepSeek,
+            Self::Droid { .. } => ProviderKind::Droid,
             Self::Fx { .. } => ProviderKind::Fx,
             Self::OpenCode { .. } => ProviderKind::OpenCode,
             Self::OpenCode2 { .. } => ProviderKind::OpenCode2,
@@ -282,6 +294,7 @@ impl ProviderResumeCursor {
             Self::Claude { session_id, .. }
             | Self::Cursor { session_id, .. }
             | Self::DeepSeek { session_id }
+            | Self::Droid { session_id }
             | Self::Fx { session_id }
             | Self::OpenCode { session_id }
             | Self::OpenCode2 { session_id, .. }
@@ -4224,7 +4237,7 @@ mod tests {
 
     #[test]
     fn all_contains_every_provider_kind() {
-        assert_eq!(ProviderKind::ALL.len(), 12);
+        assert_eq!(ProviderKind::ALL.len(), 13);
         let ids: std::collections::HashSet<_> =
             ProviderKind::ALL.iter().map(|kind| kind.id()).collect();
         assert_eq!(

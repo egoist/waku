@@ -58,6 +58,12 @@ pub fn fallback_models(provider: ProviderKind) -> Vec<ProviderModel> {
         ProviderKind::Cursor => {
             vec![ProviderModel::new("auto", tr!("model_option.auto")).default()]
         }
+        // Droid's catalog is account-specific (BYOK routes and open models
+        // come and go), so only the Factory-router default stands in before
+        // discovery answers; `auto` is valid on every account.
+        ProviderKind::Droid => {
+            vec![ProviderModel::new("auto", tr!("model_option.auto")).default()]
+        }
         ProviderKind::DeepSeek
         | ProviderKind::Fx
         | ProviderKind::Grok
