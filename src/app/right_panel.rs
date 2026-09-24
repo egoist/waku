@@ -17,6 +17,26 @@ pub(super) struct WorkingTreeEntry {
     depth: usize,
 }
 
+fn working_tree_context_menu_items(
+    absolute_path: PathBuf,
+    waku: WeakEntity<Waku>,
+) -> Vec<MenuItem> {
+    let copy_path = absolute_path.clone();
+    let add_path = absolute_path;
+    vec![
+        MenuItem::new(tr!("skills.copy_path"), move |_, cx| {
+            cx.write_to_clipboard(ClipboardItem::new_string(
+                copy_path.display().to_string(),
+            ));
+        }),
+        MenuItem::new(tr!("files.add_to_chat"), move |_, cx| {
+            let _ = waku.update(cx, |waku, cx| {
+                waku.stage_daemon_path_attachment(add_path.clone(), cx);
+            });
+        }),
+    ]
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum TranscriptLinkRoute {
     ProjectFile(String),
@@ -1405,6 +1425,36 @@ mod tests {
         }
     }
 
+    #[test]
+    fn working_tree_add_to_chat_uses_daemon_path_import() {
+        let source = include_str!("right_panel.rs");
+        let start = source
+            .find("\n    fn render_right_panel_working_tree(")
+            .expect("render fn");
+        let body = &source[start + 1..];
+        let end = body.find("\n    fn ").unwrap_or(body.len());
+        let body = &body[..end];
+
+        assert!(body.contains("context_menu("));
+        assert!(body.contains("working_tree_context_menu_items"));
+        assert!(
+            !body.contains("stage_attachment_paths"),
+            "working-tree Add to Chat must import on the daemon host, not the client filesystem"
+        );
+
+        let helper_start = source
+            .find("\nfn working_tree_context_menu_items(")
+            .expect("menu helper");
+        let helper_body = &source[helper_start + 1..];
+        let helper_end = helper_body.find("\n\n").unwrap_or(helper_body.len());
+        let helper_body = &helper_body[..helper_end];
+        assert!(helper_body.contains("stage_daemon_path_attachment"));
+        assert!(!helper_body.contains("stage_attachment_paths"));
+
+        let composer = include_str!("composer.rs");
+        assert!(composer.contains("Command::ImportPathAttachment"));
+    }
+
     /// Same guard for the file editor, which `render_right_panel_file` reaches
     /// on every frame that draws a file tab. Opening a large file used to read
     /// it inline, so the frame that revealed the tab paid for the whole file.
@@ -2735,12 +2785,16 @@ impl Waku {
         let entries = self.right_panel_working_tree.clone();
 
         let mut list = div().flex().flex_col().py(px(6.0));
+        let waku = cx.entity().downgrade();
         for entry in entries {
             let relative_path = entry.relative_path.clone();
             let absolute_path = entry.absolute_path.clone();
             let is_dir = entry.is_dir;
             let selected = selected_path == Some(relative_path.as_str());
-            let row = div()
+            let menu = self.menu_handle(format!("working-tree-{relative_path}"), cx);
+            let keyboard_menu = menu.clone();
+            let row_focus = menu.trigger_focus_handle().clone();
+            let mut row = div()
                 .id(SharedString::from(format!(
                     "right-panel-file-{relative_path}"
                 )))
@@ -2753,6 +2807,9 @@ impl Waku {
                 .items_center()
                 .gap(px(6.0))
                 .cursor_default()
+                .track_focus(&row_focus)
+                .tab_index(0)
+                .focus_visible(|style| style.border_1().border_color(theme.accent))
                 .when(selected, |element| element.bg(theme.overlay_strong))
                 .hover(|element| element.bg(theme.overlay))
                 .child(if is_dir {
@@ -2781,20 +2838,57 @@ impl Waku {
                         .text_color(theme.text_secondary)
                         .child(entry.name),
                 );
-            list = if is_dir {
-                list.child(row.on_click(cx.listener(move |this, _, _, cx| {
-                    if !this.right_panel_expanded_paths.remove(&absolute_path) {
-                        this.right_panel_expanded_paths
-                            .insert(absolute_path.clone());
-                    }
-                    this.refresh_right_panel_working_tree(cx);
-                    cx.notify();
-                })))
+            if is_dir {
+                let toggle_path = absolute_path.clone();
+                row = row
+                    .on_key_down(cx.listener(move |this, event: &KeyDownEvent, window, cx| {
+                        let key = event.keystroke.key.as_str();
+                        if key == "f10" && event.keystroke.modifiers.shift {
+                            keyboard_menu.open_context_menu(window, cx);
+                            cx.stop_propagation();
+                        } else if matches!(key, "enter" | "space") {
+                            if !this.right_panel_expanded_paths.remove(&toggle_path) {
+                                this.right_panel_expanded_paths.insert(toggle_path.clone());
+                            }
+                            this.refresh_right_panel_working_tree(cx);
+                            cx.notify();
+                            cx.stop_propagation();
+                        }
+                    }))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        if !this.right_panel_expanded_paths.remove(&absolute_path) {
+                            this.right_panel_expanded_paths
+                                .insert(absolute_path.clone());
+                        }
+                        this.refresh_right_panel_working_tree(cx);
+                        cx.notify();
+                    }));
             } else {
-                list.child(row.on_click(cx.listener(move |this, _, _, cx| {
-                    this.open_right_panel_file(relative_path.clone(), cx);
-                })))
-            };
+                let open_path = relative_path.clone();
+                let click_path = relative_path.clone();
+                row = row
+                    .on_key_down(cx.listener(move |this, event: &KeyDownEvent, window, cx| {
+                        let key = event.keystroke.key.as_str();
+                        if key == "f10" && event.keystroke.modifiers.shift {
+                            keyboard_menu.open_context_menu(window, cx);
+                            cx.stop_propagation();
+                        } else if matches!(key, "enter" | "space") {
+                            this.open_right_panel_file(open_path.clone(), cx);
+                            cx.stop_propagation();
+                        }
+                    }))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.open_right_panel_file(click_path.clone(), cx);
+                    }));
+            }
+            let menu_path = entry.absolute_path.clone();
+            let menu_waku = waku.clone();
+            list = list.child(context_menu(
+                div().w_full().child(row),
+                SharedString::from(format!("working-tree-menu-{relative_path}")),
+                &menu,
+                move |_| working_tree_context_menu_items(menu_path.clone(), menu_waku.clone()),
+            ));
         }
 
         div()

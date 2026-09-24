@@ -1672,6 +1672,8 @@ files.preparing_editor:
   en: Preparing editor…
 files.preparing_syntax:
   en: Preparing syntax highlighting.
+files.add_to_chat:
+  en: Add to Chat
 
 file_picker.open_project:
   en: Open Project

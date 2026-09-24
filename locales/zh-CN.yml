@@ -808,6 +808,7 @@ files.file_unavailable: 文件不可用
 files.loading_editor: 正在加载编辑器
 files.preparing_editor: 正在准备编辑器…
 files.preparing_syntax: 正在准备语法高亮。
+files.add_to_chat: 添加到聊天
 file_picker.open_project: 打开项目
 file_picker.attach: 添加附件
 file_picker.daemon_folders: 守护进程文件夹

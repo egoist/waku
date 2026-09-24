@@ -850,6 +850,7 @@ files.file_unavailable: ファイルを利用できません
 files.loading_editor: エディタを読み込み中
 files.preparing_editor: エディタを準備中…
 files.preparing_syntax: シンタックスハイライトを準備しています。
+files.add_to_chat: チャットに追加
 file_picker.open_project: プロジェクトを開く
 file_picker.attach: 添付
 file_picker.daemon_folders: デーモンのフォルダ

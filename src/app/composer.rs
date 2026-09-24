@@ -1943,6 +1943,62 @@ impl Waku {
         window.focus(&focus, cx);
     }
 
+    /// Stage a daemon-host path as a composer attachment chip. Tree rows and
+    /// other remote-path entry points use this instead of
+    /// [`Self::stage_attachment_paths`], which reads the client filesystem.
+    pub(super) fn stage_daemon_path_attachment(
+        &mut self,
+        path: PathBuf,
+        cx: &mut Context<Self>,
+    ) {
+        let daemon = self.daemon.clone();
+        let draft_owner = self.selected_composer_draft_key();
+        cx.spawn(async move |waku, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move {
+                    let response = daemon.client().request(
+                        Uuid::nil(),
+                        Uuid::nil(),
+                        waku_client::Command::ImportPathAttachment { path },
+                    )?;
+                    let waku_client::ResponsePayload::AttachmentStored { attachment } =
+                        response
+                    else {
+                        anyhow::bail!("the daemon returned an invalid attachment response");
+                    };
+                    Ok::<_, anyhow::Error>(attachment)
+                })
+                .await;
+            let _ = waku.update(cx, |waku, cx| match result {
+                Ok(attachment) => {
+                    if waku.selected_composer_draft_key() != draft_owner {
+                        return;
+                    }
+                    let is_image = !attachment.is_dir
+                        && is_image_attachment_path(std::path::Path::new(&attachment.name));
+                    let changed = waku.stage_daemon_attachment(
+                        attachment.path,
+                        attachment.name,
+                        attachment.is_dir,
+                        is_image,
+                        attachment.reference,
+                        None,
+                    );
+                    if changed {
+                        waku.schedule_composer_draft_save(cx);
+                        cx.notify();
+                    }
+                }
+                Err(error) => {
+                    waku.show_toast(error.to_string());
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
     fn stage_attachment_paths(&mut self, paths: &[PathBuf], cx: &mut Context<Self>) -> bool {
         if paths.is_empty() {
             return false;
