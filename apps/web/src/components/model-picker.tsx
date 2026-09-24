@@ -5,6 +5,7 @@ import { ProviderIcon, PROVIDERS, providerMeta, WakuIcon } from '@/components/wa
 import { useDaemonSettings, useProviderProbes } from '@/hooks/use-daemon-data'
 import { useI18n } from '@/lib/i18n'
 import {
+  modelPickerProviderState,
   nextModelPickerHighlight,
   selectedModelPickerIndex,
 } from '@/lib/model-picker-presentation'
@@ -66,11 +67,24 @@ export function ModelPicker({
     ...(currentProbe ? { [session.provider]: currentProbe } : {}),
   }) as Partial<Record<ProviderKind, ProviderProbe>>
 
-  const usable = PROVIDERS.filter(({ id }) => {
-    if (lockedProvider && id !== lockedProvider) return false
-    if (id === session.provider) return true
-    return !settings.data?.disabled_providers.includes(id) && probeMap[id]?.installed
-  })
+  const providers = PROVIDERS.map((provider) => ({
+    ...provider,
+    ...modelPickerProviderState({
+      current: provider.id === session.provider,
+      restricted: Boolean(
+        (lockedProvider && provider.id !== lockedProvider)
+        || settings.data?.disabled_providers.includes(provider.id),
+      ),
+      installed: probeMap[provider.id]?.installed,
+      isPending: probes.states[provider.id].isPending,
+    }),
+  }))
+  const usable = providers.filter(({ enabled }) => enabled)
+  const pending = usable.some((provider) => provider.pending && (
+    query.trim() || (tab === 'favorites'
+      ? favorites.some((key) => key.startsWith(`${provider.id}:`))
+      : provider.id === tab)
+  ))
   const rows = (() => {
     const normalized = query.trim().toLowerCase()
     const providers = normalized ? usable : usable.filter(({ id }) => tab === 'favorites' || id === tab)
@@ -159,17 +173,20 @@ export function ModelPicker({
               <WakuIcon className="size-[17px]" name="star" />
             </ModelTab>
             <div className="my-[3px] h-px w-[34px] shrink-0 bg-border" />
-            {PROVIDERS.map((provider) => {
-              const enabled = usable.some((candidate) => candidate.id === provider.id)
+            {providers.map((provider) => {
               return (
                 <ModelTab
                   active={tab === provider.id && !query}
-                  disabled={!enabled}
+                  disabled={!provider.enabled}
                   key={provider.id}
-                  label={provider.name}
+                  label={provider.pending ? `${provider.name} · ${t('common.checking')}` : provider.name}
+                  pending={provider.pending}
                   onClick={() => { setTab(provider.id); setQuery(''); setHighlight(null) }}
                 >
                   <ProviderIcon className="size-[18px]" provider={provider.id} />
+                  {provider.pending && (
+                    <WakuIcon className="absolute bottom-0.5 right-0.5 size-[10px] rounded-full bg-background motion-safe:animate-spin" name="loaderCircle" />
+                  )}
                 </ModelTab>
               )
             })}
@@ -215,13 +232,13 @@ export function ModelPicker({
             </div>
             <div className="min-h-0 flex-1 overflow-y-auto p-[9px]" ref={list}>
               {!rows.length && (
-                <div className="grid h-full place-items-center text-[11.5px] text-[var(--text-ghost)]">
-                  {t(query
-                    ? 'models.none_found'
-                    : tab === 'favorites'
-                      ? 'models.favorite_hint'
-                      : probes.isFetching
-                        ? 'models.loading'
+                <div className="grid h-full place-items-center text-[11.5px] text-[var(--text-ghost)]" role="status">
+                  {t(pending
+                    ? 'models.loading'
+                    : query
+                      ? 'models.none_found'
+                      : tab === 'favorites'
+                        ? 'models.favorite_hint'
                         : 'models.none_reported')}
                 </div>
               )}
@@ -285,12 +302,14 @@ export function ModelPicker({
   )
 }
 
-function ModelTab({ children, label, active, disabled = false, onClick }: { children: React.ReactNode; label: string; active: boolean; disabled?: boolean; onClick: () => void }) {
+function ModelTab({ children, label, active, disabled = false, pending = false, onClick }: { children: React.ReactNode; label: string; active: boolean; disabled?: boolean; pending?: boolean; onClick: () => void }) {
   return (
     <button
       aria-label={label}
-      className={cn('grid size-[38px] shrink-0 place-items-center rounded-[7px] text-[var(--text-tertiary)] outline-none hover:bg-accent focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-35', active && 'bg-accent text-foreground')}
+      aria-busy={pending || undefined}
+      className={cn('relative grid size-[38px] shrink-0 place-items-center rounded-[7px] text-[var(--text-tertiary)] outline-none hover:bg-accent focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-35', active && 'bg-accent text-foreground')}
       disabled={disabled}
+      title={label}
       type="button"
       onClick={onClick}
     >
