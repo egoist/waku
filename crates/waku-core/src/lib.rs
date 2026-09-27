@@ -32,6 +32,7 @@ pub mod cursor_session;
 pub mod daemon;
 pub mod deepseek_pool;
 pub mod deepseek_session;
+pub mod devin_session;
 pub mod driver;
 mod frontmatter;
 pub mod git_branch;
