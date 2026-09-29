@@ -1,5 +1,6 @@
 use std::borrow::Cow;
 use std::cell::Cell;
+use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -21,12 +22,12 @@ use alacritty_terminal::vte::ansi::{Color, NamedColor, Rgb};
 use anyhow::{Context as _, Result};
 use crossbeam_channel::{Receiver, Sender, unbounded};
 use gpui::{
-    App, AppContext, Bounds, ClipboardItem, Context, FocusHandle, Focusable, FontFallbacks,
-    FontStyle, FontWeight, Hsla, InteractiveElement, IntoElement, KeyDownEvent, Keystroke,
-    Modifiers, ModifiersChangedEvent, MouseButton, MouseDownEvent, MouseExitEvent, MouseMoveEvent,
-    MouseUpEvent, ParentElement, Pixels, Point, Render, ScrollDelta, ScrollWheelEvent,
-    SharedString, StrikethroughStyle, Styled, StyledText, Subscription, Task, TextRun,
-    UnderlineStyle, Window, canvas, div, font, px, rgb,
+    App, AppContext, Bounds, ClipboardItem, Context, Entity, FocusHandle, Focusable, FontFallbacks,
+    FontStyle, FontWeight, Hsla, InputHandler, InteractiveElement, IntoElement, KeyDownEvent,
+    Keystroke, Modifiers, ModifiersChangedEvent, MouseButton, MouseDownEvent, MouseExitEvent,
+    MouseMoveEvent, MouseUpEvent, ParentElement, Pixels, Point, Render, ScrollDelta,
+    ScrollWheelEvent, SharedString, StrikethroughStyle, Styled, StyledText, Subscription, Task,
+    TextRun, UTF16Selection, UnderlineStyle, Window, canvas, div, font, point, px, rgb, size,
 };
 use parking_lot::Mutex;
 
@@ -333,6 +334,8 @@ impl TerminalSession {
             && (0..rows as i32).contains(&cursor_row)
             && cursor_column < columns)
             .then_some((cursor_row as usize, cursor_column));
+        let cursor = ((0..rows as i32).contains(&cursor_row) && cursor_column < columns)
+            .then_some((cursor_row as usize, cursor_column));
         let mut cells = vec![TerminalCell::blank(theme); columns * rows];
 
         for indexed in content.display_iter {
@@ -342,10 +345,11 @@ impl TerminalSession {
                 continue;
             }
             let cell = indexed.cell;
-            let mut text = if cell.flags.contains(Flags::WIDE_CHAR_SPACER)
-                || cell.flags.contains(Flags::LEADING_WIDE_CHAR_SPACER)
-                || cell.flags.contains(Flags::HIDDEN)
-            {
+            let spacer = cell
+                .flags
+                .intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER);
+            let wide = cell.flags.contains(Flags::WIDE_CHAR);
+            let mut text = if spacer || cell.flags.contains(Flags::HIDDEN) {
                 " ".to_owned()
             } else {
                 cell.c.to_string()
@@ -383,6 +387,8 @@ impl TerminalSession {
 
             cells[row as usize * columns + column] = TerminalCell {
                 text,
+                spacer,
+                wide,
                 foreground,
                 background,
                 bold: cell.flags.contains(Flags::BOLD),
@@ -395,31 +401,15 @@ impl TerminalSession {
 
         let mut rendered_rows = Vec::with_capacity(rows);
         for row in cells.chunks(columns) {
-            let mut text = String::new();
-            let mut runs: Vec<TerminalRun> = Vec::new();
-            for cell in row {
-                let len = cell.text.len();
-                text.push_str(&cell.text);
-                let style = TerminalRunStyle {
-                    foreground: cell.foreground,
-                    background: cell.background,
-                    bold: cell.bold,
-                    italic: cell.italic,
-                    underline: cell.underline,
-                    strikeout: cell.strikeout,
-                };
-                if let Some(run) = runs.last_mut().filter(|run| run.style == style) {
-                    run.len += len;
-                } else {
-                    runs.push(TerminalRun { len, style });
-                }
-            }
-            rendered_rows.push(TerminalRow { text, runs });
+            rendered_rows.push(TerminalRow {
+                runs: segment_row(row),
+            });
         }
 
         TerminalSnapshot {
             rows: rendered_rows,
             outline_cursor,
+            cursor,
         }
     }
 }
@@ -473,6 +463,10 @@ impl scrollbar::Scrollable for TerminalScrollbarTarget {
 #[derive(Clone)]
 struct TerminalCell {
     text: String,
+    /// Trailing half of a wide (CJK/emoji) glyph: carries no glyph of its own.
+    spacer: bool,
+    /// Leading half of a wide glyph, which spans two grid columns.
+    wide: bool,
     foreground: Hsla,
     background: Hsla,
     bold: bool,
@@ -485,6 +479,8 @@ impl TerminalCell {
     fn blank(theme: Theme) -> Self {
         Self {
             text: " ".into(),
+            spacer: false,
+            wide: false,
             foreground: theme.text,
             background: theme.terminal,
             bold: false,
@@ -506,18 +502,64 @@ struct TerminalRunStyle {
 }
 
 struct TerminalRun {
-    len: usize,
+    text: String,
+    /// Number of grid columns this run occupies; the render lays it out at a
+    /// fixed width so glyphs stay column-aligned even when the fallback font's
+    /// advance differs from the measured cell width.
+    cells: usize,
+    /// A run holding a single wide glyph, pinned to its own column pair.
+    wide: bool,
     style: TerminalRunStyle,
 }
 
 struct TerminalRow {
-    text: String,
     runs: Vec<TerminalRun>,
+}
+
+/// Group a row's cells into positioned segments. A wide glyph becomes its own
+/// segment pinned to a two-column span so the next segment starts on the grid
+/// even though the CJK fallback font's advance is not two mono cells; the
+/// trailing spacer cell is dropped. Adjacent plain cells with the same style
+/// coalesce into one segment.
+fn segment_row(cells: &[TerminalCell]) -> Vec<TerminalRun> {
+    let mut runs: Vec<TerminalRun> = Vec::new();
+    for cell in cells {
+        if cell.spacer {
+            continue;
+        }
+        let style = TerminalRunStyle {
+            foreground: cell.foreground,
+            background: cell.background,
+            bold: cell.bold,
+            italic: cell.italic,
+            underline: cell.underline,
+            strikeout: cell.strikeout,
+        };
+        let merge = !cell.wide
+            && runs
+                .last()
+                .is_some_and(|run| run.style == style && !run.wide);
+        if merge {
+            let run = runs.last_mut().expect("checked above");
+            run.text.push_str(&cell.text);
+            run.cells += 1;
+        } else {
+            runs.push(TerminalRun {
+                text: cell.text.clone(),
+                cells: if cell.wide { 2 } else { 1 },
+                wide: cell.wide,
+                style,
+            });
+        }
+    }
+    runs
 }
 
 struct TerminalSnapshot {
     rows: Vec<TerminalRow>,
     outline_cursor: Option<(usize, usize)>,
+    /// Viewport row/column of the terminal cursor, when it is on screen.
+    cursor: Option<(usize, usize)>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -636,6 +678,8 @@ pub struct TerminalView {
     grid_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
     selecting: bool,
     hovered_link: Option<TerminalLink>,
+    /// In-progress IME composition (preedit) drawn over the cursor cell.
+    marked_text: Option<String>,
     cursor_blink: gpui::Entity<TerminalCursorBlink>,
     cursor_focus_tracking_started: bool,
     context_menu: ContextMenuHandle,
@@ -698,6 +742,7 @@ impl TerminalView {
             grid_bounds: Rc::new(Cell::new(None)),
             selecting: false,
             hovered_link: None,
+            marked_text: None,
             cursor_blink,
             cursor_focus_tracking_started: false,
             context_menu,
@@ -977,6 +1022,66 @@ impl TerminalView {
         cx.notify();
     }
 
+    /// IME committed text (e.g. selected CJK candidate): send it to the PTY
+    /// verbatim. It is already-encoded input, not a paste, so it bypasses
+    /// bracketed-paste framing.
+    fn commit_ime_text(&mut self, text: &str, cx: &mut Context<Self>) {
+        self.clear_marked_text(cx);
+        if text.is_empty() {
+            return;
+        }
+        self.pause_cursor_blink(cx);
+        let Some(session) = &self.session else {
+            return;
+        };
+        session.term.lock().selection = None;
+        session.write(text.as_bytes().to_vec());
+        session.dirty.store(true, Ordering::Release);
+        cx.notify();
+    }
+
+    fn set_marked_text(&mut self, text: &str, cx: &mut Context<Self>) {
+        if text.is_empty() {
+            self.clear_marked_text(cx);
+            return;
+        }
+        self.marked_text = Some(text.to_owned());
+        self.pause_cursor_blink(cx);
+        cx.notify();
+    }
+
+    fn clear_marked_text(&mut self, cx: &mut Context<Self>) {
+        if self.marked_text.take().is_some() {
+            cx.notify();
+        }
+    }
+
+    /// Window bounds of the composition cell, used to place the IME candidate
+    /// window. `range` is an offset within the marked text.
+    fn ime_bounds_for_range(&self, range: Range<usize>) -> Option<Bounds<Pixels>> {
+        let bounds = self.grid_bounds.get()?;
+        let (row, column) = {
+            let session = self.session.as_ref()?;
+            let term = session.term.lock();
+            let content = term.renderable_content();
+            let row = content.cursor.point.line.0 + content.display_offset as i32;
+            let column = content.cursor.point.column.0;
+            if row < 0 || row as usize >= session.grid_size.1 || column >= session.grid_size.0 {
+                return None;
+            }
+            (row as usize, column)
+        };
+        let cell_width = self.cell_width();
+        let origin = point(
+            bounds.origin.x + px((column + range.start) as f32 * cell_width),
+            bounds.origin.y + px(row as f32 * TERMINAL_CELL_HEIGHT),
+        );
+        Some(Bounds::new(
+            origin,
+            size(px(cell_width), px(TERMINAL_CELL_HEIGHT)),
+        ))
+    }
+
     fn select_all(&mut self, cx: &mut Context<Self>) {
         let Some(session) = &self.session else {
             return;
@@ -1058,6 +1163,101 @@ impl Focusable for TerminalView {
     }
 }
 
+/// Routes macOS input-context callbacks (IME composition and committed text)
+/// into the PTY. Without this handler the window's `NSTextInputClient` has no
+/// target while the terminal is focused, so committed CJK text is dropped and
+/// the raw composition keystrokes fall through to [`TerminalView::on_key_down`]
+/// and leak into the shell as ASCII.
+struct TerminalInputHandler {
+    terminal: Entity<TerminalView>,
+}
+
+impl InputHandler for TerminalInputHandler {
+    fn selected_text_range(
+        &mut self,
+        _ignore_disabled_input: bool,
+        _: &mut Window,
+        _: &mut App,
+    ) -> Option<UTF16Selection> {
+        Some(UTF16Selection {
+            range: 0..0,
+            reversed: false,
+        })
+    }
+
+    fn marked_text_range(&mut self, _: &mut Window, cx: &mut App) -> Option<Range<usize>> {
+        self.terminal
+            .read(cx)
+            .marked_text
+            .as_ref()
+            .map(|text| 0..text.encode_utf16().count())
+    }
+
+    fn text_for_range(
+        &mut self,
+        _: Range<usize>,
+        _: &mut Option<Range<usize>>,
+        _: &mut Window,
+        _: &mut App,
+    ) -> Option<String> {
+        None
+    }
+
+    fn replace_text_in_range(
+        &mut self,
+        _: Option<Range<usize>>,
+        text: &str,
+        _: &mut Window,
+        cx: &mut App,
+    ) {
+        self.terminal
+            .update(cx, |terminal, cx| terminal.commit_ime_text(text, cx));
+    }
+
+    fn replace_and_mark_text_in_range(
+        &mut self,
+        _: Option<Range<usize>>,
+        new_text: &str,
+        _: Option<Range<usize>>,
+        _: &mut Window,
+        cx: &mut App,
+    ) {
+        self.terminal
+            .update(cx, |terminal, cx| terminal.set_marked_text(new_text, cx));
+    }
+
+    fn unmark_text(&mut self, _: &mut Window, cx: &mut App) {
+        self.terminal
+            .update(cx, |terminal, cx| terminal.clear_marked_text(cx));
+    }
+
+    fn bounds_for_range(
+        &mut self,
+        range_utf16: Range<usize>,
+        _: &mut Window,
+        cx: &mut App,
+    ) -> Option<Bounds<Pixels>> {
+        self.terminal.read(cx).ime_bounds_for_range(range_utf16)
+    }
+
+    fn character_index_for_point(
+        &mut self,
+        _: Point<Pixels>,
+        _: &mut Window,
+        _: &mut App,
+    ) -> Option<usize> {
+        None
+    }
+
+    fn apple_press_and_hold_enabled(&mut self) -> bool {
+        false
+    }
+
+    fn prefers_ime_for_printable_keys(&mut self, _: &mut Window, _: &mut App) -> bool {
+        true
+    }
+}
+
 impl Render for TerminalView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.ensure_cursor_focus_tracking(window, cx);
@@ -1084,8 +1284,16 @@ impl Render for TerminalView {
             .max(TERMINAL_MIN_ROWS as f32) as usize;
 
         let terminal_focused = window.is_window_active() && self.focus_handle.is_focused(window);
+        let marked_text = self.marked_text.clone();
         let cursor_style =
             terminal_cursor_style(terminal_focused, self.cursor_blink.read(cx).visible());
+        // The preedit is drawn over the cursor cell, so hide the block cursor
+        // underneath it the way native text views do.
+        let cursor_style = if marked_text.is_some() {
+            TerminalCursorStyle::Hidden
+        } else {
+            cursor_style
+        };
         if let Some(session) = self.session.as_mut() {
             session.resize(columns, rows, cell_width);
         }
@@ -1138,46 +1346,55 @@ impl Render for TerminalView {
             let TerminalSnapshot {
                 rows: snapshot_rows,
                 outline_cursor,
+                cursor,
             } = snapshot;
             for row in snapshot_rows {
-                let runs = row
-                    .runs
-                    .into_iter()
-                    .map(|run| {
-                        let mut run_font = terminal_font();
-                        if run.style.bold {
-                            run_font.weight = FontWeight::BOLD;
-                        }
-                        if run.style.italic {
-                            run_font.style = FontStyle::Italic;
-                        }
-                        TextRun {
-                            len: run.len,
-                            font: run_font,
-                            color: run.style.foreground,
-                            background_color: Some(run.style.background),
-                            underline: run.style.underline.then_some(UnderlineStyle {
-                                thickness: px(1.0),
-                                color: Some(run.style.foreground),
-                                wavy: false,
-                            }),
-                            strikethrough: run.style.strikeout.then_some(StrikethroughStyle {
-                                thickness: px(1.0),
-                                color: Some(run.style.foreground),
-                            }),
-                        }
-                    })
-                    .collect::<Vec<_>>();
-                screen = screen.child(
-                    div()
-                        .h(px(TERMINAL_CELL_HEIGHT))
-                        .flex_none()
-                        .overflow_hidden()
-                        .whitespace_nowrap()
-                        .text_size(px(TERMINAL_FONT_SIZE))
-                        .line_height(px(TERMINAL_CELL_HEIGHT))
-                        .child(StyledText::new(row.text).with_runs(runs)),
-                );
+                let mut row_div = div()
+                    .h(px(TERMINAL_CELL_HEIGHT))
+                    .flex_none()
+                    .flex()
+                    .flex_row();
+                for run in row.runs {
+                    let mut run_font = terminal_font();
+                    if run.style.bold {
+                        run_font.weight = FontWeight::BOLD;
+                    }
+                    if run.style.italic {
+                        run_font.style = FontStyle::Italic;
+                    }
+                    let text_run = TextRun {
+                        len: run.text.len(),
+                        font: run_font,
+                        color: run.style.foreground,
+                        // The segment div paints the cell background across its
+                        // full column span; a run background would only cover
+                        // the glyph's own advance and leave a gap after a wide
+                        // glyph.
+                        background_color: None,
+                        underline: run.style.underline.then_some(UnderlineStyle {
+                            thickness: px(1.0),
+                            color: Some(run.style.foreground),
+                            wavy: false,
+                        }),
+                        strikethrough: run.style.strikeout.then_some(StrikethroughStyle {
+                            thickness: px(1.0),
+                            color: Some(run.style.foreground),
+                        }),
+                    };
+                    row_div = row_div.child(
+                        div()
+                            .w(px(run.cells as f32 * cell_width))
+                            .h(px(TERMINAL_CELL_HEIGHT))
+                            .flex_none()
+                            .bg(run.style.background)
+                            .overflow_hidden()
+                            .whitespace_nowrap()
+                            .text_size(px(TERMINAL_FONT_SIZE))
+                            .line_height(px(TERMINAL_CELL_HEIGHT))
+                            .child(StyledText::new(run.text).with_runs(vec![text_run])),
+                    );
+                }
+                screen = screen.child(row_div);
             }
             if let Some((row, column)) = outline_cursor {
                 screen = screen.child(
@@ -1189,6 +1406,24 @@ impl Render for TerminalView {
                         .h(px(TERMINAL_CELL_HEIGHT))
                         .border_1()
                         .border_color(theme.text),
+                );
+            }
+            if let Some(text) = marked_text.as_ref()
+                && let Some((row, column)) = cursor
+            {
+                screen = screen.child(
+                    div()
+                        .absolute()
+                        .left(px(column as f32 * cell_width))
+                        .top(px(row as f32 * TERMINAL_CELL_HEIGHT))
+                        .h(px(TERMINAL_CELL_HEIGHT))
+                        .whitespace_nowrap()
+                        .bg(theme.terminal)
+                        .text_size(px(TERMINAL_FONT_SIZE))
+                        .line_height(px(TERMINAL_CELL_HEIGHT))
+                        .text_color(theme.text)
+                        .underline()
+                        .child(SharedString::from(text.clone())),
                 );
             }
         } else {
@@ -1211,10 +1446,20 @@ impl Render for TerminalView {
         }
 
         let grid_bounds = self.grid_bounds.clone();
+        let input_terminal = cx.entity();
+        let input_focus = self.focus_handle.clone();
         screen = screen.child(
             canvas(
                 move |bounds, _, _| grid_bounds.set(Some(bounds)),
-                |_, _, _, _| {},
+                move |_, _, window, cx| {
+                    window.handle_input(
+                        &input_focus,
+                        TerminalInputHandler {
+                            terminal: input_terminal.clone(),
+                        },
+                        cx,
+                    );
+                },
             )
             .absolute()
             .inset_0(),
@@ -1993,5 +2238,54 @@ mod tests {
             ),
             Some((TerminalPoint::new(Line(-3), Column(0)), Side::Left))
         );
+    }
+
+    fn segment_cell(text: &str, wide: bool, spacer: bool) -> TerminalCell {
+        TerminalCell {
+            text: text.into(),
+            spacer,
+            wide,
+            foreground: gpui::black(),
+            background: gpui::white(),
+            bold: false,
+            italic: false,
+            underline: false,
+            strikeout: false,
+        }
+    }
+
+    fn seg(run: &TerminalRun) -> (String, usize, bool) {
+        (run.text.clone(), run.cells, run.wide)
+    }
+
+    #[test]
+    fn segments_wide_glyphs_on_the_grid() {
+        // "a你 b": the wide glyph spans two columns and its spacer is dropped,
+        // so the trailing ASCII run starts on the grid.
+        let runs = segment_row(&[
+            segment_cell("a", false, false),
+            segment_cell("你", true, false),
+            segment_cell(" ", false, true),
+            segment_cell("b", false, false),
+        ]);
+        assert_eq!(
+            runs.iter().map(seg).collect::<Vec<_>>(),
+            vec![
+                ("a".to_owned(), 1, false),
+                ("你".to_owned(), 2, true),
+                ("b".to_owned(), 1, false),
+            ]
+        );
+
+        // Adjacent wide glyphs stay in separate segments so each pins to its
+        // own column pair instead of accumulating a fallback-font advance.
+        let runs = segment_row(&[
+            segment_cell("你", true, false),
+            segment_cell(" ", false, true),
+            segment_cell("好", true, false),
+            segment_cell(" ", false, true),
+        ]);
+        assert_eq!(runs.len(), 2);
+        assert!(runs.iter().all(|run| run.wide && run.cells == 2));
     }
 }
