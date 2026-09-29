@@ -43,6 +43,7 @@ pub(crate) fn discover(
         // live DriverEvent::AvailableCommands update is the catalog surface.
         ProviderKind::Cursor
         | ProviderKind::DeepSeek
+        | ProviderKind::Droid
         | ProviderKind::Fx
         | ProviderKind::Grok
         | ProviderKind::Kimi => None,

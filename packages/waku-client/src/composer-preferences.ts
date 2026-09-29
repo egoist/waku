@@ -34,6 +34,7 @@ const PROVIDERS = new Set<ProviderKind>([
   'codex',
   'cursor',
   'deepSeek',
+  'droid',
   'fx',
   'openCode',
   'openCode2',

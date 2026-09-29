@@ -28,6 +28,7 @@ const PROVIDERS: ProviderKind[] = [
   'grok',
   'kimi',
   'deepSeek',
+  'droid',
   'fx',
   'ohMyPi',
   'pi',
