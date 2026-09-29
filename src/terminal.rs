@@ -31,7 +31,10 @@ use gpui::{
 use parking_lot::Mutex;
 
 use crate::persistence::DEFAULT_RIGHT_PANEL_WIDTH;
-use crate::theme::{Theme, sp};
+use crate::theme::{
+    TERMINAL_BACKGROUND_DARK, TERMINAL_BACKGROUND_LIGHT, TERMINAL_FOREGROUND_DARK,
+    TERMINAL_FOREGROUND_LIGHT, Theme, sp,
+};
 use crate::ui::scrollbar::{self, ScrollbarState};
 
 /// Fallback advance width, used only until the font has been measured.
@@ -1715,8 +1718,29 @@ fn terminal_rgb(index: usize, is_dark: bool) -> Rgb {
         0xc82829, 0x718c00, 0xeab700, 0x4271ae, 0x8959a8, 0x3e999f, 0xffffff,
     ];
     let ansi = if is_dark { &ANSI_DARK } else { &ANSI_LIGHT };
+    let foreground = if is_dark {
+        TERMINAL_FOREGROUND_DARK
+    } else {
+        TERMINAL_FOREGROUND_LIGHT
+    };
     let value = match index {
         0..=15 => ansi[index],
+        // OSC 10/11/12 replies. Returning a background that matches the painted
+        // surface matters because agents query it to choose their palette.
+        index if index == NamedColor::Background as usize => {
+            if is_dark {
+                TERMINAL_BACKGROUND_DARK
+            } else {
+                TERMINAL_BACKGROUND_LIGHT
+            }
+        }
+        index
+            if index == NamedColor::Foreground as usize
+                || index == NamedColor::BrightForeground as usize
+                || index == NamedColor::Cursor as usize =>
+        {
+            foreground
+        }
         16..=231 => {
             let index = index - 16;
             let channel = |value: usize| {
@@ -1749,13 +1773,7 @@ fn terminal_rgb(index: usize, is_dark: bool) -> Rgb {
             };
             (dim((base >> 16) & 0xff) << 16) | (dim((base >> 8) & 0xff) << 8) | dim(base & 0xff)
         }
-        _ => {
-            if is_dark {
-                0xe5e5e5
-            } else {
-                0x242424
-            }
-        }
+        _ => foreground,
     };
     Rgb {
         r: (value >> 16) as u8,
@@ -1798,6 +1816,21 @@ mod tests {
     fn plain_link_value(term: &Term<VoidListener>, point: TerminalPoint) -> Option<String> {
         let mut regex = RegexSearch::new(TERMINAL_LINK_REGEX).unwrap();
         plain_link_at(term, &mut regex, point).map(|(value, _)| value)
+    }
+
+    #[test]
+    fn osc_color_replies_match_the_theme_surface() {
+        let channel = |rgb: Rgb| (rgb.r, rgb.g, rgb.b);
+        let background = |is_dark| channel(terminal_rgb(NamedColor::Background as usize, is_dark));
+        let foreground = |is_dark| channel(terminal_rgb(NamedColor::Foreground as usize, is_dark));
+
+        assert_eq!(background(true), (0x15, 0x15, 0x15));
+        assert_eq!(background(false), (0xff, 0xff, 0xff));
+        assert_eq!(foreground(true), (0xe2, 0xe2, 0xe2));
+        assert_eq!(foreground(false), (0x24, 0x24, 0x24));
+        // The regression: a light background under the dark theme made Codex
+        // draw a light dialog against Waku's dark chrome.
+        assert_ne!(background(true), foreground(true));
     }
 
     #[test]
