@@ -5,6 +5,24 @@ export interface ModelPickerRow {
   model: ProviderModel
 }
 
+export function modelPickerProviderState({
+  current,
+  restricted,
+  installed,
+  isPending,
+}: {
+  current: boolean
+  restricted: boolean
+  installed: boolean | undefined
+  isPending: boolean
+}) {
+  const pending = (current || !restricted) && installed === undefined && isPending
+  return {
+    enabled: current || (!restricted && (installed === true || pending)),
+    pending,
+  }
+}
+
 export function selectedModelPickerIndex(
   rows: readonly ModelPickerRow[],
   provider: ProviderKind,
