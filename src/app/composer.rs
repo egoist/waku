@@ -862,7 +862,6 @@ impl Waku {
                 .items_center()
                 .gap(px(6.0))
                 .child(provider_mark(
-                    &theme,
                     provider,
                     10.5,
                     provider_color(&theme, provider).opacity(0.9),
@@ -997,11 +996,7 @@ impl Waku {
                 .label(tr!("models.no_providers"))
         } else {
             MenuChip::new("composer-provider-model")
-                .provider(
-                    &theme,
-                    provider,
-                    provider_color(&theme, provider).opacity(0.9),
-                )
+                .provider(provider, provider_color(&theme, provider).opacity(0.9))
                 .label(selected_model_name)
         };
 
@@ -1116,7 +1111,6 @@ impl Waku {
                                 )
                             })
                             .child(provider_mark(
-                                &theme,
                                 kind,
                                 18.0,
                                 provider_color(&theme, kind).opacity(if selected {
@@ -1242,7 +1236,6 @@ impl Waku {
                                             .items_center()
                                             .gap(px(6.0))
                                             .child(provider_mark(
-                                                &theme,
                                                 kind,
                                                 10.5,
                                                 provider_color(&theme, kind).opacity(0.85),

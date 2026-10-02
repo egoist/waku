@@ -16,6 +16,10 @@ the original feature bullet instead of adding separate entries for them.
 
 ## [unreleased]
 
+- Support the OpenCode 2.0 release, which now installs as `opencode`: OpenCode runs on its shared background service, OpenCode 2 beta and OpenCode 1 tasks continue as OpenCode tasks, and OpenCode's free models work in Waku tasks
+- Fix rewinding or branching an OpenCode task after steering it mid-turn, which forked OpenCode's conversation at the wrong turn
+- Fix OpenCode tasks going silent when the OpenCode service restarts; a turn it interrupted now continues in place once the service is back
+
 ## [0.1.19]
 
 - Render inline and block LaTeX math in Markdown, with a Copy Expression action and a setting to show the source

@@ -12,6 +12,7 @@
 //! app entity stores.
 
 use std::io::{BufRead as _, BufReader, Write as _};
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 
 #[cfg(target_os = "macos")]
@@ -219,26 +220,91 @@ fn usage_error_detail(body: &str) -> Option<String> {
 }
 
 /// Match OpenCode's credential precedence closely enough for its Go provider:
-/// `OPENCODE_AUTH_CONTENT` replaces auth.json, a provider entry overrides the
-/// catalog environment key, and `OPENCODE_API_KEY` remains the fallback.
+/// `OPENCODE_AUTH_CONTENT` replaces the stored credentials, a stored provider
+/// entry overrides the catalog environment key, and `OPENCODE_API_KEY` remains
+/// the fallback.
+///
+/// OpenCode keeps credentials in its own database, which it seeds once from
+/// the older `auth.json` and never writes back. The database is therefore
+/// authoritative wherever it exists — a key removed there must not return from
+/// the file — and `auth.json` only answers for a machine that has not started
+/// OpenCode since upgrading.
 fn opencode_go_api_key() -> Option<String> {
-    let auth = std::env::var("OPENCODE_AUTH_CONTENT")
+    let stored = match std::env::var("OPENCODE_AUTH_CONTENT")
         .ok()
         .and_then(|payload| serde_json::from_str::<Value>(&payload).ok())
-        .or_else(|| {
-            let data_home = std::env::var_os("XDG_DATA_HOME")
-                .filter(|path| !path.is_empty())
-                .map(std::path::PathBuf::from)
-                .or_else(|| dirs::home_dir().map(|home| home.join(".local/share")))?;
-            let payload = std::fs::read_to_string(data_home.join("opencode/auth.json")).ok()?;
-            serde_json::from_str(&payload).ok()
-        });
-    opencode_go_api_key_from_auth(auth.as_ref()).or_else(|| {
+    {
+        Some(auth) => opencode_go_api_key_from_auth(Some(&auth)),
+        None => opencode_data_directory().and_then(|data| {
+            opencode_go_api_key_from_store(&opencode_database_path(&data)).unwrap_or_else(|| {
+                let payload = std::fs::read_to_string(data.join("auth.json")).ok()?;
+                let auth = serde_json::from_str::<Value>(&payload).ok()?;
+                opencode_go_api_key_from_auth(Some(&auth))
+            })
+        }),
+    };
+    stored.or_else(|| {
         std::env::var("OPENCODE_API_KEY")
             .ok()
             .map(|key| key.trim().to_owned())
             .filter(|key| !key.is_empty())
     })
+}
+
+/// `${XDG_DATA_HOME:-~/.local/share}/opencode`, on every platform.
+fn opencode_data_directory() -> Option<PathBuf> {
+    let data_home = std::env::var_os("XDG_DATA_HOME")
+        .filter(|path| !path.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| dirs::home_dir().map(|home| home.join(".local/share")))?;
+    Some(data_home.join("opencode"))
+}
+
+/// OpenCode's database, which `OPENCODE_DB` can move. A relative override is
+/// resolved against the data directory, as OpenCode itself resolves it.
+fn opencode_database_path(data: &Path) -> PathBuf {
+    match std::env::var_os("OPENCODE_DB").filter(|path| !path.is_empty()) {
+        Some(path) => data.join(path),
+        None => data.join("opencode.db"),
+    }
+}
+
+/// The Go key in OpenCode's credential store: `None` when there is no store
+/// to read, `Some(None)` when the store holds no usable Go key.
+///
+/// Opened read-only: the store belongs to the user's running OpenCode
+/// service, and Waku must never write to it.
+fn opencode_go_api_key_from_store(database: &Path) -> Option<Option<String>> {
+    let connection = rusqlite::Connection::open_with_flags(
+        database,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .ok()?;
+    let _ = connection.busy_timeout(Duration::from_millis(500));
+    // A database without the table predates OpenCode's credential store.
+    let mut statement = connection
+        .prepare(
+            "SELECT value FROM credential WHERE integration_id = 'opencode-go' \
+             ORDER BY active DESC, time_updated DESC",
+        )
+        .ok()?;
+    let values = statement
+        .query_map([], |row| row.get::<_, String>(0))
+        .ok()?
+        .filter_map(Result::ok)
+        .collect::<Vec<_>>();
+    Some(values.iter().find_map(|value| {
+        let credential = serde_json::from_str::<Value>(value).ok()?;
+        if credential.get("type").and_then(Value::as_str) != Some("key") {
+            return None;
+        }
+        credential
+            .get("key")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|key| !key.is_empty())
+            .map(str::to_owned)
+    }))
 }
 
 fn opencode_go_api_key_from_auth(auth: Option<&Value>) -> Option<String> {
@@ -1072,6 +1138,97 @@ mod tests {
                 .all(|window| window.resets_at.is_some())
         );
         assert!(parse_opencode_go_plan_usage(&serde_json::json!({"usage": {}})).is_none());
+    }
+
+    #[test]
+    fn opencode_credential_store_answers_for_the_go_integration_only() {
+        let directory =
+            std::env::temp_dir().join(format!("waku-opencode-store-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let database = directory.join("opencode.db");
+
+        // No database at all: nothing to say, so `auth.json` gets to answer.
+        assert_eq!(opencode_go_api_key_from_store(&database), None);
+
+        let connection = rusqlite::Connection::open(&database).unwrap();
+        connection
+            .execute_batch("CREATE TABLE kv (key text PRIMARY KEY, value text NOT NULL);")
+            .unwrap();
+        // A database from before the credential store is not authoritative.
+        assert_eq!(opencode_go_api_key_from_store(&database), None);
+
+        // The exact table OpenCode creates.
+        connection
+            .execute_batch(
+                "CREATE TABLE credential (
+                    id text PRIMARY KEY,
+                    integration_id text,
+                    label text NOT NULL,
+                    value text NOT NULL,
+                    connector_id text,
+                    method_id text,
+                    active integer,
+                    time_created integer NOT NULL,
+                    time_updated integer NOT NULL
+                );",
+            )
+            .unwrap();
+        // A store without a Go key is authoritative: no stale fallback.
+        assert_eq!(opencode_go_api_key_from_store(&database), Some(None));
+
+        let insert = |id: &str,
+                      integration: &str,
+                      value: &str,
+                      active: Option<i64>,
+                      updated: i64| {
+            connection
+                .execute(
+                    "INSERT INTO credential (id, integration_id, label, value, active, time_created, time_updated)
+                     VALUES (?1, ?2, 'API key', ?3, ?4, 0, ?5)",
+                    rusqlite::params![id, integration, value, active, updated],
+                )
+                .unwrap();
+        };
+        insert(
+            "crd_zen",
+            "opencode",
+            r#"{"type":"key","key":"zen-key"}"#,
+            None,
+            9,
+        );
+        insert(
+            "crd_old",
+            "opencode-go",
+            r#"{"type":"key","key":"old-key"}"#,
+            None,
+            1,
+        );
+        insert(
+            "crd_new",
+            "opencode-go",
+            r#"{"type":"key","key":" new-key "}"#,
+            None,
+            2,
+        );
+        assert_eq!(
+            opencode_go_api_key_from_store(&database),
+            Some(Some("new-key".to_owned())),
+            "the newest key wins when none is marked active"
+        );
+        insert(
+            "crd_active",
+            "opencode-go",
+            r#"{"type":"key","key":"active-key"}"#,
+            Some(1),
+            0,
+        );
+        assert_eq!(
+            opencode_go_api_key_from_store(&database),
+            Some(Some("active-key".to_owned()))
+        );
+
+        drop(connection);
+        std::fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]

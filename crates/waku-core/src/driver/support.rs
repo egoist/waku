@@ -7,7 +7,6 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context as _, anyhow};
-use parking_lot::Mutex;
 use serde_json::Value;
 
 use super::computer_use as computer_use_runtime;
@@ -35,10 +34,6 @@ pub(super) fn claude_context_tokens(usage: &Value) -> Option<u64> {
 
 #[derive(Clone)]
 pub(super) enum HeadlessComputerUseConfig {
-    OpenCode {
-        base: computer_use_runtime::ComputerUseConfig,
-        config_content: String,
-    },
     Grok {
         base: computer_use_runtime::ComputerUseConfig,
         grok_home: PathBuf,
@@ -56,27 +51,6 @@ impl HeadlessComputerUseRuntime {
     pub(super) fn start(provider: ProviderKind, events: DriverEventSender) -> anyhow::Result<Self> {
         let runtime = computer_use_runtime::ComputerUseRuntime::start(events)?;
         let config = match provider {
-            ProviderKind::OpenCode => {
-                let existing = match std::env::var("OPENCODE_CONFIG_CONTENT") {
-                    Ok(content) => Some(content),
-                    Err(std::env::VarError::NotPresent) => None,
-                    Err(std::env::VarError::NotUnicode(_)) => {
-                        return Err(anyhow!("OPENCODE_CONFIG_CONTENT is not valid UTF-8"));
-                    }
-                };
-                let base = runtime.config.clone();
-                let config_content = build_opencode_computer_use_config(
-                    existing.as_deref(),
-                    &base.server_path,
-                    &base.repl_path,
-                    &base.skill_path,
-                    &base.process_directory,
-                )?;
-                HeadlessComputerUseConfig::OpenCode {
-                    base,
-                    config_content,
-                }
-            }
             ProviderKind::Grok => build_grok_computer_use_config(runtime.config.clone())?,
             _ => return Err(anyhow!("Computer Use is not supported by this driver")),
         };
@@ -90,80 +64,8 @@ impl HeadlessComputerUseRuntime {
     pub(super) fn grok_home(&self) -> Option<&Path> {
         match &self.config {
             HeadlessComputerUseConfig::Grok { grok_home, .. } => Some(grok_home),
-            HeadlessComputerUseConfig::OpenCode { .. } => None,
         }
     }
-}
-
-fn build_opencode_computer_use_config(
-    existing: Option<&str>,
-    server_path: &Path,
-    repl_path: &Path,
-    skill_path: &Path,
-    process_directory: &Path,
-) -> anyhow::Result<String> {
-    let mut config = existing
-        .map(serde_json::from_str::<Value>)
-        .transpose()
-        .context("OPENCODE_CONFIG_CONTENT is invalid JSON")?
-        .unwrap_or_else(|| serde_json::json!({}));
-    let root = config
-        .as_object_mut()
-        .ok_or_else(|| anyhow!("OPENCODE_CONFIG_CONTENT must contain a JSON object"))?;
-    let mcp = root
-        .entry("mcp")
-        .or_insert_with(|| serde_json::json!({}))
-        .as_object_mut()
-        .ok_or_else(|| anyhow!("OPENCODE_CONFIG_CONTENT.mcp must be a JSON object"))?;
-    mcp.insert(
-        "waku_js_repl".into(),
-        serde_json::json!({
-            "type": "local",
-            "command": [repl_path.display().to_string()],
-            "enabled": true,
-            "environment": {
-                "WAKU_COMPUTER_USE_SERVER": server_path.display().to_string(),
-                "WAKU_COMPUTER_USE_PROCESS_DIRECTORY": process_directory.display().to_string(),
-            },
-        }),
-    );
-    let instructions = root
-        .entry("instructions")
-        .or_insert_with(|| serde_json::json!([]))
-        .as_array_mut()
-        .ok_or_else(|| anyhow!("OPENCODE_CONFIG_CONTENT.instructions must be a JSON array"))?;
-    let skill_path = skill_path.display().to_string();
-    if !instructions
-        .iter()
-        .any(|instruction| instruction.as_str() == Some(&skill_path))
-    {
-        instructions.push(Value::String(skill_path));
-    }
-    serde_json::to_string(&config).context("could not encode OpenCode Computer Use configuration")
-}
-
-/// The environment that hands OpenCode its Computer Use configuration.
-pub(super) fn opencode_computer_use_environment(
-    config: &HeadlessComputerUseConfig,
-) -> Vec<(String, String)> {
-    let HeadlessComputerUseConfig::OpenCode {
-        base,
-        config_content,
-    } = config
-    else {
-        return Vec::new();
-    };
-    vec![
-        ("OPENCODE_CONFIG_CONTENT".to_owned(), config_content.clone()),
-        (
-            "WAKU_COMPUTER_USE_SERVER".to_owned(),
-            base.server_path.display().to_string(),
-        ),
-        (
-            "WAKU_COMPUTER_USE_PROCESS_DIRECTORY".to_owned(),
-            base.process_directory.display().to_string(),
-        ),
-    ]
 }
 
 fn build_grok_computer_use_config(
@@ -367,15 +269,14 @@ pub(super) fn classify_tool(name: &str) -> ActivityKind {
     ActivityKind::from_tool_name(name)
 }
 
-/// The permission policy both OpenCode majors share.
+/// OpenCode's permission policy.
 ///
 /// `permission_responses` translates every durable "always" choice into a
-/// one-shot provider reply and keeps the rule in driver-local state. On v1
-/// that protected a per-workspace pooled server. On v2 it is more
-/// load-bearing still: an `always` reply writes into `/api/permission/saved`,
-/// a GLOBAL store shared with the user's own terminal, so a Full Access Waku
-/// task would silently disarm prompts in every other workspace and in the
-/// user's TUI. `always` is never put on the wire.
+/// one-shot provider reply and keeps the rule in driver-local state. An
+/// `always` reply would write into `/api/permission/saved`, a GLOBAL store
+/// shared with the user's own terminal, so a Full Access Waku task would
+/// silently disarm prompts in every other workspace and in the user's TUI.
+/// `always` is never put on the wire.
 #[derive(Clone, Debug)]
 pub(super) struct OpenCodePermissionRequest {
     pub(super) permission: String,
@@ -449,18 +350,10 @@ fn opencode_wildcard_matches(input: &str, pattern: &str) -> bool {
     previous[input.len()]
 }
 
+/// The provider replies one answer to a permission card produces. The driver
+/// runs commands and events on one worker, so its permission state is
+/// thread-local and there is nothing to serialize against.
 pub(super) fn permission_responses(
-    permissions: &Mutex<OpenCodePermissionState>,
-    request_id: &str,
-    option_id: &str,
-) -> Vec<(String, String)> {
-    permission_responses_in(&mut permissions.lock(), request_id, option_id)
-}
-
-/// The same policy without the lock, for a driver whose permission state is
-/// already thread-local. OpenCode 2 runs commands and events on one worker, so
-/// there is nothing to serialize against.
-pub(super) fn permission_responses_in(
     permissions: &mut OpenCodePermissionState,
     request_id: &str,
     option_id: &str,
@@ -532,67 +425,6 @@ mod tests {
         assert_eq!(classify_tool("create_thread"), ActivityKind::Tool);
         assert_eq!(classify_tool("read_mcp_resource"), ActivityKind::Tool);
         assert_eq!(classify_tool("list_threads"), ActivityKind::Tool);
-    }
-
-    #[test]
-    fn opencode_computer_use_config_preserves_existing_inline_config() {
-        let content = build_opencode_computer_use_config(
-            Some(
-                r#"{
-                    "mcp": {
-                        "existing": {
-                            "type": "local",
-                            "command": ["existing-server"],
-                            "enabled": true
-                        }
-                    },
-                    "instructions": ["existing.md"],
-                    "plugin": ["existing-plugin"]
-                }"#,
-            ),
-            Path::new("/Applications/Waku Computer Use"),
-            Path::new("/Applications/Waku.app/Contents/Resources/waku_js_repl"),
-            Path::new(
-                "/Applications/Waku.app/Contents/Resources/skills/waku-computer-use/SKILL.md",
-            ),
-            Path::new("/tmp/waku computer use/session"),
-        )
-        .unwrap();
-        let value: Value = serde_json::from_str(&content).unwrap();
-
-        assert_eq!(
-            value
-                .pointer("/mcp/existing/command/0")
-                .and_then(Value::as_str),
-            Some("existing-server")
-        );
-        assert_eq!(
-            value
-                .pointer("/mcp/waku_js_repl/command/0")
-                .and_then(Value::as_str),
-            Some("/Applications/Waku.app/Contents/Resources/waku_js_repl")
-        );
-        assert_eq!(
-            value
-                .pointer("/mcp/waku_js_repl/environment/WAKU_COMPUTER_USE_SERVER")
-                .and_then(Value::as_str),
-            Some("/Applications/Waku Computer Use")
-        );
-        assert_eq!(
-            value.get("instructions").and_then(Value::as_array).unwrap(),
-            &[
-                Value::String("existing.md".into()),
-                Value::String(
-                    "/Applications/Waku.app/Contents/Resources/skills/waku-computer-use/SKILL.md"
-                        .into(),
-                ),
-            ]
-        );
-        assert_eq!(
-            value.pointer("/plugin/0").and_then(Value::as_str),
-            Some("existing-plugin")
-        );
-        assert!(value.pointer("/mcp/waku_computer_use").is_none());
     }
 
     #[test]
@@ -686,8 +518,8 @@ mod tests {
     }
     #[test]
     fn always_without_provider_rules_does_not_broaden_future_access() {
-        let permissions = Mutex::new(OpenCodePermissionState::default());
-        permissions.lock().pending.insert(
+        let mut permissions = OpenCodePermissionState::default();
+        permissions.pending.insert(
             "per_once".into(),
             OpenCodePermissionRequest {
                 permission: "bash".into(),
@@ -697,41 +529,37 @@ mod tests {
         );
 
         assert_eq!(
-            permission_responses(&permissions, "per_once", "always"),
+            permission_responses(&mut permissions, "per_once", "always"),
             [("per_once".into(), "once".into())]
         );
-        assert!(permissions.lock().approved.is_empty());
+        assert!(permissions.approved.is_empty());
     }
 
     #[test]
     fn always_resolves_matching_requests_that_are_already_pending() {
-        let permissions = Mutex::new(OpenCodePermissionState::default());
+        let mut permissions = OpenCodePermissionState::default();
         let request = |patterns: &[&str]| OpenCodePermissionRequest {
             permission: "bash".into(),
             patterns: patterns.iter().map(|pattern| (*pattern).into()).collect(),
             always: vec!["cargo *".into()],
         };
         permissions
-            .lock()
             .pending
             .insert("per_first".into(), request(&["cargo test"]));
         permissions
-            .lock()
             .pending
             .insert("per_matching".into(), request(&["cargo check"]));
         permissions
-            .lock()
             .pending
             .insert("per_other".into(), request(&["git status"]));
 
         assert_eq!(
-            permission_responses(&permissions, "per_first", "always"),
+            permission_responses(&mut permissions, "per_first", "always"),
             [
                 ("per_first".into(), "once".into()),
                 ("per_matching".into(), "once".into()),
             ]
         );
-        let permissions = permissions.lock();
         assert!(!permissions.pending.contains_key("per_matching"));
         assert!(permissions.pending.contains_key("per_other"));
     }

@@ -506,7 +506,7 @@ impl Waku {
                             .flex()
                             .items_center()
                             .gap(px(8.0))
-                            .child(provider_mark(theme, kind, 14.0, color))
+                            .child(provider_mark(kind, 14.0, color))
                             .child(
                                 div()
                                     .flex_1()
@@ -614,12 +614,7 @@ impl Waku {
                     .flex()
                     .items_center()
                     .gap(px(5.0))
-                    .child(provider_mark(
-                        theme,
-                        kind,
-                        12.0,
-                        provider_color(theme, kind),
-                    ))
+                    .child(provider_mark(kind, 12.0, provider_color(theme, kind)))
                     .child(
                         div()
                             .text_size(sp(12.5))
@@ -1536,12 +1531,7 @@ fn usage_chart_readout(
                 .flex()
                 .items_center()
                 .gap(px(10.0))
-                .child(provider_mark(
-                    theme,
-                    kind,
-                    11.0,
-                    provider_color(theme, kind),
-                ))
+                .child(provider_mark(kind, 11.0, provider_color(theme, kind)))
                 .child(
                     div()
                         .flex_1()
@@ -1751,12 +1741,7 @@ fn usage_model_table(history: &UsageHistory, theme: &Theme) -> Div {
                         .flex()
                         .items_center()
                         .gap(px(7.0))
-                        .child(provider_mark(
-                            theme,
-                            kind,
-                            12.0,
-                            provider_color(theme, kind),
-                        ))
+                        .child(provider_mark(kind, 12.0, provider_color(theme, kind)))
                         .child(
                             div()
                                 .min_w_0()
@@ -2220,12 +2205,7 @@ fn usage_provider_values(theme: &Theme, by_provider: &[ProviderDay; 2], by_cost:
                 .flex()
                 .items_center()
                 .gap(px(5.0))
-                .child(provider_mark(
-                    theme,
-                    kind,
-                    11.0,
-                    provider_color(theme, kind),
-                ))
+                .child(provider_mark(kind, 11.0, provider_color(theme, kind)))
                 .child(
                     div()
                         .text_size(sp(12.5))

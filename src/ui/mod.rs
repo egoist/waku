@@ -168,7 +168,6 @@ pub fn provider_color(theme: &Theme, provider: ProviderKind) -> Hsla {
         | ProviderKind::Cursor
         | ProviderKind::Fx
         | ProviderKind::OpenCode
-        | ProviderKind::OpenCode2
         | ProviderKind::Grok
         | ProviderKind::Kimi
         | ProviderKind::OhMyPi
@@ -192,7 +191,6 @@ pub fn provider_icon(provider: ProviderKind) -> &'static str {
         ProviderKind::DeepSeek => "icons/provider-deepseek.svg",
         ProviderKind::Fx => "icons/provider-fx.svg",
         ProviderKind::OpenCode => "icons/provider-opencode.svg",
-        ProviderKind::OpenCode2 => "icons/provider-opencode2.svg",
         ProviderKind::Grok => "icons/provider-grok.svg",
         ProviderKind::Kimi => "icons/provider-kimi.svg",
         ProviderKind::OhMyPi => "icons/provider-ohmypi.svg",
@@ -200,38 +198,13 @@ pub fn provider_icon(provider: ProviderKind) -> &'static str {
     }
 }
 
-/// The separately coloured layer some marks carry — OpenCode 2's red "2".
-///
-/// `svg()` renders an alpha mask tinted by ONE color, so stacking a second
-/// element is the only way to give part of a mark its own color.
-pub fn provider_badge(provider: ProviderKind) -> Option<&'static str> {
-    match provider {
-        ProviderKind::OpenCode2 => Some("icons/provider-opencode2-badge.svg"),
-        _ => None,
-    }
-}
-
-/// A provider mark, including any separately coloured badge layer.
-///
-/// Prefer this over `icon(provider_icon(..), ..)`: a bare `icon` call silently
-/// drops the badge, which is the only thing distinguishing the two OpenCode
-/// marks at a glance.
-pub fn provider_mark(theme: &Theme, provider: ProviderKind, size: f32, color: Hsla) -> Div {
-    let base = div()
-        .relative()
+/// A provider mark in a fixed square that never shrinks inside a row.
+pub fn provider_mark(provider: ProviderKind, size: f32, color: Hsla) -> Div {
+    div()
         .w(sp(size))
         .h(sp(size))
         .flex_none()
-        .child(icon(provider_icon(provider), size, color));
-    match provider_badge(provider) {
-        // The badge inherits the base's alpha so a dimmed row dims both layers.
-        Some(badge) => base.child(div().absolute().top_0().left_0().child(icon(
-            badge,
-            size,
-            theme.danger.opacity(color.a),
-        ))),
-        None => base,
-    }
+        .child(icon(provider_icon(provider), size, color))
 }
 
 pub fn status_color(theme: &Theme, status: SessionStatus) -> Hsla {
@@ -278,8 +251,6 @@ pub fn activity_noun(kind: ActivityKind) -> (String, String) {
 pub struct MenuChip {
     base: Stateful<Div>,
     icon: Option<(&'static str, Hsla)>,
-    /// A second, separately coloured icon layer — see [`provider_mark`].
-    badge: Option<(&'static str, Hsla)>,
     label: SharedString,
     caret: bool,
     outlined: bool,
@@ -294,7 +265,6 @@ impl MenuChip {
         Self {
             base: div().id(id),
             icon: None,
-            badge: None,
             label: SharedString::default(),
             caret: true,
             outlined: false,
@@ -325,11 +295,8 @@ impl MenuChip {
         self
     }
 
-    /// A provider mark, carrying its badge layer if it has one. Prefer this
-    /// over `icon(provider_icon(..), ..)`, which silently drops the badge.
-    pub fn provider(mut self, theme: &Theme, provider: ProviderKind, color: Hsla) -> Self {
+    pub fn provider(mut self, provider: ProviderKind, color: Hsla) -> Self {
         self.icon = Some((provider_icon(provider), color));
-        self.badge = provider_badge(provider).map(|badge| (badge, theme.danger.opacity(color.a)));
         self
     }
 
@@ -381,7 +348,6 @@ impl ParentElement for MenuChip {
 impl RenderOnce for MenuChip {
     fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
         let theme = Theme::current(cx);
-        let badge = self.badge;
         self.base
             .h(self
                 .height
@@ -407,23 +373,7 @@ impl RenderOnce for MenuChip {
             })
             .when(self.disabled, |element| element.opacity(0.7))
             .when_some(self.icon, |element, (path, color)| {
-                let mark = icon(path, 12.0, color);
-                match badge {
-                    Some((badge, badge_color)) => element.child(
-                        div()
-                            .relative()
-                            .w(sp(12.0))
-                            .h(sp(12.0))
-                            .flex_none()
-                            .child(mark)
-                            .child(div().absolute().top_0().left_0().child(icon(
-                                badge,
-                                12.0,
-                                badge_color,
-                            ))),
-                    ),
-                    None => element.child(mark),
-                }
+                element.child(icon(path, 12.0, color))
             })
             .child(
                 div()
@@ -577,7 +527,6 @@ mod tests {
         ];
         for provider in ProviderKind::ALL {
             paths.push(provider_icon(provider));
-            paths.extend(provider_badge(provider));
         }
         for kind in [
             ActivityKind::Reasoning,

@@ -79,7 +79,7 @@ title near when the provider writes it, and long enough to survive a slow start.
 | Codex CLI | Codex | JSON-RPC stream | thread start/resume, `thread/name/updated` | [codex.rs:1612](../crates/waku-core/src/driver/codex.rs#L1612), [codex.rs:1735](../crates/waku-core/src/driver/codex.rs#L1735) |
 | Amp | Amp | `amp threads list --json` subprocess | poll at turn end | [title_refresh.rs:53](../crates/waku-core/src/driver/title_refresh.rs#L53) |
 | Grok Build | Grok | `summary.json` on disk | poll at turn end | [title_refresh.rs:53](../crates/waku-core/src/driver/title_refresh.rs#L53) |
-| OpenCode | OpenCode | SSE stream | `session.updated` | [opencode.rs:894](../crates/waku-core/src/driver/opencode.rs#L894) |
+| OpenCode | OpenCode | SSE stream | connect, `session.renamed` | [opencode.rs:515](../crates/waku-core/src/driver/opencode.rs#L515), [opencode.rs:1568](../crates/waku-core/src/driver/opencode.rs#L1568) |
 | Pi | Pi | NDJSON stream | connect, `session_info_changed` | [pi.rs:472](../crates/waku-core/src/driver/pi.rs#L472), [pi.rs:1214](../crates/waku-core/src/driver/pi.rs#L1214) |
 | Oh My Pi | Oh My Pi | NDJSON stream | connect, `session_info_update` | [pi.rs:472](../crates/waku-core/src/driver/pi.rs#L472), [pi.rs:1214](../crates/waku-core/src/driver/pi.rs#L1214) |
 | DeepSeek | Harness | stream + projections | `session/title`, projection replay | [deepseek.rs:782](../crates/waku-core/src/driver/deepseek.rs#L782), [deepseek.rs:1139](../crates/waku-core/src/driver/deepseek.rs#L1139) |
@@ -195,8 +195,9 @@ runtime supplies.
 
 All three push titles on their own streams, so there is nothing to schedule.
 
-- **OpenCode** — `session.updated` → `properties./info/title`. Titles beginning
-  with `"New session - "` are dropped ([opencode.rs:892](../crates/waku-core/src/driver/opencode.rs#L892)):
+- **OpenCode** — the session's `title` at connect and after every reconnect,
+  then `session.renamed` → `data.title`. Titles beginning with
+  `"New session - "` are dropped ([opencode.rs:801](../crates/waku-core/src/driver/opencode.rs#L801)):
   that is OpenCode's own placeholder, and letting it through would replace
   Waku's prompt fallback with something strictly less useful.
 - **Pi and Oh My Pi** — `/data/sessionName` at connect, then the stream event.

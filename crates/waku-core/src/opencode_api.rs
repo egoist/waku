@@ -1,4 +1,4 @@
-//! Typed bindings for the OpenCode 2 background service's HTTP API.
+//! Typed bindings for the OpenCode background service's HTTP API.
 //!
 //! Every function here is a free function over an [`Endpoint`], so this module
 //! knows nothing about who owns the service, how it was discovered, or which
@@ -13,11 +13,11 @@
 //! left to callers to remember:
 //!
 //! * The response envelope is per-route. `/api/session*`, `/api/model`,
-//!   `/api/agent`, `/api/command` and `/api/skill` wrap their payload in
-//!   `{ data }` (the catalogue routes add `{ location, data }`), while
-//!   `/api/health` and `POST /api/session/{id}/interrupt` answer bare. One
-//!   generic `Envelope<T>` would silently turn a bare payload into a decode
-//!   failure, so unwrapping is chosen per route.
+//!   `/api/agent` and `/api/command` wrap their payload in `{ data }` (the
+//!   catalogue routes add `{ location, data }`), while `/api/info`,
+//!   `/api/experimental/migration/v1` and `POST /api/session/{id}/interrupt`
+//!   answer bare. One generic `Envelope<T>` would silently turn a bare payload
+//!   into a decode failure, so unwrapping is chosen per route.
 //! * Pagination terminates on an EMPTY `data` array, never on an absent
 //!   cursor: both `cursor.previous` and `cursor.next` are minted even on the
 //!   first and last page. [`page`] collapses that into an absent cursor so a
@@ -29,22 +29,22 @@
 //!   without an error, because the service itself `chdir`s to `$HOME`.
 
 use std::collections::{BTreeMap, HashSet};
-use std::time::{Duration, Instant};
+use std::sync::Mutex;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::anyhow;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use crate::http_wire::{self, Endpoint};
-use crate::opencode_session::encode_path_segment;
+use crate::http_wire::{self, Endpoint, encode_path_segment};
 
 /// The service answers a local request in single-digit milliseconds; a budget
 /// this large only ever covers a machine under load.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
-/// Health is on the start path, where a hung probe would eat the whole start
-/// budget, so it gets its own much tighter bound.
-const HEALTH_TIMEOUT: Duration = Duration::from_secs(2);
+/// Server info is on the start path, where a hung probe would eat the whole
+/// start budget, so it gets its own much tighter bound.
+const INFO_TIMEOUT: Duration = Duration::from_secs(2);
 /// A transcript page and a session export both walk stored messages, which for
 /// a long task is far more work than an ordinary request.
 const TRANSFER_TIMEOUT: Duration = Duration::from_secs(60);
@@ -95,6 +95,12 @@ impl ApiError {
         self.status() == Some(404)
     }
 
+    /// No service there to act on the call: it is down, or still stopping or
+    /// starting, which it answers with a 503 of its own.
+    pub(crate) fn is_unavailable(&self) -> bool {
+        matches!(self, Self::Transport(_)) || self.status() == Some(503)
+    }
+
     /// A location-scoped route handed a directory the service cannot resolve
     /// answers HTTP 500 with an EMPTY body. That is a bad workspace, not a
     /// server fault, and treating it as the latter would retry forever.
@@ -110,14 +116,14 @@ impl std::fmt::Display for ApiError {
                 tag,
                 message,
                 status,
-            } => write!(formatter, "OpenCode 2 {tag} (HTTP {status}): {message}"),
+            } => write!(formatter, "OpenCode {tag} (HTTP {status}): {message}"),
             Self::Http { status, body } if body.trim().is_empty() => {
-                write!(formatter, "OpenCode 2 request failed with HTTP {status}")
+                write!(formatter, "OpenCode request failed with HTTP {status}")
             }
             Self::Http { status, body } => {
                 write!(
                     formatter,
-                    "OpenCode 2 request failed with HTTP {status}: {body}"
+                    "OpenCode request failed with HTTP {status}: {body}"
                 )
             }
             Self::Transport(error) => write!(formatter, "{error}"),
@@ -158,11 +164,27 @@ pub(crate) enum Delivery {
     Queue,
 }
 
+/// `GET /api/info`. The answer also lists connection URLs and the service's
+/// temporary directory, which nothing here needs.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
-pub(crate) struct Health {
-    pub healthy: bool,
+pub(crate) struct ServerInfo {
     pub version: String,
     pub pid: u32,
+}
+
+/// Progress of the one-time import of OpenCode 1 session history, which a
+/// service runs in the background after its first start. Imported sessions
+/// keep their original ids, and each one is missing until the import reaches
+/// it.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[serde(tag = "status", rename_all = "lowercase")]
+pub(crate) enum MigrationStatus {
+    Required,
+    Running,
+    Completed,
+    Error,
+    #[serde(other)]
+    Unknown,
 }
 
 /// A model as a session refers to it.
@@ -203,8 +225,7 @@ pub(crate) struct TokenCache {
 pub(crate) struct TokenUsage {
     pub input: f64,
     pub output: f64,
-    /// Required in v2, unlike v1 where reasoning tokens were folded into
-    /// output.
+    /// Reported separately rather than folded into output.
     pub reasoning: f64,
     pub cache: TokenCache,
 }
@@ -229,9 +250,8 @@ pub(crate) enum SessionOutcome {
     Interrupted,
 }
 
-/// The fork boundary as the server REPORTS it, which always carries a message
-/// id — including for `through`, where the request form has none. The read and
-/// write shapes are deliberately two types; see [`ForkRequestBoundary`].
+/// The fork boundary as the server reports it, which always carries a message
+/// id — including for `through`, where the request names none.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
 pub(crate) struct ForkBoundary {
     #[serde(rename = "type")]
@@ -244,18 +264,6 @@ pub(crate) struct ForkBoundary {
 #[serde(rename_all = "lowercase")]
 pub(crate) enum ForkBoundaryKind {
     Before,
-    Through,
-}
-
-/// The fork boundary as the server ACCEPTS it. `through` takes no message id
-/// at all, and sending one is a 400.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
-#[serde(tag = "type", rename_all = "lowercase")]
-pub(crate) enum ForkRequestBoundary {
-    Before {
-        #[serde(rename = "messageID")]
-        message_id: String,
-    },
     Through,
 }
 
@@ -563,6 +571,11 @@ pub(crate) enum MessageInfo {
         #[serde(default)]
         error: Option<StructuredError>,
     },
+    /// The turn delimiter: written when an execution succeeds, fails or is
+    /// interrupted, but not on shutdown, whose resumed drain continues the
+    /// same turn. Steered prompts land before it, so every user message
+    /// between two markers belongs to one turn.
+    Idle { id: String },
     /// A message kind a newer build introduced. A page of transcript must not
     /// fail wholesale because one entry is from the future.
     #[serde(other)]
@@ -577,15 +590,15 @@ pub(crate) struct SessionExport {
 
 /// The inbox entry `POST /prompt` answers with.
 ///
-/// The beta build renamed this member from `data` to `payload`; the older name
-/// is gone, not aliased.
+/// Only what the driver reads is decoded. Its timestamp moved from a flat
+/// `timeCreated` into `time.created` in the 2.0 release, and requiring members
+/// nobody reads would turn every such reshuffle into a prompt that cannot
+/// start.
 #[derive(Clone, Debug, Deserialize, PartialEq)]
 pub(crate) struct InboxUser {
     pub id: String,
     #[serde(rename = "sessionID")]
     pub session_id: String,
-    #[serde(rename = "timeCreated")]
-    pub time_created: f64,
     #[serde(rename = "type")]
     pub kind: String,
     pub payload: Value,
@@ -831,31 +844,60 @@ pub(crate) struct CommandInfo {
     pub description: Option<String>,
 }
 
-/// A skill as the catalogue lists it.
+pub(crate) fn server_info(endpoint: &Endpoint) -> Result<ServerInfo> {
+    // Bare payload: server info is one of the routes with no `{ data }`
+    // envelope.
+    let response = request(endpoint, "GET", "/api/info", None, INFO_TIMEOUT)?;
+    decode(response, "server info")
+}
+
+/// Bare payload, like server info. A build without the route answers 404.
+pub(crate) fn v1_migration_status(endpoint: &Endpoint) -> Result<MigrationStatus> {
+    let response = request(
+        endpoint,
+        "GET",
+        "/api/experimental/migration/v1",
+        None,
+        INFO_TIMEOUT,
+    )?;
+    decode(response, "migration status")
+}
+
+/// Mints a session id in OpenCode's own format: `ses_`, twelve hex digits of a
+/// descending millisecond timestamp, then fourteen base62 characters.
 ///
-/// The response also carries the skill's whole markdown body under `content`.
-/// It is deliberately not decoded: nothing above this layer renders it, and
-/// keeping it would make every skill's file resident for the life of the app.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
-pub(crate) struct SkillInfo {
-    pub id: String,
-    pub name: String,
-    #[serde(default)]
-    pub description: Option<String>,
-    #[serde(default)]
-    pub slash: Option<bool>,
-    #[serde(default)]
-    pub autoinvoke: Option<bool>,
-    pub location: String,
+/// The format is load-bearing, not cosmetic. OpenCode forwards the session id
+/// to its model gateway (`x-opencode-session`), and the gateway's free tier
+/// refuses an id OpenCode could not have minted with "OpenCode's free tier can
+/// only be used from within OpenCode" — verified against 2.0.22, where every
+/// free model rejected `ses_` plus a hex UUID and accepted this format.
+pub(crate) fn new_session_id() -> String {
+    const ALPHABET: &[u8; 62] = b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
+    // OpenCode counts ids minted within one millisecond so they still sort.
+    static LAST: Mutex<(u64, u64)> = Mutex::new((0, 0));
+    let millis = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_millis() as u64);
+    let counter = {
+        let mut last = LAST.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        if last.0 != millis {
+            *last = (millis, 0);
+        }
+        last.1 += 1;
+        last.1
+    };
+    let time = !(millis.wrapping_mul(0x1000).wrapping_add(counter)) & 0xFFFF_FFFF_FFFF;
+    // Every byte of a v4 UUID is random except the version (6) and variant (8).
+    let random = uuid::Uuid::new_v4().into_bytes();
+    let suffix = random
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| *index != 6 && *index != 8)
+        .map(|(_, byte)| char::from(ALPHABET[usize::from(*byte) % ALPHABET.len()]));
+    format!("ses_{time:012x}").chars().chain(suffix).collect()
 }
 
-pub(crate) fn health(endpoint: &Endpoint) -> Result<Health> {
-    // Bare payload: health is one of the routes with no `{ data }` envelope.
-    let response = request(endpoint, "GET", "/api/health", None, HEALTH_TIMEOUT)?;
-    decode(response, "health")
-}
-
-/// Creates a session with a CLIENT-MINTED id.
+/// Creates a session with a CLIENT-MINTED id; see [`new_session_id`].
 ///
 /// The id is an argument rather than a return value because the caller must
 /// already be subscribed to the shared event stream before the session exists;
@@ -880,7 +922,7 @@ pub(crate) fn create_session(
     }
     if let Some(model) = model {
         body["model"] = serde_json::to_value(model).map_err(|error| {
-            ApiError::Transport(anyhow!("could not encode the OpenCode 2 model: {error}"))
+            ApiError::Transport(anyhow!("could not encode the OpenCode model: {error}"))
         })?;
     }
     let response = request(
@@ -914,7 +956,7 @@ pub(crate) fn add_mcp(
     config: &Value,
 ) -> Result<()> {
     let path = format!(
-        "/api/mcp/{}{}",
+        "/api/experimental/mcp/{}{}",
         encode_path_segment(server),
         location_query(Some(directory))
     );
@@ -934,7 +976,7 @@ pub(crate) fn list_mcp(endpoint: &Endpoint, directory: &str) -> Result<Vec<Value
 
 pub(crate) fn remove_mcp(endpoint: &Endpoint, directory: &str, server: &str) -> Result<()> {
     let path = format!(
-        "/api/mcp/{}{}",
+        "/api/experimental/mcp/{}{}",
         encode_path_segment(server),
         location_query(Some(directory))
     );
@@ -949,7 +991,7 @@ pub(crate) fn put_instruction_entry(
     value: &str,
 ) -> Result<()> {
     let path = format!(
-        "/api/session/{}/instructions/entries/{}",
+        "/api/experimental/session/{}/instructions/entries/{}",
         encode_path_segment(session),
         encode_path_segment(key)
     );
@@ -969,18 +1011,11 @@ pub(crate) fn remove_instruction_entry(
     key: &str,
 ) -> Result<()> {
     let path = format!(
-        "/api/session/{}/instructions/entries/{}",
+        "/api/experimental/session/{}/instructions/entries/{}",
         encode_path_segment(session),
         encode_path_segment(key)
     );
     request(endpoint, "DELETE", &path, None, REQUEST_TIMEOUT)?;
-    Ok(())
-}
-
-pub(crate) fn rename_session(endpoint: &Endpoint, session: &str, title: &str) -> Result<()> {
-    let path = format!("/api/session/{}/rename", encode_path_segment(session));
-    let body = json!({ "title": title });
-    request(endpoint, "POST", &path, Some(&body), REQUEST_TIMEOUT)?;
     Ok(())
 }
 
@@ -1024,7 +1059,7 @@ pub(crate) fn export_session(
     sanitize: bool,
 ) -> Result<SessionExport> {
     let path = format!(
-        "/api/session/{}/export?sanitize={sanitize}",
+        "/api/experimental/session/{}/export?sanitize={sanitize}",
         encode_path_segment(session)
     );
     let response = request(endpoint, "GET", &path, None, TRANSFER_TIMEOUT)?;
@@ -1062,7 +1097,7 @@ pub(crate) fn command(
     delivery: Option<Delivery>,
 ) -> Result<()> {
     let path = format!("/api/session/{}/command", encode_path_segment(session));
-    let mut body = json!({"command": name, "text": arguments});
+    let mut body = json!({"name": name, "text": arguments});
     if let Some(delivery) = delivery {
         body["delivery"] = json!(delivery);
     }
@@ -1081,35 +1116,21 @@ pub(crate) fn list_inbox(endpoint: &Endpoint, session: &str) -> Result<Vec<Value
     decode(data(response, "inbox")?, "inbox")
 }
 
-/// Promotes a queued entry so it interrupts the running turn.
-pub(crate) fn steer_inbox(endpoint: &Endpoint, session: &str, inbox_id: &str) -> Result<()> {
-    let path = format!(
-        "/api/session/{}/inbox/{}/steer",
-        encode_path_segment(session),
-        encode_path_segment(inbox_id)
-    );
-    request(endpoint, "POST", &path, None, REQUEST_TIMEOUT)?;
-    Ok(())
-}
-
-/// Demotes an entry so it waits for the running turn to finish.
-pub(crate) fn queue_inbox(endpoint: &Endpoint, session: &str, inbox_id: &str) -> Result<()> {
-    let path = format!(
-        "/api/session/{}/inbox/{}/queue",
-        encode_path_segment(session),
-        encode_path_segment(inbox_id)
-    );
-    request(endpoint, "POST", &path, None, REQUEST_TIMEOUT)?;
-    Ok(())
-}
-
-pub(crate) fn cancel_inbox(endpoint: &Endpoint, session: &str, inbox_id: &str) -> Result<()> {
+/// Moves an undelivered entry between steering the running turn and waiting
+/// for it to finish.
+pub(crate) fn set_inbox_delivery(
+    endpoint: &Endpoint,
+    session: &str,
+    inbox_id: &str,
+    delivery: Delivery,
+) -> Result<()> {
     let path = format!(
         "/api/session/{}/inbox/{}",
         encode_path_segment(session),
         encode_path_segment(inbox_id)
     );
-    request(endpoint, "DELETE", &path, None, REQUEST_TIMEOUT)?;
+    let body = json!({ "delivery": delivery });
+    request(endpoint, "PATCH", &path, Some(&body), REQUEST_TIMEOUT)?;
     Ok(())
 }
 
@@ -1128,13 +1149,18 @@ pub(crate) fn interrupt(endpoint: &Endpoint, session: &str) -> Result<bool> {
     Ok(decoded.interrupted)
 }
 
+/// Copies the session's history into a new one. `before` names the first
+/// message left out; without it the whole history is copied.
 pub(crate) fn fork(
     endpoint: &Endpoint,
     session: &str,
-    boundary: &ForkRequestBoundary,
+    before: Option<&str>,
 ) -> Result<SessionInfo> {
     let path = format!("/api/session/{}/fork", encode_path_segment(session));
-    let body = json!({ "boundary": boundary });
+    let body = match before {
+        Some(message_id) => json!({ "before": message_id }),
+        None => json!({}),
+    };
     let response = request(endpoint, "POST", &path, Some(&body), FORK_TIMEOUT)?;
     decode(data(response, "fork")?, "fork")
 }
@@ -1175,7 +1201,7 @@ pub(crate) fn reply_permission(
 ) -> Result<()> {
     if matches!(reply, PermissionReply::Always) {
         return Err(ApiError::Transport(anyhow!(
-            "OpenCode 2 permission replies must not save a persistent rule"
+            "OpenCode permission replies must not save a persistent rule"
         )));
     }
     let path = format!(
@@ -1183,7 +1209,7 @@ pub(crate) fn reply_permission(
         encode_path_segment(session),
         encode_path_segment(request_id)
     );
-    let body = json!({ "reply": reply });
+    let body = json!({ "decision": reply });
     request(endpoint, "POST", &path, Some(&body), REQUEST_TIMEOUT)?;
     Ok(())
 }
@@ -1210,16 +1236,6 @@ pub(crate) fn reply_form(
     Ok(())
 }
 
-pub(crate) fn cancel_form(endpoint: &Endpoint, session: &str, form_id: &str) -> Result<()> {
-    let path = format!(
-        "/api/session/{}/form/{}/cancel",
-        encode_path_segment(session),
-        encode_path_segment(form_id)
-    );
-    request(endpoint, "POST", &path, None, REQUEST_TIMEOUT)?;
-    Ok(())
-}
-
 /// The ids of every session this service process is currently draining.
 ///
 /// The payload is keyed BY session id, so the set is its keys; the values only
@@ -1235,7 +1251,7 @@ pub(crate) fn active_sessions(endpoint: &Endpoint) -> Result<HashSet<String>> {
     let active = data(response, "active sessions")?;
     let Value::Object(active) = active else {
         return Err(ApiError::Transport(anyhow!(
-            "OpenCode 2 returned an unreadable active session map"
+            "OpenCode returned an unreadable active session map"
         )));
     };
     Ok(active.into_iter().map(|(id, _)| id).collect())
@@ -1307,10 +1323,6 @@ fn command_plugins_ready(response: &Value) -> Option<bool> {
     )
 }
 
-pub(crate) fn list_skills(endpoint: &Endpoint, directory: Option<&str>) -> Result<Vec<SkillInfo>> {
-    catalogue(endpoint, "/api/skill", directory, "skill catalogue")
-}
-
 /// The catalogue routes differ only in their element type: each answers
 /// `{ location, data }` and each scopes by deepObject `location[directory]`.
 fn catalogue<T: DeserializeOwned>(
@@ -1337,22 +1349,22 @@ fn request(
 /// Unwraps the `{ data }` envelope.
 ///
 /// Called per route rather than from [`request`], because the envelope is not
-/// universal: `/api/health` and `POST …/interrupt` answer bare, and wrapping
+/// universal: `/api/info` and `POST …/interrupt` answer bare, and wrapping
 /// those would turn a good response into a decode failure.
 fn data(response: Value, what: &str) -> Result<Value> {
     match response {
         Value::Object(mut fields) => fields.remove("data").ok_or_else(|| {
-            ApiError::Transport(anyhow!("OpenCode 2 returned no {what} in its response"))
+            ApiError::Transport(anyhow!("OpenCode returned no {what} in its response"))
         }),
         _ => Err(ApiError::Transport(anyhow!(
-            "OpenCode 2 returned an unreadable {what} response"
+            "OpenCode returned an unreadable {what} response"
         ))),
     }
 }
 
 fn decode<T: DeserializeOwned>(response: Value, what: &str) -> Result<T> {
     serde_json::from_value(response).map_err(|error| {
-        ApiError::Transport(anyhow!("OpenCode 2 returned an invalid {what}: {error}"))
+        ApiError::Transport(anyhow!("OpenCode returned an invalid {what}: {error}"))
     })
 }
 
@@ -1450,10 +1462,10 @@ impl Query {
     }
 }
 
-/// The shared wire layer reports a non-2xx as one flat error string, because
-/// v1 had nothing to do with the status. v2 does: a 404 means the session is
-/// gone, and a bodyless 500 means the workspace does not resolve. Recover both
-/// rather than propagating prose a caller cannot branch on.
+/// The shared wire layer reports a non-2xx as one flat error string. Here the
+/// status matters: a 404 means the session is gone, and a bodyless 500 means
+/// the workspace does not resolve. Recover both rather than propagating prose
+/// a caller cannot branch on.
 const HTTP_FAILURE_PREFIX: &str = "OpenCode session request failed with HTTP ";
 
 fn classify(error: anyhow::Error) -> ApiError {
@@ -1590,13 +1602,21 @@ mod tests {
         .unwrap();
     }
 
-    #[test]
-    fn computer_use_runtime_configuration_is_location_and_session_scoped() {
+    /// Records every request line and JSON body while answering each request
+    /// with the next canned response, so a test can assert exactly what went
+    /// on the wire.
+    fn recording_server(
+        responses: Vec<String>,
+    ) -> (
+        Endpoint,
+        std::sync::mpsc::Receiver<(String, Value)>,
+        thread::JoinHandle<()>,
+    ) {
         let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
         let endpoint = Endpoint::local(listener.local_addr().unwrap().port());
         let (sent, received) = std::sync::mpsc::channel();
         let server = thread::spawn(move || {
-            for _ in 0..4 {
+            for response in responses {
                 let (mut socket, _) = listener.accept().unwrap();
                 socket
                     .set_read_timeout(Some(Duration::from_secs(5)))
@@ -1624,11 +1644,27 @@ mod tests {
                     serde_json::from_slice::<Value>(&body).unwrap_or(Value::Null),
                 ))
                 .unwrap();
-                socket
-                    .write_all(b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n")
-                    .unwrap();
+                socket.write_all(response.as_bytes()).unwrap();
             }
         });
+        (endpoint, received, server)
+    }
+
+    fn no_content() -> String {
+        "HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n".to_owned()
+    }
+
+    fn json_response(value: Value) -> String {
+        let body = value.to_string();
+        format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len()
+        )
+    }
+
+    #[test]
+    fn computer_use_runtime_configuration_is_location_and_session_scoped() {
+        let (endpoint, received, server) = recording_server(vec![no_content(); 4]);
         let config = json!({"type":"local","command":["/app/waku_js_repl"],"codemode":false});
         add_mcp(
             &endpoint,
@@ -1650,12 +1686,12 @@ mod tests {
         let requests: Vec<_> = received.try_iter().collect();
         assert_eq!(
             requests[0].0,
-            "PUT /api/mcp/waku_js_repl_test?location%5Bdirectory%5D=%2Fwork%2Fproject%20with%20space HTTP/1.1\r\n"
+            "PUT /api/experimental/mcp/waku_js_repl_test?location%5Bdirectory%5D=%2Fwork%2Fproject%20with%20space HTTP/1.1\r\n"
         );
         assert_eq!(requests[0].1, json!({"config":config}));
         assert_eq!(
             requests[1].0,
-            "PUT /api/session/ses_test/instructions/entries/waku-computer-use HTTP/1.1\r\n"
+            "PUT /api/experimental/session/ses_test/instructions/entries/waku-computer-use HTTP/1.1\r\n"
         );
         assert_eq!(
             requests[1].1,
@@ -1663,13 +1699,136 @@ mod tests {
         );
         assert_eq!(
             requests[2].0,
-            "DELETE /api/session/ses_test/instructions/entries/waku-computer-use HTTP/1.1\r\n"
+            "DELETE /api/experimental/session/ses_test/instructions/entries/waku-computer-use HTTP/1.1\r\n"
         );
+        assert!(requests[3].0.starts_with(
+            "DELETE /api/experimental/mcp/waku_js_repl_test?location%5Bdirectory%5D="
+        ));
+    }
+
+    /// The 2.0 release renamed or reshaped every turn-control request this
+    /// module sends; each of these was a 400 or a 404 against it.
+    #[test]
+    fn turn_control_requests_use_the_released_routes_and_bodies() {
+        let forked = json!({"data": {
+            "id": "ses_fork",
+            "projectID": "prj",
+            "cost": 0,
+            "tokens": {"input": 0, "output": 0, "reasoning": 0, "cache": {"read": 0, "write": 0}},
+            "time": {"created": 1.0, "updated": 1.0},
+            "location": {"directory": "/work"},
+        }});
+        let (endpoint, received, server) = recording_server(vec![
+            no_content(),
+            no_content(),
+            no_content(),
+            json_response(forked.clone()),
+            json_response(forked),
+            no_content(),
+        ]);
+        command(&endpoint, "ses_a", "review", "main", Some(Delivery::Queue)).unwrap();
+        set_inbox_delivery(&endpoint, "ses_a", "msg_1", Delivery::Steer).unwrap();
+        reply_permission(&endpoint, "ses_a", "per_1", PermissionReply::Reject).unwrap();
+        assert_eq!(
+            fork(&endpoint, "ses_a", Some("msg_2")).unwrap().id,
+            "ses_fork"
+        );
+        assert_eq!(fork(&endpoint, "ses_a", None).unwrap().id, "ses_fork");
+        export_session(&endpoint, "ses_a", false).unwrap_err();
+        server.join().unwrap();
+
+        let requests: Vec<_> = received.try_iter().collect();
+        assert_eq!(
+            requests[0],
+            (
+                "POST /api/session/ses_a/command HTTP/1.1\r\n".to_owned(),
+                json!({"name": "review", "text": "main", "delivery": "queue"})
+            )
+        );
+        assert_eq!(
+            requests[1],
+            (
+                "PATCH /api/session/ses_a/inbox/msg_1 HTTP/1.1\r\n".to_owned(),
+                json!({"delivery": "steer"})
+            )
+        );
+        assert_eq!(
+            requests[2],
+            (
+                "POST /api/session/ses_a/permission/per_1/reply HTTP/1.1\r\n".to_owned(),
+                json!({"decision": "reject"})
+            )
+        );
+        assert_eq!(
+            requests[3],
+            (
+                "POST /api/session/ses_a/fork HTTP/1.1\r\n".to_owned(),
+                json!({"before": "msg_2"})
+            )
+        );
+        assert_eq!(requests[4].1, json!({}), "no boundary copies everything");
+        assert_eq!(
+            requests[5].0,
+            "GET /api/experimental/session/ses_a/export?sanitize=false HTTP/1.1\r\n"
+        );
+    }
+
+    /// The shape OpenCode's model gateway accepts, and ordering that matches
+    /// OpenCode's own: a later id sorts before an earlier one.
+    #[test]
+    fn minted_session_ids_follow_opencodes_own_format() {
+        let ids = (0..64).map(|_| new_session_id()).collect::<Vec<_>>();
+        for id in &ids {
+            let body = id.strip_prefix("ses_").expect("a session prefix");
+            assert_eq!(body.len(), 26, "{id}");
+            assert!(
+                body[..12]
+                    .bytes()
+                    .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase()),
+                "{id}"
+            );
+            assert!(
+                body[12..].bytes().all(|byte| byte.is_ascii_alphanumeric()),
+                "{id}"
+            );
+        }
         assert!(
-            requests[3]
-                .0
-                .starts_with("DELETE /api/mcp/waku_js_repl_test?location%5Bdirectory%5D=")
+            ids.windows(2).all(|pair| pair[0][..16] > pair[1][..16]),
+            "{ids:?}"
         );
+        assert_eq!(ids.iter().collect::<HashSet<_>>().len(), ids.len());
+        // The live service minted `ses_f04139daeffeTzlMaa5sNV1PXd` at this
+        // millisecond (9 ms before it stamped the session's `time.created`),
+        // as the first id of that millisecond.
+        assert_eq!(
+            format!(
+                "{:012x}",
+                !(1_790_932_968_017_u64 * 0x1000 + 1) & 0xFFFF_FFFF_FFFF
+            ),
+            "f04139daeffe"
+        );
+    }
+
+    #[test]
+    fn migration_status_reads_every_state() {
+        for (body, status) in [
+            (json!({"status": "required"}), MigrationStatus::Required),
+            (
+                json!({"status": "running", "progress": {"label": "Migrating sessions", "numerator": 3, "denominator": 9}}),
+                MigrationStatus::Running,
+            ),
+            (json!({"status": "completed"}), MigrationStatus::Completed),
+            (
+                json!({"status": "error", "error": "disk full"}),
+                MigrationStatus::Error,
+            ),
+            (json!({"status": "paused"}), MigrationStatus::Unknown),
+        ] {
+            assert_eq!(
+                serde_json::from_value::<MigrationStatus>(body).unwrap(),
+                status
+            );
+        }
     }
 
     #[test]
@@ -1756,21 +1915,10 @@ mod tests {
         assert!(next.is_none());
     }
 
-    /// `through` carries no message id on the request side even though the
-    /// server always reports one back.
+    /// The server reports a message id for `through` too, although the
+    /// request names none.
     #[test]
-    fn fork_boundaries_have_distinct_read_and_write_shapes() {
-        assert_eq!(
-            serde_json::to_value(ForkRequestBoundary::Through).unwrap(),
-            json!({ "type": "through" })
-        );
-        assert_eq!(
-            serde_json::to_value(ForkRequestBoundary::Before {
-                message_id: "msg_1".to_owned(),
-            })
-            .unwrap(),
-            json!({ "type": "before", "messageID": "msg_1" })
-        );
+    fn a_reported_through_boundary_carries_its_message_id() {
         let reported: ForkBoundary =
             serde_json::from_value(json!({ "type": "through", "messageID": "msg_1" })).unwrap();
         assert_eq!(reported.kind, ForkBoundaryKind::Through);
@@ -1840,6 +1988,24 @@ mod tests {
         assert_eq!(messages[1], MessageInfo::Unknown);
     }
 
+    /// The shape a settled 2.0.22 execution writes.
+    #[test]
+    fn idle_markers_decode() {
+        let message: MessageInfo = serde_json::from_value(json!({
+            "id": "msg_0fbed935e001IaLxG1vLr5G2pd",
+            "time": { "created": 1_790_933_046_110_u64 },
+            "type": "idle",
+            "outcome": "succeeded",
+        }))
+        .unwrap();
+        assert_eq!(
+            message,
+            MessageInfo::Idle {
+                id: "msg_0fbed935e001IaLxG1vLr5G2pd".to_owned()
+            }
+        );
+    }
+
     #[test]
     fn assistant_messages_decode_their_parts_and_usage() {
         let message: MessageInfo = serde_json::from_value(json!({
@@ -1892,14 +2058,14 @@ mod tests {
         assert!(session.parent_id.is_none());
     }
 
-    /// The inbox entry's payload member is `payload` on this build; the older
-    /// `data` name is gone rather than aliased.
+    /// The exact entry the released service answers a prompt with. Its
+    /// timestamp moved into `time.created`, which must not fail a prompt.
     #[test]
-    fn inbox_user_reads_the_payload_member() {
+    fn inbox_user_reads_the_released_prompt_answer() {
         let entry: InboxUser = serde_json::from_value(json!({
             "id": "msg_1",
             "sessionID": "ses_1",
-            "timeCreated": 1.0,
+            "time": { "created": 1.0 },
             "type": "user",
             "payload": { "text": "hi" },
             "delivery": "steer",
@@ -2004,26 +2170,16 @@ mod tests {
     /// Reads the user's own running service. Kept out of the default run
     /// because it depends on a daemon this test must never start.
     #[test]
-    #[ignore = "requires a running opencode2 service"]
-    fn live_service_answers_health_and_catalogues() {
-        let registration = std::fs::read_to_string(
-            dirs::state_dir()
-                .or_else(|| dirs::home_dir().map(|home| home.join(".local/state")))
-                .expect("a state directory")
-                .join("opencode/service.json"),
-        )
-        .expect("a registered opencode2 service");
-        let registration: Value = serde_json::from_str(&registration).unwrap();
-        let endpoint = Endpoint::basic(
-            registration["url"].as_str().unwrap(),
-            "opencode",
-            registration["password"].as_str().unwrap(),
-        )
-        .unwrap();
+    #[ignore = "requires a running OpenCode background service"]
+    fn live_service_answers_info_and_catalogues() {
+        let registration = crate::opencode_service::read_registration()
+            .expect("a registered OpenCode background service");
+        let endpoint = crate::opencode_service::probe(&registration)
+            .expect("the registered service is not healthy");
 
-        let health = health(&endpoint).unwrap();
-        assert!(health.healthy);
-        assert_eq!(health.pid, registration["pid"].as_u64().unwrap() as u32);
+        let info = server_info(&endpoint).unwrap();
+        assert_eq!(info.pid, registration.pid);
+        assert!(v1_migration_status(&endpoint).is_ok());
 
         let directory = std::env::current_dir().unwrap();
         let directory = std::fs::canonicalize(directory).unwrap();
@@ -2034,7 +2190,6 @@ mod tests {
         let _ = list_models(&endpoint, Some(directory)).unwrap();
         assert!(!list_agents(&endpoint, Some(directory)).unwrap().is_empty());
         let _ = list_commands(&endpoint, Some(directory)).unwrap();
-        let _ = list_skills(&endpoint, Some(directory)).unwrap();
         let _ = active_sessions(&endpoint).unwrap();
 
         let (sessions, _) =

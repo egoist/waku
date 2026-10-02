@@ -27,16 +27,11 @@ pub enum ProviderSessionForkRequest {
         source: AgentSession,
         turn_count: usize,
     },
+    /// OpenCode sessions carry their own `location`, so there is no server
+    /// working directory to fork against; `binary` only lets the cold path
+    /// reach the adopted background service.
+    #[serde(alias = "openCode2")]
     OpenCode {
-        binary: PathBuf,
-        cwd: PathBuf,
-        session_id: String,
-        turn_count: usize,
-    },
-    /// v2 sessions carry their own `location`, so there is no server working
-    /// directory to fork against; `binary` only lets the cold path reach the
-    /// adopted background service.
-    OpenCode2 {
         binary: PathBuf,
         session_id: String,
         turn_count: usize,

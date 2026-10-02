@@ -34,7 +34,6 @@ pub(crate) fn discover(
         ProviderKind::Claude => discover_claude(binary, project_root),
         ProviderKind::Codex => discover_codex(binary, project_root),
         ProviderKind::OpenCode => discover_opencode(binary, project_root),
-        ProviderKind::OpenCode2 => discover_opencode2(binary, project_root),
         ProviderKind::OhMyPi => discover_oh_my_pi(binary, project_root),
         ProviderKind::Pi => discover_pi(binary, project_root),
         // ACP advertises commands only after session/new. Harness likewise
@@ -138,31 +137,14 @@ fn discover_codex(binary: &Path, project_root: &Path) -> Option<Vec<SlashCommand
 }
 
 fn discover_opencode(binary: &Path, project_root: &Path) -> Option<Vec<SlashCommand>> {
-    // The command registry includes built-ins and MCP prompts that never
-    // appear in `debug config`. Reading it needs a workspace server, but does
-    // not create a session or run a turn. Reuse the resident server when one
-    // already exists instead of starting a competing plugin/MCP stack.
-    if let Ok(server) = crate::opencode_pool::acquire(binary, project_root)
-        && let Ok(value) = server.request_with_timeout("GET", "/command", None, CLI_PROBE_TIMEOUT)
-        && value.is_array()
-    {
-        return Some(parse_opencode_commands(&value));
-    }
-    // Older CLI builds can still report configured commands without a server.
-    let value = capture_json(binary, &["debug", "config"], project_root)?;
-    Some(parse_opencode_config_commands(&value))
-}
-
-fn discover_opencode2(binary: &Path, project_root: &Path) -> Option<Vec<SlashCommand>> {
-    // These catalogues are directory-scoped, not session-scoped. Seed the
-    // new-task composer too, without creating a disposable provider session.
+    // The registry is directory-scoped, not session-scoped. Seed the new-task
+    // composer too, without creating a disposable provider session.
     let directory = std::fs::canonicalize(project_root).ok()?;
     let directory = directory.to_string_lossy();
-    let service = crate::opencode2_service::shared(binary).ok()?;
+    let service = crate::opencode_service::shared(binary).ok()?;
     let endpoint = service.endpoint();
-    let commands = crate::opencode2_api::list_commands(&endpoint, Some(&directory)).ok()?;
-    let skills = crate::opencode2_api::list_skills(&endpoint, Some(&directory)).unwrap_or_default();
-    Some(opencode2_commands(commands, skills))
+    let commands = crate::opencode_api::list_commands(&endpoint, Some(&directory)).ok()?;
+    Some(opencode_commands(commands))
 }
 
 fn discover_pi(binary: &Path, project_root: &Path) -> Option<Vec<SlashCommand>> {
@@ -314,60 +296,10 @@ fn parse_codex_skills(value: &Value, project_root: &Path) -> Vec<SlashCommand> {
         .collect()
 }
 
-pub(crate) fn parse_opencode_commands(value: &Value) -> Vec<SlashCommand> {
-    value
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter_map(|entry| {
-            let hints = entry.get("hints").and_then(Value::as_array).map(|hints| {
-                hints
-                    .iter()
-                    .filter_map(Value::as_str)
-                    .collect::<Vec<_>>()
-                    .join(" ")
-            });
-            command(
-                entry.get("name")?.as_str()?,
-                entry.get("description").and_then(Value::as_str),
-                if entry.get("source").and_then(Value::as_str) == Some("skill") {
-                    CommandScope::Skill
-                } else {
-                    CommandScope::Builtin
-                },
-                hints.as_deref(),
-                // The server owns template expansion, agent/model overrides,
-                // subtask dispatch, file references, and shell interpolation.
-                None,
-            )
-        })
-        .take(COMMAND_CATALOG_CAP)
-        .collect()
-}
-
-fn parse_opencode_config_commands(value: &Value) -> Vec<SlashCommand> {
-    value
-        .get("command")
-        .and_then(Value::as_object)
-        .into_iter()
-        .flatten()
-        .filter_map(|(name, entry)| {
-            command(
-                name,
-                entry.get("description").and_then(Value::as_str),
-                CommandScope::Project,
-                None,
-                None,
-            )
-        })
-        .take(COMMAND_CATALOG_CAP)
-        .collect()
-}
-
-fn opencode2_commands(
-    commands: Vec<crate::opencode2_api::CommandInfo>,
-    skills: Vec<crate::opencode2_api::SkillInfo>,
-) -> Vec<SlashCommand> {
+/// The service's command registry: built-ins, configured commands and MCP
+/// prompts, which the server expands itself. Skills are not commands here;
+/// OpenCode attaches them to a prompt as `@` mentions.
+fn opencode_commands(commands: Vec<crate::opencode_api::CommandInfo>) -> Vec<SlashCommand> {
     commands
         .into_iter()
         .filter_map(|entry| {
@@ -379,20 +311,6 @@ fn opencode2_commands(
                 None,
             )
         })
-        .chain(
-            skills
-                .into_iter()
-                .filter(|skill| skill.slash == Some(true))
-                .filter_map(|entry| {
-                    command(
-                        &entry.name,
-                        entry.description.as_deref(),
-                        CommandScope::Skill,
-                        None,
-                        None,
-                    )
-                }),
-        )
         .take(COMMAND_CATALOG_CAP)
         .collect()
 }
@@ -734,38 +652,13 @@ mod tests {
     }
 
     #[test]
-    fn parses_opencode_registry_builtins_and_skills_without_expanding_templates() {
-        let commands = parse_opencode_commands(&json!([
-            {"name": "init", "source": "command", "description": "guided AGENTS.md setup", "template": "Native init", "hints": []},
-            {"name": "review", "source": "command", "subtask": true, "template": "Review $ARGUMENTS", "hints": ["$ARGUMENTS"]},
-            {"name": "deploy", "source": "skill", "description": "Deploy", "hints": []},
-            {"name": "mcp:lookup", "source": "mcp", "template": {}, "hints": ["$1", "$2"]},
-            {"name": "invalid command"}
-        ]));
-        assert_eq!(
-            commands
-                .iter()
-                .map(|command| command.name.as_str())
-                .collect::<Vec<_>>(),
-            ["init", "review", "deploy", "mcp:lookup"]
-        );
-        assert_eq!(commands[0].scope, CommandScope::Builtin);
-        assert_eq!(commands[1].argument_hint.as_deref(), Some("$ARGUMENTS"));
-        assert_eq!(commands[2].scope, CommandScope::Skill);
-        assert_eq!(commands[3].argument_hint.as_deref(), Some("$1 $2"));
-        assert!(commands.iter().all(|command| command.template.is_none()));
-    }
-
-    #[test]
-    fn opencode2_catalog_keeps_only_user_invocable_skills() {
-        let commands = opencode2_commands(
-            vec![crate::opencode2_api::CommandInfo {
-                name: "review".into(),
-                description: Some("Review changes".into()),
-            }],
+    fn opencode_registry_commands_are_server_expanded_builtins() {
+        let commands = opencode_commands(
             serde_json::from_value(json!([
-                {"id": "hidden", "name": "hidden", "slash": false, "location": "builtin"},
-                {"id": "deploy", "name": "deploy", "slash": true, "location": "skills/deploy.md"}
+                {"name": "init", "description": "guided AGENTS.md setup"},
+                {"name": "review", "description": "review changes [commit|branch|pr], defaults to uncommitted"},
+                {"name": "mcp:lookup"},
+                {"name": "invalid command"}
             ]))
             .unwrap(),
         );
@@ -774,21 +667,18 @@ mod tests {
                 .iter()
                 .map(|command| command.name.as_str())
                 .collect::<Vec<_>>(),
-            ["review", "deploy"]
+            ["init", "review", "mcp:lookup"]
         );
-        assert_eq!(commands[0].scope, CommandScope::Builtin);
-        assert_eq!(commands[1].scope, CommandScope::Skill);
+        assert!(
+            commands
+                .iter()
+                .all(|command| command.scope == CommandScope::Builtin)
+        );
         assert!(commands.iter().all(|command| command.template.is_none()));
     }
 
     #[test]
-    fn parses_effective_opencode_config_and_amp_skills() {
-        let opencode = parse_opencode_config_commands(&json!({"command": {
-            "review": {"description": "Review changes", "template": "Review $ARGUMENTS"}
-        }}));
-        assert_eq!(opencode.len(), 1);
-        assert!(opencode[0].template.is_none());
-
+    fn parses_amp_skills() {
         let amp = parse_amp_skills(&json!({"skills": [
             {"name": "building-skills", "description": "Build skills", "source": "builtin"}
         ]}));
@@ -797,34 +687,10 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires an installed opencode; reads its catalogue without creating sessions"]
-    fn opencode_builtin_catalog_against_a_real_server() {
+    #[ignore = "requires an installed opencode; reads a cold workspace catalogue without creating sessions"]
+    fn opencode_builtin_catalog_against_a_real_service() {
         let binary =
             crate::command_env::find_executable("opencode").expect("opencode is not installed");
-        let root =
-            std::env::temp_dir().join(format!("waku-command-catalog-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&root).unwrap();
-        let server = crate::opencode_pool::acquire(&binary, &root).unwrap();
-        let before = server.request("GET", "/session", None).unwrap();
-        let commands = discover(ProviderKind::OpenCode, &binary, &root).unwrap();
-        for name in ["init", "review"] {
-            let command = commands
-                .iter()
-                .find(|command| command.name == name)
-                .expect("missing OpenCode built-in");
-            assert_eq!(command.scope, CommandScope::Builtin);
-            assert!(command.template.is_none());
-        }
-        assert_eq!(before, server.request("GET", "/session", None).unwrap());
-        drop(server);
-        std::fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    #[ignore = "requires an installed opencode2; reads a cold workspace catalogue without creating sessions"]
-    fn opencode2_builtin_catalog_against_a_real_service() {
-        let binary =
-            crate::command_env::find_executable("opencode2").expect("opencode2 is not installed");
         let root =
             std::env::temp_dir().join(format!("waku-command-catalog-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(root.join(".opencode/commands")).unwrap();
@@ -834,7 +700,7 @@ mod tests {
         )
         .unwrap();
         let root = std::fs::canonicalize(root).unwrap();
-        let commands = discover(ProviderKind::OpenCode2, &binary, &root).unwrap();
+        let commands = discover(ProviderKind::OpenCode, &binary, &root).unwrap();
         for name in ["init", "review", "waku-catalog-smoke"] {
             assert!(
                 commands
@@ -843,12 +709,12 @@ mod tests {
                 "missing {name}"
             );
         }
-        let service = crate::opencode2_service::shared(&binary).unwrap();
-        let (sessions, _) = crate::opencode2_api::list_sessions(
+        let service = crate::opencode_service::shared(&binary).unwrap();
+        let (sessions, _) = crate::opencode_api::list_sessions(
             &service.endpoint(),
             Some(&root.to_string_lossy()),
             None,
-            crate::opencode2_api::Order::Desc,
+            crate::opencode_api::Order::Desc,
             10,
             None,
         )

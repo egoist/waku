@@ -146,7 +146,7 @@ describe('mobile slash command submission', () => {
     expect(composerProviderPrompt('pi', '/deploy prod', [skill])).toBe('/skill:deploy prod');
     expect(composerProviderPrompt('ohMyPi', '/deploy prod', [skill])).toBe('/skill:deploy prod');
     expect(composerProviderPrompt('claude', '/deploy prod', [skill])).toBeUndefined();
-    expect(composerProviderPrompt('openCode2', '/review @src', [{ ...template, template: null }])).toBeUndefined();
+    expect(composerProviderPrompt('openCode', '/review @src', [{ ...template, template: null }])).toBeUndefined();
     expect(composerProviderPrompt('codex', '/unknown', [template])).toBeUndefined();
   });
 });

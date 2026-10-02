@@ -403,7 +403,7 @@ mod tests {
     #[test]
     fn joins_consecutive_content_blocks_without_inventing_turns() {
         let history = history_from_updates(
-            ProviderKind::OpenCode,
+            ProviderKind::Kimi,
             &[
                 json!({"sessionUpdate":"user_message_chunk","content":{"type":"text","text":"hello "}}),
                 json!({"sessionUpdate":"user_message_chunk","content":{"type":"text","text":"world"}}),

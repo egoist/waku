@@ -1,9 +1,9 @@
-//! Minimal blocking HTTP/1.1 and server-sent-event wire shared by the OpenCode
-//! providers.
+//! Minimal blocking HTTP/1.1 and server-sent-event wire for the providers Waku
+//! drives over a local HTTP server rather than stdio: OpenCode's background
+//! service and DeepSeek Harness's RPC routes.
 //!
-//! Both OpenCode majors are driven over a local HTTP server rather than stdio,
-//! and both hit the same two traps, so the wire lives here once instead of
-//! being copied per major:
+//! A local server sets the same two traps for every client, so the wire lives
+//! here once:
 //!
 //! * A keep-alive server never EOFs, so response completion is detected at the
 //!   protocol's own body boundary (`Content-Length` or the terminating chunk).
@@ -22,15 +22,15 @@ use std::time::Duration;
 
 use anyhow::{Context as _, anyhow, bail};
 use base64::Engine as _;
-use crossbeam_channel::Sender;
 use parking_lot::Mutex;
 use serde_json::Value;
 
 /// Where a request goes, and how it authenticates.
 ///
-/// OpenCode v1 serves unauthenticated on loopback; the v2 background service
-/// demands HTTP Basic with the password from its registration file. Precompute
-/// the header once so it is never rebuilt per request — and never log it.
+/// A private loopback server can serve unauthenticated; OpenCode's background
+/// service demands HTTP Basic with the password from its registration file.
+/// Precompute the header once so it is never rebuilt per request — and never
+/// log it.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct Endpoint {
     pub host: String,
@@ -39,7 +39,7 @@ pub(crate) struct Endpoint {
 }
 
 impl Endpoint {
-    /// An unauthenticated loopback server, as OpenCode v1 serves.
+    /// An unauthenticated loopback server.
     pub(crate) fn local(port: u16) -> Self {
         Self {
             host: "127.0.0.1".to_owned(),
@@ -74,8 +74,8 @@ impl Endpoint {
 
 /// Sends one request and returns the decoded JSON body.
 ///
-/// A 204/205/304 — or any empty success body — answers `Value::Null`, matching
-/// what routes like OpenCode v1's `prompt_async` return.
+/// A 204/205/304 — or any empty success body — answers `Value::Null`, which is
+/// what every acknowledgement-only route returns.
 pub(crate) fn request_json(
     endpoint: &Endpoint,
     method: &str,
@@ -90,6 +90,22 @@ pub(crate) fn request_json(
     }
     serde_json::from_slice(&response)
         .with_context(|| format!("OpenCode returned invalid JSON for {method} {path}"))
+}
+
+/// Percent-encodes one path segment or query component, keeping only RFC 3986
+/// unreserved characters. Session ids, MCP server names and directories all
+/// pass through here, and a deepObject key's brackets must arrive as
+/// `%5B`/`%5D`.
+pub(crate) fn encode_path_segment(value: &str) -> String {
+    let mut encoded = String::new();
+    for byte in value.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~') {
+            encoded.push(byte as char);
+        } else {
+            encoded.push_str(&format!("%{byte:02X}"));
+        }
+    }
+    encoded
 }
 
 pub(crate) fn http_request(
@@ -262,9 +278,6 @@ fn decode_chunked(mut input: &[u8]) -> anyhow::Result<Vec<u8>> {
 pub(crate) struct StreamControl {
     cancelled: AtomicBool,
     socket: Mutex<Option<TcpStream>>,
-    /// Woken alongside the socket shutdown, so one cancel can release a
-    /// channel-based consumer that is not itself blocked on the socket.
-    waker: Mutex<Option<Sender<()>>>,
 }
 
 impl StreamControl {
@@ -284,9 +297,6 @@ impl StreamControl {
         if let Some(socket) = self.socket.lock().take() {
             let _ = socket.shutdown(Shutdown::Both);
         }
-        if let Some(waker) = self.waker.lock().as_ref() {
-            let _ = waker.try_send(());
-        }
     }
 
     pub(crate) fn clear(&self) {
@@ -301,10 +311,6 @@ impl StreamControl {
     pub(crate) fn reset(&self) {
         self.cancelled.store(false, Ordering::Release);
         self.socket.lock().take();
-    }
-
-    pub(crate) fn set_waker(&self, waker: Option<Sender<()>>) {
-        *self.waker.lock() = waker;
     }
 }
 
@@ -394,12 +400,12 @@ pub(crate) fn open_event_stream(
 pub(crate) enum SseFrame {
     /// A frame with only `data:` lines, which is every ordinary event.
     Data(String),
-    /// A frame carrying an `event:` field. OpenCode 2 uses this solely to
+    /// A frame carrying an `event:` field. OpenCode uses this solely to
     /// report that the stream itself failed
     /// (`event: effect/httpapi/stream/failure`), so a reader that ignores the
     /// field sits blind on a dead stream until its read timeout fires.
     Named { event: String, data: String },
-    /// A `:`-prefixed comment. The v2 service heartbeats with `: heartbeat`.
+    /// A `:`-prefixed comment. OpenCode's service heartbeats with `: heartbeat`.
     Comment,
 }
 

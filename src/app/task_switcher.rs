@@ -514,7 +514,6 @@ impl Waku {
                     .items_center()
                     .gap(px(7.0))
                     .child(provider_mark(
-                        &theme,
                         provider,
                         14.0,
                         provider_color(&theme, provider),
@@ -640,7 +639,6 @@ impl Waku {
                     .items_center()
                     .gap(px(8.0))
                     .child(provider_mark(
-                        &theme,
                         provider,
                         16.0,
                         if highlighted {

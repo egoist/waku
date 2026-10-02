@@ -11,7 +11,6 @@ export const PROVIDER_MENU_ICONS: Record<ProviderKind, ImageSourcePropType> = {
   deepSeek: require('@/assets/images/providers/deepSeek.png'),
   fx: require('@/assets/images/providers/fx.png'),
   openCode: require('@/assets/images/providers/openCode.png'),
-  openCode2: require('@/assets/images/providers/openCode2.png'),
   grok: require('@/assets/images/providers/grok.png'),
   kimi: require('@/assets/images/providers/kimi.png'),
   ohMyPi: require('@/assets/images/providers/ohMyPi.png'),

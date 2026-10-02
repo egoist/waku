@@ -36,7 +36,6 @@ const PROVIDERS = new Set<ProviderKind>([
   'deepSeek',
   'fx',
   'openCode',
-  'openCode2',
   'grok',
   'kimi',
   'ohMyPi',
@@ -123,13 +122,31 @@ export function rememberedModelTraits(
   return preferences.modelTraits[modelKey(provider, model)]
 }
 
+// OpenCode 2 was its own `openCode2` provider while it was in beta. Its release
+// took over the `opencode` command, so preferences saved for it carry over.
+const RENAMED_PROVIDERS = new Map<string, ProviderKind>([['openCode2', 'openCode']])
+
+function currentProvider(value: unknown): ProviderKind | undefined {
+  const provider = typeof value === 'string' ? (RENAMED_PROVIDERS.get(value) ?? value) : value
+  return PROVIDERS.has(provider as ProviderKind) ? (provider as ProviderKind) : undefined
+}
+
+function currentModelKey(key: string): string {
+  const separator = key.indexOf('\u0000')
+  if (separator < 0) return key
+  const provider = RENAMED_PROVIDERS.get(key.slice(0, separator))
+  return provider ? provider + key.slice(separator) : key
+}
+
 function parsePreferences(value: unknown): ComposerPreferences {
-  if (!isRecord(value) || !PROVIDERS.has(value.lastProvider as ProviderKind)) {
+  const lastProvider = isRecord(value) ? currentProvider(value.lastProvider) : undefined
+  if (!isRecord(value) || !lastProvider) {
     return { ...DEFAULT_PREFERENCES }
   }
   const modelTraits: Record<string, RememberedModelTraits> = {}
   if (isRecord(value.modelTraits)) {
-    for (const [key, traits] of Object.entries(value.modelTraits)) {
+    for (const [storedKey, traits] of Object.entries(value.modelTraits)) {
+      const key = currentModelKey(storedKey)
       if (!isRecord(traits)) continue
       const reasoningEffort = nullableString(traits.reasoningEffort)
       const serviceTier = nullableString(traits.serviceTier)
@@ -142,7 +159,7 @@ function parsePreferences(value: unknown): ComposerPreferences {
     }
   }
   return {
-    lastProvider: value.lastProvider as ProviderKind,
+    lastProvider,
     lastModel: nullableString(value.lastModel) ?? null,
     lastReasoningEffort: nullableString(value.lastReasoningEffort) ?? null,
     lastServiceTier: nullableString(value.lastServiceTier) ?? null,

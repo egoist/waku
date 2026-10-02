@@ -69,6 +69,33 @@ describe('composer preferences', () => {
 
     expect(readComposerPreferences(storage, 'ws://first').lastProvider).toBe('fx')
   })
+
+  test('carries preferences saved for the OpenCode 2 beta over to OpenCode', () => {
+    const storage = memoryStorage()
+    storage.setItem('waku.composer-preferences.v1', JSON.stringify({
+      'ws://first': {
+        lastProvider: 'openCode2',
+        lastModel: 'opencode-go/deepseek-v4-flash',
+        lastReasoningEffort: 'high',
+        lastServiceTier: null,
+        modelTraits: {
+          'openCode2\u0000opencode-go/deepseek-v4-flash': {
+            reasoningEffort: 'high',
+            serviceTier: null,
+          },
+        },
+      },
+    }))
+
+    const preferences = readComposerPreferences(storage, 'ws://first')
+    expect(preferences.lastProvider).toBe('openCode')
+    expect(preferences.lastModel).toBe('opencode-go/deepseek-v4-flash')
+    expect(rememberedModelTraits(preferences, 'openCode', 'opencode-go/deepseek-v4-flash')).toEqual({
+      reasoningEffort: 'high',
+      serviceTier: null,
+      contextWindow: null,
+    })
+  })
 })
 
 function memoryStorage() {

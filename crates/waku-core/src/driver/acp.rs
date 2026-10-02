@@ -97,10 +97,6 @@ fn launch_for(provider: ProviderKind, reasoning_effort: Option<&str>) -> anyhow:
             args: vec!["acp".into()],
             env: Vec::new(),
         }),
-        ProviderKind::OpenCode => Ok(AcpLaunch {
-            args: vec!["acp".into()],
-            env: Vec::new(),
-        }),
         _ => Err(anyhow!(
             "{} does not speak the Agent Client Protocol",
             provider.display_name()
@@ -1243,8 +1239,8 @@ async fn apply_model(
         return;
     }
 
-    // Grok, Kimi, OpenCode, and Cursor agents that do not advertise a model
-    // config option retain the legacy request unchanged. Fx intentionally
+    // Grok, Kimi, and Cursor agents that do not advertise a model config
+    // option retain the legacy request unchanged. Fx intentionally
     // stays on session/set_config_option, its documented model API.
     let request = match UntypedMessage::new(
         "session/set_model",

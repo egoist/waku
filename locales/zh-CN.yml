@@ -78,7 +78,7 @@ settings.daemon: 守护进程
 settings.computer_use: 电脑操作
 settings.general_keywords: 通用 本地 项目 对话 隐私 匿名 使用数据 分析 分享 更新 自动 版本 数学 公式 表达式 math latex
 settings.appearance_keywords: 外观 主题 系统 浅色 深色 语言 英语 中文 简体 字号 字体 大小 编辑器
-settings.providers_keywords: 服务商 智能体 模型 命令行 版本 安装 检测 claude codex cursor opencode opencode2 amp grok pi
+settings.providers_keywords: 服务商 智能体 模型 命令行 版本 安装 检测 claude codex cursor opencode amp grok pi
 settings.skills: 技能
 settings.skills_keywords: 技能 技能库 智能体 禁用 启用 删除 claude codex cursor opencode pi amp 共享
 settings.usage_keywords: 用量 令牌 费用 支出 缓存 每日 图表 模型 明细 历史 claude codex
@@ -209,7 +209,10 @@ providers.checked_just_now: 刚刚检查过
 providers.checked_minutes_ago: "%{count} 分钟前检查过"
 providers.checked_hours_ago: "%{count} 小时前检查过"
 computer_use.allow_apps: 允许 Waku 操作其他应用
-computer_use.availability: Codex、OpenCode、OpenCode 2、Grok 和 Pi 支持电脑操作功能
+computer_use.availability: Codex、OpenCode、Grok 和 Pi 支持电脑操作功能
+computer_use.desktop_access: 桌面权限
+computer_use.windows_access_description: 在当前 Windows 桌面会话中操作应用。Windows 可能会限制访问以管理员身份运行的应用和安全桌面。
+computer_use.linux_access_description: 在当前 Linux 桌面会话中操作应用。截图和输入支持取决于你的合成器和辅助功能服务。
 computer_use.macos_access: macOS 权限
 computer_use.helper_access: 请向 Waku 的独立控制助手 %{helper} 授予权限
 computer_use.screen_recording: 屏幕录制
@@ -388,6 +391,13 @@ activity.plan_update_failed: 更新计划失败
 activity.activity: 操作
 activity.tool: 工具
 activity.plan_updated: 计划已更新
+activity.compacting_context: 正在压缩上下文
+activity.compacted_context: 已压缩上下文
+activity.compaction_failed: 上下文压缩失败
+activity.provider_retrying: 正在重试请求
+activity.provider_service_waiting: "正在等待 %{provider} 服务"
+activity.provider_service_reconnected: "已重新连接 %{provider} 服务"
+activity.background_shell: 后台终端
 activity.output_truncated: "\n\n… 输出已截断"
 activity.thought: 思考
 activity.thoughts: 思考

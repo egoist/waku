@@ -16,8 +16,8 @@ use uuid::Uuid;
 
 use super::computer_use::{ComputerUseConfig, ComputerUseRuntime, create_process_directory};
 use crate::driver::DriverEventSender;
-use crate::opencode2_api;
-use crate::opencode2_service::Opencode2Service;
+use crate::opencode_api;
+use crate::opencode_service::OpenCodeService;
 
 pub(super) const INSTRUCTION_KEY: &str = "waku-computer-use";
 
@@ -35,7 +35,7 @@ type Bridges = Mutex<HashMap<BridgeKey, Weak<McpBridge>>>;
 static BRIDGES: OnceLock<Bridges> = OnceLock::new();
 
 struct McpBridge {
-    service: Arc<Opencode2Service>,
+    service: Arc<OpenCodeService>,
     directory: String,
     server: String,
     sessions_directory: PathBuf,
@@ -45,7 +45,7 @@ struct McpBridge {
 
 impl McpBridge {
     fn acquire(
-        service: &Arc<Opencode2Service>,
+        service: &Arc<OpenCodeService>,
         directory: &str,
         config: &ComputerUseConfig,
     ) -> anyhow::Result<Arc<Self>> {
@@ -83,7 +83,7 @@ impl McpBridge {
     fn ensure_connected(&self) -> anyhow::Result<()> {
         let _registration = self.registration.lock();
         let endpoint = self.service.endpoint();
-        let status = opencode2_api::list_mcp(&endpoint, &self.directory)?
+        let status = opencode_api::list_mcp(&endpoint, &self.directory)?
             .into_iter()
             .find(|server| server["name"] == self.server);
         if status
@@ -92,11 +92,11 @@ impl McpBridge {
         {
             return Ok(());
         }
-        opencode2_api::add_mcp(&endpoint, &self.directory, &self.server, &self.config)
-            .context("could not connect OpenCode 2 to Waku Computer Use")?;
+        opencode_api::add_mcp(&endpoint, &self.directory, &self.server, &self.config)
+            .context("could not connect OpenCode to Waku Computer Use")?;
         let deadline = Instant::now() + Duration::from_secs(12);
         loop {
-            let status = opencode2_api::list_mcp(&endpoint, &self.directory)?
+            let status = opencode_api::list_mcp(&endpoint, &self.directory)?
                 .into_iter()
                 .find(|server| server["name"] == self.server);
             match status
@@ -105,14 +105,14 @@ impl McpBridge {
             {
                 Some("connected") => return Ok(()),
                 Some("failed" | "disabled" | "needs_auth") => bail!(
-                    "OpenCode 2 could not start Waku Computer Use: {}",
+                    "OpenCode could not start Waku Computer Use: {}",
                     status
                         .as_ref()
                         .and_then(|server| server["status"]["error"].as_str())
                         .unwrap_or("MCP server unavailable")
                 ),
                 _ if Instant::now() >= deadline => {
-                    bail!("OpenCode 2 timed out connecting Waku Computer Use")
+                    bail!("OpenCode timed out connecting Waku Computer Use")
                 }
                 _ => std::thread::sleep(Duration::from_millis(100)),
             }
@@ -129,20 +129,20 @@ impl McpBridge {
 
 impl Drop for McpBridge {
     fn drop(&mut self) {
-        let _ = opencode2_api::remove_mcp(&self.service.endpoint(), &self.directory, &self.server);
+        let _ = opencode_api::remove_mcp(&self.service.endpoint(), &self.directory, &self.server);
         let _ = fs::remove_dir_all(&self.sessions_directory);
     }
 }
 
-pub(super) struct OpenCode2ComputerUse {
+pub(super) struct OpenCodeComputerUse {
     runtime: ComputerUseRuntime,
     bridge: Arc<McpBridge>,
     session_id: String,
 }
 
-impl OpenCode2ComputerUse {
+impl OpenCodeComputerUse {
     pub(super) fn start(
-        service: &Arc<Opencode2Service>,
+        service: &Arc<OpenCodeService>,
         directory: &str,
         session_id: &str,
         events: DriverEventSender,
@@ -173,13 +173,13 @@ impl OpenCode2ComputerUse {
             this.bridge.server,
             this.runtime.config.skill_path.display(),
         );
-        let attached = opencode2_api::put_instruction_entry(
+        let attached = opencode_api::put_instruction_entry(
             &service.endpoint(),
             session_id,
             INSTRUCTION_KEY,
             &instructions,
         )
-        .map_err(|error| anyhow!("could not attach OpenCode 2 Computer Use instructions: {error}"));
+        .map_err(|error| anyhow!("could not attach OpenCode Computer Use instructions: {error}"));
         drop(registration);
         attached?;
         Ok(this)
@@ -194,7 +194,7 @@ impl OpenCode2ComputerUse {
     }
 }
 
-impl Drop for OpenCode2ComputerUse {
+impl Drop for OpenCodeComputerUse {
     fn drop(&mut self) {
         // Worker ownership keeps these blocking cleanup calls off the UI
         // thread. Removing the registration revokes this session immediately;
@@ -215,7 +215,7 @@ impl Drop for OpenCode2ComputerUse {
             });
         if owns_registration {
             let _ = fs::remove_file(path);
-            let _ = opencode2_api::remove_instruction_entry(
+            let _ = opencode_api::remove_instruction_entry(
                 &self.bridge.service.endpoint(),
                 &self.session_id,
                 INSTRUCTION_KEY,

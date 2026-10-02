@@ -171,7 +171,6 @@ export function providerLabel(provider: ProviderKind): string {
     deepSeek: 'DeepSeek',
     fx: 'Fx',
     openCode: 'OpenCode',
-    openCode2: 'OpenCode 2',
     grok: 'Grok',
     kimi: 'Kimi',
     ohMyPi: 'Oh My Pi',
