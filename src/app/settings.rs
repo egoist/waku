@@ -6,6 +6,17 @@ const SETTINGS_CONTENT_MAX_WIDTH: f32 = 760.0;
 /// The Usage page is a dashboard, not a form; it mirrors T3 Code's wide
 /// two-column layout and needs the extra room for the chart.
 const SETTINGS_USAGE_MAX_WIDTH: f32 = 1024.0;
+const SETTINGS_CONTENT_PADDING: f32 = 32.0;
+
+/// Width a page is painted into at this window width, for pages that reflow
+/// on it.
+pub(super) fn settings_content_width(viewport_width: f32, page: SettingsPage) -> f32 {
+    let max_width = match page {
+        SettingsPage::Usage => SETTINGS_USAGE_MAX_WIDTH,
+        _ => SETTINGS_CONTENT_MAX_WIDTH,
+    };
+    (viewport_width - DEFAULT_SIDEBAR_WIDTH - 2.0 * SETTINGS_CONTENT_PADDING).clamp(0.0, max_width)
+}
 
 /// Key context the settings sidebar declares around its search field.
 const SETTINGS_SIDEBAR_CONTEXT: &str = "SettingsSidebar";
@@ -337,6 +348,7 @@ impl Waku {
         // rather than a glitch.
         let content_scrolled = !fills_viewport && self.settings_scroll.offset().y < px(-1.0);
 
+        let content_width = settings_content_width(f32::from(window.viewport_size().width), page);
         let inner = div()
             .w_full()
             .max_w(px(match page {
@@ -368,7 +380,7 @@ impl Waku {
                 SettingsPage::General => self.render_general_settings(cx),
                 SettingsPage::Providers => self.render_providers_settings(cx),
                 SettingsPage::Skills => self.render_skills_settings(cx),
-                SettingsPage::Usage => self.render_usage_settings(cx),
+                SettingsPage::Usage => self.render_usage_settings(content_width, cx),
                 SettingsPage::Daemon => self.render_daemon_settings(cx),
                 SettingsPage::ComputerUse => self.render_computer_use_settings(cx),
                 SettingsPage::Appearance => self.render_appearance_settings(cx),
@@ -411,7 +423,7 @@ impl Waku {
                             .when(fills_viewport, |element| {
                                 element.min_h_0().flex().flex_col()
                             })
-                            .px(px(32.0))
+                            .px(px(SETTINGS_CONTENT_PADDING))
                             .child(inner),
                     )
                     .when(!fills_viewport, |element| {
