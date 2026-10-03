@@ -26,6 +26,26 @@ Waku expects:
 
 Set `WAKU_VERSION` to install a specific version rather than the latest.
 
+## NixOS
+
+From a checkout of this repository, build and run Waku with:
+
+```sh
+nix run .
+```
+
+The flake builds the desktop and daemon from the checked-in source and supplies
+their native dependencies. The first build can take a while. It supports
+`x86_64-linux` and `aarch64-linux`; enable Nix flakes and run it from a graphical
+session with a working graphics driver and desktop portal. Install and
+authenticate an agent CLI separately, as described in the [README](../README.md).
+
+`nix build .` produces an install prefix at `result`, including the desktop
+entry and icon. Nix builds do not self-update; update your checkout and rebuild.
+
+For development, use `nix develop`, then follow the existing `bun install` and
+`bun run dev` workflow in [CONTRIBUTING.md](../CONTRIBUTING.md).
+
 ## Installing manually
 
 The script is a convenience, not a requirement. Download
