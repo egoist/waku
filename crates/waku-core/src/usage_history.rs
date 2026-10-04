@@ -61,6 +61,10 @@ fn might_carry_usage(line: &str, provider: UsageProvider) -> bool {
     match provider {
         UsageProvider::Claude => line.contains("\"usage\""),
         UsageProvider::Codex => line.contains("\"token_count\""),
+        // OpenCode/OpenCode2 are read from their SQLite database, never from
+        // JSONL transcripts, so this JSONL pre-filter is never consulted for
+        // them; `false` keeps the signature honest.
+        UsageProvider::OpenCode | UsageProvider::OpenCode2 => false,
     }
 }
 
@@ -558,7 +562,9 @@ pub struct FileCacheEntry {
 
 pub type ScanCache = HashMap<PathBuf, FileCacheEntry>;
 
-/// The transcript root scanned for one provider.
+/// The transcript root scanned for one provider. OpenCode/OpenCode2 keep their
+/// sessions in a SQLite database (see [`provider_db_path`]), not JSONL, so they
+/// have no transcript directory here.
 fn provider_root(provider: UsageProvider) -> Option<PathBuf> {
     match provider {
         UsageProvider::Claude => match std::env::var_os("CLAUDE_CONFIG_DIR") {
@@ -569,7 +575,32 @@ fn provider_root(provider: UsageProvider) -> Option<PathBuf> {
             Some(dir) if !dir.is_empty() => Some(PathBuf::from(dir).join("sessions")),
             _ => dirs::home_dir().map(|home| home.join(".codex/sessions")),
         },
+        UsageProvider::OpenCode | UsageProvider::OpenCode2 => None,
     }
+}
+
+/// The OpenCode on-disk database for one provider, if it can be located. Both
+/// OpenCode and its `opencode2` sibling store sessions under an `opencode`
+/// (or `opencode2`) data directory; we probe the common locations and return
+/// the first that exists. A missing database is not an error — it simply means
+/// that provider has never been used on this machine, mirroring how Claude/Codex
+/// are skipped when their transcript directory is absent.
+fn provider_db_path(provider: UsageProvider) -> Option<PathBuf> {
+    let name = match provider {
+        UsageProvider::OpenCode => "opencode",
+        UsageProvider::OpenCode2 => "opencode2",
+        UsageProvider::Claude | UsageProvider::Codex => return None,
+    };
+    let home = dirs::home_dir()?;
+    let candidates = [
+        // XDG data home (Linux; also where the desktop app lands on this box).
+        Some(home.join(".local/share").join(name).join("opencode.db")),
+        // Cross-platform data dir (Windows %LOCALAPPDATA%, macOS Application Support).
+        dirs::data_dir().map(|data| data.join(name).join("opencode.db")),
+        // Legacy config location.
+        Some(home.join(".config").join(name).join("opencode.db")),
+    ];
+    candidates.into_iter().flatten().find(|path| path.is_file())
 }
 
 /// Lists `.jsonl` transcripts under `root` modified at or after `since_ms`.
@@ -667,9 +698,95 @@ fn read_transcript_records(path: &Path, provider: UsageProvider) -> Option<Vec<U
                     records.push(record);
                 }
             }
+            // OpenCode/OpenCode2 are read from their SQLite database, never
+            // line-by-line, so this JSONL path is never reached for them.
+            UsageProvider::OpenCode | UsageProvider::OpenCode2 => return None,
         }
     }
     Some(records)
+}
+
+/// Reads OpenCode (or `opencode2`) session totals straight from its SQLite
+/// database. OpenCode stores per-session token and cost aggregates in the
+/// `session`/`session_v2` tables (the newer `session_v2` is the live one; we
+/// union both so pre-migration history is not lost), so unlike Claude/Codex we
+/// never parse JSONL. Each row becomes one [`UsageRecord`] keyed by its session
+/// id — the aggregator's global de-duplication drops the same session if it
+/// appears in both tables, and a re-scan rebuilds the snapshot from scratch so
+/// there is no cross-scan double counting.
+fn read_opencode_db(
+    path: &Path,
+    provider: UsageProvider,
+    since_ms: i64,
+) -> Result<Vec<UsageRecord>, String> {
+    use rusqlite::OpenFlags;
+    let conn = rusqlite::Connection::open_with_flags(
+        path,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .map_err(|cause| format!("open {}: {cause}", path.display()))?;
+
+    // `model` is a JSON object like {"id":"glm-5.3-flash","providerID":"opencode-go"};
+    // the pricing table keys on the bare model id, so we unwrap it.
+    let mut statement = conn
+        .prepare(
+            "SELECT id, directory, model, cost, tokens_input, tokens_output, \
+             tokens_reasoning, tokens_cache_read, tokens_cache_write, time_created \
+             FROM session_v2 WHERE time_created >= ?1 \
+             UNION ALL \
+             SELECT id, directory, model, cost, tokens_input, tokens_output, \
+             tokens_reasoning, tokens_cache_read, tokens_cache_write, time_created \
+             FROM session WHERE time_created >= ?1",
+        )
+        .map_err(|cause| format!("query {}: {cause}", path.display()))?;
+
+    let rows = statement
+        .query_map(rusqlite::params![since_ms], |row| {
+            Ok((
+                row.get::<_, String>(0)?, // id
+                row.get::<_, String>(1)?, // directory
+                row.get::<_, String>(2)?, // model (JSON)
+                row.get::<_, f64>(3)?,    // cost
+                row.get::<_, i64>(4)?,    // tokens_input
+                row.get::<_, i64>(5)?,    // tokens_output
+                row.get::<_, i64>(6)?,    // tokens_reasoning
+                row.get::<_, i64>(7)?,    // tokens_cache_read
+                row.get::<_, i64>(8)?,    // tokens_cache_write
+                row.get::<_, i64>(9)?,    // time_created (ms)
+            ))
+        })
+        .map_err(|cause| format!("read {}: {cause}", path.display()))?;
+
+    let mut records = Vec::new();
+    for row in rows {
+        let (id, directory, model_json, cost, input, output, reasoning, cache_read, cache_write, created) =
+            row.map_err(|cause| format!("row {}: {cause}", path.display()))?;
+        let model = serde_json::from_str::<Value>(&model_json)
+            .ok()
+            .and_then(|value| value.get("id").and_then(Value::as_str).map(str::to_owned))
+            .filter(|id| !id.is_empty())
+            .unwrap_or_else(|| model_json.clone());
+        if model.is_empty() {
+            continue;
+        }
+        records.push(UsageRecord {
+            provider,
+            timestamp_ms: created,
+            model,
+            session_id: id.clone(),
+            project: directory,
+            totals: TokenTotals {
+                uncached_input: input.max(0) as u64,
+                cached_input: cache_read.max(0) as u64,
+                cache_creation: cache_write.max(0) as u64,
+                output: output.max(0) as u64,
+                reasoning: reasoning.max(0) as u64,
+            },
+            reported_cost_usd: Some(cost),
+            dedupe_key: Some(id),
+        });
+    }
+    Ok(records)
 }
 
 /* ------------------------------------------------------------------------- */
@@ -698,7 +815,7 @@ struct Bucket {
 struct ProjectAccumulator {
     cost_usd: f64,
     total_tokens: u64,
-    by_provider: [ProviderDay; 2],
+    by_provider: [ProviderDay; UsageProvider::ALL.len()],
     sessions: HashSet<(UsageProvider, String)>,
     /// Cost per model, for the row's "top models" caption.
     models: HashMap<String, f64>,
@@ -855,6 +972,22 @@ pub fn scan(
     let mut errors = Vec::new();
 
     for provider in UsageProvider::ALL {
+        // OpenCode/OpenCode2 persist sessions in a SQLite database rather than
+        // JSONL transcripts: read the database directly and fold its rows in.
+        if let Some(db) = provider_db_path(provider) {
+            if db.is_file() {
+                scanned_files += 1;
+                match read_opencode_db(&db, provider, mtime_cutoff_ms) {
+                    Ok(records) => {
+                        for record in &records {
+                            aggregator.add(record, rates);
+                        }
+                    }
+                    Err(message) => errors.push(message),
+                }
+            }
+            continue;
+        }
         let Some(root) = provider_root(provider) else {
             continue;
         };
@@ -968,7 +1101,7 @@ fn derive_history(
             day: *day,
             cost_usd: 0.0,
             total_tokens: 0,
-            by_provider: [ProviderDay::default(); 2],
+            by_provider: [ProviderDay::default(); UsageProvider::ALL.len()],
         });
         day_entry.cost_usd += bucket.cost_usd;
         day_entry.total_tokens += tokens;
@@ -1028,7 +1161,7 @@ fn derive_history(
                 first_day: first_of_month(day.day),
                 cost_usd: 0.0,
                 total_tokens: 0,
-                by_provider: [ProviderDay::default(); 2],
+                by_provider: [ProviderDay::default(); UsageProvider::ALL.len()],
                 sessions: 0,
                 active_days: 0,
                 top_models: Vec::new(),

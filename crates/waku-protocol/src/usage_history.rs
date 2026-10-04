@@ -93,15 +93,27 @@ use chrono::Datelike as _;
 pub enum UsageProvider {
     Claude,
     Codex,
+    /// OpenCode (and its `opencode2` sibling) persist sessions in a SQLite
+    /// database rather than JSONL transcripts, so the usage scan reads their
+    /// `session`/`session_v2` tables directly instead of walking `.jsonl` files.
+    OpenCode,
+    OpenCode2,
 }
 
 impl UsageProvider {
-    pub const ALL: [UsageProvider; 2] = [UsageProvider::Claude, UsageProvider::Codex];
+    pub const ALL: [UsageProvider; 4] = [
+        UsageProvider::Claude,
+        UsageProvider::Codex,
+        UsageProvider::OpenCode,
+        UsageProvider::OpenCode2,
+    ];
 
     pub fn label(self) -> &'static str {
         match self {
             UsageProvider::Claude => "Claude Code",
             UsageProvider::Codex => "Codex",
+            UsageProvider::OpenCode => "OpenCode",
+            UsageProvider::OpenCode2 => "OpenCode 2",
         }
     }
 
@@ -109,6 +121,8 @@ impl UsageProvider {
         match self {
             UsageProvider::Claude => 0,
             UsageProvider::Codex => 1,
+            UsageProvider::OpenCode => 2,
+            UsageProvider::OpenCode2 => 3,
         }
     }
 }
@@ -178,7 +192,7 @@ pub struct DaySlice {
     pub day: NaiveDate,
     pub cost_usd: f64,
     pub total_tokens: u64,
-    pub by_provider: [ProviderDay; 2],
+    pub by_provider: [ProviderDay; 4],
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, TS)]
@@ -196,7 +210,7 @@ pub struct MonthSlice {
     pub first_day: NaiveDate,
     pub cost_usd: f64,
     pub total_tokens: u64,
-    pub by_provider: [ProviderDay; 2],
+    pub by_provider: [ProviderDay; 4],
     pub sessions: u64,
     pub active_days: u32,
     pub top_models: Vec<(String, f64)>,
@@ -208,7 +222,7 @@ pub struct ProjectSlice {
     pub path: String,
     pub cost_usd: f64,
     pub total_tokens: u64,
-    pub by_provider: [ProviderDay; 2],
+    pub by_provider: [ProviderDay; 4],
     pub sessions: u64,
     pub cost_share: f64,
     pub last_day: Option<NaiveDate>,

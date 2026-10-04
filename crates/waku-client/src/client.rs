@@ -237,6 +237,32 @@ impl DaemonClient {
     pub fn shutdown(&self) {
         let _ = self.inner.outgoing.send(Outgoing::Shutdown);
     }
+
+    #[cfg(test)]
+    pub(crate) fn disconnected_for_test(last_sequences: Vec<ReplayCursor>) -> Self {
+        let sequences: HashMap<(Uuid, Uuid), LastSequence> = last_sequences
+            .into_iter()
+            .map(|cursor| {
+                (
+                    (cursor.session_id, cursor.runtime_id),
+                    LastSequence {
+                        epoch: cursor.epoch,
+                        sequence: cursor.sequence,
+                    },
+                )
+            })
+            .collect();
+        let inner = Arc::new(ClientInner {
+            outgoing: unbounded().0,
+            pending: Mutex::new(HashMap::new()),
+            sessions: Mutex::new(HashMap::new()),
+            pending_events: Mutex::new(HashMap::new()),
+            task_state_subscribers: Mutex::new(Vec::new()),
+            last_sequences: Mutex::new(sequences),
+            disconnected: AtomicBool::new(true),
+        });
+        Self { inner }
+    }
 }
 
 fn daemon_url(address: &str) -> anyhow::Result<String> {
