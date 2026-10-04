@@ -15,6 +15,14 @@ pub fn sp(value: f32) -> Rems {
     rems(value / waku_client::persistence::DEFAULT_UI_FONT_SIZE)
 }
 
+/// Terminal screen surface and default glyph color. These are also the values
+/// reported to child processes over OSC 10/11/12, and agents such as Codex pick
+/// a light or dark palette from the background reply, so the two must agree.
+pub const TERMINAL_BACKGROUND_DARK: u32 = 0x151515;
+pub const TERMINAL_BACKGROUND_LIGHT: u32 = 0xFFFFFF;
+pub const TERMINAL_FOREGROUND_DARK: u32 = 0xE2E2E2;
+pub const TERMINAL_FOREGROUND_LIGHT: u32 = 0x242424;
+
 fn resolves_to_dark(preference: ThemePreference, system_appearance: WindowAppearance) -> bool {
     match preference {
         ThemePreference::System => matches!(
@@ -114,7 +122,7 @@ impl Theme {
             raised: rgb(0x232323).into(),
             composer: rgb(0x212121).into(),
             inset: rgb(0x151515).into(),
-            terminal: rgb(0x151515).into(),
+            terminal: rgb(TERMINAL_BACKGROUND_DARK).into(),
             overlay: hsla(220.0 / 360.0, 0.10, 0.90, 0.05),
             overlay_strong: hsla(220.0 / 360.0, 0.10, 0.90, 0.09),
 
@@ -122,7 +130,7 @@ impl Theme {
             border_strong: hsla(220.0 / 360.0, 0.10, 0.90, 0.14),
             sidebar_border: hsla(126.93 / 360.0, 0.000_000_1, 0.16077, 1.0),
 
-            text: rgb(0xE2E2E2).into(),
+            text: rgb(TERMINAL_FOREGROUND_DARK).into(),
             text_secondary: rgb(0xA3A3A3).into(),
             text_tertiary: rgb(0x7D7D7D).into(),
             text_ghost: rgb(0x575757).into(),
@@ -161,7 +169,7 @@ impl Theme {
             raised: rgb(0xECECEC).into(),
             composer: rgb(0xFFFFFF).into(),
             inset: rgb(0xE6E6E6).into(),
-            terminal: rgb(0xFFFFFF).into(),
+            terminal: rgb(TERMINAL_BACKGROUND_LIGHT).into(),
             overlay: hsla(220.0 / 360.0, 0.10, 0.12, 0.05),
             overlay_strong: hsla(220.0 / 360.0, 0.10, 0.12, 0.09),
 
@@ -169,7 +177,7 @@ impl Theme {
             border_strong: hsla(220.0 / 360.0, 0.10, 0.12, 0.15),
             sidebar_border: hsla(0.0, 0.0, 0.078, 0.12),
 
-            text: rgb(0x242424).into(),
+            text: rgb(TERMINAL_FOREGROUND_LIGHT).into(),
             text_secondary: rgb(0x666666).into(),
             text_tertiary: rgb(0x858585).into(),
             text_ghost: rgb(0xA4A4A4).into(),
