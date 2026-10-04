@@ -2573,6 +2573,7 @@ impl Waku {
                     .when(menu_open, |element| element.bg(theme.overlay_strong))
                     .hover(|element| element.bg(theme.overlay_strong))
                     .active(|element| element.opacity(0.8))
+                    .tooltip(Tooltip::text(tr!("composer.queued_message_actions")))
                     .child(icon("icons/ellipsis.svg", 12.5, theme.text_secondary)),
                 SharedString::from(format!("queued-message-more-menu-{message_id}")),
                 &menu_handle,
@@ -2611,7 +2612,6 @@ impl Waku {
                     .tab_index(0)
                     .focus_visible(|style| style.border_1().border_color(theme.accent))
                     .hover(|element| element.bg(theme.overlay))
-                    .tooltip(Tooltip::text(tr!("composer.edit_in_composer")))
                     .child(div().h(px(30.0)).flex().items_center().child(icon(
                         "icons/queue.svg",
                         12.0,
@@ -2619,8 +2619,16 @@ impl Waku {
                     )))
                     .child(
                         div()
+                            .id(SharedString::from(format!(
+                                "queued-message-text-{message_id}"
+                            )))
                             .flex_1()
                             .min_w_0()
+                            // The edit hint sits on the text, not the row: GPUI
+                            // keeps an ancestor's tooltip live over its children,
+                            // so a row tooltip would show before Steer's, Remove's
+                            // and More's own.
+                            .tooltip(Tooltip::text(tr!("composer.edit_in_composer")))
                             // Three lines is enough to recognise a prompt without
                             // the queue becoming a second transcript.
                             .py(px(6.0))
