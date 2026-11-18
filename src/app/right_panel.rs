@@ -2337,9 +2337,12 @@ impl Waku {
             .get(&terminal_id)
             .is_some_and(|terminal| terminal.read(cx).working_directory() == working_directory);
         if !matches_project {
+            // The shell is read once, when the pane is created: a terminal
+            // that is already running keeps the shell it started with.
+            let settings = self.state.terminal.clone();
             self.right_panel_terminals.insert(
                 terminal_id,
-                cx.new(|cx| TerminalView::new(working_directory.clone(), cx)),
+                cx.new(|cx| TerminalView::new(working_directory.clone(), settings.clone(), cx)),
             );
         }
     }

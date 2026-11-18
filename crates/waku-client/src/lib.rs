@@ -14,6 +14,7 @@ mod process;
 mod workspace_client;
 
 pub use client::DaemonClient;
+pub use command_env::{TERMINAL_SHELL_ENV, TerminalSettings, TerminalShell};
 pub use process::{
     DEFAULT_EXPOSED_DAEMON_PORT, DaemonExposureSettings, DaemonProcess, DaemonSupervisor,
     parse_allowed_origins,

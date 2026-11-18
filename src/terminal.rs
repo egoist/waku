@@ -30,6 +30,7 @@ use gpui::{
 };
 use parking_lot::Mutex;
 
+use crate::command_env::TerminalSettings;
 use crate::persistence::DEFAULT_RIGHT_PANEL_WIDTH;
 use crate::theme::{Theme, sp};
 use crate::ui::scrollbar::{self, ScrollbarState};
@@ -179,7 +180,12 @@ struct TerminalSession {
 }
 
 impl TerminalSession {
-    fn new(working_directory: &Path, columns: usize, rows: usize) -> Result<Self> {
+    fn new(
+        working_directory: &Path,
+        settings: &TerminalSettings,
+        columns: usize,
+        rows: usize,
+    ) -> Result<Self> {
         let columns = columns.max(TERMINAL_MIN_COLUMNS);
         let rows = rows.max(TERMINAL_MIN_ROWS);
         let window_size = WindowSize {
@@ -214,10 +220,12 @@ impl TerminalSession {
             proxy.clone(),
         )));
 
-        let shell = crate::command_env::default_terminal_shell();
-        let shell_args = crate::command_env::default_terminal_shell_args(&shell);
+        let shell = crate::command_env::terminal_shell(settings);
         let mut options = tty::Options {
-            shell: Some(Shell::new(shell.to_string_lossy().into_owned(), shell_args)),
+            shell: Some(Shell::new(
+                shell.program.to_string_lossy().into_owned(),
+                shell.args,
+            )),
             working_directory: Some(working_directory.to_path_buf()),
             drain_on_exit: false,
             ..Default::default()
@@ -643,12 +651,19 @@ pub struct TerminalView {
 }
 
 impl TerminalView {
-    pub fn new(working_directory: PathBuf, cx: &mut Context<Self>) -> Self {
+    pub fn new(
+        working_directory: PathBuf,
+        settings: TerminalSettings,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let terminal_cwd = working_directory.clone();
+        let terminal_settings = settings;
         cx.spawn(async move |this, cx| {
             let started = cx
                 .background_executor()
-                .spawn(async move { TerminalSession::new(&terminal_cwd, 52, 36) })
+                .spawn(
+                    async move { TerminalSession::new(&terminal_cwd, &terminal_settings, 52, 36) },
+                )
                 .await;
             if this
                 .update(cx, |this, cx| {

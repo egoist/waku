@@ -81,6 +81,23 @@ desktop's Settings → Daemon page can explicitly
 expose the child daemon on a fixed port, configure exact browser origins, and
 copy its stable authentication token. It remains loopback-only by default.
 
+The terminal pane runs the account's login shell by default. Settings →
+General picks a different one, either from the app or by hand-editing
+`app.json`:
+
+```json
+{
+  "terminal": {
+    "shell": "/usr/bin/fish",
+    "args": ["-l"]
+  }
+}
+```
+
+The shell is a path, or a name to look up on `PATH`. Leaving `args` out keeps
+the platform defaults for that shell. `WAKU_TERMINAL_SHELL` names a shell the
+same way, for setups that cannot edit the settings file.
+
 When connected to a daemon managed outside the desktop process, Waku never
 interprets daemon paths on the client machine. The local folder picker and PTY
 are therefore unavailable until the protocol gains daemon-host picker and

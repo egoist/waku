@@ -1073,6 +1073,9 @@ pub struct Waku {
     settings_search: Entity<TextInput>,
     daemon_port_input: Entity<TextInput>,
     daemon_origins_input: Entity<TextInput>,
+    /// The shell the terminal pane should run. Edited in Settings, applied
+    /// on submit.
+    terminal_shell_input: Entity<TextInput>,
     daemon_reconfigure_pending: bool,
     daemon_token_revealed: bool,
     settings_focus: FocusHandle,
@@ -2037,6 +2040,14 @@ impl Waku {
             input.set_content(daemon_origins, cx);
             input
         });
+        let terminal_shell = state.terminal.shell.clone().unwrap_or_default();
+        let terminal_shell_input = cx.new(|cx| {
+            let mut input = TextInput::new(window, cx)
+                .select_all_on_focus_click()
+                .placeholder(tr!("settings.terminal_shell_placeholder"));
+            input.set_content(terminal_shell, cx);
+            input
+        });
         let skills_search = cx.new(|cx| {
             TextInput::new(window, cx)
                 .clear_on_escape()
@@ -2599,6 +2610,15 @@ impl Waku {
                 )
                 .detach();
             }
+            cx.subscribe(
+                &terminal_shell_input,
+                |this: &mut Self, _, event: &InputEvent, cx| match event {
+                    InputEvent::Submit(_) => this.apply_terminal_shell(cx),
+                    InputEvent::Edited => cx.notify(),
+                    _ => {}
+                },
+            )
+            .detach();
             cx.subscribe(&skills_search, |_: &mut Self, _, event: &InputEvent, cx| {
                 if matches!(event, InputEvent::Edited) {
                     cx.notify();
@@ -2770,6 +2790,7 @@ impl Waku {
                 settings_search,
                 daemon_port_input,
                 daemon_origins_input,
+                terminal_shell_input,
                 daemon_reconfigure_pending: false,
                 daemon_token_revealed: false,
                 settings_focus,
