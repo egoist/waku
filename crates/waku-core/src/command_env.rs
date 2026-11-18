@@ -625,8 +625,12 @@ fn windows_shell_candidates() -> Vec<PathBuf> {
 /// platform shell as a final fallback when desktop launchers omit `SHELL`.
 pub fn default_terminal_shell() -> PathBuf {
     let mut candidates = Vec::new();
+    // An explicitly named shell outranks the account's login shell and
+    // `SHELL`: the user picked it on purpose, the way an explicit choice
+    // outranks a default everywhere else in Waku.
+    candidates.extend(shell_from_environment());
     // The shell the user chose outranks whatever `SHELL` was inherited from;
-    // see the note in waku-client's `unix_terminal_shell_candidates`. The
+    // see the note in waku-client's `terminal_shell_candidates`. The
     // environment probe below keeps its own order, since it wants the shell
     // whose rc files produced this process's `PATH`.
     #[cfg(unix)]
@@ -637,6 +641,18 @@ pub fn default_terminal_shell() -> PathBuf {
         .into_iter()
         .find(|shell| shell.is_file())
         .unwrap_or_else(default_terminal_shell_fallback)
+}
+
+/// The shell named by `WAKU_TERMINAL_SHELL`.
+///
+/// The value is a path, or a name to look up on `PATH`.
+fn shell_from_environment() -> Option<PathBuf> {
+    let value = std::env::var_os("WAKU_TERMINAL_SHELL")?;
+    let trimmed = value.to_string_lossy().trim().to_owned();
+    if trimmed.is_empty() {
+        return None;
+    }
+    find_executable(&trimmed)
 }
 
 #[cfg(not(windows))]
@@ -656,25 +672,20 @@ fn default_terminal_shell_fallback() -> PathBuf {
 /// login mode to ask for — PowerShell's `-Login` exists on Unix hosts only,
 /// and passing it here is an error. Suppressing its banner is the one thing
 /// worth saying.
+///
+/// A shell that is neither takes nothing: nushell has no `-l`, and a
+/// terminal that refuses to start is worse than one that starts plain.
 pub fn default_terminal_shell_args(shell: &Path) -> Vec<String> {
-    #[cfg(not(windows))]
-    {
-        let _ = shell;
-        vec!["-l".to_owned()]
-    }
-    #[cfg(windows)]
-    {
-        let is_powershell = shell
-            .file_stem()
-            .and_then(|stem| stem.to_str())
-            .is_some_and(|stem| {
-                stem.eq_ignore_ascii_case("pwsh") || stem.eq_ignore_ascii_case("powershell")
-            });
-        if is_powershell {
-            vec!["-NoLogo".to_owned()]
-        } else {
-            Vec::new()
-        }
+    let stem = shell
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    match stem.as_str() {
+        "pwsh" | "powershell" => vec!["-NoLogo".to_owned()],
+        // Every POSIX shell spells its login mode the same way.
+        _ if stem.ends_with("sh") => vec!["-l".to_owned()],
+        _ => Vec::new(),
     }
 }
 

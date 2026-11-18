@@ -157,7 +157,7 @@ settings.daemon:
 settings.computer_use:
   en: Computer Use
 settings.general_keywords:
-  en: general local projects conversations privacy analytics telemetry anonymous sharing updates automatic sparkle version math latex formula expression
+  en: general local projects conversations privacy analytics telemetry anonymous sharing updates automatic sparkle version math latex formula expression terminal shell fish nushell zsh
 settings.appearance_keywords:
   en: appearance theme system light dark language english chinese simplified font size text editor
 settings.providers_keywords:
@@ -379,6 +379,16 @@ settings.share_anonymous_usage_data:
   en: Share anonymous usage data
 settings.share_anonymous_usage_data_description:
   en: Help improve Waku by sharing feature usage and reliability data. Prompts, responses, project names, file paths, and other personal data are never included
+settings.terminal_shell:
+  en: Terminal shell
+settings.terminal_shell_description:
+  en: The shell the terminal pane runs. Leave it empty to use your login shell.
+settings.terminal_shell_placeholder:
+  en: /usr/bin/fish
+settings.terminal_shell_hint:
+  en: Press Enter to apply
+settings.terminal_shell_not_found:
+  en: "No shell found at %{shell}"
 
 providers.coding_agents:
   en: Coding agents

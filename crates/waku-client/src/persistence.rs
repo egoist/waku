@@ -14,7 +14,10 @@ use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::{Command, DaemonExposureSettings, DaemonSettings, DaemonSupervisor, ResponsePayload};
+use crate::{
+    Command, DaemonExposureSettings, DaemonSettings, DaemonSupervisor, ResponsePayload,
+    TerminalSettings,
+};
 use waku_protocol::computer_use::ComputerAppGrant;
 use waku_protocol::i18n::AppLanguage;
 use waku_protocol::identity::DATA_DIRECTORY_NAME;
@@ -262,6 +265,9 @@ pub struct AppSettings {
     /// catalog id. `None` — and an id no longer installed — fall back to the
     /// platform file manager.
     pub open_in_app: Option<String>,
+    /// The shell the terminal pane runs, and the arguments it runs with.
+    /// Empty keeps the account's login shell.
+    pub terminal: TerminalSettings,
 }
 
 impl Default for AppSettings {
@@ -276,6 +282,7 @@ impl Default for AppSettings {
             render_math: true,
             daemon_exposure: DaemonExposureSettings::default(),
             open_in_app: None,
+            terminal: TerminalSettings::default(),
         }
     }
 }
@@ -383,6 +390,10 @@ pub struct PersistedState {
     pub daemon_exposure: DaemonExposureSettings,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub open_in_app: Option<String>,
+    /// The shell the terminal pane runs, and the arguments it runs with.
+    /// Empty keeps the account's login shell.
+    #[serde(default)]
+    pub terminal: TerminalSettings,
     #[serde(default = "default_sidebar_visibility")]
     pub sidebar_visible: bool,
     #[serde(default = "default_right_panel_visibility")]
@@ -455,6 +466,7 @@ impl PersistedState {
             render_math: true,
             daemon_exposure: DaemonExposureSettings::default(),
             open_in_app: None,
+            terminal: TerminalSettings::default(),
             sidebar_visible: true,
             right_panel_visible: false,
             sidebar_width: DEFAULT_SIDEBAR_WIDTH,
@@ -583,6 +595,7 @@ impl PersistedState {
             render_math: self.render_math,
             daemon_exposure: self.daemon_exposure.clone(),
             open_in_app: self.open_in_app.clone(),
+            terminal: self.terminal.clone(),
         }
     }
 
@@ -620,6 +633,7 @@ impl PersistedState {
         self.render_math = settings.render_math;
         self.daemon_exposure = settings.daemon_exposure;
         self.open_in_app = settings.open_in_app;
+        self.terminal = settings.terminal;
     }
 
     fn apply_app_state(&mut self, app_state: AppState) {
@@ -1154,6 +1168,23 @@ mod tests {
         let mut restored = PersistedState::empty();
         restored.apply_app_settings(serde_json::from_value(settings).unwrap());
         assert!(!restored.render_math);
+    }
+
+    #[test]
+    fn the_terminal_shell_persists_as_an_app_preference() {
+        let mut state = PersistedState::empty();
+        assert!(state.terminal.shell.is_none());
+        state.terminal.shell = Some("/usr/bin/fish".to_owned());
+        state.terminal.args = vec!["-l".to_owned()];
+
+        let settings = serde_json::to_value(state.app_settings()).unwrap();
+        assert_eq!(settings["terminal"]["shell"], "/usr/bin/fish");
+        assert_eq!(settings["terminal"]["args"][0], "-l");
+
+        let mut restored = PersistedState::empty();
+        restored.apply_app_settings(serde_json::from_value(settings).unwrap());
+        assert_eq!(restored.terminal.shell.as_deref(), Some("/usr/bin/fish"));
+        assert_eq!(restored.terminal.args, vec!["-l".to_owned()]);
     }
 
     #[test]

@@ -540,6 +540,59 @@ impl Waku {
                         },
                     )),
             )
+            .child(
+                div()
+                    .mt(px(15.0))
+                    .w_full()
+                    .min_h(px(60.0))
+                    .px(px(20.0))
+                    .py(px(12.0))
+                    .rounded(px(13.0))
+                    .bg(theme.raised)
+                    .flex()
+                    .items_center()
+                    .gap(px(24.0))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .child(
+                                div()
+                                    .text_size(sp(13.5))
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .text_color(theme.text)
+                                    .child(tr!("settings.terminal_shell")),
+                            )
+                            .child(
+                                div()
+                                    .mt(px(5.0))
+                                    .text_size(sp(12.5))
+                                    .line_height(sp(18.0))
+                                    .text_color(theme.text_secondary)
+                                    .child(tr!("settings.terminal_shell_description")),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .flex_none()
+                            .flex_col()
+                            .items_end()
+                            .gap(px(4.0))
+                            .child(
+                                TextField::new(
+                                    "terminal-shell-field",
+                                    self.terminal_shell_input.clone(),
+                                )
+                                .w(px(220.0)),
+                            )
+                            .child(
+                                div()
+                                    .text_size(sp(11.5))
+                                    .text_color(theme.text_ghost)
+                                    .child(tr!("settings.terminal_shell_hint")),
+                            ),
+                    ),
+            )
             .when(updater_available, |column| {
                 let enabled = self.automatic_updates_enabled;
                 let toggle = toggle_switch(
@@ -591,6 +644,30 @@ impl Waku {
     fn set_analytics_enabled(&mut self, enabled: bool, cx: &mut Context<Self>) {
         self.state.analytics_enabled = enabled;
         self.analytics.set_enabled(enabled);
+        self.save();
+        cx.notify();
+    }
+
+    /// Commit the shell the terminal pane should run.
+    ///
+    /// Empty keeps the account's login shell. A shell that cannot be found is
+    /// refused, so a typo does not leave the terminal without one.
+    pub(super) fn apply_terminal_shell(&mut self, cx: &mut Context<Self>) {
+        let text = self
+            .terminal_shell_input
+            .read(cx)
+            .content()
+            .trim()
+            .to_owned();
+        let current = self.state.terminal.shell.clone().unwrap_or_default();
+        if text == current {
+            return;
+        }
+        if !text.is_empty() && crate::command_env::resolve_shell(&text).is_none() {
+            self.show_toast(tr!("settings.terminal_shell_not_found", shell = text));
+            return;
+        }
+        self.state.terminal.shell = (!text.is_empty()).then_some(text);
         self.save();
         cx.notify();
     }
