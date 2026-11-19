@@ -501,10 +501,26 @@ fn catalog_models(models: &[ModelInfo]) -> Vec<ProviderModel> {
             // `low`/`medium`/`high`/`max`/`minimal`/`xhigh`/`none`/`thinking`,
             // and the chosen one rides on `ModelRef::variant`. Dropping them
             // left the effort control empty for every OpenCode model.
-            Some(crate::model_catalog::with_variant_efforts(
+            let catalog = crate::model_catalog::with_variant_efforts(
                 catalog,
                 model.variants.iter().map(|variant| variant.id.as_str()),
-            ))
+            );
+            // Whether the model takes pictures is worth carrying: without it
+            // the composer accepts an image, the turn starts, and the provider
+            // drops the attachment with a message only the agent sees. A build
+            // that reports no input list at all is left unknown rather than
+            // declared image-blind.
+            let accepts_images = (!model.capabilities.input.is_empty()).then(|| {
+                model
+                    .capabilities
+                    .input
+                    .iter()
+                    .any(|kind| kind.eq_ignore_ascii_case("image"))
+            });
+            Some(match accepts_images {
+                Some(accepts) => catalog.accepts_images(accepts),
+                None => catalog,
+            })
         })
         .collect()
 }
@@ -979,6 +995,53 @@ mod tests {
         assert_eq!(models[0].sub_provider.as_deref(), Some("Github Copilot"));
         // A beta model is still selectable; only a disabled one is not.
         assert_eq!(models[1].id, "deepseek/deepseek-v4-flash-vision-exp");
+    }
+
+    #[test]
+    fn the_catalog_records_whether_a_model_takes_images() {
+        let models: Vec<ModelInfo> = serde_json::from_value(json!([
+            {
+                "id": "deepseek-v4-flash",
+                "modelID": "deepseek-v4-flash",
+                "providerID": "opencode",
+                "name": "DeepSeek V4 Flash",
+                "status": "active",
+                "enabled": true,
+                "limit": {"context": 128_000, "output": 8_000},
+                "capabilities": {"tools": true, "input": ["text", "image"], "output": ["text"]}
+            },
+            {
+                "id": "kimi-k3",
+                "modelID": "kimi-k3",
+                "providerID": "kimi-code",
+                "name": "Kimi K3",
+                "status": "active",
+                "enabled": true,
+                "limit": {"context": 262_144, "output": 32_768},
+                "capabilities": {"tools": true, "input": ["text"], "output": ["text"]}
+            },
+            {
+                "id": "unreported",
+                "modelID": "unreported",
+                "providerID": "opencode",
+                "name": "Unreported",
+                "status": "active",
+                "enabled": true,
+                "limit": {"context": 1, "output": 1}
+            }
+        ]))
+        .expect("the model catalogue should decode");
+
+        let models = catalog_models(&models);
+
+        assert_eq!(models.len(), 3, "{models:#?}");
+        // The capability is what lets the composer refuse a picture instead of
+        // letting the turn start and the provider drop the attachment.
+        assert_eq!(models[0].accepts_images, Some(true));
+        assert_eq!(models[1].accepts_images, Some(false));
+        // A build that reports no input list says nothing either way, so the
+        // model stays unknown rather than being declared image-blind.
+        assert_eq!(models[2].accepts_images, None);
     }
 
     #[test]

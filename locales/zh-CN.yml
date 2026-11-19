@@ -646,6 +646,7 @@ errors.claude_fork_checkpoint_missing: Claude 未返回派生任务所需的检�
 errors.claude_turn_checkpoint_unavailable: "Claude 中该轮任务的原生检查点不可用：%{error}"
 errors.provider_session_file_unavailable: "%{provider} 的原生会话文件不可用"
 errors.provider_turn_branching_unsupported: "%{provider} 无法在指定轮次回退或分支对话"
+errors.model_refuses_images: "%{model} 不支持图片，因此未附加该图片"
 errors.fork_task: "无法派生任务：%{error}"
 errors.create_rewind_snapshot: "无法创建回退前的安全快照：%{error}"
 errors.restore_checkpoint: "无法恢复检查点：%{error}"

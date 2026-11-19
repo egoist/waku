@@ -7,4 +7,11 @@ export type ProviderModel = { id: string, name: string, sub_provider?: string | 
  * Claude Code keeps its 1M window opt-in behind a model-id suffix, so the
  * window is a trait of the session rather than of the model.
  */
-context_windows: Array<ProviderModelOption>, default_context_window?: string | null, };
+context_windows: Array<ProviderModelOption>, default_context_window?: string | null,
+/**
+ * Whether the model takes images in a prompt. `None` means the provider
+ * never said, which is not the same as "no" — only a provider that
+ * publishes the trait gets to refuse an attachment, and a model nobody
+ * knows about is left to try.
+ */
+accepts_images?: boolean | null, };

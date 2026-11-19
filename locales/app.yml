@@ -1325,6 +1325,8 @@ errors.provider_session_file_unavailable:
   en: "%{provider}'s native session file is unavailable"
 errors.provider_turn_branching_unsupported:
   en: "%{provider} cannot rewind or branch a conversation at a turn"
+errors.model_refuses_images:
+  en: "%{model} does not accept images, so the picture was not attached"
 errors.fork_task:
   en: "Could not fork the task: %{error}"
 errors.create_rewind_snapshot:

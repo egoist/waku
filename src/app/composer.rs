@@ -1940,6 +1940,16 @@ impl Waku {
         if paths.is_empty() {
             return false;
         }
+        // A picture the model cannot read is refused here rather than sent:
+        // once the turn starts the provider drops the attachment and only the
+        // agent sees why, which reads as the agent ignoring the user.
+        if let Some(reason) = self.image_attachment_refusal()
+            && paths.iter().any(|path| is_image_attachment_path(path))
+        {
+            self.show_toast(reason);
+            cx.notify();
+            return false;
+        }
         let paths = paths.to_vec();
         let daemon = self.daemon.clone();
         let draft_owner = self.selected_composer_draft_key();
@@ -2002,6 +2012,26 @@ impl Waku {
         true
     }
 
+    /// The reason the selected session's model cannot take the image being
+    /// staged, when the provider has said so. `None` covers every other case,
+    /// including a model whose capabilities nobody knows: an unknown model is
+    /// left to try rather than refused on a guess.
+    fn image_attachment_refusal(&self) -> Option<String> {
+        let session = self.selected_session();
+        // A composer with no session yet still names the provider its first
+        // turn will use, and that turn will run on the probe's preferred
+        // model — the one whose capabilities apply.
+        let provider = session
+            .map(|session| session.provider)
+            .unwrap_or_else(ProviderKind::default);
+        let probe = self.provider_probe(provider)?;
+        let model = match session.and_then(|session| self.model_for_session(session)) {
+            Some(model) => probe.model(model),
+            None => probe.preferred_model(),
+        };
+        image_refusal_for_model(model)
+    }
+
     fn stage_daemon_attachment(
         &mut self,
         path: PathBuf,
@@ -2054,6 +2084,11 @@ impl Waku {
         }
         self.stage_attachment_paths(&paths, cx);
         if images.is_empty() {
+            return;
+        }
+        if let Some(reason) = self.image_attachment_refusal() {
+            self.show_toast(reason);
+            cx.notify();
             return;
         }
 
@@ -3637,6 +3672,20 @@ pub(super) fn dropped_file_mention(
         format!("{mention}/")
     } else {
         mention
+    }
+}
+
+/// Why an image cannot be staged for `model`, when the provider has said the
+/// model does not take one. Kept as a free function so the rule is testable
+/// without a session, a probe, or a window.
+pub(super) fn image_refusal_for_model(model: Option<&ProviderModel>) -> Option<String> {
+    let model = model?;
+    match model.accepts_images {
+        Some(false) => Some(tr!(
+            "errors.model_refuses_images",
+            model = model.name.clone()
+        )),
+        _ => None,
     }
 }
 
