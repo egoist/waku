@@ -47,6 +47,7 @@ pub mod opencode_api;
 pub mod opencode_service;
 pub mod opencode_session;
 pub mod persistence;
+mod pi_chunks;
 pub mod pi_session;
 pub mod projectless;
 pub mod settings;

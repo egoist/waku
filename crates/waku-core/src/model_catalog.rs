@@ -1061,12 +1061,32 @@ fn discover_pi_models(binary: &Path, dialect: PiDialect) -> Vec<ProviderModel> {
     };
     let (tx, rx) = mpsc::channel();
     std::thread::spawn(move || {
+        // Oh My Pi splits a response larger than its 1 MiB frame ceiling into
+        // an uninterrupted run of `rpc_chunk` envelopes. Reassemble them into
+        // the one logical message before anything downstream sees them.
+        let mut chunks = crate::pi_chunks::ChunkAssembly::default();
         for line in BufReader::new(stdout).lines().map_while(Result::ok) {
-            if let Ok(value) = serde_json::from_str::<Value>(&line) {
+            if let Ok(value) = serde_json::from_str::<Value>(&line)
+                && let Ok(Some(value)) = chunks.accept(value)
+            {
                 let _ = tx.send(value);
             }
         }
     });
+
+    // Oh My Pi answers a catalog larger than its 1 MiB v1 stdout ceiling with a
+    // transport error, which the probe reads as "no models" and the picker stays
+    // empty. Negotiate the chunked transport first so the full list arrives
+    // reassembled. Commands are processed in order, so the request may follow
+    // immediately, and a build that ignores the command still works whenever its
+    // catalog fits under the ceiling — so nothing regresses for smaller installs.
+    // Pi's own RPC is v1 only, so this is Oh My Pi's probe alone.
+    if dialect == PiDialect::OhMyPi {
+        let _ = write_json_line(
+            &mut stdin,
+            &json!({"id": "waku-protocol", "type": "negotiate_protocol", "protocolVersion": 2}),
+        );
+    }
 
     let models_request = json!({"id": "waku-models", "type": "get_available_models"});
     let result = if write_json_line(&mut stdin, &models_request).is_ok()
@@ -2337,6 +2357,75 @@ done
         assert_eq!(models[0].id, "extension-provider/extension-model");
         assert_eq!(models[0].name, "Extension Model");
         assert!(models[0].is_default);
+        let _ = std::fs::remove_file(binary);
+    }
+
+    /// Oh My Pi's catalog outgrows protocol v1's 1 MiB stdout ceiling, and the
+    /// probe used to read the transport error that follows as "no models". The
+    /// chunked transport has to be negotiated before the catalog is requested,
+    /// and the `rpc_chunk` run it comes back in reassembled.
+    #[cfg(unix)]
+    #[test]
+    fn ohmypi_discovery_negotiates_the_chunked_transport_and_reassembles_the_catalog() {
+        use base64::Engine as _;
+
+        let catalog = json!({"id":"waku-models","type":"response","success":true,"data":{"models":[
+            {"provider":"deepseek","id":"deepseek-v4-pro","name":"DeepSeek V4 Pro","reasoning":false},
+            {"provider":"deepseek","id":"deepseek-v4-chat","name":"DeepSeek V4 Chat","reasoning":false}
+        ]}});
+        let bytes = serde_json::to_vec(&catalog).unwrap();
+        let (first, second) = bytes.split_at(bytes.len() / 2);
+        let encode = |data: &[u8]| base64::engine::general_purpose::STANDARD.encode(data);
+        let chunk = |index: u64, data: &[u8]| {
+            serde_json::json!({
+                "type": "rpc_chunk",
+                "chunkId": "catalog-1",
+                "index": index,
+                "count": 2,
+                "byteLength": bytes.len(),
+                "data": encode(data),
+            })
+            .to_string()
+        };
+
+        // Without the negotiate, the catalog never fits and the probe is told so
+        // with a transport error — the failure this guards against. With it, the
+        // same catalog arrives split across two frames.
+        let binary = write_fake_model_cli(
+            "ohmypi-chunks",
+            &format!(
+                r#"#!/bin/sh
+negotiated=0
+while IFS= read -r request; do
+  case "$request" in
+    *negotiate_protocol*)
+      negotiated=1
+      ;;
+    *waku-models*)
+      if [ "$negotiated" = 1 ]; then
+        printf '%s\n' '{first}'
+        printf '%s\n' '{second}'
+      else
+        printf '%s\n' '{{"type":"rpc_error","error":"RPC response exceeded the transport limit"}}'
+      fi
+      ;;
+    *waku-state*)
+      printf '%s\n' '{{"id":"waku-state","type":"response","success":true,"data":{{"model":{{"provider":"deepseek","id":"deepseek-v4-pro"}},"thinkingLevel":"high"}}}}'
+      ;;
+  esac
+done
+"#,
+                first = chunk(0, first),
+                second = chunk(1, second),
+            ),
+        );
+
+        let models = discover_pi_models(&binary, PiDialect::OhMyPi);
+
+        assert_eq!(models.len(), 2, "{models:?}");
+        assert_eq!(models[0].id, "deepseek/deepseek-v4-pro");
+        assert!(models[0].is_default);
+        assert_eq!(models[1].id, "deepseek/deepseek-v4-chat");
         let _ = std::fs::remove_file(binary);
     }
 
