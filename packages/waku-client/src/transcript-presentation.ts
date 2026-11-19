@@ -171,6 +171,11 @@ export function activityDisplayTitle(activity: ActivityItem, t?: Translator) {
       return activityToolDisplayName(activity, t)
     case 'reasoning':
       return activity.title
+    case 'image':
+      if (!activity.complete) return t ? t('activity.generating_image') : 'Generating image'
+      return activity.failed
+        ? t ? t('activity.image_generation_failed') : 'Image generation failed'
+        : t ? t('activity.generated_image') : 'Generated image'
   }
 }
 
@@ -192,7 +197,9 @@ export function activityActionLabel(activity: ActivityItem, t?: Translator) {
               ? 'activity.action_list'
               : activity.kind === 'plan'
                 ? 'activity.action_plan'
-                : 'activity.tool'
+                : activity.kind === 'image'
+                  ? 'activity.action_generate'
+                  : 'activity.tool'
   if (t) return t(key)
   return {
     'activity.action_think': 'Think',
@@ -202,6 +209,7 @@ export function activityActionLabel(activity: ActivityItem, t?: Translator) {
     'activity.action_search': 'Search',
     'activity.action_list': 'List',
     'activity.action_plan': 'Plan',
+    'activity.action_generate': 'Generate',
     'activity.tool': 'Tool',
   }[key]!
 }
@@ -241,6 +249,8 @@ export function activityRowDetail(activity: ActivityItem, t?: Translator) {
       return activity.display_target?.trim() || !isGenericActivityTitle(activity)
         ? activityToolDisplayName(activity, t)
         : ''
+    case 'image':
+      return activity.detail?.trim() || ''
   }
 }
 
@@ -567,6 +577,7 @@ function activityNoun(kind: ActivityItem['kind'], count: number) {
     search: ['search', 'searches'],
     plan: ['plan step', 'plan steps'],
     tool: ['tool call', 'tool calls'],
+    image: ['image', 'images'],
   }
   const [one, many] = nouns[kind]
   return count === 1 ? one : many
@@ -583,6 +594,7 @@ function activityNounKey(kind: ActivityItem['kind'], count: number) {
     search: ['activity.search', 'activity.searches'],
     plan: ['activity.plan_step', 'activity.plan_steps'],
     tool: ['activity.tool_call', 'activity.tool_calls'],
+    image: ['activity.image', 'activity.images'],
   }
   const [one, many] = keys[kind]
   return count === 1 ? one : many
@@ -635,6 +647,7 @@ function isGenericActivityTitle(activity: ActivityItem) {
     plan: ['plan', 'planupdated', 'updateplan'],
     tool: ['tool'],
     reasoning: ['reasoning'],
+    image: ['image', 'generatedimage'],
   }[activity.kind]
   return generic.includes(normalized)
 }

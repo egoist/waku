@@ -607,6 +607,7 @@ function isActivityKind(value: unknown): value is ActivityKind {
       'search',
       'plan',
       'tool',
+      'image',
     ].includes(value)
   )
 }

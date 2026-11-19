@@ -1267,6 +1267,11 @@ pub(super) fn activity_display_title(activity: &ActivityItem) -> String {
         }
         ActivityKind::Tool => activity_tool_display_name(activity),
         ActivityKind::Reasoning => activity.title.clone(),
+        ActivityKind::Image => match (activity.complete, activity.failed) {
+            (false, _) => tr!("activity.generating_image"),
+            (true, false) => tr!("activity.generated_image"),
+            (true, true) => tr!("activity.image_generation_failed"),
+        },
     }
 }
 
@@ -1283,6 +1288,7 @@ pub(super) fn activity_action_label(activity: &ActivityItem) -> String {
         ActivityKind::Plan => tr!("activity.action_plan"),
         ActivityKind::Tool if is_ask_user_question(activity) => tr!("activity.ask_questions"),
         ActivityKind::Tool => tr!("activity.tool"),
+        ActivityKind::Image => tr!("activity.action_generate"),
     }
 }
 
@@ -1334,6 +1340,13 @@ pub(super) fn activity_row_detail(activity: &ActivityItem, reasoning_live: bool)
                 .then(|| activity_tool_display_name(activity))
                 .unwrap_or_default()
         }
+        ActivityKind::Image => activity
+            .detail
+            .as_deref()
+            .map(str::trim)
+            .filter(|detail| !detail.is_empty())
+            .unwrap_or_default()
+            .to_owned(),
     }
 }
 
@@ -1798,6 +1811,30 @@ mod message_time_tests {
 
         assert_eq!(activity_display_title(&titled), "Inspect Helium browser");
         assert_eq!(activity_display_title(&untitled), "Js");
+    }
+
+    #[test]
+    fn a_generated_image_reads_as_an_image_activity() {
+        let activity = ActivityItem::new(
+            Some("image-1".into()),
+            crate::model::ActivityKind::Image,
+            "Generated image",
+            Some("a red fox in the snow".into()),
+            true,
+        )
+        .with_image_urls(vec!["data:image/png;base64,aGVsbG8=".into()]);
+
+        assert_eq!(activity_display_title(&activity), "Generated image");
+        assert_eq!(activity_action_label(&activity), "Generate");
+        assert_eq!(
+            activity_row_detail(&activity, false),
+            "a red fox in the snow"
+        );
+        // The picture is the point of the row, so the row opens on it.
+        assert!(
+            !activity_disclosure_sections(&activity).is_empty(),
+            "an image activity must be expandable"
+        );
     }
 
     #[test]

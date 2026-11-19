@@ -654,6 +654,8 @@ activity.action_plan:
   en: Plan
 activity.action_use:
   en: Use
+activity.action_generate:
+  en: Generate
 activity.ask_questions:
   en: Ask questions
 activity.arguments:
@@ -666,6 +668,18 @@ activity.output:
   en: Output
 activity.image_output:
   en: Image output
+activity.image:
+  en: Image
+activity.images:
+  en: Images
+activity.generating_image:
+  en: Generating image
+activity.generated_image:
+  en: Generated image
+activity.image_generation_failed:
+  en: Image generation failed
+activity.image_usage_limit:
+  en: Image generation limit reached
 activity.open_file:
   en: Open file
 activity.search_for:
