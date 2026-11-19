@@ -21,6 +21,7 @@ menu.toggle_right_panel: 显示或隐藏右侧面板
 menu.focus_composer: 将焦点移到输入框
 menu.toggle_model_picker: 打开或关闭模型选择器
 menu.toggle_usage_panel: 打开或关闭用量面板
+menu.cycle_access_mode: 切换访问模式
 menu.window: 窗口
 menu.toggle_fps_counter: 显示或隐藏帧率
 menu.close_window: 关闭窗口
@@ -46,6 +47,7 @@ command_palette.change_provider: 更改服务商
 command_palette.current_provider: 当前服务商
 command_palette.open_project: 打开项目…
 command_palette.choose_model: 选择模型…
+command_palette.cycle_access_mode: 切换访问模式
 command_palette.copy_task_id: 复制任务 ID
 command_palette.copy_agent_cli_thread_id: 复制智能体 CLI 线程 ID
 command_palette.task_id_copied: 已复制任务 ID

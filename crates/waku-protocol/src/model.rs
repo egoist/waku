@@ -325,6 +325,14 @@ impl RuntimeMode {
         Self::FullAccess,
     ];
 
+    /// The mode after this one in [`Self::ACCESS_OPTIONS`] order, wrapping
+    /// around — the keyboard route through the composer's access chip.
+    pub fn next_access_mode(self) -> Self {
+        let options = Self::ACCESS_OPTIONS;
+        let current = options.iter().position(|&mode| mode == self).unwrap_or(0);
+        options[(current + 1) % options.len()]
+    }
+
     pub fn label(self) -> String {
         match self {
             Self::Ask => tr!("mode.supervised"),
@@ -3522,6 +3530,23 @@ mod tests {
 
         assert_eq!(mode, RuntimeMode::Ask);
         assert_eq!(serde_json::to_string(&mode).unwrap(), r#""ask""#);
+    }
+
+    #[test]
+    fn access_modes_cycle_in_menu_order_and_wrap() {
+        let options = RuntimeMode::ACCESS_OPTIONS;
+        for (index, mode) in options.iter().enumerate() {
+            assert_eq!(
+                mode.next_access_mode(),
+                options[(index + 1) % options.len()],
+                "the mode after {mode:?} moved"
+            );
+        }
+        assert_eq!(
+            RuntimeMode::FullAccess.next_access_mode(),
+            RuntimeMode::Ask,
+            "the last mode wraps to the first"
+        );
     }
 
     #[test]

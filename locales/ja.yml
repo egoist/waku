@@ -21,6 +21,7 @@ menu.toggle_right_panel: 右パネルの表示を切り替える
 menu.focus_composer: 入力欄にフォーカスを移動
 menu.toggle_model_picker: モデル選択の表示を切り替える
 menu.toggle_usage_panel: 使用状況パネルの表示を切り替える
+menu.cycle_access_mode: アクセスモードを切り替える
 menu.window: ウインドウ
 menu.toggle_fps_counter: FPS カウンターの表示を切り替える
 menu.close_window: ウインドウを閉じる
@@ -48,6 +49,7 @@ command_palette.change_provider: プロバイダーを変更
 command_palette.current_provider: 現在のプロバイダー
 command_palette.open_project: プロジェクトを開く…
 command_palette.choose_model: モデルを選択…
+command_palette.cycle_access_mode: アクセスモードを切り替える
 command_palette.copy_task_id: タスク ID をコピー
 command_palette.copy_agent_cli_thread_id: エージェント CLI スレッド ID をコピー
 command_palette.task_id_copied: タスク ID をコピーしました
