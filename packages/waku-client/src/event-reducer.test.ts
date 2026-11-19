@@ -146,6 +146,30 @@ test('MCP tool identity survives partial updates and stays separate in expanded 
   ])
 })
 
+test('whitespace between tool calls opens no message and splits no section', () => {
+  const call = {
+    id: 'tool-1', source_id: 'call-1', kind: 'command' as const,
+    title: 'Ran tests', detail: null, tool_name: null, mcp_server: null, arguments: null,
+    output: null, image_urls: [], failed: false, complete: true,
+    file_changes: [], display_target: null, display_description: null, reasoning: null,
+  }
+  const worked = apply(runningSession(), 'richActivity', call)
+  expect(worked.transcript_blocks).toHaveLength(1)
+
+  // Whitespace is not output: it opens no assistant message, so the work
+  // around it stays one section and the transcript has no blank row.
+  const blank = apply(worked, 'textDelta', '\n\n')
+  expect(blank.messages.filter((message) => message.role === 'assistant')).toHaveLength(0)
+
+  const more = apply(blank, 'richActivity', {
+    ...call, id: 'tool-2', source_id: 'call-2', title: 'Ran the build',
+  })
+  expect(more.transcript_blocks).toHaveLength(1)
+  const activities = more.transcript_blocks[0]!.content
+  if (activities.kind !== 'activities') throw new Error('Expected an activity block')
+  expect(activities.data.map((activity) => activity.title)).toEqual(['Ran tests', 'Ran the build'])
+})
+
 function apply(session: AgentSession, kind: string, payload: unknown) {
   return reduceRuntimeEvent(session, event(kind, payload), clock).session
 }

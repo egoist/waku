@@ -915,7 +915,10 @@ pub(super) fn folded_transcript_row_kinds(
         .iter()
         .map(|block| block.after_message)
         .collect::<Vec<_>>();
-    let raw_rows = transcript_row_kinds(session.messages.len(), &anchors);
+    let raw_rows = transcript_row_kinds(session.messages.len(), &anchors)
+        .into_iter()
+        .filter(|row| !is_blank_assistant_row(session, *row))
+        .collect::<Vec<_>>();
     let mut hidden_rows = HashSet::new();
     let mut fold_anchors = HashMap::new();
     let mut response_footers = HashMap::new();
@@ -929,11 +932,23 @@ pub(super) fn folded_transcript_row_kinds(
             response_footers.insert(turn.id, message_index);
         }
         let hidden = &turn_rows[..turn_answer_start(session, &turn_rows)];
-        let Some(anchor) = hidden.first().copied() else {
+        // The fold opens at the first row the transcript shows. A blank
+        // message has none — it is not rendered — so the fold opens at the
+        // work below it instead.
+        let Some(anchor) = hidden
+            .iter()
+            .copied()
+            .find(|row| !is_blank_assistant_row(session, *row))
+        else {
             continue;
         };
         fold_anchors.insert(anchor, turn.id);
-        hidden_rows.extend(hidden.iter().copied());
+        hidden_rows.extend(
+            hidden
+                .iter()
+                .copied()
+                .filter(|row| !is_blank_assistant_row(session, *row)),
+        );
     }
 
     let mut rows = Vec::with_capacity(raw_rows.len() + fold_anchors.len() + 1);
@@ -1063,6 +1078,31 @@ fn turn_rows(session: &AgentSession, turn_id: Uuid) -> Vec<TranscriptRowKind> {
     }
     rows.extend(blocks.map(|(_, block_index)| TranscriptRowKind::TurnBlock(block_index)));
     rows
+}
+
+/// An assistant message with nothing to show is not part of the transcript.
+///
+/// A provider that emits whitespace between two tool calls leaves a blank
+/// message behind: it renders as an empty band between two sections of work,
+/// and it is not an answer, so nothing folds to it. The live path no longer
+/// opens a message for such a delta, but a session recorded before that fix
+/// still holds one and the transcript has to stop showing it.
+fn is_blank_assistant_message(message: &Message) -> bool {
+    message.role == MessageRole::Assistant && message.visible_content().trim().is_empty()
+}
+
+fn is_blank_assistant_row(session: &AgentSession, row: TranscriptRowKind) -> bool {
+    match row {
+        TranscriptRowKind::Message(message_index) => session
+            .messages
+            .get(message_index)
+            .is_some_and(is_blank_assistant_message),
+        TranscriptRowKind::TurnBlock(_)
+        | TranscriptRowKind::TurnFold(_)
+        | TranscriptRowKind::ResponseFooter(_, _)
+        | TranscriptRowKind::ChangedFiles(_)
+        | TranscriptRowKind::WorkingIndicator => false,
+    }
 }
 
 fn response_footer_message_index_from_rows(
