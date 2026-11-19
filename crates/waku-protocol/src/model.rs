@@ -11,6 +11,10 @@ use uuid::Uuid;
 #[serde(rename_all = "camelCase")]
 pub enum ProviderKind {
     Amp,
+    /// Google's Antigravity agent. It speaks the Agent Client Protocol, but
+    /// the server binary ships separately from the product, so it has to be
+    /// installed before Waku can find it.
+    Antigravity,
     Claude,
     #[default]
     Codex,
@@ -29,8 +33,9 @@ pub enum ProviderKind {
 }
 
 impl ProviderKind {
-    pub const ALL: [Self; 11] = [
+    pub const ALL: [Self; 12] = [
         Self::Amp,
+        Self::Antigravity,
         Self::Claude,
         Self::Codex,
         Self::Cursor,
@@ -46,6 +51,7 @@ impl ProviderKind {
     pub fn id(self) -> &'static str {
         match self {
             Self::Amp => "amp",
+            Self::Antigravity => "antigravity",
             Self::Claude => "claude",
             Self::Codex => "codex",
             Self::Cursor => "cursor",
@@ -62,6 +68,7 @@ impl ProviderKind {
     pub fn display_name(self) -> &'static str {
         match self {
             Self::Amp => "Amp",
+            Self::Antigravity => "Antigravity",
             Self::Claude => "Claude Code",
             Self::Codex => "Codex CLI",
             Self::Cursor => "Cursor CLI",
@@ -78,6 +85,7 @@ impl ProviderKind {
     pub fn short_name(self) -> &'static str {
         match self {
             Self::Amp => "Amp",
+            Self::Antigravity => "Antigravity",
             Self::Claude => "Claude",
             Self::Codex => "Codex",
             Self::Cursor => "Cursor",
@@ -94,6 +102,10 @@ impl ProviderKind {
     pub fn command(self) -> &'static str {
         match self {
             Self::Amp => "amp",
+            // The Antigravity agent is served by a standalone binary that the
+            // product does not put on PATH; Waku's binary path setting points
+            // at it.
+            Self::Antigravity => "agy_acp_server",
             Self::Claude => "claude",
             Self::Codex => "codex",
             // Cursor documents `agent` as its primary command, but that name is
@@ -207,6 +219,9 @@ pub enum ProviderResumeCursor {
     Kimi {
         session_id: String,
     },
+    Antigravity {
+        session_id: String,
+    },
     OhMyPi {
         session_id: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -243,6 +258,7 @@ impl ProviderResumeCursor {
             },
             ProviderKind::Grok => Self::Grok { session_id: id },
             ProviderKind::Kimi => Self::Kimi { session_id: id },
+            ProviderKind::Antigravity => Self::Antigravity { session_id: id },
             ProviderKind::OhMyPi => Self::OhMyPi {
                 session_id: id,
                 session_file: None,
@@ -265,6 +281,7 @@ impl ProviderResumeCursor {
             Self::OpenCode { .. } => ProviderKind::OpenCode,
             Self::Grok { .. } => ProviderKind::Grok,
             Self::Kimi { .. } => ProviderKind::Kimi,
+            Self::Antigravity { .. } => ProviderKind::Antigravity,
             Self::OhMyPi { .. } => ProviderKind::OhMyPi,
             Self::Pi { .. } => ProviderKind::Pi,
         }
@@ -280,6 +297,7 @@ impl ProviderResumeCursor {
             | Self::OpenCode { session_id, .. }
             | Self::Grok { session_id }
             | Self::Kimi { session_id }
+            | Self::Antigravity { session_id }
             | Self::OhMyPi { session_id, .. }
             | Self::Pi { session_id, .. } => session_id,
             Self::Codex { thread_id } => thread_id,
@@ -4248,7 +4266,7 @@ mod tests {
 
     #[test]
     fn all_contains_every_provider_kind() {
-        assert_eq!(ProviderKind::ALL.len(), 11);
+        assert_eq!(ProviderKind::ALL.len(), 12);
         let ids: std::collections::HashSet<_> =
             ProviderKind::ALL.iter().map(|kind| kind.id()).collect();
         assert_eq!(

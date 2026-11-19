@@ -29,6 +29,8 @@ there yet.
 Waku works with:
 
 - [Amp](https://ampcode.com/)
+- Antigravity (install its ACP server from the
+  [ACP registry](https://github.com/agentclientprotocol/registry/tree/main/antigravity-acp))
 - Claude Code
 - Codex CLI
 - Cursor CLI

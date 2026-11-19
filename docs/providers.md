@@ -631,7 +631,8 @@ instruction entry; see [computer-use.md](computer-use.md).
 
 ## Agent Client Protocol
 
-**Launch** — `cursor-agent acp`, `fx acp`, `grok agent [--reasoning-effort E] stdio`, `kimi acp`
+**Launch** — `cursor-agent acp`, `fx acp`, `grok agent [--reasoning-effort E] stdio`, `kimi acp`,
+`agy_acp_server` (`--uid=` on Linux)
 ([driver/acp.rs](../crates/waku-core/src/driver/acp.rs)).
 
 **Protocol** — newline-delimited JSON-RPC over stdio, bidirectional. One agent
@@ -842,6 +843,31 @@ independent, so the ACP session reuses the same builder the headless driver used
 channel), Cursor's no longer means `--force`, and **Cursor streams reasoning**,
 which its `--print` transport did not emit at all.
 
+### Antigravity
+
+Google's Antigravity agent is served by a standalone ACP binary,
+`agy_acp_server`, which the product itself does not install: it is distributed
+through the [ACP registry](https://github.com/agentclientprotocol/registry/tree/main/antigravity-acp)
+as a platform zip. Waku therefore detects it by that name, and the binary path
+setting points at wherever the user unpacked it. The Linux build is the one
+platform the registry entry gives arguments to — an explicit, empty `--uid=` —
+and Waku mirrors that exactly; macOS and Windows launch it bare.
+
+Two behaviours follow from the agent rather than from Waku, and are worth
+knowing before filing a bug:
+
+- **Authentication happens outside Waku.** The server keeps its own settings at
+  `~/.gemini/antigravity-acp/settings.json` and refuses `session/new` until a
+  login method has been picked there once.
+- **No model catalog, no usage figures.** The server advertises neither, so the
+  model picker stays empty and the agent runs on its own default. Asking it for
+  a commit subject is likewise impossible — it has no one-shot mode — so commit
+  messages are typed by hand for Antigravity tasks.
+
+Rewind and branch stay hidden: the registry says nothing about turn-aware
+forking, and a fork the server would answer by copying a whole session is worse
+than no button at all.
+
 ---
 
 ## Access modes across providers
@@ -849,12 +875,12 @@ which its `--print` transport did not emit at all.
 Waku's `RuntimeMode` (Supervised / Auto-accept edits / Auto / Full access)
 maps into each CLI's own vocabulary.
 
-| Waku | Codex (`approvalPolicy` / `sandbox` / reviewer) | Claude `--permission-mode` | Cursor | Fx | OpenCode | Grok | Kimi Code |
-| --- | --- | --- | --- | --- | --- | --- | --- |
-| Supervised | `untrusted` / `read-only` / `user` | `default` + `can_use_tool` reaches the user | `session/request_permission` reaches the user | `session/set_mode` → `ask` | permission requests reach the user | `session/request_permission` reaches the user | `session/request_permission` reaches the user |
-| Auto-accept edits | `on-request` / `workspace-write` / `user` | `acceptEdits` | auto-answered | `session/set_mode` → `code` | edits auto-answered (`once`), the rest reach the user | auto-answered | auto-answered |
-| Auto | `on-request` / `workspace-write` / `auto_review` | `auto` | auto-answered | `session/set_mode` → `code` | auto-answered (`once`) | auto-answered | auto-answered |
-| Full access | `never` / `danger-full-access` / `user` | `bypassPermissions` + `--dangerously-skip-permissions` | auto-answered | `session/set_mode` → `code` | auto-answered (`once`) | auto-answered | auto-answered |
+| Waku | Codex (`approvalPolicy` / `sandbox` / reviewer) | Claude `--permission-mode` | Cursor | Fx | OpenCode | Grok | Kimi Code | Antigravity |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| Supervised | `untrusted` / `read-only` / `user` | `default` + `can_use_tool` reaches the user | `session/request_permission` reaches the user | `session/set_mode` → `ask` | permission requests reach the user | `session/request_permission` reaches the user | `session/request_permission` reaches the user | `session/request_permission` reaches the user |
+| Auto-accept edits | `on-request` / `workspace-write` / `user` | `acceptEdits` | auto-answered | `session/set_mode` → `code` | edits auto-answered (`once`), the rest reach the user | auto-answered | auto-answered | auto-answered |
+| Auto | `on-request` / `workspace-write` / `auto_review` | `auto` | auto-answered | `session/set_mode` → `code` | auto-answered (`once`) | auto-answered | auto-answered | auto-answered |
+| Full access | `never` / `danger-full-access` / `user` | `bypassPermissions` + `--dangerously-skip-permissions` | auto-answered | `session/set_mode` → `code` | auto-answered (`once`) | auto-answered | auto-answered | auto-answered |
 
 Amp, Pi, and Oh My Pi accept Full access only and always run wide open
 (`--dangerously-allow-all`, `--approve`, `--yolo`).
@@ -884,6 +910,7 @@ persisted with the session and is what makes a Waku task outlive its process:
 | OpenCode | `session_id`, `directory` | `GET /api/session/{id}` / service fork; `directory` is the workspace string the service stored |
 | Grok | `session_id` | `--resume` / ACP fork |
 | Kimi Code | `session_id` | `session/resume`; no fork, see above |
+| Antigravity | `session_id` | `session/resume`; no fork, see above |
 
 A cursor from the wrong provider is rejected at driver start rather than
 silently ignored.

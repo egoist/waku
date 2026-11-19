@@ -1443,6 +1443,7 @@ function providerName(provider: AgentSession['provider']) {
   return (
     {
       amp: 'Amp',
+      antigravity: 'Antigravity',
       claude: 'Claude Code',
       codex: 'Codex',
       cursor: 'Cursor Agent',

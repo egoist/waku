@@ -104,7 +104,7 @@ pub fn generate_message(
         invocation.reasoning_effort.as_deref(),
         &prompt,
         amp_settings.as_deref(),
-    );
+    )?;
     let mut command = crate::command_env::command(&invocation.binary);
     command
         .args(args)
@@ -213,7 +213,7 @@ fn agent_arguments(
     reasoning_effort: Option<&str>,
     prompt: &str,
     amp_settings: Option<&Path>,
-) -> Vec<OsString> {
+) -> anyhow::Result<Vec<OsString>> {
     let mut args = Vec::<OsString>::new();
     fn push(args: &mut Vec<OsString>, value: &str) {
         args.push(OsString::from(value));
@@ -331,7 +331,7 @@ fn agent_arguments(
                 push(&mut args, "--reasoning-effort");
                 push(&mut args, effort);
             }
-            return args;
+            return Ok(args);
         }
         // Kimi carries the prompt as `--prompt`'s value rather than a trailing
         // positional, so it returns early. It has no tool or session switches
@@ -345,7 +345,7 @@ fn agent_arguments(
                 push(&mut args, "--model");
                 push(&mut args, model);
             }
-            return args;
+            return Ok(args);
         }
         // Oh My Pi rejects unknown flags outright, so it gets its own list
         // rather than Pi's: context files are `--no-rules`, and it has no
@@ -365,6 +365,15 @@ fn agent_arguments(
                 push(&mut args, "--thinking");
                 push(&mut args, effort);
             }
+        }
+        // The Antigravity agent is an ACP server. It has no one-shot mode
+        // that takes a prompt on the command line, so there is no argument
+        // list to build.
+        ProviderKind::Antigravity => {
+            bail!(
+                "{} has no one-shot mode for generating a commit message",
+                provider.display_name()
+            )
         }
         ProviderKind::Pi => {
             push(&mut args, "--print");
@@ -386,7 +395,7 @@ fn agent_arguments(
         }
     }
     push(&mut args, prompt);
-    args
+    Ok(args)
 }
 
 fn normalize_message(output: &str) -> Option<String> {
@@ -734,15 +743,22 @@ mod tests {
     fn every_provider_uses_a_noninteractive_generation_mode() {
         let prompt = "Generate subject";
         for provider in ProviderKind::ALL {
-            let args = agent_arguments(
+            let Ok(args) = agent_arguments(
                 provider,
                 Some("model"),
                 Some("low"),
                 prompt,
                 Some(Path::new("/tmp/amp.json")),
-            );
+            ) else {
+                // Antigravity serves ACP instead of a one-shot prompt, so it
+                // is the only provider without an argument list.
+                assert_eq!(provider, ProviderKind::Antigravity);
+                continue;
+            };
             assert!(has(&args, prompt));
             match provider {
+                // Antigravity never reaches here; the let-else above skips it.
+                ProviderKind::Antigravity => unreachable!("no one-shot arguments"),
                 ProviderKind::Amp => {
                     assert!(has(&args, "--execute"));
                     assert!(has_pair(&args, "--settings-file", "/tmp/amp.json"));
@@ -822,7 +838,8 @@ mod tests {
             Some("xhigh"),
             "Generate subject",
             None,
-        );
+        )
+        .expect("Claude generates a commit message");
         assert!(has_pair(&claude, "--model", CLAUDE_COMMIT_MODEL));
         assert!(has_pair(&claude, "--effort", CLAUDE_COMMIT_EFFORT));
         assert!(!has(&claude, "claude-opus-5"));
@@ -834,7 +851,8 @@ mod tests {
             Some("high"),
             "Generate subject",
             None,
-        );
+        )
+        .expect("Codex generates a commit message");
         assert!(has_pair(&codex, "--model", CODEX_COMMIT_MODEL));
         assert!(has_pair(&codex, "-c", CODEX_COMMIT_EFFORT));
         assert!(!has(&codex, "gpt-5.6-sol"));

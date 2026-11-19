@@ -161,7 +161,7 @@ settings.general_keywords:
 settings.appearance_keywords:
   en: appearance theme system light dark language english chinese simplified font size text editor
 settings.providers_keywords:
-  en: providers agents models cli version install detect claude codex cursor opencode amp grok pi
+  en: providers agents models cli version install detect claude codex cursor opencode amp grok pi antigravity
 settings.skills:
   en: Skills
 settings.skills_keywords:
