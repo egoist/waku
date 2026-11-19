@@ -1371,7 +1371,6 @@ impl Waku {
                     matches!(row, SidebarRow::Session(_) | SidebarRow::ShowMore(_))
                 });
                 self.render_sidebar_group_header(group, index == 1, has_expanded_children, cx)
-                    .into_any_element()
             }
             SidebarRow::Session(session_id) => self
                 .render_sidebar_session_item(session_id, cx)
@@ -1392,7 +1391,7 @@ impl Waku {
         first: bool,
         has_expanded_children: bool,
         cx: &mut Context<Self>,
-    ) -> Div {
+    ) -> AnyElement {
         let theme = Theme::current(cx);
         let collapsed = self.sidebar_collapsed_groups.contains(&group);
         let group_key = group.element_key();
@@ -1421,6 +1420,19 @@ impl Waku {
                 .unwrap_or_else(|| tr!("project.no_project_name")),
             SidebarGroup::Projectless => tr!("project.no_project_name"),
         };
+        // Folders the user added can be removed; the implicit projectless
+        // workspace and the date groups cannot.
+        let removable_project = match group {
+            SidebarGroup::Project(project_id) => self
+                .state
+                .projects
+                .iter()
+                .any(|project| project.id == project_id && !project.is_projectless()),
+            SidebarGroup::Updated(_) | SidebarGroup::Projectless => false,
+        };
+        let project_menu =
+            removable_project.then(|| self.menu_handle(format!("sidebar-project-{group_key}"), cx));
+        let project_menu_for_keys = project_menu.clone();
         let updated_chevron = matches!(group, SidebarGroup::Updated(_)).then(|| {
             icon("icons/chevron-down.svg", 14.0, theme.text_secondary)
                 .when(collapsed, |icon| {
@@ -1542,7 +1554,7 @@ impl Waku {
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.toggle_sidebar_group(group, cx);
             }))
-            .on_key_down(cx.listener(move |this, event: &KeyDownEvent, _, cx| {
+            .on_key_down(cx.listener(move |this, event: &KeyDownEvent, window, cx| {
                 match event.keystroke.key.as_str() {
                     "enter" | "space" => {
                         this.toggle_sidebar_group(group, cx);
@@ -1556,14 +1568,57 @@ impl Waku {
                         this.set_sidebar_group_collapsed(group, false, cx);
                         cx.stop_propagation();
                     }
+                    // The keyboard route to the same menu a right-click
+                    // opens, matching the session rows.
+                    "f10"
+                        if event.keystroke.modifiers.shift
+                            && let Some(menu) = project_menu_for_keys.as_ref() =>
+                    {
+                        menu.open_context_menu(window, cx);
+                        cx.stop_propagation();
+                    }
                     _ => {}
                 }
             }));
 
-        div()
-            .w_full()
-            .pb(px(SIDEBAR_GROUP_HEADER_BOTTOM_GAP))
-            .child(header)
+        let container = div().w_full().pb(px(SIDEBAR_GROUP_HEADER_BOTTOM_GAP));
+        match (group, project_menu) {
+            // Removal lives on the header's context menu so the row itself
+            // stays a click-to-collapse target.
+            (SidebarGroup::Project(project_id), Some(menu)) => {
+                let waku = cx.entity().downgrade();
+                context_menu(
+                    container.child(header),
+                    SharedString::from(format!("sidebar-project-menu-{project_id}")),
+                    &menu,
+                    move |cx| {
+                        let Some(entity) = waku.upgrade() else {
+                            return Vec::new();
+                        };
+                        let task_count = entity
+                            .read(cx)
+                            .state
+                            .sessions
+                            .iter()
+                            .filter(|session| session.project_id == project_id)
+                            .count();
+                        // The label names the cascade: a folder holding
+                        // tasks must not read like a cheap tidy-up.
+                        let label = if task_count == 0 {
+                            tr!("project.remove")
+                        } else {
+                            tr!("project.remove_with_tasks", count = task_count)
+                        };
+                        let entity = entity.clone();
+                        vec![MenuItem::new(label, move |_, cx| {
+                            let _ =
+                                entity.update(cx, |waku, cx| waku.remove_project(project_id, cx));
+                        })]
+                    },
+                )
+            }
+            _ => container.child(header).into_any_element(),
+        }
     }
 
     fn open_new_task_for_sidebar_group(

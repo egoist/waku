@@ -51,6 +51,7 @@ pub struct WakuBackend {
     task_store: StateStore,
     task_state: Mutex<PersistedState>,
     removed_session_ids: Mutex<HashSet<Uuid>>,
+    removed_project_ids: Mutex<HashSet<Uuid>>,
     composer_drafts: ComposerDraftStore,
     attachments: AttachmentStore,
     usage_scan_cache: Mutex<crate::usage_history::ScanCache>,
@@ -87,6 +88,7 @@ impl WakuBackend {
             task_store,
             task_state: Mutex::new(task_state),
             removed_session_ids: Mutex::new(HashSet::new()),
+            removed_project_ids: Mutex::new(HashSet::new()),
             composer_drafts,
             attachments,
             usage_scan_cache: Mutex::new(HashMap::new()),
@@ -363,6 +365,13 @@ impl Backend for WakuBackend {
                     .collect::<HashMap<_, _>>();
                 let mut state = self.task_state.lock();
                 let removed_session_ids = self.removed_session_ids.lock();
+                let removed_project_ids = self.removed_project_ids.lock();
+                // A removed project stays removed: a stale snapshot listing
+                // it must not re-add it through the merge-only save path.
+                let projects = projects
+                    .into_iter()
+                    .filter(|project| !removed_project_ids.contains(&project.id))
+                    .collect::<Vec<_>>();
                 for project in projects {
                     if let Some(existing) = state
                         .projects
@@ -459,6 +468,45 @@ impl Backend for WakuBackend {
                 }
                 let removed = self.sessions.lock().remove(&session_id);
                 drop(removed);
+                Ok(ResponsePayload::Ack)
+            }
+            Command::RemoveProject { project_id } => {
+                let removed_session_ids = {
+                    let mut state = self.task_state.lock();
+                    // The projectless container is implicit and recreated on
+                    // demand; only folders the user added can be removed.
+                    if state
+                        .projects
+                        .iter()
+                        .find(|project| project.id == project_id)
+                        .is_some_and(Project::is_projectless)
+                    {
+                        bail!("the projectless workspace cannot be removed");
+                    }
+                    let removed_session_ids = state
+                        .sessions
+                        .iter()
+                        .filter(|session| session.project_id == project_id)
+                        .map(|session| session.id)
+                        .collect::<Vec<_>>();
+                    // Tombstone the tasks too: a stale client snapshot must
+                    // not resurrect them through an ordinary save.
+                    self.removed_session_ids
+                        .lock()
+                        .extend(removed_session_ids.iter().copied());
+                    self.removed_project_ids.lock().insert(project_id);
+                    state
+                        .sessions
+                        .retain(|session| session.project_id != project_id);
+                    state.projects.retain(|project| project.id != project_id);
+                    self.task_store.save(&mut state)?;
+                    removed_session_ids
+                };
+                let mut runtimes = self.sessions.lock();
+                for session_id in removed_session_ids {
+                    let removed = runtimes.remove(&session_id);
+                    drop(removed);
+                }
                 Ok(ResponsePayload::Ack)
             }
             Command::HydrateSession { session_id } => {
@@ -1787,6 +1835,7 @@ fn handle_driver_command(
         | Command::LoadTaskState
         | Command::SaveTaskState { .. }
         | Command::RemoveSession
+        | Command::RemoveProject { .. }
         | Command::HydrateSession { .. }
         | Command::SearchSessionMessages { .. }
         | Command::ListProviderSessions { .. }

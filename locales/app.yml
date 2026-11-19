@@ -1257,6 +1257,10 @@ terminal.starting:
 
 project.add_project:
   en: Add project
+project.remove:
+  en: Remove Project
+project.remove_with_tasks:
+  en: Remove Project and %{count} Tasks
 errors.remote_project_picker:
   en: Adding a daemon-host project needs a remote path picker, which is not available yet
 

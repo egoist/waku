@@ -646,6 +646,8 @@ workspace.worktree: ワークツリー
 terminal.starting: ターミナルを起動中…
 
 project.add_project: プロジェクトを追加
+project.remove: プロジェクトを削除
+project.remove_with_tasks: プロジェクトと%{count}件のタスクを削除
 errors.remote_project_picker: デーモンホスト上のプロジェクトを追加するにはリモートパス選択が必要ですが、まだ利用できません
 
 session.stopped: 停止しました

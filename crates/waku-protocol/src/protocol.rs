@@ -179,6 +179,12 @@ pub enum Command {
     /// merge-only so a stale client snapshot cannot delete tasks another
     /// client just created.
     RemoveSession,
+    /// Explicitly remove a project and, with it, every task it owns. The
+    /// same merge-only rule as [`Command::RemoveSession`] applies: a
+    /// shortened project list in an ordinary save deletes nothing.
+    RemoveProject {
+        project_id: Uuid,
+    },
     HydrateSession {
         session_id: Uuid,
     },
