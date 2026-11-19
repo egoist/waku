@@ -54,6 +54,30 @@ pub fn close_hanging(text: &str) -> Option<String> {
         let ch = chars[index].1;
 
         if code.is_none() && ch == '\\' {
+            // A LaTeX-style math delimiter opens math the same way `$`
+            // does. Inside it nothing is a Markdown delimiter, and a
+            // missing closer means the formula is still streaming.
+            if let Some(open) = at(index + 1).filter(|ch| matches!(ch, '[' | '(')) {
+                let close = if open == '[' { ']' } else { ')' };
+                let mut scan = index + 2;
+                let mut closed = false;
+                while scan < chars.len() {
+                    match at(scan) {
+                        Some('\\') if at(scan + 1) == Some(close) => {
+                            last_content = Some(scan + 1);
+                            index = scan + 2;
+                            closed = true;
+                            break;
+                        }
+                        Some('\\') => scan += 2,
+                        _ => scan += 1,
+                    }
+                }
+                if closed {
+                    continue;
+                }
+                return None;
+            }
             // An escape and its escapee are both literal, but the escapee is
             // still content that can justify closing an opener.
             if index + 1 < chars.len() {
@@ -421,6 +445,20 @@ mod tests {
     }
 
     #[test]
+    fn latex_style_math_is_never_closed_early() {
+        // The closer has not streamed in yet: the formula stays as it is.
+        assert_eq!(close_hanging(r"\[\frac{a}{b}"), None);
+        assert_eq!(close_hanging(r"\(x **bold"), None);
+        // A complete formula is skipped whole, so markers inside it stay
+        // literal and nothing after it is disturbed.
+        assert_eq!(close_hanging(r"\[a * b\]"), None);
+        assert_eq!(
+            close_hanging(r"\(a*b\) and **bold").as_deref(),
+            Some(r"\(a*b\) and **bold**")
+        );
+    }
+
+    #[test]
     fn defuses_a_streaming_setext_underline() {
         let mended = close_hanging("paragraph\n-").expect("guard should apply");
         assert_eq!(mended, format!("paragraph\n-{ZERO_WIDTH_SPACE}"));
@@ -435,7 +473,7 @@ mod tests {
     #[test]
     fn every_prefix_of_a_corpus_mends_without_panicking() {
         let corpus = "Mixed **bold `code`** and *em*, a [link](https://example.com), \
-                      ~~struck~~, emoji 🎉, accents héllo, and a list:\n\n- one\n- two\n";
+                      ~~struck~~, emoji 🎉, accents héllo, \\(\\pi\\) plus \\[x^2\\], and a list:\n\n- one\n- two\n";
         for end in 0..=corpus.len() {
             if !corpus.is_char_boundary(end) {
                 continue;
