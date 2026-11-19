@@ -402,6 +402,12 @@ pub struct ProviderModel {
     pub context_windows: Vec<ProviderModelOption>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_context_window: Option<String>,
+    /// Whether the model takes images in a prompt. `None` means the provider
+    /// never said, which is not the same as "no" — only a provider that
+    /// publishes the trait gets to refuse an attachment, and a model nobody
+    /// knows about is left to try.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub accepts_images: Option<bool>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
@@ -493,6 +499,7 @@ impl ProviderModel {
             default_service_tier: None,
             context_windows: Vec::new(),
             default_context_window: None,
+            accepts_images: None,
         }
     }
 
@@ -533,6 +540,13 @@ impl ProviderModel {
     ) -> Self {
         self.context_windows = windows.into_iter().collect();
         self.default_context_window = Some(default.into());
+        self
+    }
+
+    /// Records whether the model takes images. Only a provider that publishes
+    /// the trait should call this; an unknown model stays unknown.
+    pub fn accepts_images(mut self, accepts: bool) -> Self {
+        self.accepts_images = Some(accepts);
         self
     }
 }

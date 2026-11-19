@@ -1,6 +1,6 @@
 use super::composer::{
-    ComposerSubmitAction, composer_submit_action, dropped_file_mention, merged_submission,
-    next_picker_highlight, visible_branch_entries,
+    ComposerSubmitAction, composer_submit_action, dropped_file_mention, image_refusal_for_model,
+    merged_submission, next_picker_highlight, visible_branch_entries,
 };
 use super::runtime::{merge_remote_session_catalog, session_has_active_provider_turn};
 use super::settings::visible_settings_pages;
@@ -271,6 +271,35 @@ fn dropped_files_mention_project_relative_paths() {
     assert_eq!(
         dropped_file_mention(None, std::path::Path::new("/tmp/no project.png"), false),
         "/tmp/no project.png"
+    );
+}
+
+#[test]
+fn an_image_is_refused_only_for_a_model_the_provider_calls_image_blind() {
+    use crate::model::ProviderModel;
+
+    // Unknown is not "no". A model whose capabilities nobody decoded is left
+    // to try, so a provider that says nothing keeps today's behaviour.
+    assert_eq!(image_refusal_for_model(None), None);
+    assert_eq!(
+        image_refusal_for_model(Some(&ProviderModel::new("deepseek/v4-flash", "V4 Flash"))),
+        None
+    );
+    assert_eq!(
+        image_refusal_for_model(Some(
+            &ProviderModel::new("opencode/glm", "GLM").accepts_images(true)
+        )),
+        None
+    );
+    // Only a provider that publishes the trait gets to refuse the picture.
+    // The wording is not asserted here: it is localized, and the rule is what
+    // this guards.
+    assert!(
+        image_refusal_for_model(Some(
+            &ProviderModel::new("opencode/deepseek", "DeepSeek V4 Flash").accepts_images(false)
+        ))
+        .is_some(),
+        "a model the provider says takes no images must refuse one"
     );
 }
 
