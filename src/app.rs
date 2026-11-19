@@ -2368,7 +2368,6 @@ impl Waku {
 
             cx.observe_window_activation(window, |this: &mut Self, window, cx| {
                 if window.is_window_active() {
-                    this.reload_clean_right_panel_file_editors(cx);
                     // The working tree and branch may have moved while another
                     // app had focus — a checkout in a terminal, an edit in an
                     // editor. Coming back is the moment to re-check.

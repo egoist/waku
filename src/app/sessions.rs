@@ -240,6 +240,10 @@ impl Waku {
     /// expire on a timer, they are dropped at the moments the answer plausibly
     /// moved — coming back to the window, or a turn finishing.
     pub(super) fn invalidate_workspace_queries(&mut self, cx: &mut Context<Self>) {
+        // An open, untouched editor is cached state too: whatever moved the
+        // queries — a finished turn, a commit, a refocus — may have rewritten
+        // the files behind it.
+        self.reload_clean_right_panel_file_editors(cx);
         let Some(workspace_path) = self
             .selected_workspace_path()
             .map(std::path::Path::to_path_buf)
