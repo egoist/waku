@@ -1336,9 +1336,9 @@ fn wait_for_thread_id(thread_id: &Mutex<Option<String>>) -> Option<String> {
 }
 
 fn fork_last_turn_id(turn_ids: &[String], turns_to_remove: usize) -> Result<String, String> {
-    turn_ids
-        .len()
-        .checked_sub(turns_to_remove + 1)
+    turns_to_remove
+        .checked_add(1)
+        .and_then(|turns| turn_ids.len().checked_sub(turns))
         .and_then(|index| turn_ids.get(index))
         .cloned()
         .ok_or_else(|| "Codex has no completed turn at that response.".to_owned())
@@ -3391,6 +3391,7 @@ mod tests {
         assert_eq!(fork_last_turn_id(&turns, 0), Ok("turn-3".into()));
         assert_eq!(fork_last_turn_id(&turns, 2), Ok("turn-1".into()));
         assert!(fork_last_turn_id(&turns, 3).is_err());
+        assert!(fork_last_turn_id(&turns, usize::MAX).is_err());
     }
 
     #[test]
