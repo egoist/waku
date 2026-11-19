@@ -64,7 +64,10 @@ pub fn fallback_models(provider: ProviderKind) -> Vec<ProviderModel> {
         | ProviderKind::Kimi
         | ProviderKind::OpenCode
         | ProviderKind::OhMyPi
-        | ProviderKind::Pi => Vec::new(),
+        | ProviderKind::Pi
+        // Antigravity's ACP server advertises no model catalog, so a
+        // fabricated fallback would offer a model the server rejects.
+        | ProviderKind::Antigravity => Vec::new(),
     }
 }
 

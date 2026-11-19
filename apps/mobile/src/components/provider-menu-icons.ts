@@ -5,6 +5,7 @@ import type { ImageSourcePropType } from 'react-native';
  * The menu tints these marks to stay legible in either system theme. */
 export const PROVIDER_MENU_ICONS: Record<ProviderKind, ImageSourcePropType> = {
   amp: require('@/assets/images/providers/amp.png'),
+  antigravity: require('@/assets/images/providers/antigravity.png'),
   claude: require('@/assets/images/providers/claude.png'),
   codex: require('@/assets/images/providers/codex.png'),
   cursor: require('@/assets/images/providers/cursor.png'),

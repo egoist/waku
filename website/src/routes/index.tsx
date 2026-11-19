@@ -51,6 +51,7 @@ const PROVIDERS = [
   { slug: 'grok', label: 'Grok' },
   { slug: 'pi', label: 'Pi' },
   { slug: 'kimi', label: 'Kimi' },
+  { slug: 'antigravity', label: 'Antigravity' },
 ]
 
 const FEATURES = [

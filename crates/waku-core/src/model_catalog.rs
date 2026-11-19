@@ -98,6 +98,9 @@ pub fn fallback_models(provider: ProviderKind) -> Vec<ProviderModel> {
         // configured LLM providers. A fabricated fallback would make
         // unavailable models look selectable.
         ProviderKind::Kimi | ProviderKind::OhMyPi | ProviderKind::Pi => Vec::new(),
+        // Antigravity's ACP server advertises no model catalog of its own, so
+        // there is nothing to fall back to either.
+        ProviderKind::Antigravity => Vec::new(),
     }
 }
 
@@ -139,6 +142,10 @@ pub fn discover_catalog(
         ProviderKind::Kimi => (discover_kimi_models(binary), None),
         ProviderKind::Pi => (discover_pi_models(binary, PiDialect::Pi), None),
         ProviderKind::OhMyPi => (discover_pi_models(binary, PiDialect::OhMyPi), None),
+        // The Antigravity server speaks ACP but publishes no catalog command,
+        // and starting it just to ask costs a cold start, so the agent keeps
+        // its own default model.
+        ProviderKind::Antigravity => (Vec::new(), None),
     };
     let models = if discovered.is_empty() {
         // A failed or empty probe keeps the last successful discovery over

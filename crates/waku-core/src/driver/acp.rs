@@ -97,6 +97,17 @@ fn launch_for(provider: ProviderKind, reasoning_effort: Option<&str>) -> anyhow:
             args: vec!["acp".into()],
             env: Vec::new(),
         }),
+        // The Antigravity ACP server takes no arguments on macOS and Windows.
+        // The Linux build wants an explicit, empty `--uid`, which is what the
+        // ACP registry entry declares for that platform.
+        ProviderKind::Antigravity => Ok(AcpLaunch {
+            args: if cfg!(target_os = "linux") {
+                vec!["--uid=".into()]
+            } else {
+                Vec::new()
+            },
+            env: Vec::new(),
+        }),
         _ => Err(anyhow!(
             "{} does not speak the Agent Client Protocol",
             provider.display_name()
@@ -2245,6 +2256,19 @@ mod tests {
     fn fx_launches_its_documented_acp_subcommand() {
         let launch = launch_for(ProviderKind::Fx, None).unwrap();
         assert_eq!(launch.args, ["acp"]);
+        assert!(launch.env.is_empty());
+    }
+
+    #[test]
+    fn antigravity_launches_the_registry_entrys_arguments() {
+        let launch = launch_for(ProviderKind::Antigravity, None).unwrap();
+        // The registry entry gives the Linux build an explicit, empty --uid
+        // and every other platform no arguments at all.
+        if cfg!(target_os = "linux") {
+            assert_eq!(launch.args, ["--uid="]);
+        } else {
+            assert!(launch.args.is_empty());
+        }
         assert!(launch.env.is_empty());
     }
 

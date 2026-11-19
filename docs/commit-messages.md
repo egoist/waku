@@ -80,6 +80,7 @@ argument**; `NO_COLOR=1` and `CI=1` are set for all of them.
 | Pi | `pi` | `--print --no-session --no-tools --no-context-files --no-extensions --no-skills --no-prompt-templates --no-approve` | `--model` | `--thinking` |
 | Oh My Pi | `omp` | `--print --no-session --no-tools --no-rules --no-extensions --no-skills` | `--model` | `--thinking` |
 | Kimi Code | `kimi` | `--prompt <prompt> --output-format text` | `--model` | — |
+| Antigravity | `agy_acp_server` | none — the agent has no one-shot mode, so generation is refused | — | — |
 
 Where a provider is not simply "flags plus prompt":
 
