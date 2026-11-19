@@ -422,13 +422,27 @@ impl Waku {
             }
             DriverEvent::RichActivity(item) => {
                 if self.accepts_turn_output(session_id) {
+                    let selected = self.state.selected_session == Some(session_id);
                     let refresh_branch =
-                        should_refresh_branch_after_activity(item.kind, item.complete)
-                            && self.state.selected_session == Some(session_id);
+                        should_refresh_branch_after_activity(item.kind, item.complete) && selected;
+                    // Collected now because `update_activity` consumes the
+                    // item; these are the same paths it records as changed.
+                    let changed_files =
+                        if item.complete && selected && !item.file_changes.is_empty() {
+                            item.file_changes
+                                .iter()
+                                .map(|change| change.path.clone())
+                                .collect::<Vec<_>>()
+                        } else {
+                            Vec::new()
+                        };
                     self.observe_foreground_command_activity(session_id, &item);
                     self.update_activity(session_id, runtime, item);
                     if refresh_branch {
                         self.refresh_selected_branch_snapshot(cx);
+                    }
+                    if !changed_files.is_empty() {
+                        self.reload_files_changed_by_activity(&changed_files, cx);
                     }
                 }
             }

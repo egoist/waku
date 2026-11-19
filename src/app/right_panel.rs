@@ -138,6 +138,30 @@ fn workspace_relative_file_path(workspace: &Path, target: &Path) -> Option<Strin
     relative(&workspace, &target)
 }
 
+/// Editor keys for the files a completed activity changed, resolved the way
+/// `open_activity_file` routes a click on the activity: an absolute path must
+/// land inside the workspace to have an editor at all, a relative one already
+/// is the key. Lexical, like routing — no filesystem probing.
+fn activity_changed_editor_keys(paths: &[String], workspace: Option<&Path>) -> Vec<String> {
+    let Some(workspace) = workspace else {
+        return Vec::new();
+    };
+    paths
+        .iter()
+        .filter_map(|path| {
+            let path = Path::new(path.trim());
+            if path.as_os_str().is_empty() {
+                return None;
+            }
+            if path.is_absolute() {
+                workspace_relative_file_path(workspace, path)
+            } else {
+                Some(path.to_string_lossy().into_owned())
+            }
+        })
+        .collect()
+}
+
 fn transcript_link_route(target: &str, workspace: Option<&Path>) -> TranscriptLinkRoute {
     let Some(path) = markdown_file_link_path(target) else {
         return TranscriptLinkRoute::External;
@@ -1116,6 +1140,36 @@ mod tests {
             transcript_link_route("https://example.com/file.rs:12", Some(workspace)),
             TranscriptLinkRoute::External
         );
+    }
+
+    /// A completed edit activity's paths resolve to the keys its files'
+    /// editors were opened under, the same split `open_activity_file`
+    /// applies: inside the workspace stays, outside is dropped, relative
+    /// paths pass through untouched.
+    #[test]
+    fn activity_changed_paths_resolve_to_editor_keys() {
+        let workspace = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let inside = workspace.join("src/app.rs");
+        let outside = workspace.join("../kero/src/app.rs");
+
+        assert_eq!(
+            activity_changed_editor_keys(
+                &[
+                    inside.to_string_lossy().into_owned(),
+                    outside.to_string_lossy().into_owned(),
+                    "src/app.rs".into(),
+                    "  src/lib.rs  ".into(),
+                    String::new(),
+                ],
+                Some(workspace),
+            ),
+            vec![
+                "src/app.rs".to_owned(),
+                "src/app.rs".to_owned(),
+                "src/lib.rs".to_owned()
+            ]
+        );
+        assert!(activity_changed_editor_keys(&["src/app.rs".into()], None).is_empty());
     }
 
     /// Selection resolves rows by key, so a repeated key makes a drag jump
@@ -3371,6 +3425,24 @@ impl Waku {
             .collect::<Vec<_>>();
         for path in paths {
             self.reload_right_panel_file_if_clean(&path, cx);
+        }
+    }
+
+    /// Re-reads the clean editors for the files a completed tool activity
+    /// changed.
+    ///
+    /// The agent's edit has landed on disk by the time the activity
+    /// completes, so an editor the user has not touched picks the new
+    /// content up right away instead of waiting for the turn to settle or
+    /// focus to return.
+    pub(super) fn reload_files_changed_by_activity(
+        &mut self,
+        paths: &[String],
+        cx: &mut Context<Self>,
+    ) {
+        let workspace = self.selected_workspace_path().map(Path::to_path_buf);
+        for key in activity_changed_editor_keys(paths, workspace.as_deref()) {
+            self.reload_right_panel_file_if_clean(&key, cx);
         }
     }
 

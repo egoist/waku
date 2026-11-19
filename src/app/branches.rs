@@ -363,7 +363,6 @@ impl Waku {
                                 *branch = current;
                             }
                             waku.invalidate_workspace_queries(cx);
-                            waku.reload_clean_right_panel_file_editors(cx);
                             waku.save();
                         }
                     }
