@@ -42,6 +42,8 @@ menu.toggle_model_picker:
   en: Toggle Model Picker
 menu.toggle_usage_panel:
   en: Toggle Usage Panel
+menu.cycle_access_mode:
+  en: Cycle Access Mode
 menu.window:
   en: Window
 menu.toggle_fps_counter:
@@ -94,6 +96,8 @@ command_palette.open_project:
   en: Open project…
 command_palette.choose_model:
   en: Choose model…
+command_palette.cycle_access_mode:
+  en: Cycle access mode
 command_palette.copy_task_id:
   en: Copy Task ID
 command_palette.copy_agent_cli_thread_id:

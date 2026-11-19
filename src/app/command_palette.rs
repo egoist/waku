@@ -155,6 +155,7 @@ enum PaletteAction {
     FocusComposer,
     CopyIdentifier(PaletteIdentifier),
     ChooseModel,
+    CycleAccessMode,
     ToggleUsage,
     CollapseSidebarGroups,
     ToggleSidebar,
@@ -733,6 +734,17 @@ impl Waku {
                 Some(crate::platform::primary_shortcut("⌘/", "Ctrl+/")),
                 PaletteAction::ChooseModel,
                 "choose change select model provider agent",
+                next(),
+            ));
+        }
+        if self.selected_session().is_some() {
+            commands.push(CommandPaletteItem::command(
+                PaletteSection::Commands,
+                tr!("command_palette.cycle_access_mode"),
+                "icons/lock-open.svg",
+                Some(crate::platform::primary_shortcut("⌘⇧M", "Ctrl+Shift+M")),
+                PaletteAction::CycleAccessMode,
+                "access mode permission ask auto accept edits full cycle switch",
                 next(),
             ));
         }
@@ -1595,6 +1607,12 @@ impl Waku {
                 self.select_session(session_id, cx);
                 let focus = self.composer_focus(cx);
                 window.focus(&focus, cx);
+            }
+            PaletteAction::CycleAccessMode => {
+                // Unlike the pickers, cycling opens no popover anchored to the
+                // composer, so the mode can change directly.
+                self.settings_page = None;
+                self.cycle_access_mode_action(&CycleAccessMode, window, cx);
             }
             PaletteAction::ChooseModel | PaletteAction::ToggleUsage => {
                 // These popovers are rendered by the composer. If the command

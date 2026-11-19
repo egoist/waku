@@ -998,6 +998,21 @@ impl Waku {
         });
     }
 
+    /// Primary modifier + shift + M: advance the selected session's access
+    /// mode, the keyboard route through the composer's access chip.
+    pub(super) fn cycle_access_mode_action(
+        &mut self,
+        _: &CycleAccessMode,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let current = self
+            .selected_session()
+            .map(|session| session.runtime_mode)
+            .unwrap_or(self.state.last_runtime_mode);
+        self.set_runtime_mode(current.next_access_mode(), cx);
+    }
+
     /// Discovery is not requested here: launch already requested it for every
     /// installed provider, so tabs only ever switch between loaded lists.
     pub(super) fn select_model_picker_tab(&mut self, tab: ModelPickerTab, cx: &mut Context<Self>) {

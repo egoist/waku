@@ -82,6 +82,7 @@ actions!(
         CancelTaskSwitch,
         FocusComposer,
         ToggleModelPicker,
+        CycleAccessMode,
         ToggleUsagePanel,
         SaveFile,
         CancelTurn,
@@ -256,6 +257,7 @@ pub fn run() {
                 KeyBinding::new("escape", CancelTaskSwitch, Some("TaskSwitcher")),
                 KeyBinding::new("secondary-l", FocusComposer, None),
                 KeyBinding::new("secondary-/", ToggleModelPicker, None),
+                KeyBinding::new("secondary-shift-m", CycleAccessMode, None),
                 KeyBinding::new("secondary-u", ToggleUsagePanel, None),
                 KeyBinding::new("secondary-s", SaveFile, None),
                 KeyBinding::new("escape", CancelTurn, Some("Waku")),
@@ -464,6 +466,7 @@ pub(crate) fn set_app_menus(cx: &mut App, updater_available: bool) {
                 MenuItem::action(tr!("menu.focus_composer"), FocusComposer),
                 MenuItem::action(tr!("menu.toggle_model_picker"), ToggleModelPicker),
                 MenuItem::action(tr!("menu.toggle_usage_panel"), ToggleUsagePanel),
+                MenuItem::action(tr!("menu.cycle_access_mode"), CycleAccessMode),
             ],
         },
         Menu {
