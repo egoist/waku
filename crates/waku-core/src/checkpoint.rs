@@ -180,6 +180,7 @@ fn capture_worktree_commit_from(
         cwd.join(common_dir)
     };
     let temporary_index = common_dir.join(format!("waku-checkpoint-index-{}", Uuid::new_v4()));
+    let temporary_message = common_dir.join(format!("waku-checkpoint-message-{}", Uuid::new_v4()));
 
     let result = (|| {
         if let Some(head) = head {
@@ -192,11 +193,16 @@ fn capture_worktree_commit_from(
         if tree.is_empty() {
             bail!("git write-tree returned no object id");
         }
+        // The message goes through a file rather than `-m`. A turn start
+        // snapshot embeds one entry per ref in the repository, and an
+        // argument is capped at 128 KiB, so passing the message inline
+        // failed outright on a repository with a few thousand refs.
+        fs::write(&temporary_message, message)?;
         let mut arguments = vec![
             "commit-tree".to_owned(),
             tree,
-            "-m".to_owned(),
-            message.to_owned(),
+            "-F".to_owned(),
+            temporary_message.to_string_lossy().into_owned(),
         ];
         for parent in parents {
             arguments.push("-p".to_owned());
@@ -213,6 +219,7 @@ fn capture_worktree_commit_from(
 
     let _ = fs::remove_file(&temporary_index);
     let _ = fs::remove_file(temporary_index.with_extension("lock"));
+    let _ = fs::remove_file(&temporary_message);
     result
 }
 
@@ -244,7 +251,13 @@ fn prepare_turn_diff_base(
 }
 
 fn turn_start_metadata(cwd: &Path, start_ref: &str) -> anyhow::Result<TurnStartMetadata> {
-    let message = git_output(cwd, ["show", "-s", "--format=%B", start_ref])?;
+    // `git show` is deliberately avoided here. On a merge commit it runs the
+    // combined-diff machinery over every parent, which is quadratic in the
+    // parent count, and a turn start snapshot takes one parent per ref in the
+    // repository. A repository with a few thousand refs made this read take
+    // seconds every time, with no timeout to bound it. `git log` reads the
+    // same message without walking the parents, and prints it identically.
+    let message = git_output(cwd, ["log", "-1", "--format=%B", start_ref])?;
     let encoded = message
         .lines()
         .find_map(|line| line.strip_prefix(TURN_START_METADATA_PREFIX))
@@ -792,6 +805,27 @@ mod tests {
         String::from_utf8_lossy(&output.stdout).trim().to_owned()
     }
 
+    /// Imports a `git fast-import` stream, so a test can create thousands of
+    /// commits in one process instead of one per commit.
+    fn git_import(cwd: &Path, stream: &str) {
+        use std::io::Write;
+        let mut child = crate::command_env::plain_command("git")
+            .args(["fast-import", "--quiet"])
+            .current_dir(cwd)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::inherit())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(stream.as_bytes())
+            .unwrap();
+        assert!(child.wait().unwrap().success(), "git fast-import failed");
+    }
+
     fn diverged_repository() -> PathBuf {
         let directory = std::env::temp_dir().join(format!("waku-checkpoints-{}", Uuid::new_v4()));
         fs::create_dir_all(&directory).unwrap();
@@ -1120,6 +1154,59 @@ mod tests {
 
         assert_eq!(second.files.len(), 1);
         assert_eq!(second.files[0].path, "second-turn.txt");
+        fs::remove_dir_all(directory).ok();
+    }
+
+    /// A turn start snapshot takes one parent per ref in the repository, so a
+    /// repository with a few thousand refs produces a commit with a few
+    /// thousand parents. Reading that commit's message with `git show` runs
+    /// the combined-diff machinery over every parent and takes seconds, with
+    /// nothing to bound it; reading it has to stay cheap however many refs
+    /// the repository has.
+    #[test]
+    fn turn_start_metadata_reads_a_many_parent_snapshot_quickly() {
+        let directory = std::env::temp_dir().join(format!("waku-checkpoints-{}", Uuid::new_v4()));
+        fs::create_dir_all(&directory).unwrap();
+        git_ok(&directory, &["init", "--quiet", "--initial-branch=main"]);
+        git_ok(&directory, &["config", "user.name", "Waku Test"]);
+        git_ok(&directory, &["config", "user.email", "waku@example.com"]);
+
+        // One commit per branch, imported in a single process so that
+        // thousands of refs stay cheap to set up.
+        let branches = 4096;
+        let mut stream = String::from(
+            "blob\nmark :1\ndata 3\nabc\ncommit refs/heads/main\ncommitter Waku Test <waku@example.com> 0 +0000\ndata 5\ncmain\nM 100644 :1 a.txt\n",
+        );
+        for index in 0..branches {
+            stream.push_str(&format!(
+                "commit refs/heads/branch{index}\ncommitter Waku Test <waku@example.com> 0 +0000\ndata 5\nc{index:04}\nM 100644 :1 a.txt\n"
+            ));
+        }
+        stream.push_str("done\n");
+        git_import(&directory, &stream);
+
+        let session_id = Uuid::new_v4();
+        capture_turn_start(&directory, session_id, 0).unwrap();
+        let start_ref = turn_start_ref(session_id, 0);
+        let parents = git_text(&directory, &["cat-file", "-p", &start_ref])
+            .lines()
+            .filter(|line| line.starts_with("parent "))
+            .count();
+        assert!(
+            parents > 1000,
+            "the snapshot should carry a parent per ref, got {parents}"
+        );
+
+        let started = std::time::Instant::now();
+        let metadata = turn_start_metadata(&directory, &start_ref).unwrap();
+        let elapsed = started.elapsed();
+
+        assert_eq!(metadata.branch.as_deref(), Some("refs/heads/main"));
+        assert_eq!(metadata.refs.len(), branches + 1);
+        assert!(
+            elapsed.as_secs_f64() < 2.0,
+            "reading a {parents}-parent snapshot took {elapsed:?}"
+        );
         fs::remove_dir_all(directory).ok();
     }
 }
