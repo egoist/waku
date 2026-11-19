@@ -612,25 +612,33 @@ impl Waku {
             return div()
                 .mt(px(15.0))
                 .w_full()
-                .px(px(20.0))
-                .py(px(16.0))
-                .rounded(px(13.0))
-                .bg(theme.raised)
+                .flex()
+                .flex_col()
+                .gap(px(12.0))
                 .child(
                     div()
-                        .text_size(sp(13.5))
-                        .font_weight(FontWeight::MEDIUM)
-                        .text_color(theme.text)
-                        .child(tr!("daemon.external_title")),
+                        .w_full()
+                        .px(px(20.0))
+                        .py(px(16.0))
+                        .rounded(px(13.0))
+                        .bg(theme.raised)
+                        .child(
+                            div()
+                                .text_size(sp(13.5))
+                                .font_weight(FontWeight::MEDIUM)
+                                .text_color(theme.text)
+                                .child(tr!("daemon.external_title")),
+                        )
+                        .child(
+                            div()
+                                .mt(px(5.0))
+                                .text_size(sp(12.5))
+                                .line_height(sp(18.0))
+                                .text_color(theme.text_secondary)
+                                .child(tr!("daemon.external_description")),
+                        ),
                 )
-                .child(
-                    div()
-                        .mt(px(5.0))
-                        .text_size(sp(12.5))
-                        .line_height(sp(18.0))
-                        .text_color(theme.text_secondary)
-                        .child(tr!("daemon.external_description")),
-                )
+                .child(self.render_daemon_profiles_settings(cx))
                 .into_any_element();
         }
 
@@ -1139,7 +1147,319 @@ impl Waku {
                         ),
                 )
             })
+            .child(self.render_daemon_profiles_settings(cx))
             .into_any_element()
+    }
+
+    /// The remote-daemon section: the profiles the desktop can dial instead
+    /// of the environment variables a GUI bundle cannot set.
+    fn render_daemon_profiles_settings(&self, cx: &mut Context<Self>) -> AnyElement {
+        let theme = Theme::current(cx);
+        let profiles = self.state.daemon_profiles.clone();
+        let active = self.state.active_daemon_profile;
+        let connected_remotely = self.daemon.is_remote();
+
+        let rows = profiles
+            .iter()
+            .map(|profile| {
+                let profile_id = profile.id;
+                let is_active = active == Some(profile_id);
+                let use_button = (!is_active).then(|| {
+                    div()
+                        .id(SharedString::from(format!(
+                            "daemon-profile-use-{profile_id}"
+                        )))
+                        .tab_index(0)
+                        .h(px(27.0))
+                        .px(px(9.0))
+                        .rounded(px(6.0))
+                        .border_1()
+                        .border_color(theme.border_strong)
+                        .flex()
+                        .items_center()
+                        .cursor_default()
+                        .text_size(sp(12.5))
+                        .text_color(theme.text_secondary)
+                        .focus_visible(|style| style.border_color(theme.accent))
+                        .hover(|element| element.bg(theme.overlay))
+                        .child(tr!("daemon.profile_use"))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.activate_daemon_profile(profile_id, cx);
+                        }))
+                        .on_key_down(cx.listener(move |this, event: &KeyDownEvent, _, cx| {
+                            if !event.keystroke.modifiers.modified()
+                                && matches!(event.keystroke.key.as_str(), "enter" | "space")
+                            {
+                                this.activate_daemon_profile(profile_id, cx);
+                                cx.stop_propagation();
+                            }
+                        }))
+                });
+                let remove_button = div()
+                    .id(SharedString::from(format!(
+                        "daemon-profile-remove-{profile_id}"
+                    )))
+                    .tab_index(0)
+                    .h(px(27.0))
+                    .px(px(9.0))
+                    .rounded(px(6.0))
+                    .border_1()
+                    .border_color(theme.border_strong)
+                    .flex()
+                    .items_center()
+                    .cursor_default()
+                    .text_size(sp(12.5))
+                    .text_color(theme.text_secondary)
+                    .focus_visible(|style| style.border_color(theme.accent))
+                    .hover(|element| element.bg(theme.overlay))
+                    .child(tr!("daemon.profile_remove"))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.remove_daemon_profile(profile_id, cx);
+                    }))
+                    .on_key_down(cx.listener(move |this, event: &KeyDownEvent, _, cx| {
+                        if !event.keystroke.modifiers.modified()
+                            && matches!(event.keystroke.key.as_str(), "enter" | "space")
+                        {
+                            this.remove_daemon_profile(profile_id, cx);
+                            cx.stop_propagation();
+                        }
+                    }));
+                div()
+                    .px(px(10.0))
+                    .py(px(9.0))
+                    .rounded(px(8.0))
+                    .bg(theme.inset)
+                    .flex()
+                    .items_center()
+                    .gap(px(10.0))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap(px(7.0))
+                                    .child(
+                                        div()
+                                            .truncate()
+                                            .text_size(sp(13.0))
+                                            .font_weight(FontWeight::MEDIUM)
+                                            .text_color(theme.text)
+                                            .child(SharedString::from(profile.name.clone())),
+                                    )
+                                    .when(is_active, |element| {
+                                        element.child(
+                                            div()
+                                                .px(px(6.0))
+                                                .py(px(2.0))
+                                                .rounded_full()
+                                                .text_size(sp(11.5))
+                                                .text_color(theme.success)
+                                                .bg(theme.inset)
+                                                .child(tr!("daemon.profile_active")),
+                                        )
+                                    }),
+                            )
+                            .child(
+                                div()
+                                    .mt(px(3.0))
+                                    .truncate()
+                                    .font_family(".SystemUIFontMonospaced")
+                                    .text_size(sp(12.0))
+                                    .text_color(theme.text_tertiary)
+                                    .child(SharedString::from(profile.address.clone())),
+                            ),
+                    )
+                    .when_some(use_button, |element, button| element.child(button))
+                    .child(remove_button)
+            })
+            .collect::<Vec<_>>();
+
+        let unreachable = (active.is_some() && !connected_remotely).then(|| {
+            let name = profiles
+                .iter()
+                .find(|profile| Some(profile.id) == active)
+                .map(|profile| profile.name.clone())
+                .unwrap_or_default();
+            div()
+                .px(px(10.0))
+                .py(px(8.0))
+                .rounded(px(8.0))
+                .bg(theme.inset)
+                .w_full()
+                .flex()
+                .gap(px(8.0))
+                .child(icon("icons/alert.svg", 13.0, theme.warning))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .whitespace_normal()
+                        .text_size(sp(12.5))
+                        .line_height(sp(15.0))
+                        .text_color(theme.text_secondary)
+                        .child(tr!("daemon.profile_unreachable", name = name)),
+                )
+        });
+
+        let add_button = div()
+            .id("add-daemon-profile")
+            .tab_index(0)
+            .h(px(29.0))
+            .px(px(11.0))
+            .rounded(px(7.0))
+            .border_1()
+            .border_color(theme.border_strong)
+            .flex()
+            .items_center()
+            .justify_center()
+            .cursor_default()
+            .text_size(sp(12.5))
+            .text_color(theme.text_secondary)
+            .focus_visible(|style| style.border_color(theme.accent))
+            .hover(|element| element.bg(theme.overlay))
+            .child(tr!("daemon.profile_add"))
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.add_daemon_profile(cx);
+            }))
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
+                if !event.keystroke.modifiers.modified()
+                    && matches!(event.keystroke.key.as_str(), "enter" | "space")
+                {
+                    this.add_daemon_profile(cx);
+                    cx.stop_propagation();
+                }
+            }));
+
+        div()
+            .w_full()
+            .px(px(20.0))
+            .py(px(16.0))
+            .rounded(px(13.0))
+            .bg(theme.raised)
+            .flex()
+            .flex_col()
+            .gap(px(12.0))
+            .child(
+                div()
+                    .text_size(sp(13.5))
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(theme.text)
+                    .child(tr!("daemon.profile_title")),
+            )
+            .child(
+                div()
+                    .text_size(sp(12.5))
+                    .line_height(sp(18.0))
+                    .text_color(theme.text_secondary)
+                    .child(tr!("daemon.profile_description")),
+            )
+            .when(!rows.is_empty(), |column| {
+                column.child(div().flex().flex_col().gap(px(8.0)).children(rows))
+            })
+            .when_some(unreachable, |column, banner| column.child(banner))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(10.0))
+                    .child(
+                        div().flex_1().min_w_0().child(
+                            TextField::new(
+                                "daemon-profile-name-field",
+                                self.daemon_profile_name_input.clone(),
+                            )
+                            .w_full(),
+                        ),
+                    )
+                    .child(
+                        div().flex_1().min_w_0().child(
+                            TextField::new(
+                                "daemon-profile-address-field",
+                                self.daemon_profile_address_input.clone(),
+                            )
+                            .w_full(),
+                        ),
+                    )
+                    .child(
+                        div().flex_1().min_w_0().child(
+                            TextField::new(
+                                "daemon-profile-token-field",
+                                self.daemon_profile_token_input.clone(),
+                            )
+                            .w_full(),
+                        ),
+                    )
+                    .child(add_button),
+            )
+            .into_any_element()
+    }
+
+    fn add_daemon_profile(&mut self, cx: &mut Context<Self>) {
+        let profile = waku_client::DaemonProfile {
+            id: uuid::Uuid::new_v4(),
+            name: self
+                .daemon_profile_name_input
+                .read(cx)
+                .content()
+                .trim()
+                .to_owned(),
+            address: self
+                .daemon_profile_address_input
+                .read(cx)
+                .content()
+                .trim()
+                .to_owned(),
+            token: self
+                .daemon_profile_token_input
+                .read(cx)
+                .content()
+                .trim()
+                .to_owned(),
+        };
+        if let Err(error) = profile.validate() {
+            self.show_toast(tr!("daemon.profile_invalid", error = error.to_string()));
+            return;
+        }
+        self.state.daemon_profiles.push(profile);
+        for input in [
+            &self.daemon_profile_name_input,
+            &self.daemon_profile_address_input,
+            &self.daemon_profile_token_input,
+        ] {
+            input.update(cx, |input, cx| input.set_content(String::new(), cx));
+        }
+        self.save();
+        cx.notify();
+    }
+
+    fn remove_daemon_profile(&mut self, profile_id: uuid::Uuid, cx: &mut Context<Self>) {
+        self.state
+            .daemon_profiles
+            .retain(|profile| profile.id != profile_id);
+        if self.state.active_daemon_profile == Some(profile_id) {
+            self.state.active_daemon_profile = None;
+        }
+        self.save();
+        cx.notify();
+    }
+
+    fn activate_daemon_profile(&mut self, profile_id: uuid::Uuid, cx: &mut Context<Self>) {
+        let Some(profile) = self
+            .state
+            .daemon_profiles
+            .iter()
+            .find(|profile| profile.id == profile_id)
+            .cloned()
+        else {
+            return;
+        };
+        self.state.active_daemon_profile = Some(profile_id);
+        self.save();
+        self.show_toast(tr!("daemon.profile_activated", name = profile.name));
+        cx.notify();
     }
 
     fn daemon_exposure_from_fields(

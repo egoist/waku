@@ -14,7 +14,10 @@ use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::{Command, DaemonExposureSettings, DaemonSettings, DaemonSupervisor, ResponsePayload};
+use crate::{
+    Command, DaemonExposureSettings, DaemonProfile, DaemonSettings, DaemonSupervisor,
+    ResponsePayload,
+};
 use waku_protocol::computer_use::ComputerAppGrant;
 use waku_protocol::i18n::AppLanguage;
 use waku_protocol::identity::DATA_DIRECTORY_NAME;
@@ -258,6 +261,13 @@ pub struct AppSettings {
     pub code_font_size: f32,
     pub render_math: bool,
     pub daemon_exposure: DaemonExposureSettings,
+    /// Remote daemons the desktop can connect to, and the one it uses at
+    /// launch. A GUI bundle cannot set the daemon environment variables, so
+    /// the desktop names its daemon here instead.
+    #[serde(default)]
+    pub daemon_profiles: Vec<DaemonProfile>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_daemon_profile: Option<Uuid>,
     /// Preferred target of the header's "open project in app" control, by
     /// catalog id. `None` — and an id no longer installed — fall back to the
     /// platform file manager.
@@ -275,6 +285,8 @@ impl Default for AppSettings {
             code_font_size: DEFAULT_CODE_FONT_SIZE,
             render_math: true,
             daemon_exposure: DaemonExposureSettings::default(),
+            daemon_profiles: Vec::new(),
+            active_daemon_profile: None,
             open_in_app: None,
         }
     }
@@ -381,6 +393,12 @@ pub struct PersistedState {
     pub render_math: bool,
     #[serde(default)]
     pub daemon_exposure: DaemonExposureSettings,
+    /// Remote daemons the desktop can connect to, and the one it uses at
+    /// launch.
+    #[serde(default)]
+    pub daemon_profiles: Vec<DaemonProfile>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_daemon_profile: Option<Uuid>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub open_in_app: Option<String>,
     #[serde(default = "default_sidebar_visibility")]
@@ -454,6 +472,8 @@ impl PersistedState {
             code_font_size: DEFAULT_CODE_FONT_SIZE,
             render_math: true,
             daemon_exposure: DaemonExposureSettings::default(),
+            daemon_profiles: Vec::new(),
+            active_daemon_profile: None,
             open_in_app: None,
             sidebar_visible: true,
             right_panel_visible: false,
@@ -582,6 +602,8 @@ impl PersistedState {
             code_font_size: self.code_font_size,
             render_math: self.render_math,
             daemon_exposure: self.daemon_exposure.clone(),
+            daemon_profiles: self.daemon_profiles.clone(),
+            active_daemon_profile: self.active_daemon_profile,
             open_in_app: self.open_in_app.clone(),
         }
     }
@@ -619,6 +641,8 @@ impl PersistedState {
         self.code_font_size = sanitized_code_font_size(settings.code_font_size);
         self.render_math = settings.render_math;
         self.daemon_exposure = settings.daemon_exposure;
+        self.daemon_profiles = settings.daemon_profiles;
+        self.active_daemon_profile = settings.active_daemon_profile;
         self.open_in_app = settings.open_in_app;
     }
 

@@ -110,6 +110,18 @@ daemon.hide_token: 隐藏令牌
 daemon.regenerate_token: 重新生成
 daemon.security_warning: 此令牌可完全访问本机上的任务、文件、Git、附件和编程智能体。在私有网络之外请通过受信任的 TLS 代理使用 WSS。
 daemon.external_title: 外部守护进程
+daemon.profile_title: 远程守护进程
+daemon.profile_description: 为此应用要连接的守护进程命名。当 shell 设置了 WAKU_DAEMON_ADDRESS 和 WAKU_DAEMON_TOKEN 环境变量时，它们仍然优先。
+daemon.profile_name_placeholder: 名称
+daemon.profile_address_placeholder: host:port
+daemon.profile_token_placeholder: 令牌
+daemon.profile_add: 添加
+daemon.profile_use: 使用
+daemon.profile_remove: 移除
+daemon.profile_active: 使用中
+daemon.profile_activated: 重启 Waku 以连接到 %{name}
+daemon.profile_unreachable: "无法连接 %{name}；正在使用本地守护进程。"
+daemon.profile_invalid: "守护进程配置无效: %{error}"
 daemon.external_description: 此桌面应用连接到由 Waku 之外管理的守护进程。请在对应主机上配置监听地址、浏览器来源和令牌。
 daemon.web_external_description: Waku Web 连接到由浏览器之外管理的守护进程。请在对应主机上配置监听地址、浏览器来源和令牌。
 daemon.web_connection_description: 此浏览器不会启动或停止守护进程。
