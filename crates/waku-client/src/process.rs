@@ -50,6 +50,58 @@ impl Default for DaemonExposureSettings {
     }
 }
 
+/// A remote Waku daemon the desktop can connect to.
+///
+/// `WAKU_DAEMON_ADDRESS` and `WAKU_DAEMON_TOKEN` remain the strongest
+/// signal — a shell that exports them wins — but a GUI bundle cannot set
+/// them, so the desktop keeps named profiles here instead.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(default)]
+pub struct DaemonProfile {
+    pub id: Uuid,
+    pub name: String,
+    /// Where the daemon listens, with or without a `ws://` scheme.
+    pub address: String,
+    /// The token the daemon expects.
+    pub token: String,
+}
+
+impl Default for DaemonProfile {
+    fn default() -> Self {
+        Self {
+            id: Uuid::new_v4(),
+            name: String::new(),
+            address: String::new(),
+            token: String::new(),
+        }
+    }
+}
+
+impl DaemonProfile {
+    /// The address the client dials: a scheme, a host, and a port.
+    pub fn normalized_address(&self) -> String {
+        let address = self.address.trim();
+        if address.starts_with("ws://") || address.starts_with("wss://") {
+            address.to_owned()
+        } else {
+            format!("ws://{address}")
+        }
+    }
+
+    pub fn validate(&self) -> anyhow::Result<()> {
+        if self.name.trim().is_empty() {
+            bail!("daemon name is empty");
+        }
+        if self.address.trim().is_empty() {
+            bail!("daemon address is empty");
+        }
+        if self.token.trim().is_empty() {
+            bail!("daemon token is empty");
+        }
+        Ok(())
+    }
+}
+
 impl DaemonExposureSettings {
     pub fn new_token() -> String {
         Uuid::new_v4().simple().to_string()

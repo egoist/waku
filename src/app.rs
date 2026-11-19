@@ -1072,6 +1072,9 @@ pub struct Waku {
     model_search: Entity<TextInput>,
     settings_search: Entity<TextInput>,
     daemon_port_input: Entity<TextInput>,
+    daemon_profile_name_input: Entity<TextInput>,
+    daemon_profile_address_input: Entity<TextInput>,
+    daemon_profile_token_input: Entity<TextInput>,
     daemon_origins_input: Entity<TextInput>,
     daemon_reconfigure_pending: bool,
     daemon_token_revealed: bool,
@@ -2037,6 +2040,21 @@ impl Waku {
             input.set_content(daemon_origins, cx);
             input
         });
+        let daemon_profile_name_input = cx.new(|cx| {
+            TextInput::new(window, cx)
+                .select_all_on_focus_click()
+                .placeholder(tr!("daemon.profile_name_placeholder"))
+        });
+        let daemon_profile_address_input = cx.new(|cx| {
+            TextInput::new(window, cx)
+                .select_all_on_focus_click()
+                .placeholder(tr!("daemon.profile_address_placeholder"))
+        });
+        let daemon_profile_token_input = cx.new(|cx| {
+            TextInput::new(window, cx)
+                .select_all_on_focus_click()
+                .placeholder(tr!("daemon.profile_token_placeholder"))
+        });
         let skills_search = cx.new(|cx| {
             TextInput::new(window, cx)
                 .clear_on_escape()
@@ -2599,6 +2617,18 @@ impl Waku {
                 )
                 .detach();
             }
+            for input in [
+                &daemon_profile_name_input,
+                &daemon_profile_address_input,
+                &daemon_profile_token_input,
+            ] {
+                cx.subscribe(input, |_: &mut Self, _, event: &InputEvent, cx| {
+                    if matches!(event, InputEvent::Edited) {
+                        cx.notify();
+                    }
+                })
+                .detach();
+            }
             cx.subscribe(&skills_search, |_: &mut Self, _, event: &InputEvent, cx| {
                 if matches!(event, InputEvent::Edited) {
                     cx.notify();
@@ -2770,6 +2800,9 @@ impl Waku {
                 settings_search,
                 daemon_port_input,
                 daemon_origins_input,
+                daemon_profile_name_input,
+                daemon_profile_address_input,
+                daemon_profile_token_input,
                 daemon_reconfigure_pending: false,
                 daemon_token_revealed: false,
                 settings_focus,

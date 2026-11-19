@@ -15,8 +15,8 @@ mod workspace_client;
 
 pub use client::DaemonClient;
 pub use process::{
-    DEFAULT_EXPOSED_DAEMON_PORT, DaemonExposureSettings, DaemonProcess, DaemonSupervisor,
-    parse_allowed_origins,
+    DEFAULT_EXPOSED_DAEMON_PORT, DaemonExposureSettings, DaemonProcess, DaemonProfile,
+    DaemonSupervisor, parse_allowed_origins,
 };
 pub use waku_protocol::*;
 pub use workspace_client::WorkspaceClient;

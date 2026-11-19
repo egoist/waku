@@ -114,6 +114,18 @@ daemon.hide_token: トークンを隠す
 daemon.regenerate_token: 再生成
 daemon.security_warning: このトークンは、このマシン上のタスク、ファイル、Git、添付ファイル、コーディングエージェントへの完全なアクセス権を持ちます。プライベートネットワーク外では信頼できる TLS プロキシ経由で WSS を使用してください。
 daemon.external_title: 外部デーモン
+daemon.profile_title: リモートデーモン
+daemon.profile_description: このアプリが接続するデーモンに名前を付けます。シェルが WAKU_DAEMON_ADDRESS と WAKU_DAEMON_TOKEN を設定している場合はそちらが優先されます。
+daemon.profile_name_placeholder: 名前
+daemon.profile_address_placeholder: host:port
+daemon.profile_token_placeholder: トークン
+daemon.profile_add: 追加
+daemon.profile_use: 使用
+daemon.profile_remove: 削除
+daemon.profile_active: 使用中
+daemon.profile_activated: "%{name} に接続するには Waku を再起動してください"
+daemon.profile_unreachable: "%{name} に接続できませんでした。ローカルのデーモンを使用しています。"
+daemon.profile_invalid: "デーモンの設定が正しくありません: %{error}"
 daemon.external_description: このデスクトップは Waku の外部で管理されているデーモンに接続しています。リスナー、ブラウザオリジン、トークンは接続先ホストで設定してください。
 daemon.web_external_description: Waku Web はブラウザの外部で管理されているデーモンに接続します。リスナー、ブラウザオリジン、トークンは接続先ホストで設定してください。
 daemon.web_connection_description: このブラウザがデーモンを起動または停止することはありません。

@@ -224,6 +224,30 @@ daemon.security_warning:
   en: The token grants full access to tasks, files, Git, attachments, and coding agents on this machine. Use WSS through a trusted TLS proxy outside a private network.
 daemon.external_title:
   en: External daemon
+daemon.profile_title:
+  en: Remote daemons
+daemon.profile_description:
+  en: Name the daemon this app should talk to. The WAKU_DAEMON_ADDRESS and WAKU_DAEMON_TOKEN environment variables still win when a shell sets them.
+daemon.profile_name_placeholder:
+  en: Name
+daemon.profile_address_placeholder:
+  en: host:port
+daemon.profile_token_placeholder:
+  en: Token
+daemon.profile_add:
+  en: Add
+daemon.profile_use:
+  en: Use
+daemon.profile_remove:
+  en: Remove
+daemon.profile_active:
+  en: In use
+daemon.profile_activated:
+  en: Restart Waku to connect to %{name}
+daemon.profile_unreachable:
+  en: Could not reach %{name}; the local daemon is in use.
+daemon.profile_invalid:
+  en: "Invalid daemon: %{error}"
 daemon.external_description:
   en: This desktop is connected to a daemon managed outside Waku. Configure its listener, browser origins, and token on that host.
 daemon.web_external_description:
