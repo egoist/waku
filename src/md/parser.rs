@@ -14,8 +14,10 @@
 use std::ops::Range;
 use std::sync::LazyLock;
 
-use pulldown_cmark::{Alignment, CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag};
+use pulldown_cmark::{Alignment, CodeBlockKind, CowStr, Event, HeadingLevel, Options, Parser, Tag};
 use regex::Regex;
+
+use super::tex::TexRewrite;
 
 /// CommonMark only recognizes angle-bracket autolinks. Transcript content is
 /// conversational, so bare web URLs should be useful without requiring the
@@ -149,13 +151,18 @@ fn options() -> Options {
 }
 
 /// Parse a whole source into a [`BlockTree`].
+///
+/// LaTeX-style math delimiters are rewritten to the dollar form first, so
+/// `\[…\]` and `\(…\)` reach the math extension like `$$…$$` and `$…$` do.
 pub fn parse(source: &str) -> BlockTree {
-    let events = Parser::new_ext(source, options())
+    let rewrite = TexRewrite::new(source);
+    let events = Parser::new_ext(&rewrite.text, options())
         .into_offset_iter()
         .collect::<Vec<_>>();
     let mut cursor = Cursor {
         events: &events,
         index: 0,
+        rewrite: &rewrite,
     };
     let mut blocks = Vec::new();
     while let Some((event, range)) = cursor.peek() {
@@ -164,14 +171,14 @@ pub fn parse(source: &str) -> BlockTree {
             Event::Rule => {
                 cursor.bump();
                 blocks.push(TopBlock {
-                    range,
+                    range: rewrite.source_range(&range),
                     block: Block::Rule,
                 });
             }
             Event::Start(_) => {
                 for block in parse_started_block(&mut cursor) {
                     blocks.push(TopBlock {
-                        range: range.clone(),
+                        range: rewrite.source_range(&range),
                         block,
                     });
                 }
@@ -187,6 +194,7 @@ pub fn parse(source: &str) -> BlockTree {
 struct Cursor<'a, 'e> {
     events: &'a [(Event<'e>, Range<usize>)],
     index: usize,
+    rewrite: &'a TexRewrite<'e>,
 }
 
 impl<'e> Cursor<'_, 'e> {
@@ -208,6 +216,15 @@ impl<'e> Cursor<'_, 'e> {
             self.index += 1;
         }
         event
+    }
+
+    /// The next event with the range it covers in the source.
+    fn next_event_with_range(&mut self) -> Option<(Event<'e>, Range<usize>)> {
+        let (event, range) = self.events.get(self.index)?;
+        let event = event.clone();
+        let range = range.clone();
+        self.index += 1;
+        Some((event, range))
     }
 }
 
@@ -497,7 +514,7 @@ fn pieces_into_runs(pieces: Vec<InlinePiece>) -> Vec<InlineRun> {
 /// Consume one inline event, appending its runs with `style` applied. Nested
 /// emphasis and links recurse with an extended style.
 fn parse_inline_event(cursor: &mut Cursor, pieces: &mut Vec<InlinePiece>, style: &InlineStyle) {
-    let Some(event) = cursor.next_event() else {
+    let Some((event, range)) = cursor.next_event_with_range() else {
         return;
     };
     let mut push_run = |run: InlineRun| pieces.push(InlinePiece::Run(run));
@@ -518,11 +535,13 @@ fn parse_inline_event(cursor: &mut Cursor, pieces: &mut Vec<InlinePiece>, style:
             let mut style = style.clone();
             style.math = true;
             push_run(InlineRun {
-                text: text.into_string(),
+                text: math_text(cursor, &range, text),
                 style,
             });
         }
-        Event::DisplayMath(text) => pieces.push(InlinePiece::DisplayMath(text.into_string())),
+        Event::DisplayMath(text) => {
+            pieces.push(InlinePiece::DisplayMath(math_text(cursor, &range, text)))
+        }
         // A hard or soft break inside a paragraph is a line break in the
         // rendered run: shaped text splits on '\n' on its own.
         Event::SoftBreak | Event::HardBreak => push_run(InlineRun {
@@ -586,6 +605,18 @@ fn parse_inline_event(cursor: &mut Cursor, pieces: &mut Vec<InlinePiece>, style:
             style: style.clone(),
         }),
         Event::End(_) | Event::Rule => {}
+    }
+}
+
+/// The formula of a math event.
+///
+/// A formula written in dollars keeps the parser's own text. One written in
+/// LaTeX-style delimiters was rewritten before the parse, so the source's own
+/// body is the formula — taken verbatim, with the escapes inside it intact.
+fn math_text(cursor: &Cursor, range: &Range<usize>, text: CowStr<'_>) -> String {
+    match cursor.rewrite.latex_at(range) {
+        Some(latex) => latex.to_owned(),
+        None => text.into_string(),
     }
 }
 
@@ -948,6 +979,81 @@ mod tests {
         assert!(
             matches!(&tree.blocks[0].block, Block::CodeBlock { code, .. } if code == "$$x^2$$")
         );
+    }
+
+    #[test]
+    fn latex_style_delimiters_render_as_math() {
+        let tree = parse(r"Before \(x^2\) after \[\frac{1}{2}\] done");
+        let Block::Paragraph { runs } = &tree.blocks[0].block else {
+            panic!("{tree:?}")
+        };
+        let math = runs.iter().filter(|run| run.style.math).collect::<Vec<_>>();
+        assert_eq!(math.len(), 1);
+        assert_eq!(math[0].text, "x^2");
+        assert!(
+            matches!(&tree.blocks[1].block, Block::DisplayMath { latex } if latex == r"\frac{1}{2}")
+        );
+        assert_eq!(paragraph_text(&tree.blocks[2].block), " done");
+    }
+
+    #[test]
+    fn latex_style_math_keeps_the_formula_verbatim() {
+        // CommonMark eats the backslash of `\{`; the formula must not.
+        let tree = parse(r"\[\{x \pm y\}\]");
+        assert!(
+            matches!(&tree.blocks[0].block, Block::DisplayMath { latex } if latex == r"\{x \pm y\}")
+        );
+        let tree = parse(r"\(a\_b\)");
+        let Block::Paragraph { runs } = &tree.blocks[0].block else {
+            panic!("{tree:?}")
+        };
+        assert_eq!(runs[0].text, r"a\_b");
+        assert!(runs[0].style.math);
+    }
+
+    #[test]
+    fn latex_style_delimiters_stay_literal_in_code() {
+        for (source, text) in [(r"`\[x\]`", r"\[x\]"), (r"`\(x\)`", r"\(x\)")] {
+            let tree = parse(source);
+            let Block::Paragraph { runs } = &tree.blocks[0].block else {
+                panic!("{tree:?}")
+            };
+            assert!(runs.iter().all(|run| !run.style.math), "{source}");
+            assert_eq!(runs[0].text, text, "{source}");
+            assert!(runs[0].style.code, "{source}");
+        }
+        let tree = parse("```latex\n\\[x\\]\n```");
+        assert!(matches!(&tree.blocks[0].block, Block::CodeBlock { code, .. } if code == r"\[x\]"));
+    }
+
+    #[test]
+    fn latex_style_math_keeps_the_source_ranges() {
+        let source = "before \\(x\\) after\n\nsecond \\(y\\)\n";
+        let tree = parse(source);
+        assert_eq!(
+            &source[tree.blocks[0].range.clone()],
+            "before \\(x\\) after\n"
+        );
+        assert_eq!(&source[tree.blocks[1].range.clone()], "second \\(y\\)\n");
+    }
+
+    #[test]
+    fn streamed_latex_style_math_matches_full_parse_at_every_character_boundary() {
+        for source in [
+            "Intro\n\nBefore \\(x_1\\) and \\(y\\) after\n\n\\[\n\\frac{a}{b}\n\\]\n\nDone",
+            "- Before \\(x\\) after\n- Next \\[y\\]\n",
+            "before \\[x\\] after **bold**",
+            // The transcript from the report: display and inline formulas
+            // around prose, with a code span keeping its delimiters literal.
+            "\\[\nax^2+bx+c=0,\\qquad a\\ne 0\n\\]\n\nThe discriminant is \
+             \\(\\Delta=b^2-4ac\\):\n\n`\\[not math\\]` but \\(y\\) is",
+        ] {
+            let mut parser = IncrementalParser::new();
+            for ch in source.chars() {
+                parser.append(&ch.to_string());
+                assert_eq!(parser.tree(), &parse(parser.text()), "{}", parser.text());
+            }
+        }
     }
 
     #[test]

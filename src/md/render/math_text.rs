@@ -1186,4 +1186,57 @@ mod tests {
             );
         });
     }
+
+    #[gpui::test]
+    fn latex_delimited_formulas_reach_the_typesetter(cx: &mut gpui::TestAppContext) {
+        struct Harness {
+            markdown: MarkdownView,
+            selection: TranscriptSelection,
+        }
+        impl gpui::Render for Harness {
+            fn render(&mut self, _: &mut Window, _: &mut gpui::Context<Self>) -> impl IntoElement {
+                let palette = Palette::from_theme(&Theme::dark());
+                let ctx = Ctx::new("math-test", &palette, Metrics::BODY, self.selection.clone());
+                div()
+                    .w(px(400.0))
+                    .child(frame_reset(self.selection.clone()))
+                    .children(markdown(&self.markdown, &ctx))
+            }
+        }
+        // The delimiters the report is about, taken from it verbatim.
+        let source =
+            "The discriminant is \\(\\Delta=b^2-4ac\\):\n\n\\[\nax^2+bx+c=0,\\qquad a\\ne 0\n\\]";
+        let mut markdown = MarkdownView::new();
+        markdown.set_text(source, false);
+        let (view, cx) = cx.add_window_view(|_, _| Harness {
+            markdown,
+            selection: TranscriptSelection::default(),
+        });
+        cx.run_until_parked();
+        view.read_with(cx, |view, _| {
+            let flats = view.markdown.flats.borrow();
+            let spans = flats
+                .values()
+                .filter_map(|flat| flat.math.as_ref())
+                .flat_map(|data| data.spans.iter())
+                .map(|span| (span.latex.to_string(), span.display))
+                .collect::<Vec<_>>();
+            assert_eq!(
+                spans,
+                vec![
+                    (r"\Delta=b^2-4ac".to_owned(), false),
+                    ("\nax^2+bx+c=0,\\qquad a\\ne 0\n".to_owned(), true),
+                ]
+            );
+            for flat in flats.values() {
+                if let Some(data) = flat.math.as_ref() {
+                    let cache = data.cache.borrow();
+                    assert!(
+                        cache.metrics.iter().all(Option::is_some),
+                        "worker must complete native rendering"
+                    );
+                }
+            }
+        });
+    }
 }
