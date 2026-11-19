@@ -16,6 +16,8 @@ the original feature bullet instead of adding separate entries for them.
 
 ## [unreleased]
 
+- Let the desktop save named remote daemons in settings and switch between them, instead of launching from a terminal with environment variables
+
 ## [0.1.20]
 
 - Support the OpenCode 2.0 release, which now installs as `opencode`: OpenCode runs on its shared background service, OpenCode 2 beta and OpenCode 1 tasks continue as OpenCode tasks, and OpenCode's free models work in Waku tasks
