@@ -18,11 +18,16 @@ impl Waku {
         delta: String,
     ) {
         let previous_phase = runtime.stream_phase;
+        let continuing = previous_phase == Some(StreamPhase::Text);
+        // A dropped delta is not output: the phase must not move to text
+        // either, or the run of work that follows it splits into two
+        // sections.
+        if !append_text_delta_to_session(&mut self.state.sessions, session_id, continuing, delta) {
+            return;
+        }
         if previous_phase == Some(StreamPhase::Reasoning) {
             self.complete_reasoning_activity(session_id);
         }
-        let continuing = previous_phase == Some(StreamPhase::Text);
-        append_text_delta_to_session(&mut self.state.sessions, session_id, continuing, delta);
         self.state.mark_session_dirty(session_id);
         runtime.stream_phase = Some(StreamPhase::Text);
     }
@@ -1004,14 +1009,26 @@ pub(super) fn pop_stream_batch(
     }
 }
 
+/// Append one text delta to a session. Returns whether the delta was
+/// accepted.
+///
+/// Whitespace is not output. A provider that emits it between two tool calls
+/// — Pi sends a bare newline, OpenCode a text part that starts with one —
+/// must not open an assistant message for it: the message renders as a blank
+/// band in the transcript, and the text phase it starts breaks one run of
+/// work into two sections with a gap between them. The reasoning path
+/// already drops such a delta.
 pub(super) fn append_text_delta_to_session(
     sessions: &mut [AgentSession],
     session_id: Uuid,
     continuing: bool,
     delta: String,
-) {
+) -> bool {
+    if !continuing && delta.trim().is_empty() {
+        return false;
+    }
     let Some(session) = sessions.iter_mut().find(|session| session.id == session_id) else {
-        return;
+        return false;
     };
     if !continuing {
         for message in &mut session.messages {
@@ -1038,4 +1055,5 @@ pub(super) fn append_text_delta_to_session(
         session.messages.push(message);
     }
     session.updated_at = unix_time();
+    true
 }

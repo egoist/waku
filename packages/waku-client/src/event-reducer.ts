@@ -382,20 +382,25 @@ function adoptSubmittedPrompt(
 
 function appendText(session: AgentSession, delta: string, clock: ReducerClock) {
   if (!delta) return
-  completeReasoning(session)
   const previous = session.messages.at(-1)
   if (previous?.role === 'assistant' && previous.streaming) {
+    completeReasoning(session)
     previous.content += delta
-  } else {
-    session.messages.push({
-      id: clock.randomUUID(),
-      turn_id: activeTurn(session)?.id ?? null,
-      role: 'assistant',
-      content: delta,
-      created_at: clock.nowSeconds(),
-      streaming: true,
-    })
+    return
   }
+  // Whitespace is not output. It opens no assistant message, so it leaves no
+  // blank row between two sections of work and does not split them. The
+  // reasoning path already drops such a delta.
+  if (!delta.trim()) return
+  completeReasoning(session)
+  session.messages.push({
+    id: clock.randomUUID(),
+    turn_id: activeTurn(session)?.id ?? null,
+    role: 'assistant',
+    content: delta,
+    created_at: clock.nowSeconds(),
+    streaming: true,
+  })
 }
 
 function appendReasoning(session: AgentSession, delta: string, clock: ReducerClock) {

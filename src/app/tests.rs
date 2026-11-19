@@ -7,7 +7,7 @@ use super::settings::visible_settings_pages;
 use super::{
     ESCAPE_STOP_CONFIRMATION_TIMEOUT, EscapeStopConfirmation, EscapeStopPress, EscapeStopTarget,
     NAVIGATION_RAIL_TICK_HEIGHT, NAVIGATION_RAIL_TURN_HEIGHT, PendingUserInput, SessionNavigation,
-    StreamDeltaKind, TranscriptRowKind::*, active_navigation_turn_index,
+    StreamDeltaKind, StreamPhase, TranscriptRowKind::*, active_navigation_turn_index,
     append_text_delta_to_session, assistant_response_footer, assistant_response_footer_index,
     assistant_response_footer_time, compact_driver_error, disclosure_leading_space, fenced_code,
     fitted_file_tree_width, fitted_panel_widths, folded_transcript_row_kinds,
@@ -875,6 +875,127 @@ fn reasoning_and_tools_share_one_ordered_activity_block() {
     );
 }
 
+/// A provider that emits whitespace between two tool calls is not saying
+/// anything. The delta must not open an assistant message: the message would
+/// render as a blank band between two sections of work.
+#[test]
+fn whitespace_only_text_delta_opens_no_assistant_message() {
+    let mut session = AgentSession::new(Uuid::new_v4(), ProviderKind::Codex);
+    session.begin_turn("Build it");
+    let session_id = session.id;
+    let mut sessions = vec![session];
+
+    assert!(
+        !append_text_delta_to_session(&mut sessions, session_id, false, "\n\n".into()),
+        "a whitespace-only delta is not output"
+    );
+    assert_eq!(
+        sessions[0].messages.len(),
+        1,
+        "only the prompt is in the transcript"
+    );
+
+    assert!(
+        append_text_delta_to_session(&mut sessions, session_id, false, "Here goes.".into()),
+        "real text is output"
+    );
+    assert_eq!(sessions[0].messages.len(), 2);
+    assert_eq!(sessions[0].messages[1].content, "Here goes.");
+}
+
+/// The issue behind the gaps: a thought, a tool call, a whitespace-only
+/// delta, another tool call. The delta is not output, so the work around it
+/// stays one section — the run of tool calls is not cut in two by a gap.
+#[test]
+fn a_whitespace_delta_between_tool_calls_keeps_one_section_of_work() {
+    let mut session = AgentSession::new(Uuid::new_v4(), ProviderKind::Codex);
+    session.begin_turn("Build it");
+    let session_id = session.id;
+    let mut sessions = vec![session];
+
+    // The phase the app keeps for the stream. Only an accepted delta moves
+    // it to text, so the work around a dropped delta stays one run.
+    let mut phase = None;
+    let work = |session: &mut AgentSession, phase: &mut Option<StreamPhase>, item: ActivityItem| {
+        let continuing = matches!(*phase, Some(StreamPhase::Reasoning | StreamPhase::Activity));
+        push_transcript_activity(session, item, continuing);
+        *phase = Some(StreamPhase::Activity);
+    };
+
+    work(
+        &mut sessions[0],
+        &mut phase,
+        ActivityItem::new(None, ActivityKind::Command, "Ran tests", None, true),
+    );
+    let accepted = append_text_delta_to_session(
+        &mut sessions,
+        session_id,
+        matches!(phase, Some(StreamPhase::Text)),
+        "\n\n".into(),
+    );
+    if accepted {
+        phase = Some(StreamPhase::Text);
+    }
+    work(
+        &mut sessions[0],
+        &mut phase,
+        ActivityItem::new(None, ActivityKind::Command, "Ran the build", None, true),
+    );
+
+    assert_eq!(
+        sessions[0].transcript_blocks.len(),
+        1,
+        "one run of work is one section"
+    );
+    assert_eq!(
+        sessions[0].transcript_blocks[0].activities.len(),
+        2,
+        "both tool calls sit in it"
+    );
+    assert_eq!(
+        sessions[0].messages.len(),
+        1,
+        "and no blank message came between them"
+    );
+}
+
+/// A session recorded before the delta was dropped still holds the blank
+/// message. It renders as an empty band, so the transcript stops showing it.
+#[test]
+fn a_blank_assistant_message_leaves_no_row_in_the_transcript() {
+    let mut session = AgentSession::new(Uuid::new_v4(), ProviderKind::Codex);
+    let turn_id = session.begin_turn("Build it");
+    session.transcript_blocks.push(TranscriptBlock {
+        after_message: 1,
+        turn_id: Some(turn_id),
+        activities: vec![ActivityItem::new(
+            None,
+            ActivityKind::Command,
+            "Ran tests",
+            None,
+            true,
+        )],
+    });
+    session.push_message(MessageRole::Assistant, "\n\n");
+    session.transcript_blocks.push(TranscriptBlock {
+        after_message: 2,
+        turn_id: Some(turn_id),
+        activities: vec![ActivityItem::new(
+            None,
+            ActivityKind::Command,
+            "Ran the build",
+            None,
+            true,
+        )],
+    });
+
+    assert_eq!(
+        folded_transcript_row_kinds(&session, &HashSet::new()),
+        vec![Message(0), TurnBlock(0), TurnBlock(1)],
+        "the blank message leaves no row between the two sections"
+    );
+}
+
 #[test]
 fn idle_reaping_releases_finished_sessions_but_never_a_running_turn() {
     let project_id = uuid::Uuid::new_v4();
@@ -1153,9 +1274,9 @@ fn changed_files_remain_visible_when_an_interrupted_turn_has_no_answer() {
             Message(0),
             TurnFold(turn_id),
             TurnBlock(0),
-            Message(1),
             ChangedFiles(turn_id),
-        ]
+        ],
+        "the empty message has nothing to show, so it is not a row"
     );
     assert_eq!(response_footer_message_index(&session, turn_id), None);
 }
@@ -1480,7 +1601,8 @@ fn a_turn_without_an_answer_folds_completely() {
     );
     assert_eq!(
         folded_transcript_row_kinds(&session, &HashSet::from([turn_id])),
-        vec![Message(0), TurnFold(turn_id), TurnBlock(0), Message(1)]
+        vec![Message(0), TurnFold(turn_id), TurnBlock(0)],
+        "the empty placeholder has nothing to show, so it is not a row"
     );
 }
 
