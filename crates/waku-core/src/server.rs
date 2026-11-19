@@ -1001,6 +1001,7 @@ fn task_catalog_action(command: &Command) -> TaskCatalogAction {
             projects: projects.clone(),
         },
         Command::RemoveSession
+        | Command::RemoveProject { .. }
         | Command::ForkSessionFromResponse { .. }
         | Command::RewindSessionToMessage { .. } => TaskCatalogAction::Changed,
         _ => TaskCatalogAction::None,
@@ -1362,6 +1363,116 @@ mod tests {
             panic!("expected task state");
         };
         assert!(sessions.is_empty());
+
+        stale_client.shutdown();
+        server.join().unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn remove_project_drops_its_tasks_and_resists_resurrection() {
+        let root = std::env::temp_dir().join(format!("waku-remove-project-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let backend = WakuBackend::new(
+            DaemonSettingsStore::open(root.join("settings.json")).unwrap(),
+            StateStore::daemon(root.join("app.db")),
+        )
+        .unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let server_shutdown = shutdown.clone();
+        let server = std::thread::spawn(move || {
+            serve(
+                listener,
+                "secret".into(),
+                Arc::new(backend),
+                server_shutdown,
+                ServerOptions {
+                    allow_shutdown: true,
+                    ..ServerOptions::default()
+                },
+            )
+            .unwrap()
+        });
+
+        let stale_client = DaemonClient::connect(&address.to_string(), "secret".into()).unwrap();
+        let remover = DaemonClient::connect(&address.to_string(), "secret".into()).unwrap();
+        let project = Project::from_path(root.join("repo"));
+        let other_project = Project::from_path(root.join("other"));
+        let first = AgentSession::new(project.id, ProviderKind::Codex);
+        let second = AgentSession::new(project.id, ProviderKind::Claude);
+        let bystander = AgentSession::new(other_project.id, ProviderKind::Codex);
+
+        stale_client
+            .request(
+                Uuid::nil(),
+                Uuid::nil(),
+                Command::SaveTaskState {
+                    projects: vec![project.clone(), other_project.clone()],
+                    live_session_ids: Vec::new(),
+                    sessions: vec![first.clone(), second.clone(), bystander.clone()],
+                },
+            )
+            .unwrap();
+        remover
+            .request(
+                Uuid::nil(),
+                Uuid::nil(),
+                Command::RemoveProject {
+                    project_id: project.id,
+                },
+            )
+            .unwrap();
+
+        let ResponsePayload::TaskState {
+            projects, sessions, ..
+        } = stale_client
+            .request(Uuid::nil(), Uuid::nil(), Command::LoadTaskState)
+            .unwrap()
+        else {
+            panic!("expected task state");
+        };
+        assert!(projects.iter().any(|loaded| loaded.id == other_project.id));
+        assert!(!projects.iter().any(|loaded| loaded.id == project.id));
+        assert_eq!(
+            sessions
+                .iter()
+                .map(|session| session.id)
+                .collect::<Vec<_>>(),
+            vec![bystander.id]
+        );
+
+        // A stale snapshot holding the removed project must not resurrect it
+        // or its tasks through the merge-only save path.
+        stale_client
+            .request(
+                Uuid::nil(),
+                Uuid::nil(),
+                Command::SaveTaskState {
+                    projects: vec![project.clone()],
+                    live_session_ids: vec![first.id, second.id],
+                    sessions: vec![first.clone(), second.clone()],
+                },
+            )
+            .unwrap();
+        let ResponsePayload::TaskState {
+            projects, sessions, ..
+        } = stale_client
+            .request(Uuid::nil(), Uuid::nil(), Command::LoadTaskState)
+            .unwrap()
+        else {
+            panic!("expected task state");
+        };
+        assert!(!projects.iter().any(|loaded| loaded.id == project.id));
+        assert_eq!(
+            sessions
+                .iter()
+                .map(|session| session.id)
+                .collect::<Vec<_>>(),
+            vec![bystander.id]
+        );
 
         stale_client.shutdown();
         server.join().unwrap();

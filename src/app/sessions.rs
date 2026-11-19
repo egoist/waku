@@ -294,33 +294,16 @@ impl Waku {
         cx.notify();
     }
 
-    pub(super) fn remove_session(&mut self, session_id: Uuid, cx: &mut Context<Self>) {
-        if self.response_fork_preparations.contains_key(&session_id) {
-            self.show_toast(tr!("session.response_fork_in_progress"));
-            cx.notify();
-            return;
-        }
-        let Some(index) = self
-            .state
-            .sessions
-            .iter()
-            .position(|session| session.id == session_id)
-        else {
-            return;
-        };
-        let project_id = self.state.sessions[index].project_id;
-        let composer_draft_key =
-            crate::persistence::ComposerDraftKey::for_session(&self.state.sessions[index]);
-        let projectless = self
-            .state
-            .projects
-            .iter()
-            .find(|project| project.id == project_id)
-            .is_some_and(Project::is_projectless);
-        let project_path = self
-            .workspace_path_for_session(&self.state.sessions[index])
-            .map(std::path::Path::to_path_buf);
-        let was_selected = self.state.selected_session == Some(session_id);
+    /// Local teardown for one task: runtime, panels, draft, navigation.
+    ///
+    /// Shared by single-task removal and project removal; persistence and
+    /// selection are the caller's to settle.
+    fn detach_session(
+        &mut self,
+        session_id: Uuid,
+        composer_draft_key: crate::persistence::ComposerDraftKey,
+        cx: &mut Context<Self>,
+    ) {
         self.submission_preparations.remove(&session_id);
         self.goal_runtime_starts.remove(&session_id);
         self.pending_goal_operations.remove(&session_id);
@@ -329,10 +312,9 @@ impl Waku {
         self.background_work.remove(&session_id);
         self.remove_right_panel_session_state(session_id);
         self.remove_composer_draft(composer_draft_key, cx);
-        self.state.sessions.remove(index);
-        if let Err(error) = self.store.remove_session(session_id) {
-            self.show_toast(tr!("errors.save_local_state", error = error));
-        }
+        self.state
+            .sessions
+            .retain(|session| session.id != session_id);
         if self
             .pending_session_activation
             .is_some_and(|pending| pending.session_id == session_id)
@@ -341,6 +323,38 @@ impl Waku {
         }
         self.session_navigation.remove(session_id);
         self.task_switcher.remove(session_id);
+    }
+
+    pub(super) fn remove_session(&mut self, session_id: Uuid, cx: &mut Context<Self>) {
+        if self.response_fork_preparations.contains_key(&session_id) {
+            self.show_toast(tr!("session.response_fork_in_progress"));
+            cx.notify();
+            return;
+        }
+        let Some(session) = self
+            .state
+            .sessions
+            .iter()
+            .find(|session| session.id == session_id)
+        else {
+            return;
+        };
+        let project_id = session.project_id;
+        let composer_draft_key = crate::persistence::ComposerDraftKey::for_session(session);
+        let projectless = self
+            .state
+            .projects
+            .iter()
+            .find(|project| project.id == project_id)
+            .is_some_and(Project::is_projectless);
+        let project_path = self
+            .workspace_path_for_session(session)
+            .map(std::path::Path::to_path_buf);
+        let was_selected = self.state.selected_session == Some(session_id);
+        self.detach_session(session_id, composer_draft_key, cx);
+        if let Err(error) = self.store.remove_session(session_id) {
+            self.show_toast(tr!("errors.save_local_state", error = error));
+        }
         let project_still_used = self
             .state
             .sessions
@@ -395,6 +409,110 @@ impl Waku {
         // Only now is the row gone, so the sweep can see which blobs are
         // genuinely unreferenced. It reads the database and walks the blob
         // directory, so it stays off the UI thread.
+        let sweep = self.store.blob_sweep();
+        cx.background_executor()
+            .spawn(async move { sweep() })
+            .detach();
+    }
+
+    /// Removes an added project folder and, with it, every task it owns.
+    ///
+    /// One explicit daemon command performs the whole cascade — ordinary
+    /// saves are merge-only by design, so a shortened project list would
+    /// delete nothing — while the local teardown reuses the per-task path.
+    /// The implicit projectless workspace is not removable and is never
+    /// offered the action.
+    pub(super) fn remove_project(&mut self, project_id: Uuid, cx: &mut Context<Self>) {
+        if self.daemon.is_remote() {
+            self.show_toast(tr!("errors.remote_project_picker"));
+            cx.notify();
+            return;
+        }
+        if !self
+            .state
+            .projects
+            .iter()
+            .any(|project| project.id == project_id && !project.is_projectless())
+        {
+            return;
+        }
+        // Snapshot what teardown needs while `&self` still sees the rows.
+        struct SessionTeardown {
+            id: Uuid,
+            draft_key: crate::persistence::ComposerDraftKey,
+            project_path: Option<std::path::PathBuf>,
+        }
+        let sessions = self
+            .state
+            .sessions
+            .iter()
+            .filter(|session| session.project_id == project_id)
+            .map(|session| SessionTeardown {
+                id: session.id,
+                draft_key: crate::persistence::ComposerDraftKey::for_session(session),
+                project_path: self
+                    .workspace_path_for_session(session)
+                    .map(std::path::Path::to_path_buf),
+            })
+            .collect::<Vec<_>>();
+        let was_selected = self
+            .state
+            .selected_session
+            .is_some_and(|selected| sessions.iter().any(|session| session.id == selected));
+        for session in &sessions {
+            self.detach_session(session.id, session.draft_key.clone(), cx);
+        }
+        self.remove_composer_draft(
+            crate::persistence::ComposerDraftKey::NewSession(project_id),
+            cx,
+        );
+        self.state
+            .projects
+            .retain(|project| project.id != project_id);
+        if self.state.selected_project == Some(project_id) {
+            self.state.selected_project = self.state.projects.first().map(|project| project.id);
+        }
+        if let Err(error) = self.store.remove_project(project_id) {
+            self.show_toast(tr!("errors.save_local_state", error = error));
+        }
+        for session in &sessions {
+            if let Some(project_path) = session.project_path.clone() {
+                let workspace = waku_client::WorkspaceClient::new(self.daemon.client());
+                let session_id = session.id;
+                cx.background_executor()
+                    .spawn(async move {
+                        let _ =
+                            workspace.request(waku_client::WorkspaceOperation::DeleteSessionRefs {
+                                cwd: project_path,
+                                session_id,
+                            });
+                    })
+                    .detach();
+            }
+        }
+        self.invalidate_checkpoint_refs();
+        if was_selected {
+            self.state.selected_session = None;
+            // Any remaining task in any project beats fabricating an empty
+            // one; only a now-empty sidebar falls back to projectless.
+            let next_session = self
+                .state
+                .sessions
+                .iter()
+                .max_by_key(|session| session.updated_at)
+                .map(|session| session.id);
+            if let Some(session_id) = next_session {
+                self.select_session(session_id, cx);
+            } else {
+                self.create_projectless_session(cx);
+            }
+        } else {
+            self.save();
+            cx.notify();
+        }
+
+        // Same reasoning as single-task removal: sweep only now that every
+        // row is gone, off the UI thread.
         let sweep = self.store.blob_sweep();
         cx.background_executor()
             .spawn(async move { sweep() })

@@ -613,6 +613,8 @@ workspace.workspace: 工作区
 workspace.worktree: 工作树
 terminal.starting: 正在启动终端…
 project.add_project: 添加项目
+project.remove: 移除项目
+project.remove_with_tasks: 移除项目及 %{count} 个任务
 errors.remote_project_picker: 添加守护进程主机上的项目需要远程路径选择器，但该功能尚不可用
 session.stopped: 已停止
 session.turn_completed: 本轮已完成
