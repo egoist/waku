@@ -1737,6 +1737,8 @@ pub enum ActivityKind {
     Search,
     Plan,
     Tool,
+    /// A picture the provider produced, such as a generated image.
+    Image,
 }
 
 impl ActivityKind {
@@ -2637,6 +2639,7 @@ pub fn is_generic_activity_title(kind: ActivityKind, title: &str) -> bool {
         ActivityKind::FileList => title == tr!("activity.list_files"),
         ActivityKind::Plan => title == tr!("activity.plan_updated"),
         ActivityKind::Tool => title.eq_ignore_ascii_case("tool") || title == tr!("activity.tool"),
+        ActivityKind::Image => title == tr!("activity.generated_image"),
         _ => false,
     }
 }

@@ -2104,6 +2104,8 @@ fn codex_activity_kind(item: &Value) -> Option<ActivityKind> {
         Some(ActivityKind::Search)
     } else if item_type.contains("plan") || item_type.contains("todo") {
         Some(ActivityKind::Plan)
+    } else if codex_is_image_generation(item) {
+        Some(ActivityKind::Image)
     } else if item_type.contains("tool") || item_type.contains("collab") {
         Some(
             item.get("tool")
@@ -2118,6 +2120,9 @@ fn codex_activity_kind(item: &Value) -> Option<ActivityKind> {
 }
 
 fn codex_item_title(item: &Value) -> String {
+    if codex_is_image_generation(item) {
+        return tr!("activity.generated_image");
+    }
     if let Some((_, title)) = codex_command_action_presentation(item) {
         return title;
     }
@@ -2215,6 +2220,9 @@ fn codex_item_detail(item: &Value, output: Option<&str>) -> Option<String> {
     {
         return Some(first_line.to_owned());
     }
+    if codex_is_image_generation(item) {
+        return codex_image_generation_detail(item);
+    }
     if item.get("type").and_then(Value::as_str) == Some("fileChange") {
         return None;
     }
@@ -2223,6 +2231,80 @@ fn codex_item_detail(item: &Value, output: Option<&str>) -> Option<String> {
         .or_else(|| item.get("path").and_then(Value::as_str))
         .or_else(|| item.get("status").and_then(Value::as_str))
         .map(str::to_owned)
+}
+
+/// What an image generation says about itself: the prompt the model actually
+/// drew, the file Codex wrote it to, or why the generation failed.
+fn codex_image_generation_detail(item: &Value) -> Option<String> {
+    if let Some(failure) = item.get("failure").filter(|failure| !failure.is_null()) {
+        // The failure type is Codex's own vocabulary, so only the one case a
+        // reader can act on is named; the rest stays generic.
+        return Some(match failure.get("type").and_then(Value::as_str) {
+            Some("usageLimitExceeded") => tr!("activity.image_usage_limit"),
+            _ => tr!("activity.image_generation_failed"),
+        });
+    }
+    if let Some(prompt) = item
+        .get("revisedPrompt")
+        .or_else(|| item.get("revised_prompt"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|prompt| !prompt.is_empty())
+    {
+        return Some(truncate_text(prompt, 160));
+    }
+    item.get("savedPath")
+        .or_else(|| item.get("saved_path"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|path| !path.is_empty())
+        .map(|path| {
+            path.rsplit(['/', '\\'])
+                .next()
+                .filter(|name| !name.is_empty())
+                .unwrap_or(path)
+                .to_owned()
+        })
+}
+
+/// Whether a Codex item is an image generation.
+///
+/// The app-server sends a generation as its own thread item
+/// (`{"type": "imageGeneration", "id", "status", "revisedPrompt", "result"}`),
+/// so it never arrives on the tool-call path.
+fn codex_is_image_generation(item: &Value) -> bool {
+    item.get("type")
+        .and_then(Value::as_str)
+        .is_some_and(|item_type| item_type.eq_ignore_ascii_case("imageGeneration"))
+}
+
+/// The generated picture, when Codex sent it inline.
+///
+/// The app-server carries the image as raw base64 in `result`; Codex also
+/// writes it to disk and reports that path separately.
+fn codex_image_generation_url(item: &Value) -> Vec<String> {
+    let Some(result) = item
+        .get("result")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|result| !result.is_empty())
+    else {
+        return Vec::new();
+    };
+    if result.starts_with("data:") {
+        return vec![result.to_owned()];
+    }
+    vec![format!("data:image/png;base64,{result}")]
+}
+
+fn truncate_text(text: &str, max_chars: usize) -> String {
+    if text.chars().count() <= max_chars {
+        return text.to_owned();
+    }
+    text.chars()
+        .take(max_chars)
+        .chain(std::iter::once('…'))
+        .collect()
 }
 
 fn codex_item_arguments(item: &Value) -> Option<String> {
@@ -2338,6 +2420,9 @@ fn codex_item_output(item: &Value) -> Option<String> {
 }
 
 fn codex_item_image_urls(item: &Value) -> Vec<String> {
+    if codex_is_image_generation(item) {
+        return codex_image_generation_url(item);
+    }
     let content = match item.get("type").and_then(Value::as_str) {
         Some("mcpToolCall") => item.pointer("/result/content"),
         _ => None,
@@ -3562,6 +3647,94 @@ mod tests {
             assert_eq!(item.mcp_server.as_deref(), Some("waku_js_repl"));
             assert_eq!(item.complete, method == "item/completed");
         }
+    }
+
+    #[test]
+    fn generated_images_arrive_as_image_activities() {
+        let thread_id = Mutex::new(Some("thread-1".to_owned()));
+        let turn_id = Mutex::new(Some("turn-9".to_owned()));
+        let turn_ids = Mutex::new(vec!["turn-9".to_owned()]);
+        let pending_rollbacks = Mutex::new(HashMap::new());
+        let pending_steers = Mutex::new(HashMap::new());
+        let background_rpcs = Mutex::new(BackgroundRpcState::default());
+        let goal_rpcs = Mutex::new(GoalRpcState::default());
+        let (goal_commands, _goal_command_rx) = unbounded();
+        let (event_tx, event_rx) = unbounded();
+        let mut stream_state = CodexStreamState::default();
+        handle_codex_message(
+            json!({
+                "method": "item/completed", "params": {
+                    "threadId": "thread-1", "turnId": "turn-9", "item": {
+                        "id": "image-1", "type": "imageGeneration", "status": "completed",
+                        "revisedPrompt": "a red fox in the snow", "result": "aGVsbG8="
+                    }
+                }
+            }),
+            &thread_id,
+            &turn_id,
+            &turn_ids,
+            &pending_rollbacks,
+            &pending_steers,
+            &background_rpcs,
+            &goal_rpcs,
+            &goal_commands,
+            &event_tx,
+            &mut stream_state,
+        );
+        let DriverEvent::RichActivity(item) = event_rx.try_recv().unwrap() else {
+            panic!("expected an image activity");
+        };
+        assert_eq!(item.kind, ActivityKind::Image);
+        assert_eq!(item.title, "Generated image");
+        assert_eq!(item.detail.as_deref(), Some("a red fox in the snow"));
+        assert_eq!(
+            item.image_urls,
+            vec!["data:image/png;base64,aGVsbG8=".to_owned()]
+        );
+        assert!(item.complete);
+        assert!(!item.failed);
+    }
+
+    #[test]
+    fn a_failed_image_generation_says_why() {
+        let item = json!({
+            "id": "image-2", "type": "imageGeneration", "status": "failed",
+            "failure": {"type": "usageLimitExceeded", "limitId": "chatgpt-images"}
+        });
+
+        assert_eq!(codex_activity_kind(&item), Some(ActivityKind::Image));
+        assert!(codex_item_failed(&item));
+        assert_eq!(
+            codex_image_generation_detail(&item).as_deref(),
+            Some("Image generation limit reached")
+        );
+        assert!(codex_item_image_urls(&item).is_empty());
+    }
+
+    #[test]
+    fn an_image_generation_without_inline_data_names_the_saved_file() {
+        let item = json!({
+            "id": "image-3", "type": "imageGeneration", "status": "completed",
+            "savedPath": "/tmp/codex/generated/fox.png"
+        });
+
+        assert_eq!(
+            codex_image_generation_detail(&item).as_deref(),
+            Some("fox.png")
+        );
+        assert!(codex_item_image_urls(&item).is_empty());
+    }
+
+    #[test]
+    fn a_long_image_prompt_stays_on_one_row() {
+        let item = json!({
+            "id": "image-4", "type": "imageGeneration", "status": "completed",
+            "revisedPrompt": "x".repeat(400)
+        });
+
+        let detail = codex_image_generation_detail(&item).unwrap_or_default();
+        assert_eq!(detail.chars().count(), 161);
+        assert!(detail.ends_with('…'));
     }
 
     #[test]

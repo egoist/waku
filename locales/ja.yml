@@ -336,12 +336,19 @@ activity.action_search: 検索
 activity.action_list: 一覧
 activity.action_plan: 計画
 activity.action_use: 使用
+activity.action_generate: 生成
 activity.ask_questions: 質問する
 activity.arguments: 引数
 activity.tool_name: ツール
 activity.mcp_server: MCP サーバー
 activity.output: 出力
 activity.image_output: 画像出力
+activity.image: 画像
+activity.images: 画像
+activity.generating_image: 画像を生成しています
+activity.generated_image: 画像を生成しました
+activity.image_generation_failed: 画像の生成に失敗しました
+activity.image_usage_limit: 画像の生成上限に達しました
 activity.open_file: ファイルを開く
 activity.search_for: "%{query} を検索"
 activity.searched_web: ウェブを検索しました

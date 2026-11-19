@@ -318,12 +318,19 @@ activity.action_search: 搜索
 activity.action_list: 列出
 activity.action_plan: 计划
 activity.action_use: 使用
+activity.action_generate: 生成
 activity.ask_questions: 提问
 activity.arguments: 参数
 activity.tool_name: 工具
 activity.mcp_server: MCP 服务器
 activity.output: 输出
 activity.image_output: 图片输出
+activity.image: 图片
+activity.images: 图片
+activity.generating_image: 正在生成图片
+activity.generated_image: 已生成图片
+activity.image_generation_failed: 图片生成失败
+activity.image_usage_limit: 已达到图片生成上限
 activity.open_file: 打开文件
 activity.search_for: 搜索：%{query}
 activity.searched_web: 已搜索网页
