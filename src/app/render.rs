@@ -246,6 +246,7 @@ impl Render for Waku {
         if self.settings_page.is_some() {
             let command_palette = self.render_command_palette(window, cx);
             let commit_dialog = self.render_commit_dialog(cx);
+            let remote_directory_picker = self.render_remote_directory_picker(window, cx);
             let goal_dialog = self.render_goal_dialog(window, cx);
             let toast = self.render_active_toast(cx);
             let content = div()
@@ -264,6 +265,7 @@ impl Render for Waku {
                 .children(toast)
                 .children(command_palette)
                 .children(commit_dialog)
+                .children(remote_directory_picker)
                 .children(goal_dialog)
                 .children(image_preview)
                 .children(task_switcher)
@@ -280,6 +282,7 @@ impl Render for Waku {
         let computer_use = self.render_computer_use_overlay(window, cx);
         let command_palette = self.render_command_palette(window, cx);
         let commit_dialog = self.render_commit_dialog(cx);
+        let remote_directory_picker = self.render_remote_directory_picker(window, cx);
         let goal_dialog = self.render_goal_dialog(window, cx);
         let toast = self.render_active_toast(cx);
         let content = div()
@@ -412,6 +415,7 @@ impl Render for Waku {
             .children(computer_use)
             .children(command_palette)
             .children(commit_dialog)
+            .children(remote_directory_picker)
             .children(goal_dialog)
             .children(image_preview)
             .children(task_switcher)

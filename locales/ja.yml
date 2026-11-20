@@ -646,7 +646,14 @@ workspace.worktree: ワークツリー
 terminal.starting: ターミナルを起動中…
 
 project.add_project: プロジェクトを追加
-errors.remote_project_picker: デーモンホスト上のプロジェクトを追加するにはリモートパス選択が必要ですが、まだ利用できません
+remote_picker.title: デーモンホストのフォルダを選択
+remote_picker.loading: フォルダを読み込み中…
+remote_picker.empty: サブフォルダはありません
+remote_picker.parent: 親フォルダ
+remote_picker.use_folder: このフォルダを使う
+remote_picker.home: ホーム
+remote_picker.root: ファイルシステムのルート
+remote_picker.failed: "フォルダを開けませんでした: %{error}"
 
 session.stopped: 停止しました
 session.turn_completed: ターンが完了しました
