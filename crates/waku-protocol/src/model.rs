@@ -7,6 +7,8 @@ use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 use uuid::Uuid;
 
+use crate::plan::extract_plan_from_value;
+
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, Hash, PartialEq, Serialize, TS)]
 #[serde(rename_all = "camelCase")]
 pub enum ProviderKind {
@@ -2186,6 +2188,37 @@ impl ActivityFileChange {
     }
 }
 
+/// The state of one step in a provider's plan.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[serde(rename_all = "snake_case")]
+pub enum PlanEntryStatus {
+    #[default]
+    Pending,
+    InProgress,
+    Completed,
+    Cancelled,
+}
+
+/// One step of a provider's plan.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize, TS)]
+pub struct PlanEntry {
+    /// What the step says, in the provider's own words.
+    pub content: String,
+    #[serde(default)]
+    pub status: PlanEntryStatus,
+}
+
+/// The plan a provider produced, prepared from the plan tool's own payload.
+///
+/// A provider that plans writes its steps into a tool call — Claude Code's
+/// `TodoWrite`, a `todo/write` event, a plan item in a rollout. The transcript
+/// used to say only that a plan was updated and left the steps to the raw
+/// arguments, so the plan itself was nowhere to be read.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize, TS)]
+pub struct ActivityPlan {
+    pub entries: Vec<PlanEntry>,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize, TS)]
 pub struct ActivityItem {
     pub id: Uuid,
@@ -2230,6 +2263,10 @@ pub struct ActivityItem {
     /// activity fields and leave this empty.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning: Option<ReasoningBlock>,
+    /// The steps of the plan this activity produced, prepared when the event
+    /// arrives so the row builder never parses a payload of its own.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan: Option<ActivityPlan>,
 }
 
 impl ActivityItem {
@@ -2259,6 +2296,7 @@ impl ActivityItem {
             display_target,
             display_description: None,
             reasoning: None,
+            plan: None,
         }
     }
 
@@ -2309,6 +2347,7 @@ impl ActivityItem {
     pub fn with_output(mut self, output: Option<String>) -> Self {
         self.output = output;
         self.refresh_command_output();
+        self.refresh_plan();
         self
     }
 
@@ -2359,6 +2398,32 @@ impl ActivityItem {
             self.display_target = fallback_activity_display_target(self.kind, &self.title);
         }
         self.refresh_command_output();
+        self.refresh_plan();
+    }
+
+    /// Reads the plan out of the payload a plan tool carried.
+    ///
+    /// The plan is prepared here, while the event is handled, so the row
+    /// builder only reads what is already in memory. A provider that plans
+    /// writes its steps into the tool call — Claude Code's `TodoWrite`, a
+    /// `todo/write` event — and the payload lands in the arguments or, for a
+    /// provider that reports the plan as the tool's result, in the output.
+    fn refresh_plan(&mut self) {
+        if self.kind != ActivityKind::Plan {
+            self.plan = None;
+            return;
+        }
+        self.plan = self
+            .arguments
+            .as_deref()
+            .and_then(|source| serde_json::from_str::<serde_json::Value>(source).ok())
+            .and_then(|value| extract_plan_from_value(&value))
+            .or_else(|| {
+                self.output
+                    .as_deref()
+                    .and_then(|source| serde_json::from_str::<serde_json::Value>(source).ok())
+                    .and_then(|value| extract_plan_from_value(&value))
+            });
     }
 
     /// Refile a shell command that only exists to apply a patch as the file

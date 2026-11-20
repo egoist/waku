@@ -794,6 +794,8 @@ activity.updated_plan:
   en: Updated plan
 activity.plan_update_failed:
   en: Failed to update plan
+activity.plan_progress:
+  en: "%{done} of %{total} completed"
 activity.activity:
   en: Activity
 activity.tool:

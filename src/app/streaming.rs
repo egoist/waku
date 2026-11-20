@@ -160,6 +160,9 @@ impl Waku {
                     if item.reasoning.is_some() {
                         activity.reasoning = item.reasoning;
                     }
+                    if item.plan.is_some() {
+                        activity.plan = item.plan;
+                    }
                     session.updated_at = unix_time();
                     runtime.stream_phase = Some(StreamPhase::Activity);
                     if replaces_changes {

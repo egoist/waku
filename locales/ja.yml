@@ -406,6 +406,7 @@ activity.web_search_failed: ウェブ検索に失敗しました
 activity.updating_plan: プランを更新中
 activity.updated_plan: プランを更新しました
 activity.plan_update_failed: プランの更新に失敗しました
+activity.plan_progress: "%{done} / %{total} 完了"
 activity.activity: アクティビティ
 activity.tool: ツール
 activity.plan_updated: プランを更新しました
