@@ -1230,6 +1230,9 @@ pub struct Waku {
     /// Window-modal Git commit/push UI. Its repository snapshot is filled
     /// off-thread; frames only read this in-memory value.
     commit_dialog: Option<commit_dialog::CommitDialogState>,
+    /// Browser for a project that lives on a remote daemon host. The listing
+    /// comes from the daemon; frames only read what it last answered.
+    remote_directory_picker: Option<remote_directory_picker::RemoteDirectoryPickerState>,
     goal_dialog: Option<goal_dialog::GoalDialogState>,
     goal_dialog_request: Option<goal_dialog::GoalDialogRequest>,
     /// Goal operations accepted before the session's runtime exists. Goals
@@ -1631,6 +1634,7 @@ mod file_search;
 mod goal_dialog;
 mod image_preview;
 mod project_picker;
+mod remote_directory_picker;
 mod render;
 mod right_panel;
 mod runtime;
@@ -1657,6 +1661,7 @@ use components::*;
 pub use goal_dialog::init as init_goal_dialog_keys;
 pub use image_preview::init as init_image_preview_keys;
 use project_picker::ProjectPickerSite;
+pub use remote_directory_picker::init as init_remote_directory_picker_keys;
 pub use settings::init as init_settings_keys;
 pub use sidebar::init as init_sidebar_keys;
 use sidebar::{SidebarGroup, SidebarRow};
@@ -2855,6 +2860,7 @@ impl Waku {
                 visible_branch_snapshot: None,
                 branch_operation_pending: false,
                 commit_dialog: None,
+                remote_directory_picker: None,
                 goal_dialog: None,
                 goal_dialog_request: None,
                 pending_goal_operations: HashMap::new(),

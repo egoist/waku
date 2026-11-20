@@ -1257,8 +1257,22 @@ terminal.starting:
 
 project.add_project:
   en: Add project
-errors.remote_project_picker:
-  en: Adding a daemon-host project needs a remote path picker, which is not available yet
+remote_picker.title:
+  en: Choose a folder on the daemon host
+remote_picker.loading:
+  en: Loading folders…
+remote_picker.empty:
+  en: No subfolders here
+remote_picker.parent:
+  en: Parent folder
+remote_picker.use_folder:
+  en: Use this folder
+remote_picker.home:
+  en: Home
+remote_picker.root:
+  en: Filesystem root
+remote_picker.failed:
+  en: "Could not open the folder: %{error}"
 
 session.stopped:
   en: Stopped

@@ -209,6 +209,7 @@ pub fn run() {
             crate::app::init_settings_keys(cx);
             crate::app::init_command_palette(cx);
             crate::app::init_commit_dialog_keys(cx);
+            crate::app::init_remote_directory_picker_keys(cx);
             crate::app::init_goal_dialog_keys(cx);
             crate::app::init_image_preview_keys(cx);
             crate::app::init_sidebar_keys(cx);
