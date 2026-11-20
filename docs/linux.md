@@ -65,6 +65,31 @@ sed -i "s|^Icon=sh.waku$|Icon=$HOME/.local/waku.app/share/icons/hicolor/256x256/
   ~/.local/share/applications/sh.waku.desktop
 ```
 
+## System packages
+
+Every release also ships a `.deb` and an `.rpm`, built from the same tarball
+by [`scripts/package-linux.sh`](../scripts/package-linux.sh):
+
+```sh
+sudo apt install ./waku-<version>-amd64.deb       # Debian, Ubuntu
+sudo dnf install ./waku-<version>-x86_64.rpm      # Fedora, RHEL
+```
+
+Both put the binaries in `/usr/lib/waku/bin` and the resources beside them in
+`/usr/lib/waku/share`, so Waku finds its daemon, updater and helpers exactly
+as it does in a tarball install. `/usr/bin/waku` is a symlink into that
+prefix, and the desktop entry and icon are installed under `/usr/share`.
+Remove it with your package manager (`sudo apt remove waku`, `sudo dnf remove
+waku`); projects and settings stay in `~/.waku`.
+
+A system install updates through the package manager rather than Waku's own
+updater, which only self-updates installs under your home directory.
+
+The packages declare the C runtime and nothing else — the graphics stack, the
+portals and the desktop entry are loaded at runtime, so the requirements
+above still apply. An AppImage is not published: its runtime would have to be
+fetched from a third party inside the release workflow.
+
 ## Updating
 
 Tarball installs under the user's home directory update themselves. Waku
@@ -104,6 +129,12 @@ this page installs with:
 
 ```sh
 ./scripts/bundle-linux.sh
+```
+
+To build the system packages from that local bundle:
+
+```sh
+./scripts/package-linux.sh target/release/waku-<version>-<target>.tar.gz
 ```
 
 To exercise the install script against that local build:

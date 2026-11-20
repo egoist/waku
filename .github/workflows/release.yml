@@ -98,6 +98,7 @@ jobs:
             libxtst-dev \
             libxkbcommon-x11-dev \
             pkg-config \
+            rpm \
             xdg-desktop-portal
 
       - uses: actions/cache@v6
@@ -122,13 +123,23 @@ jobs:
           WAKU_ANALYTICS_WEBSITE_ID: ${{ secrets.WAKU_ANALYTICS_WEBSITE_ID }}
         run: ./scripts/bundle-linux.sh
 
+      # The system packages are built from the tarball the bundle step just
+      # wrote, so a package holds exactly what the tarball ships.
+      - name: Package
+        run: |
+          ./scripts/package-linux.sh \
+            "target/release/waku-${{ needs.version.outputs.version }}-x86_64-unknown-linux-gnu.tar.gz"
+
       - uses: actions/upload-artifact@v7
         with:
           name: linux-x86_64
           # Named exactly, not globbed: `if-no-files-found: error` is then a
           # real check that this version built, rather than something an older
           # bundle can satisfy.
-          path: target/release/waku-${{ needs.version.outputs.version }}-x86_64-unknown-linux-gnu.tar.gz
+          path: |
+            target/release/waku-${{ needs.version.outputs.version }}-x86_64-unknown-linux-gnu.tar.gz
+            target/release/waku_${{ needs.version.outputs.version }}_amd64.deb
+            target/release/waku-${{ needs.version.outputs.version }}-x86_64.rpm
           if-no-files-found: error
 
   linux-arm64:
@@ -161,6 +172,7 @@ jobs:
             libxtst-dev \
             libxkbcommon-x11-dev \
             pkg-config \
+            rpm \
             xdg-desktop-portal
 
       - uses: actions/cache@v6
@@ -177,7 +189,7 @@ jobs:
       # release's bundles are still sitting in `target/release` when this one
       # starts. Cargo does not own them, so nothing else clears them.
       - name: Clear stale bundles
-        run: rm -f target/release/waku-*.tar.gz
+        run: rm -f target/release/waku-*.tar.gz target/release/waku_*.deb target/release/waku-*.rpm
 
       - name: Bundle
         env:
@@ -185,10 +197,20 @@ jobs:
           WAKU_ANALYTICS_WEBSITE_ID: ${{ secrets.WAKU_ANALYTICS_WEBSITE_ID }}
         run: ./scripts/bundle-linux.sh
 
+      # The system packages are built from the tarball the bundle step just
+      # wrote, so a package holds exactly what the tarball ships.
+      - name: Package
+        run: |
+          ./scripts/package-linux.sh \
+            "target/release/waku-${{ needs.version.outputs.version }}-aarch64-unknown-linux-gnu.tar.gz"
+
       - uses: actions/upload-artifact@v7
         with:
           name: linux-arm64
-          path: target/release/waku-${{ needs.version.outputs.version }}-aarch64-unknown-linux-gnu.tar.gz
+          path: |
+            target/release/waku-${{ needs.version.outputs.version }}-aarch64-unknown-linux-gnu.tar.gz
+            target/release/waku_${{ needs.version.outputs.version }}_arm64.deb
+            target/release/waku-${{ needs.version.outputs.version }}-aarch64.rpm
           if-no-files-found: error
 
   windows-x86_64:
@@ -452,6 +474,8 @@ jobs:
           fail_on_unmatched_files: true
           files: |
             artifacts/*.tar.gz
+            artifacts/*.deb
+            artifacts/*.rpm
             artifacts/*.dmg
             artifacts/*.md
             artifacts/*.zip
