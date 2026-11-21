@@ -58,6 +58,7 @@ pub fn user_skill_locations() -> Vec<SkillLocation> {
                 scope: SkillScope::User,
                 root,
                 project: None,
+                plugin: None,
             });
         }
     };
@@ -125,6 +126,7 @@ pub fn project_skill_locations(project_root: &Path, project_name: &str) -> Vec<S
         scope: SkillScope::Project,
         root: project_root.join(suffix),
         project: Some(project_name.to_owned()),
+        plugin: None,
     })
     .collect()
 }
@@ -164,12 +166,17 @@ pub fn scan_skills(locations: &[SkillLocation]) -> SkillsCatalog {
         }
     }
 
-    // One entry per (scope group, name): the same skill installed into
-    // several ecosystems' roots — copied or symlinked — is one skill.
+    // One entry per (scope group, name, plugin): the same skill installed
+    // into several ecosystems' roots — copied or symlinked — is one skill,
+    // while two plugins shipping the same name stay apart.
     let mut skills: Vec<SkillEntry> = Vec::new();
-    let mut by_identity: HashMap<(Option<String>, String), usize> = HashMap::new();
+    let mut by_identity: HashMap<(Option<String>, String, Option<String>), usize> = HashMap::new();
     for raw in raw {
-        let key = (raw.project.clone(), raw.name.clone());
+        let key = (
+            raw.project.clone(),
+            raw.name.clone(),
+            raw.install.plugin.clone(),
+        );
         match by_identity.get(&key) {
             Some(&index) => {
                 let entry = &mut skills[index];
@@ -288,6 +295,7 @@ fn scan_location(location: &SkillLocation, raw: &mut Vec<RawSkill>) {
                 dir,
                 skill_file,
                 enabled,
+                plugin: location.plugin.clone(),
             },
             allowed_tools: front.allowed_tools,
             body: front.body[..body_end].trim().to_owned(),
@@ -422,6 +430,7 @@ mod tests {
             scope: SkillScope::User,
             root: root.to_path_buf(),
             project: None,
+            plugin: None,
         }
     }
 
@@ -545,6 +554,7 @@ mod tests {
                 scope: SkillScope::Project,
                 root: project_root.clone(),
                 project: Some("waku".into()),
+                plugin: None,
             },
         ];
         let catalog = scan_skills(&locations);
@@ -637,5 +647,33 @@ mod tests {
         // User scope leads the scan, so grouped entries prefer user copies.
         assert!(locations[0].scope == SkillScope::User);
         assert_eq!(locations[0].source, SkillSource::Shared);
+    }
+
+    #[test]
+    fn two_plugins_shipping_the_same_name_stay_apart() {
+        let root = temp_root("plugin-groups");
+        write_skill(&root, "review", "---\nname: review\n---\nX");
+        let plugin_location = |plugin: &str| SkillLocation {
+            source: SkillSource::Provider(ProviderKind::Codex),
+            scope: SkillScope::User,
+            root: root.clone(),
+            project: None,
+            plugin: Some(plugin.to_owned()),
+        };
+        let locations = vec![plugin_location("one"), plugin_location("two")];
+
+        let catalog = scan_skills(&locations);
+        assert_eq!(catalog.skills.len(), 2);
+        for skill in &catalog.skills {
+            assert_eq!(skill.name, "review");
+            assert_eq!(skill.installs.len(), 1);
+            assert!(skill.primary().plugin.is_some());
+        }
+        // The label says which plugin the copy came from.
+        assert!(
+            catalog.skills[0].sources_label().contains("one")
+                || catalog.skills[0].sources_label().contains("two")
+        );
+        let _ = std::fs::remove_dir_all(&root);
     }
 }
