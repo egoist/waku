@@ -58,7 +58,7 @@ use crate::persistence::{
 };
 use crate::query::{Query, QueryCache};
 use crate::review_diff::{Snapshot as ReviewDiffSnapshot, Source as ReviewDiffSource};
-use crate::terminal::TerminalView;
+use crate::terminal::{TerminalFileLocation, TerminalFileOpen, TerminalView};
 use crate::theme::{Theme, ThemePreference, sp};
 use crate::ui::text_field::TextField;
 use crate::ui::{
@@ -1393,6 +1393,9 @@ pub struct Waku {
     right_panel_files_selected_path: Option<String>,
     right_panel_file_tree_width: f32,
     right_panel_file_editors: HashMap<String, RightPanelFileEditor>,
+    /// A line the user asked to jump to, from a link in the terminal. It waits
+    /// for the editor to hold the file's text before the caret can go there.
+    right_panel_pending_file_jump: Option<right_panel::FileJump>,
     /// Find-and-replace over the visible file editor. Created on first use of
     /// the primary find shortcut and kept for the window's lifetime so the
     /// query and toggles survive closing the bar; `open` says whether it shows.
@@ -2944,6 +2947,7 @@ impl Waku {
                 right_panel_files_selected_path: None,
                 right_panel_file_tree_width: DEFAULT_FILE_TREE_WIDTH,
                 right_panel_file_editors: HashMap::new(),
+                right_panel_pending_file_jump: None,
                 file_search: None,
                 right_panel_diff_source: ReviewDiffSource::default(),
                 right_panel_diff_snapshot: None,

@@ -5,6 +5,9 @@ use super::*;
 
 const TAB_SCROLL_FADE_WIDTH: f32 = 24.0;
 const REVIEW_DIFF_FILE_HEADER_HEIGHT: f32 = 36.0;
+/// The space above the first line of the file editor, inside the scroll
+/// container. A jump to a line has to count it to land on the right row.
+const CONTENT_PAD_TOP: f32 = 6.0;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct WorkingTreeEntry {
@@ -22,6 +25,65 @@ enum TranscriptLinkRoute {
     ProjectFile(String),
     Finder(PathBuf),
     External,
+}
+
+/// A line the user asked to jump to, from a link in the terminal.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) struct FileJump {
+    /// The file, relative to the project.
+    relative_path: String,
+    /// The line, counted from 1.
+    line: u32,
+    /// The column within the line, counted from 1, when the terminal named
+    /// one.
+    column: Option<u32>,
+    /// How many frames the jump has waited for the editor to measure the
+    /// file's text. A jump that never lands gives up rather than ask for
+    /// another frame forever.
+    attempts: u8,
+}
+
+/// How many frames a jump waits for the editor to measure the file's text.
+const FILE_JUMP_MAX_ATTEMPTS: u8 = 3;
+
+/// Where a line starts in `content`, as a byte offset.
+///
+/// A line past the end of the text has no start of its own, so it lands at
+/// the end — the closest place the caret can go.
+fn line_start_offset(content: &str, line: u32) -> usize {
+    if line <= 1 {
+        return 0;
+    }
+    let mut offset = 0;
+    for (index, text) in content.split_inclusive('\n').enumerate() {
+        if index as u32 + 1 == line {
+            return offset;
+        }
+        offset += text.len();
+    }
+    content.len()
+}
+
+/// Where a place in the text is, as a byte offset.
+///
+/// The line is counted from 1, and so is the column within it. A column past
+/// the end of the line lands at the end of it.
+fn text_offset(content: &str, line: u32, column: Option<u32>) -> usize {
+    let start = line_start_offset(content, line);
+    let Some(column) = column else {
+        return start;
+    };
+    let end = content[start..]
+        .find('\n')
+        .map(|index| start + index)
+        .unwrap_or(content.len());
+    let text = &content[start..end];
+    let offset = text
+        .char_indices()
+        .nth(column.max(1) as usize - 1)
+        .map(|(index, _)| index)
+        .unwrap_or(text.len());
+    start + offset
 }
 
 fn positive_number(value: &str) -> bool {
@@ -1118,6 +1180,36 @@ mod tests {
         );
     }
 
+    /// A jump from the terminal lands on the line the terminal named, and on
+    /// the column within it when there is one.
+    #[test]
+    fn a_jump_lands_on_the_line_and_column_the_terminal_named() {
+        let content = "first line\nsecond line\nthird line\n";
+
+        assert_eq!(text_offset(content, 1, None), 0);
+        assert_eq!(text_offset(content, 2, None), "first line\n".len());
+        assert_eq!(
+            text_offset(content, 3, None),
+            "first line\nsecond line\n".len()
+        );
+
+        // The column counts characters from 1.
+        assert_eq!(text_offset(content, 2, Some(1)), "first line\n".len());
+        // The column counts characters from 1, so column 8 is the eighth
+        // character of the line.
+        assert_eq!(
+            text_offset(content, 2, Some(8)),
+            "first line\nsecond ".len()
+        );
+
+        // A line or column past the end lands at the end of the text.
+        assert_eq!(text_offset(content, 99, None), content.len());
+        assert_eq!(
+            text_offset(content, 2, Some(99)),
+            "first line\nsecond line".len()
+        );
+    }
+
     /// Selection resolves rows by key, so a repeated key makes a drag jump
     /// between the duplicates. Numbered rows keep their number-derived keys
     /// (stable across Review's gap expansion); rows a provider never
@@ -1776,6 +1868,128 @@ impl Waku {
         self.open_transcript_link(&resolved.to_string_lossy(), cx);
     }
 
+    /// Open a file the user clicked in the terminal.
+    ///
+    /// A file inside the project opens in the right panel's editor, and the
+    /// place the terminal named — `path:line:column` — becomes the caret's
+    /// position. A file outside the project goes to the file manager, the
+    /// same split a file link in the transcript takes.
+    pub(super) fn open_terminal_file(
+        &mut self,
+        path: &Path,
+        location: Option<TerminalFileLocation>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(relative_path) = self
+            .selected_workspace_path()
+            .and_then(|workspace| workspace_relative_file_path(workspace, path))
+        else {
+            crate::platform::reveal_in_file_manager(path, cx);
+            return;
+        };
+        self.open_right_panel_surface(RightPanelSurface::Files, cx);
+        self.open_right_panel_file(relative_path.clone(), cx);
+        let Some(location) = location else {
+            return;
+        };
+        self.right_panel_pending_file_jump = Some(FileJump {
+            relative_path,
+            line: location.line,
+            column: location.column,
+            attempts: 0,
+        });
+        // The editor may already hold the file's text — the file was open
+        // before — in which case the caret can go there at once. Otherwise the
+        // caret waits for the read to land.
+        self.select_pending_file_jump(cx);
+    }
+
+    /// Put the caret on the line a jump asked for.
+    ///
+    /// The editor's text has to be there first: the caret's place in a file
+    /// that is still being read is not known. The jump waits for the read.
+    fn select_pending_file_jump(&mut self, cx: &mut Context<Self>) {
+        let Some(jump) = self.right_panel_pending_file_jump.clone() else {
+            return;
+        };
+        let Some(editor) = self
+            .right_panel_file_editors
+            .get(&jump.relative_path)
+            .map(|editor| editor.state.clone())
+        else {
+            return;
+        };
+        let offset = {
+            let content = editor.read(cx).content();
+            if content.is_empty() {
+                return;
+            }
+            text_offset(content, jump.line, jump.column)
+        };
+        editor.update(cx, |state, cx| state.select_range(offset..offset, cx));
+        // The scroll to the line follows the caret, and it needs a frame to
+        // find the line's place on screen.
+        cx.notify();
+    }
+
+    /// Scroll the editor to the line a jump asked for.
+    ///
+    /// Where the line sits on screen comes from the editor's measured text,
+    /// which lands a frame after the text itself. Until the measurement is
+    /// there, the jump waits for the next frame.
+    fn reveal_pending_file_jump(
+        &mut self,
+        relative_path: &str,
+        editor_state: &Entity<TextInput>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(jump) = self.right_panel_pending_file_jump.clone() else {
+            return;
+        };
+        if jump.relative_path != relative_path {
+            return;
+        }
+        let offset = {
+            let content = editor_state.read(cx).content();
+            if content.is_empty() {
+                // The file has not been read yet; the read lands in its own
+                // time and the app draws again then.
+                return;
+            }
+            text_offset(content, jump.line, jump.column)
+        };
+        let Some((position, line_height)) = editor_state.read(cx).position_for_offset(offset)
+        else {
+            // The text has not been measured yet. Draw once more, when the
+            // editor has painted it — a one-shot follow-up, not an animation.
+            let Some(jump) = self.right_panel_pending_file_jump.as_mut() else {
+                return;
+            };
+            if jump.attempts >= FILE_JUMP_MAX_ATTEMPTS {
+                self.right_panel_pending_file_jump = None;
+                return;
+            }
+            jump.attempts += 1;
+            window.request_animation_frame();
+            return;
+        };
+        let scroll = &self.right_panel_editor_scroll_handle;
+        let viewport = scroll.bounds();
+        let current = scroll.offset();
+        if let Some(next) = super::file_search::revealed_scroll_offset(
+            current.y,
+            scroll.max_offset().y,
+            position.y,
+            line_height,
+            viewport.top(),
+            viewport.bottom(),
+        ) {
+            scroll.set_offset(point(current.x, next));
+        }
+        self.right_panel_pending_file_jump = None;
+    }
+
     pub(super) fn store_selected_right_panel_state(&mut self) {
         let Some(session_id) = self.state.selected_session else {
             return;
@@ -2337,10 +2551,17 @@ impl Waku {
             .get(&terminal_id)
             .is_some_and(|terminal| terminal.read(cx).working_directory() == working_directory);
         if !matches_project {
-            self.right_panel_terminals.insert(
-                terminal_id,
-                cx.new(|cx| TerminalView::new(working_directory.clone(), cx)),
-            );
+            let terminal = cx.new(|cx| TerminalView::new(working_directory.clone(), cx));
+            // The terminal reports the file that was clicked; the app decides
+            // where it opens.
+            cx.subscribe(
+                &terminal,
+                |this: &mut Self, _, event: &TerminalFileOpen, cx| {
+                    this.open_terminal_file(&event.path, event.location, cx);
+                },
+            )
+            .detach();
+            self.right_panel_terminals.insert(terminal_id, terminal);
         }
     }
 
@@ -2860,6 +3081,9 @@ impl Waku {
         // language always shows source.
         let is_markdown = file_highlighter_language(&relative_path) == "markdown";
         let preview = is_markdown && self.state.markdown_preview;
+        // A jump asked for a line in this file; the editor scrolls there once
+        // it has measured the text.
+        self.reveal_pending_file_jump(&relative_path, &editor_state, window, cx);
         let body = if preview {
             self.render_file_markdown_preview(&relative_path, &editor_state, cx)
         } else {
@@ -3120,6 +3344,9 @@ impl Waku {
                     state.set_read_only(!writable);
                     state.set_content(content, cx);
                 });
+                // A jump asked for a line in this file; the text it needed has
+                // just arrived, so the caret can go there now.
+                waku.select_pending_file_jump(cx);
                 cx.notify();
             })
             .ok();
@@ -3147,7 +3374,6 @@ impl Waku {
         cx: &mut Context<Self>,
     ) -> Div {
         const GUTTER_PAD_RIGHT: f32 = 8.0;
-        const CONTENT_PAD_TOP: f32 = 6.0;
 
         let text_size = self.state.code_font_size;
         let line_height = (text_size * 1.5).round();
