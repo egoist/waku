@@ -632,7 +632,13 @@ instruction entry; see [computer-use.md](computer-use.md).
 ## Agent Client Protocol
 
 **Launch** — `cursor-agent acp`, `fx acp`, `grok agent [--reasoning-effort E] stdio`, `kimi acp`
-([driver/acp.rs](../crates/waku-core/src/driver/acp.rs)).
+([driver/acp.rs](../crates/waku-core/src/driver/acp.rs)). On Unix the agent is
+spawned through `/usr/bin/env -C <cwd>`, which carries the session's working
+directory in the command line without a shell and keeps the argument boundaries
+intact. Windows has no `env`, so the binary is launched directly there — through
+it, every ACP provider failed before the agent ran. The working directory still
+reaches the agent in the session request, which the protocol requires the agent
+to honour wherever its process was spawned.
 
 **Protocol** — newline-delimited JSON-RPC over stdio, bidirectional. One agent
 process serves the whole conversation, streams `session/update` notifications,
