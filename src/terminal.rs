@@ -21,12 +21,12 @@ use alacritty_terminal::vte::ansi::{Color, NamedColor, Rgb};
 use anyhow::{Context as _, Result};
 use crossbeam_channel::{Receiver, Sender, unbounded};
 use gpui::{
-    App, AppContext, Bounds, ClipboardItem, Context, FocusHandle, Focusable, FontFallbacks,
-    FontStyle, FontWeight, Hsla, InteractiveElement, IntoElement, KeyDownEvent, Keystroke,
-    Modifiers, ModifiersChangedEvent, MouseButton, MouseDownEvent, MouseExitEvent, MouseMoveEvent,
-    MouseUpEvent, ParentElement, Pixels, Point, Render, ScrollDelta, ScrollWheelEvent,
-    SharedString, StrikethroughStyle, Styled, StyledText, Subscription, Task, TextRun,
-    UnderlineStyle, Window, canvas, div, font, px, rgb,
+    App, AppContext, Bounds, ClipboardItem, Context, EventEmitter, FocusHandle, Focusable,
+    FontFallbacks, FontStyle, FontWeight, Hsla, InteractiveElement, IntoElement, KeyDownEvent,
+    Keystroke, Modifiers, ModifiersChangedEvent, MouseButton, MouseDownEvent, MouseExitEvent,
+    MouseMoveEvent, MouseUpEvent, ParentElement, Pixels, Point, Render, ScrollDelta,
+    ScrollWheelEvent, SharedString, StrikethroughStyle, Styled, StyledText, Subscription, Task,
+    TextRun, UnderlineStyle, Window, canvas, div, font, px, rgb,
 };
 use parking_lot::Mutex;
 
@@ -529,7 +529,31 @@ struct TerminalLink {
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum TerminalLinkTarget {
     Url(String),
-    File(PathBuf),
+    File {
+        path: PathBuf,
+        location: Option<TerminalFileLocation>,
+    },
+}
+
+/// A place in a file, as the terminal spelled it: `path:line` or
+/// `path:line:column`. Both numbers are 1-based.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TerminalFileLocation {
+    pub line: u32,
+    pub column: Option<u32>,
+}
+
+/// A file the user asked to open from the terminal.
+///
+/// The terminal does not know what the app does with a path, so it reports
+/// the click and lets the owner decide: a file in the project opens in the
+/// editor, anything else goes to the file manager.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TerminalFileOpen {
+    /// The file on disk.
+    pub path: PathBuf,
+    /// The place in the file the terminal named, if it named one.
+    pub location: Option<TerminalFileLocation>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -845,8 +869,8 @@ impl TerminalView {
             self.hovered_link = Some(link);
             match target {
                 TerminalLinkTarget::Url(url) => cx.open_url(&url),
-                TerminalLinkTarget::File(path) => {
-                    crate::platform::reveal_in_file_manager(&path, cx)
+                TerminalLinkTarget::File { path, location } => {
+                    cx.emit(TerminalFileOpen { path, location });
                 }
             }
             window.prevent_default();
@@ -1051,6 +1075,8 @@ impl TerminalView {
         self.cursor_blink.update(cx, |cursor, cx| cursor.pause(cx));
     }
 }
+
+impl EventEmitter<TerminalFileOpen> for TerminalView {}
 
 impl Focusable for TerminalView {
     fn focus_handle(&self, _: &App) -> FocusHandle {
@@ -1505,8 +1531,8 @@ fn hyperlink_at<T: EventListener>(term: &Term<T>, point: TerminalPoint) -> Optio
 }
 
 fn terminal_link_target(value: &str, working_directory: &Path) -> Option<TerminalLinkTarget> {
-    if let Some(path) = existing_terminal_file_path(value, working_directory) {
-        return Some(TerminalLinkTarget::File(path));
+    if let Some((path, location)) = existing_terminal_file_path(value, working_directory) {
+        return Some(TerminalLinkTarget::File { path, location });
     }
 
     let url = url::Url::parse(value).ok()?;
@@ -1516,7 +1542,16 @@ fn terminal_link_target(value: &str, working_directory: &Path) -> Option<Termina
     Some(TerminalLinkTarget::Url(url.to_string()))
 }
 
-fn existing_terminal_file_path(value: &str, working_directory: &Path) -> Option<PathBuf> {
+/// Resolve a link that names a file, with the place in the file the terminal
+/// spelled out.
+///
+/// A trailing `:line` or `:line:column` is a position, not part of the path,
+/// so the numbers are peeled off until what remains exists. The last number
+/// peeled is the column when a second one follows it, and the line otherwise.
+fn existing_terminal_file_path(
+    value: &str,
+    working_directory: &Path,
+) -> Option<(PathBuf, Option<TerminalFileLocation>)> {
     let mut path = match url::Url::parse(value) {
         Ok(url) if url.scheme() == "file" => url.to_file_path().ok()?,
         Ok(_) => return None,
@@ -1534,17 +1569,34 @@ fn existing_terminal_file_path(value: &str, working_directory: &Path) -> Option<
         }
     };
 
+    // The numbers are peeled right to left, so the first one is the column
+    // when a second follows.
+    let mut peeled: Vec<u32> = Vec::new();
     loop {
         if path.exists() {
-            return Some(path);
+            break;
         }
-        let value = path.to_string_lossy();
+        let value = path.to_string_lossy().into_owned();
         let (prefix, suffix) = value.rsplit_once(':')?;
         if suffix.is_empty() || !suffix.bytes().all(|byte| byte.is_ascii_digit()) {
             return None;
         }
         path = PathBuf::from(prefix);
+        peeled.push(suffix.parse().ok()?);
     }
+
+    let location = match peeled.as_slice() {
+        [] => None,
+        [line] => Some(TerminalFileLocation {
+            line: *line,
+            column: None,
+        }),
+        [column, line, ..] => Some(TerminalFileLocation {
+            line: *line,
+            column: Some(*column),
+        }),
+    };
+    Some((path, location))
 }
 
 fn bracketed_paste(text: String, mode: TermMode) -> Vec<u8> {
@@ -1846,13 +1898,51 @@ mod tests {
         );
         assert_eq!(
             terminal_link_target("src/terminal.rs:42:8", working_directory),
-            Some(TerminalLinkTarget::File(
-                working_directory.join("src/terminal.rs")
-            ))
+            Some(TerminalLinkTarget::File {
+                path: working_directory.join("src/terminal.rs"),
+                location: Some(TerminalFileLocation {
+                    line: 42,
+                    column: Some(8),
+                }),
+            })
         );
         assert_eq!(
             terminal_link_target("src/does-not-exist.rs", working_directory),
             None
+        );
+    }
+
+    #[test]
+    fn keeps_the_line_a_terminal_link_names() {
+        let working_directory = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let path = working_directory.join("src/terminal.rs");
+
+        assert_eq!(
+            terminal_link_target("src/terminal.rs", working_directory),
+            Some(TerminalLinkTarget::File {
+                path: path.clone(),
+                location: None,
+            })
+        );
+        assert_eq!(
+            terminal_link_target("src/terminal.rs:42", working_directory),
+            Some(TerminalLinkTarget::File {
+                path: path.clone(),
+                location: Some(TerminalFileLocation {
+                    line: 42,
+                    column: None,
+                }),
+            })
+        );
+        assert_eq!(
+            terminal_link_target("src/terminal.rs:42:8", working_directory),
+            Some(TerminalLinkTarget::File {
+                path,
+                location: Some(TerminalFileLocation {
+                    line: 42,
+                    column: Some(8),
+                }),
+            })
         );
     }
 
