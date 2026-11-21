@@ -111,6 +111,11 @@ fn system_locale() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::{BTreeMap, BTreeSet};
+
+    const EN_CATALOG: &str = include_str!("../../../locales/app.yml");
+    const ZH_CATALOG: &str = include_str!("../../../locales/zh-CN.yml");
+    const JA_CATALOG: &str = include_str!("../../../locales/ja.yml");
 
     #[test]
     fn language_locale_ids_are_supported() {
@@ -218,5 +223,118 @@ mod tests {
             &*rust_i18n::t!("providers.disabled_for_new_tasks", locale = "en"),
             "Disabled for new tasks"
         );
+    }
+
+    /// A locale that is missing a message shows the English one instead, and
+    /// nobody notices: the translation registry falls back silently. The
+    /// catalogs are therefore kept in step by a test rather than by whoever
+    /// remembers to look (#163).
+    #[test]
+    fn every_locale_defines_the_same_messages_as_english() {
+        let english = catalog_messages(EN_CATALOG, "en");
+        assert!(!english.is_empty());
+        for (locale, source) in [("ja", JA_CATALOG), ("zh-CN", ZH_CATALOG)] {
+            let messages = catalog_messages(source, locale);
+            let missing: Vec<&String> = english
+                .keys()
+                .filter(|key| !messages.contains_key(*key))
+                .collect();
+            let extra: Vec<&String> = messages
+                .keys()
+                .filter(|key| !english.contains_key(*key))
+                .collect();
+            assert!(
+                missing.is_empty() && extra.is_empty(),
+                "the {locale} catalog drifted: missing {missing:?}, unknown {extra:?}"
+            );
+        }
+    }
+
+    /// A translation that drops a placeholder shows the raw `%{name}` to the
+    /// reader, so the placeholders of a locale have to be the ones of the
+    /// message they translate.
+    #[test]
+    fn translations_keep_the_placeholders_of_their_english_message() {
+        let english = catalog_messages(EN_CATALOG, "en");
+        for (locale, source) in [("ja", JA_CATALOG), ("zh-CN", ZH_CATALOG)] {
+            let messages = catalog_messages(source, locale);
+            for (key, english_value) in &english {
+                let Some(value) = messages.get(key) else {
+                    continue;
+                };
+                assert_eq!(
+                    placeholders(value),
+                    placeholders(english_value),
+                    "the {locale} translation of {key} does not use the same placeholders"
+                );
+            }
+        }
+    }
+
+    /// The messages one catalog defines for a locale.
+    ///
+    /// The catalogs are flat `key: value` maps, except the English one, which
+    /// nests every value under its locale so a later locale can share the
+    /// file. Both shapes are read here the way the translation registry reads
+    /// them, and the metadata key rust_i18n ignores is left out.
+    fn catalog_messages(source: &str, locale: &str) -> BTreeMap<String, String> {
+        let mut messages = BTreeMap::new();
+        let mut pending: Option<String> = None;
+        for line in source.lines() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() || trimmed.starts_with('#') {
+                continue;
+            }
+            let indented = line.len() != trimmed.len();
+            let Some((key, value)) = trimmed.split_once(':') else {
+                continue;
+            };
+            let key = key.trim();
+            let value = value.trim();
+            if indented {
+                // A nested value belongs to the message that opened the block.
+                let Some(parent) = pending.as_ref() else {
+                    continue;
+                };
+                if key == locale {
+                    messages.insert(parent.clone(), unquote(value));
+                    pending = None;
+                }
+                continue;
+            }
+            if key.starts_with('_') {
+                continue;
+            }
+            pending = None;
+            if value.is_empty() {
+                pending = Some(key.to_owned());
+                continue;
+            }
+            messages.insert(key.to_owned(), unquote(value));
+        }
+        messages
+    }
+
+    /// The value a catalog writes, without the quotes a value may carry.
+    fn unquote(value: &str) -> String {
+        if !value.starts_with('"') {
+            return value.to_owned();
+        }
+        serde_json::from_str::<String>(value).unwrap_or_else(|_| value.to_owned())
+    }
+
+    /// The placeholders one message interpolates.
+    fn placeholders(value: &str) -> BTreeSet<&str> {
+        let mut found = BTreeSet::new();
+        let mut rest = value;
+        while let Some(start) = rest.find("%{") {
+            let after = &rest[start + 2..];
+            let Some(end) = after.find('}') else {
+                break;
+            };
+            found.insert(&after[..end]);
+            rest = &after[end + 1..];
+        }
+        found
     }
 }
