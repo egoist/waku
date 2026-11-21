@@ -16,6 +16,8 @@ the original feature bullet instead of adding separate entries for them.
 
 ## [unreleased]
 
+- Show the plan a provider produced in the transcript: a plan tool's steps render as a checklist with each step's state, and the row says how much of the plan is done — in Waku, Waku Web, and the mobile app
+
 ## [0.1.20]
 
 - Support the OpenCode 2.0 release, which now installs as `opencode`: OpenCode runs on its shared background service, OpenCode 2 beta and OpenCode 1 tasks continue as OpenCode tasks, and OpenCode's free models work in Waku tasks

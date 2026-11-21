@@ -2026,6 +2026,7 @@ impl Waku {
             });
             let reasoning = activity.reasoning.as_ref();
             let reasoning_live = live_reasoning_id == Some(id);
+            let plan = activity.plan.as_ref();
             let sections = if reasoning.is_some() {
                 Vec::new()
             } else {
@@ -2060,13 +2061,16 @@ impl Waku {
             let has_detail = reasoning
                 .is_some_and(|reasoning| !reasoning.content.trim().is_empty())
                 || !sections.is_empty()
-                || shows_diff;
+                || shows_diff
+                || plan.is_some();
             let item_expanded = has_detail
                 && self
                     .expanded_activity_items
                     .get(&id)
                     .copied()
-                    .unwrap_or(reasoning_live);
+                    // A plan is the point of the activity, so its steps are
+                    // shown without a second click.
+                    .unwrap_or(reasoning_live || plan.is_some());
             let item_focus = self.transcript_control_focus(format!("activity-item-{id}"), cx);
             let mut item = div()
                 .w_full()
@@ -2271,6 +2275,9 @@ impl Waku {
                         ))
                         .child(activity_scroll_guard(reasoning_viewport, reasoning_live)),
                 );
+            }
+            if item_expanded && let Some(plan) = plan {
+                item = item.child(activity_plan_checklist(plan, theme));
             }
             if item_expanded && shows_diff {
                 let diff = self.activity_diff_rows(activity);

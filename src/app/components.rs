@@ -1322,7 +1322,11 @@ pub(super) fn activity_row_detail(activity: &ActivityItem, reasoning_live: bool)
             || custom_title().unwrap_or_default(),
             |query| tr!("activity.search_for", query = query),
         ),
-        ActivityKind::Plan => custom_title().unwrap_or_default(),
+        ActivityKind::Plan => activity
+            .plan
+            .as_ref()
+            .map(activity_plan_progress)
+            .unwrap_or_else(|| custom_title().unwrap_or_default()),
         ActivityKind::Tool if is_ask_user_question(activity) => String::new(),
         ActivityKind::Tool => {
             let has_name = activity
@@ -1334,6 +1338,95 @@ pub(super) fn activity_row_detail(activity: &ActivityItem, reasoning_live: bool)
                 .then(|| activity_tool_display_name(activity))
                 .unwrap_or_default()
         }
+    }
+}
+
+/// How much of a plan is done, in a form the row can carry.
+pub(super) fn activity_plan_progress(plan: &ActivityPlan) -> String {
+    let done = plan
+        .entries
+        .iter()
+        .filter(|entry| entry.status == PlanEntryStatus::Completed)
+        .count();
+    tr!(
+        "activity.plan_progress",
+        done = done,
+        total = plan.entries.len()
+    )
+}
+
+/// The steps of a provider's plan, as a checklist.
+///
+/// Each step carries its own state, so a step reads as waiting, under way,
+/// finished, or dropped. The state is a shape as well as a colour — a ring, a
+/// filled dot, a check, a cross — so it does not depend on colour alone.
+pub(super) fn activity_plan_checklist(plan: &ActivityPlan, theme: &Theme) -> AnyElement {
+    div()
+        .w_full()
+        .min_w_0()
+        .border_t_1()
+        .border_color(theme.border_strong)
+        .px(px(12.0))
+        .py(px(8.0))
+        .flex()
+        .flex_col()
+        .gap(px(6.0))
+        .children(plan.entries.iter().map(|entry| {
+            let color = match entry.status {
+                PlanEntryStatus::Pending => theme.text_secondary,
+                PlanEntryStatus::InProgress => theme.text,
+                PlanEntryStatus::Completed | PlanEntryStatus::Cancelled => theme.text_tertiary,
+            };
+            div()
+                .w_full()
+                .min_w_0()
+                .flex()
+                .items_start()
+                .gap(px(8.0))
+                .child(
+                    div()
+                        .w(px(12.0))
+                        .h(px(17.0))
+                        .flex_none()
+                        .flex()
+                        .items_center()
+                        .child(plan_entry_glyph(entry.status, theme)),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .text_size(sp(12.5))
+                        .line_height(sp(17.0))
+                        .text_color(color)
+                        .child(SharedString::from(entry.content.clone())),
+                )
+        }))
+        .into_any_element()
+}
+
+/// The shape that carries a step's state.
+fn plan_entry_glyph(status: PlanEntryStatus, theme: &Theme) -> AnyElement {
+    match status {
+        PlanEntryStatus::Pending => div()
+            .w(px(10.0))
+            .h(px(10.0))
+            .flex_none()
+            .rounded_full()
+            .border_1()
+            .border_color(theme.text_tertiary)
+            .into_any_element(),
+        PlanEntryStatus::InProgress => div()
+            .w(px(8.0))
+            .h(px(8.0))
+            .flex_none()
+            .rounded_full()
+            .bg(theme.accent)
+            .into_any_element(),
+        PlanEntryStatus::Completed => {
+            icon("icons/check.svg", 11.0, theme.success).into_any_element()
+        }
+        PlanEntryStatus::Cancelled => icon("icons/x.svg", 11.0, theme.danger).into_any_element(),
     }
 }
 
@@ -2039,5 +2132,26 @@ mod message_time_tests {
             false,
         );
         assert_eq!(activity_display_title(&plan), "Updating plan");
+
+        // A plan tool that carries its steps shows how much of it is done
+        // rather than nothing at all.
+        let todos = ActivityItem::new(
+            Some("plan-2".into()),
+            crate::model::ActivityKind::Plan,
+            "TodoWrite",
+            None,
+            true,
+        )
+        .with_arguments(Some(
+            serde_json::json!({
+                "todos": [
+                    {"content": "Read the issue", "status": "completed"},
+                    {"content": "Fix it", "status": "in_progress"},
+                    {"content": "Ship it", "status": "pending"}
+                ]
+            })
+            .to_string(),
+        ));
+        assert_eq!(activity_row_detail(&todos, false), "1 of 3 completed");
     }
 }

@@ -388,6 +388,7 @@ activity.web_search_failed: 搜索网页失败
 activity.updating_plan: 正在更新计划
 activity.updated_plan: 已更新计划
 activity.plan_update_failed: 更新计划失败
+activity.plan_progress: "已完成 %{done} / %{total}"
 activity.activity: 操作
 activity.tool: 工具
 activity.plan_updated: 计划已更新

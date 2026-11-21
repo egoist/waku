@@ -7,6 +7,9 @@ import {
   activityFileChangeStats,
   activityGroupIsLive,
   activityHeaderTitle,
+  activityPlan,
+  activityPlanEntries,
+  activityPlanProgress,
   activityPreview,
   activityRowDetail,
   activitySummary,
@@ -249,6 +252,65 @@ describe('desktop transcript language', () => {
     expect(userMessageRewindTurnCount(session, firstMessage, new Set([0]))).toBeNull()
   })
 })
+
+describe('plan checklists', () => {
+  test('reads the plan steps and their state off an activity', () => {
+    const item = planActivity([
+      { content: 'Read the code', status: 'completed' },
+      { content: 'Write the fix', status: 'in_progress' },
+      { content: 'Run the tests', status: 'pending' },
+    ])
+
+    expect(activityPlan(item)).toEqual(item.plan ?? null)
+    expect(activityPlanEntries(item)).toEqual([
+      { content: 'Read the code', status: 'completed', done: true },
+      { content: 'Write the fix', status: 'in_progress', done: false },
+      { content: 'Run the tests', status: 'pending', done: false },
+    ])
+  })
+
+  test('counts only completed steps as progress', () => {
+    const item = planActivity([
+      { content: 'Read the code', status: 'completed' },
+      { content: 'Give up', status: 'cancelled' },
+      { content: 'Write the fix', status: 'in_progress' },
+    ])
+
+    expect(activityPlanProgress(item)).toEqual({ done: 1, total: 3 })
+  })
+
+  test('treats an activity without a plan as no plan at all', () => {
+    const empty = planActivity([])
+    expect(activityPlan(empty)).toBeNull()
+    expect(activityPlanEntries(empty)).toEqual([])
+    expect(activityPlanProgress(empty)).toBeNull()
+
+    const withoutPlan = activity('plan', true)
+    expect(activityPlan(withoutPlan)).toBeNull()
+    expect(activityPlanEntries(withoutPlan)).toEqual([])
+  })
+
+  test('says how much of the plan is done on the row', () => {
+    const item = planActivity([
+      { content: 'Read the code', status: 'completed' },
+      { content: 'Write the fix', status: 'pending' },
+    ])
+
+    expect(activityRowDetail(item)).toBe('1 of 2 completed')
+    expect(activityRowDetail(item, (key, params) => `${key} ${params?.done}/${params?.total}`)).toBe(
+      'activity.plan_progress 1/2',
+    )
+  })
+})
+
+function planActivity(
+  entries: Array<{ content: string; status: 'pending' | 'in_progress' | 'completed' | 'cancelled' }>,
+): ActivityItem {
+  return {
+    ...activity('plan', true),
+    plan: { entries },
+  }
+}
 
 function transcriptSession(): AgentSession {
   return {
