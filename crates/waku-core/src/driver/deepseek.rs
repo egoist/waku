@@ -78,7 +78,6 @@ struct StreamState {
 }
 
 struct HistorySnapshot {
-    events: Vec<Value>,
     projection_values: Option<Value>,
     last_seq: i64,
     turn_active: bool,
@@ -155,9 +154,9 @@ impl DeepSeekDriver {
             .map(str::to_owned)
             .or(agent_preset);
 
-        let baseline = fetch_history(&server, &session_id)
+        let baseline = fetch_projections(&server, &session_id)
             .context("could not read DeepSeek Harness session history")?;
-        normalize_legacy_read_only_mode(&server, &session_id, baseline.projection_values.as_ref())
+        normalize_legacy_read_only_mode(&server, &session_id, baseline.as_ref())
             .context("could not normalize the DeepSeek Harness session")?;
         let available_commands = fetch_commands(&server, &session_id)
             .context("could not read DeepSeek Harness commands")?;
@@ -172,13 +171,8 @@ impl DeepSeekDriver {
             service_tier,
             context_window: None,
         };
-        apply_session_options(
-            &server,
-            &session_id,
-            &initial_options,
-            baseline.projection_values.as_ref(),
-        )
-        .context("could not configure the DeepSeek Harness session")?;
+        apply_session_options(&server, &session_id, &initial_options, baseline.as_ref())
+            .context("could not configure the DeepSeek Harness session")?;
         // Selecting a model or changing a native command-backed option appends
         // durable state. Take the history cut after those operations so their
         // already-buffered stream frames are deduplicated by sequence.
@@ -495,9 +489,7 @@ fn handle_command(
             }
         }
         CommandMessage::ApplyOptions(options) => {
-            let projections = fetch_history(server, session_id)
-                .ok()
-                .and_then(|history| history.projection_values);
+            let projections = fetch_projections(server, session_id).ok().flatten();
             match apply_session_options(server, session_id, &options, projections.as_ref()) {
                 Ok(()) => *mode.lock() = options.mode,
                 Err(error) => {
@@ -562,14 +554,15 @@ fn handle_envelope(
         Some("session/subscribed") => {
             let remote_last_seq = payload.get("lastSeq").and_then(Value::as_i64).unwrap_or(-1);
             if remote_last_seq > state.last_seq {
-                match fetch_history(server, session_id) {
-                    Ok(history) => {
-                        for entry in history.events {
-                            let event = entry.get("event").unwrap_or(&entry);
-                            let view = entry.get("view");
-                            handle_session_event(event, view, events, state);
+                // Only the events the session gained since the last one the
+                // driver saw are replayed; the rest of the history is read
+                // for its sequence numbers alone.
+                match fetch_history_events(server, session_id, state.last_seq) {
+                    Ok((replayed, projection_values)) => {
+                        for (event, view) in replayed {
+                            handle_session_event(&event, view.as_ref(), events, state);
                         }
-                        if let Some(values) = history.projection_values.as_ref() {
+                        if let Some(values) = projection_values.as_ref() {
                             emit_projection_values(values, events);
                         }
                     }
@@ -1379,78 +1372,63 @@ fn legacy_read_only_mode_active(projections: Option<&Value>) -> bool {
     active || pending
 }
 
+/// Read the session's history and keep only what the driver needs from it.
+///
+/// The pages are read as bytes and typed field by field. A session's history
+/// is mostly token-level `assistant/chunk` deltas, and building a value tree
+/// for every one of them costs far more than the history itself — while the
+/// driver reads nothing but the sequence numbers and the turn boundaries.
 fn fetch_history(
     server: &PooledDeepSeekServer,
     session_id: &str,
 ) -> anyhow::Result<HistorySnapshot> {
-    let mut entries = Vec::new();
     let mut projection_values = None;
+    let mut last_seq = -1_i64;
+    let mut last_turn_start = None;
+    let mut last_turn_end = None;
+    let mut completed_turn_seqs = Vec::new();
     let mut before_seq = None;
+    let mut seen_before_seqs = HashSet::new();
     loop {
         let mut payload = json!({"sessionId": session_id, "maxMessages": 200});
         if let Some(before_seq) = before_seq {
             payload["beforeSeq"] = json!(before_seq);
         }
-        let page = server.rpc("session.history", payload)?;
+        let (bytes, rpc_id) = server.rpc_raw("session.history", payload)?;
+        let page = crate::deepseek_history::parse_history_response(&bytes, &rpc_id)
+            .context("could not read DeepSeek Harness session history")?;
         if projection_values.is_none() {
-            projection_values = page.pointer("/projections/values").cloned();
+            projection_values = page.projection_values();
         }
-        let page_entries = page
-            .get("events")
-            .and_then(Value::as_array)
-            .cloned()
-            .unwrap_or_default();
-        let oldest = page_entries
-            .iter()
-            .filter_map(|entry| entry.pointer("/event/seq").and_then(Value::as_u64))
-            .min();
-        entries.extend(page_entries);
-        if !page
-            .get("hasMore")
-            .and_then(Value::as_bool)
-            .unwrap_or(false)
-        {
-            break;
+        let oldest = crate::deepseek_history::oldest_seq(&page.events);
+        for event in &page.events {
+            let Some(seq) = event.seq else {
+                continue;
+            };
+            last_seq = last_seq.max(i64::try_from(seq).unwrap_or(i64::MAX));
+            match event.kind {
+                crate::deepseek_history::HistoryEventKind::TurnStart => {
+                    last_turn_start =
+                        Some(last_turn_start.map_or(seq, |start: u64| start.max(seq)));
+                }
+                crate::deepseek_history::HistoryEventKind::TurnEnd => {
+                    last_turn_end = Some(last_turn_end.map_or(seq, |end: u64| end.max(seq)));
+                    completed_turn_seqs.push(seq);
+                }
+                _ => {}
+            }
         }
-        let Some(oldest) = oldest.filter(|oldest| *oldest > 0) else {
+        let Some(oldest) =
+            crate::deepseek_history::next_before_seq(page.has_more, oldest, &mut seen_before_seqs)
+        else {
             break;
         };
         before_seq = Some(oldest);
     }
-    entries.sort_by_key(|entry| {
-        entry
-            .pointer("/event/seq")
-            .and_then(Value::as_u64)
-            .unwrap_or(u64::MAX)
-    });
-    entries.dedup_by_key(|entry| {
-        entry
-            .pointer("/event/seq")
-            .and_then(Value::as_u64)
-            .unwrap_or(u64::MAX)
-    });
+    completed_turn_seqs.sort_unstable();
+    completed_turn_seqs.dedup();
 
-    let mut last_seq = -1_i64;
-    let mut last_turn_start = None;
-    let mut last_turn_end = None;
-    let mut completed_turn_seqs = Vec::new();
-    for entry in &entries {
-        let event = entry.get("event").unwrap_or(entry);
-        let Some(seq) = event.get("seq").and_then(Value::as_u64) else {
-            continue;
-        };
-        last_seq = last_seq.max(i64::try_from(seq).unwrap_or(i64::MAX));
-        match event.get("type").and_then(Value::as_str) {
-            Some("turn/start") => last_turn_start = Some(seq),
-            Some("turn/end") => {
-                last_turn_end = Some(seq);
-                completed_turn_seqs.push(seq);
-            }
-            _ => {}
-        }
-    }
     Ok(HistorySnapshot {
-        events: entries,
         projection_values,
         last_seq,
         turn_active: last_turn_start
@@ -1459,9 +1437,104 @@ fn fetch_history(
     })
 }
 
+/// Read the session's projection values.
+///
+/// They ride on the newest page, so there is no reason to walk the rest of
+/// the history for them.
+fn fetch_projections(
+    server: &PooledDeepSeekServer,
+    session_id: &str,
+) -> anyhow::Result<Option<Value>> {
+    let payload = json!({"sessionId": session_id, "maxMessages": 200});
+    let (bytes, rpc_id) = server.rpc_raw("session.history", payload)?;
+    let page = crate::deepseek_history::parse_history_response(&bytes, &rpc_id)
+        .context("could not read DeepSeek Harness session history")?;
+    Ok(page.projection_values())
+}
+
+type ReplayedHistoryEvent = (Value, Option<Value>);
+type ReplayedHistory = (Vec<ReplayedHistoryEvent>, Option<Value>);
+
+fn order_replayed_events(mut events: Vec<ReplayedHistoryEvent>) -> Vec<ReplayedHistoryEvent> {
+    events.retain(|(event, _)| event.get("seq").and_then(Value::as_u64).is_some());
+    events.sort_by_key(|(event, _)| event.get("seq").and_then(Value::as_u64).unwrap_or(u64::MAX));
+    events.dedup_by_key(|(event, _)| event.get("seq").and_then(Value::as_u64).unwrap_or(u64::MAX));
+    events
+}
+
+/// Read the events the session gained after `after_seq`, as the driver reads
+/// them: the event itself and the view the harness computed for it.
+///
+/// The session's projection values come back with them: they ride on the
+/// newest page, which this reads anyway.
+fn fetch_history_events(
+    server: &PooledDeepSeekServer,
+    session_id: &str,
+    after_seq: i64,
+) -> anyhow::Result<ReplayedHistory> {
+    let mut events = Vec::new();
+    let mut projection_values = None;
+    let mut before_seq = None;
+    let mut seen_before_seqs = HashSet::new();
+    loop {
+        let mut payload = json!({"sessionId": session_id, "maxMessages": 200});
+        if let Some(before_seq) = before_seq {
+            payload["beforeSeq"] = json!(before_seq);
+        }
+        let (bytes, rpc_id) = server.rpc_raw("session.history", payload)?;
+        let page = crate::deepseek_history::parse_history_response(&bytes, &rpc_id)
+            .context("could not read DeepSeek Harness session history")?;
+        if projection_values.is_none() {
+            projection_values = page.projection_values();
+        }
+        let oldest = crate::deepseek_history::oldest_seq(&page.events);
+        for event in &page.events {
+            let Some(seq) = event.seq else {
+                continue;
+            };
+            if i64::try_from(seq).unwrap_or(i64::MAX) <= after_seq {
+                continue;
+            }
+            events.push((
+                crate::deepseek_history::event_value(event),
+                event.view_value(),
+            ));
+        }
+        let Some(oldest) =
+            crate::deepseek_history::next_before_seq(page.has_more, oldest, &mut seen_before_seqs)
+        else {
+            break;
+        };
+        if i64::try_from(oldest).unwrap_or(i64::MAX) <= after_seq {
+            break;
+        }
+        before_seq = Some(oldest);
+    }
+    Ok((order_replayed_events(events), projection_values))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn history_replay_sorts_events_and_deduplicates_page_boundaries() {
+        let ordered = order_replayed_events(vec![
+            (json!({"seq": 5, "type": "turn/end"}), None),
+            (json!({"seq": 2, "type": "turn/start"}), None),
+            (json!({"seq": 4, "type": "assistant/message"}), None),
+            (json!({"seq": 4, "type": "assistant/message"}), None),
+            (json!({"type": "invalid-without-sequence"}), None),
+        ]);
+
+        assert_eq!(
+            ordered
+                .iter()
+                .map(|(event, _)| event["seq"].as_u64().expect("sequence"))
+                .collect::<Vec<_>>(),
+            [2, 4, 5]
+        );
+    }
 
     #[test]
     fn legacy_read_only_projection_is_normalized_on_attach() {

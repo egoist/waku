@@ -22,6 +22,7 @@ use parking_lot::Mutex;
 use serde_json::{Value, json};
 use uuid::Uuid;
 
+use crate::deepseek_history::{HistoryEventKind, OwnedHistoryEvent};
 use crate::model::{
     AgentTurn, Message, MessageRole, ProviderResumeCursor, ProviderSessionHistory,
     ProviderSessionSummary, TurnStatus,
@@ -136,34 +137,27 @@ fn start_import_turn(history: &mut ProviderSessionHistory, timestamp: u64) -> Uu
     id
 }
 
-fn parse_provider_history(entries: &[Value]) -> ProviderSessionHistory {
-    let mut ordered = entries.to_vec();
-    ordered.sort_by_key(|entry| {
-        entry
-            .pointer("/event/seq")
-            .or_else(|| entry.get("seq"))
-            .and_then(Value::as_u64)
-            .unwrap_or(u64::MAX)
-    });
+fn parse_provider_history(events: &[OwnedHistoryEvent]) -> ProviderSessionHistory {
+    let mut ordered = events.iter().collect::<Vec<_>>();
+    ordered.sort_by_key(|event| event.seq.unwrap_or(u64::MAX));
     let mut history = ProviderSessionHistory::default();
     let mut current_has_user = false;
 
-    for entry in ordered {
-        let event = entry.get("event").unwrap_or(&entry);
-        let kind = event.get("type").and_then(Value::as_str);
-        let timestamp = provider_timestamp(event.get("time").unwrap_or(&Value::Null));
-        let data = event.get("data").unwrap_or(&Value::Null);
-        match kind {
-            Some("turn/start") => {
+    for event in ordered {
+        let timestamp = provider_timestamp(&event.time);
+        let data = &event.data;
+        match event.kind {
+            HistoryEventKind::TurnStart => {
                 if !current_has_user {
                     start_import_turn(&mut history, timestamp);
                 } else if let Some(turn) = history.turns.last_mut() {
                     turn.started_at = turn.started_at.min(timestamp);
                 }
             }
-            Some("user/message")
-                if data.pointer("/source/kind").and_then(Value::as_str) == Some("user") =>
-            {
+            HistoryEventKind::UserMessage => {
+                if data.pointer("/source/kind").and_then(Value::as_str) != Some("user") {
+                    continue;
+                }
                 if history.turns.is_empty() || current_has_user {
                     start_import_turn(&mut history, timestamp);
                 }
@@ -176,7 +170,7 @@ fn parse_provider_history(entries: &[Value]) -> ProviderSessionHistory {
                 message.created_at = timestamp;
                 history.messages.push(message);
             }
-            Some("assistant/message") => {
+            HistoryEventKind::AssistantMessage => {
                 let Some(turn) = history.turns.last_mut() else {
                     continue;
                 };
@@ -199,7 +193,7 @@ fn parse_provider_history(entries: &[Value]) -> ProviderSessionHistory {
                     history.messages.push(message);
                 }
             }
-            Some("turn/end") => {
+            HistoryEventKind::TurnEnd => {
                 let Some(turn) = history.turns.last_mut() else {
                     continue;
                 };
@@ -211,7 +205,7 @@ fn parse_provider_history(entries: &[Value]) -> ProviderSessionHistory {
                 turn.completed_at = Some(timestamp.max(turn.started_at));
                 current_has_user = false;
             }
-            _ => {}
+            HistoryEventKind::Other => {}
         }
     }
     history
@@ -223,7 +217,7 @@ pub fn provider_session_history(
     visible_turn_limit: usize,
 ) -> anyhow::Result<ProviderSessionHistory> {
     let server = crate::deepseek_pool::acquire(binary)?;
-    let mut entries = Vec::new();
+    let mut events = Vec::new();
     let mut before_seq = None;
     let mut seen = std::collections::HashSet::new();
     loop {
@@ -231,34 +225,30 @@ pub fn provider_session_history(
         if let Some(before_seq) = before_seq {
             payload["beforeSeq"] = json!(before_seq);
         }
-        let page = server.rpc("session.history", payload)?;
-        let page_entries = page
-            .get("events")
-            .and_then(Value::as_array)
-            .cloned()
-            .unwrap_or_default();
-        let oldest = page_entries
-            .iter()
-            .filter_map(|entry| entry.pointer("/event/seq").or_else(|| entry.get("seq")))
-            .filter_map(Value::as_u64)
-            .min();
-        entries.extend(page_entries);
-        if !page
-            .get("hasMore")
-            .and_then(Value::as_bool)
-            .unwrap_or(false)
-        {
-            break;
+        // The pages are read as bytes and typed field by field: a page of
+        // token-level deltas is the bulk of a session, and none of it belongs
+        // to the conversation the import shows.
+        let (bytes, rpc_id) = server.rpc_raw("session.history", payload)?;
+        let page = crate::deepseek_history::parse_history_response(&bytes, &rpc_id)
+            .context("could not read DeepSeek Harness session history")?;
+        for event in &page.events {
+            match event.kind {
+                HistoryEventKind::TurnStart
+                | HistoryEventKind::TurnEnd
+                | HistoryEventKind::UserMessage
+                | HistoryEventKind::AssistantMessage => events.push(event.to_owned_event()),
+                HistoryEventKind::Other => {}
+            }
         }
-        let Some(oldest) = oldest.filter(|oldest| *oldest > 0) else {
+        let oldest = crate::deepseek_history::oldest_seq(&page.events);
+        let Some(oldest) =
+            crate::deepseek_history::next_before_seq(page.has_more, oldest, &mut seen)
+        else {
             break;
         };
-        if !seen.insert(oldest) {
-            break;
-        }
         before_seq = Some(oldest);
     }
-    let mut history = parse_provider_history(&entries);
+    let mut history = parse_provider_history(&events);
     let retained = history
         .turns
         .iter()
@@ -579,6 +569,36 @@ impl DeepSeekServer {
             bail!("DeepSeek Harness returned an invalid {method} response");
         }
         rpc_result_value(method, &response)
+    }
+
+    /// Send one request and hand back the response bytes unparsed.
+    ///
+    /// A `session.history` page is large enough that reading it into a value
+    /// tree costs more than the history itself, so the caller reads the
+    /// fields it needs straight from the bytes. The request id comes back
+    /// with them: the response has to be checked against it, and only the
+    /// caller knows which id the request carried.
+    pub(crate) fn rpc_raw(
+        &self,
+        method: &str,
+        payload: Value,
+    ) -> anyhow::Result<(Vec<u8>, String)> {
+        let rpc_id = format!("waku-{}", Uuid::new_v4());
+        let body = json!({
+            "type": "client-request",
+            "rpcId": rpc_id,
+            "method": method,
+            "payload": payload,
+        });
+        let body = serde_json::to_vec(&body)?;
+        let response = crate::http_wire::http_request(
+            &crate::http_wire::Endpoint::local(self.port),
+            "POST",
+            &format!("/api/{method}"),
+            Some(&body),
+            RPC_TIMEOUT,
+        )?;
+        Ok((response, rpc_id))
     }
 
     pub(crate) fn respond(&self, rpc_id: &str, value: Value) -> anyhow::Result<()> {
@@ -953,6 +973,17 @@ impl WebSocketReader {
 mod tests {
     use super::*;
 
+    /// Read the events of a `session.history` response the way the driver
+    /// does, so the tests below run against the wire shape.
+    fn history_events(response: &str) -> Vec<OwnedHistoryEvent> {
+        let page = crate::deepseek_history::parse_history_response(response.as_bytes(), "waku-1")
+            .expect("read the history response");
+        page.events
+            .iter()
+            .map(|event| event.to_owned_event())
+            .collect()
+    }
+
     #[test]
     fn ready_line_accepts_only_the_private_loopback_url() {
         assert_eq!(
@@ -1008,12 +1039,14 @@ mod tests {
         assert_eq!(summaries[0].title, "Resume DeepSeek");
         assert_eq!(summaries[0].updated_at, 1_700_000_000);
 
-        let history = parse_provider_history(&[
-            json!({"type":"event","event":{"type":"turn/start","seq":1,"time":1000,"data":{"turn":1}}}),
-            json!({"type":"event","event":{"type":"user/message","seq":2,"time":2000,"data":{"source":{"kind":"user"},"content":[{"type":"text","text":"question"}]}}}),
-            json!({"type":"event","event":{"type":"assistant/message","seq":3,"time":3000,"data":{"message":{"content":[{"type":"reasoning","text":"private"},{"type":"text","text":"answer"}]}}}}),
-            json!({"type":"event","event":{"type":"turn/end","seq":4,"time":4000,"data":{"reason":{"kind":"completed"}}}}),
-        ]);
+        let history = parse_provider_history(&history_events(
+            r#"{"type":"server-response","rpcId":"waku-1","result":{"ok":true,"value":{"events":[
+                {"event":{"type":"turn/start","seq":1,"time":1000,"data":{"turn":1}}},
+                {"event":{"type":"user/message","seq":2,"time":2000,"data":{"source":{"kind":"user"},"content":[{"type":"text","text":"question"}]}}},
+                {"event":{"type":"assistant/message","seq":3,"time":3000,"data":{"message":{"content":[{"type":"reasoning","text":"private"},{"type":"text","text":"answer"}]}}}},
+                {"event":{"type":"turn/end","seq":4,"time":4000,"data":{"reason":{"kind":"completed"}}}}
+            ]}}}"#,
+        ));
         assert_eq!(history.turns.len(), 1);
         assert_eq!(history.turns[0].status, TurnStatus::Completed);
         assert_eq!(history.messages.len(), 2);
@@ -1022,11 +1055,13 @@ mod tests {
 
     #[test]
     fn a_queued_user_event_before_turn_start_does_not_create_an_empty_turn() {
-        let history = parse_provider_history(&[
-            json!({"event":{"type":"user/message","seq":1,"time":1000,"data":{"source":{"kind":"user"},"content":[{"type":"text","text":"queued"}]}}}),
-            json!({"event":{"type":"turn/start","seq":2,"time":2000,"data":{"turn":1}}}),
-            json!({"event":{"type":"turn/end","seq":3,"time":3000,"data":{"reason":{"kind":"aborted"}}}}),
-        ]);
+        let history = parse_provider_history(&history_events(
+            r#"{"type":"server-response","rpcId":"waku-1","result":{"ok":true,"value":{"events":[
+                {"event":{"type":"user/message","seq":1,"time":1000,"data":{"source":{"kind":"user"},"content":[{"type":"text","text":"queued"}]}}},
+                {"event":{"type":"turn/start","seq":2,"time":2000,"data":{"turn":1}}},
+                {"event":{"type":"turn/end","seq":3,"time":3000,"data":{"reason":{"kind":"aborted"}}}}
+            ]}}}"#,
+        ));
         assert_eq!(history.turns.len(), 1);
         assert_eq!(history.turns[0].status, TurnStatus::Interrupted);
         assert_eq!(history.messages[0].content, "queued");
