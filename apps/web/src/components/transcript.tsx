@@ -32,6 +32,7 @@ import {
   activityFileChangeStats,
   activityGroupIsLive,
   activityHeaderTitle,
+  activityPlanEntries,
   activityPreview,
   activityRowDetail,
   activityTextRows,
@@ -46,7 +47,7 @@ import {
   turnFoldLabel,
   userMessageRewindTurnCount,
 } from '@/lib/transcript-presentation'
-import type { AssistantResponseFooter, Translator } from '@/lib/transcript-presentation'
+import type { AssistantResponseFooter, PlanEntryView, Translator } from '@/lib/transcript-presentation'
 import {
   activeNavigationTurn,
   firstVisibleTranscriptItem,
@@ -1484,7 +1485,8 @@ function ActivityRow({
 }) {
   const sections = activity.reasoning ? [] : activityDisclosureSections(activity, t)
   const reasoningContent = activity.reasoning?.content.trim() ?? ''
-  const hasDetail = Boolean(reasoningContent || sections.length)
+  const planEntries = activityPlanEntries(activity)
+  const hasDetail = Boolean(reasoningContent || sections.length || planEntries.length)
   const [expanded, setExpanded] = useState(Boolean(activity.reasoning && !activity.complete))
   const iconName = activityIcon(activity)
   const preview = expanded || activity.reasoning ? '' : activityPreview(activity, t)
@@ -1574,26 +1576,78 @@ function ActivityRow({
             </ActivityScrollableContent>
           </div>
         ) : (
-          <div className="flex min-w-0 flex-col gap-2 overflow-hidden border-t px-3 py-2 font-mono text-[10.5px] leading-4 text-[var(--text-secondary)]">
-            {sections.map((section) => (
-              <ActivitySection
-                edges={detailEdges}
-                key={section.kind}
-                scrollable={activity.kind === 'command' && section.kind === 'output'}
-                section={section}
-                t={t}
-                viewportRef={detailScroll}
-                onScroll={updateDetailEdges}
-              />
-            ))}
-            {activity.image_urls?.map((url, index) => (
-              <ActivityImage key={`${url}-${index}`} reference={url} t={t} />
-            ))}
+          <div className="flex min-w-0 flex-col">
+            {planEntries.length > 0 && (
+              <div className="border-t px-3 py-2">
+                <ActivityPlanChecklist entries={planEntries} />
+              </div>
+            )}
+            {(sections.length > 0 || (activity.image_urls?.length ?? 0) > 0) && (
+              <div className="flex min-w-0 flex-col gap-2 overflow-hidden border-t px-3 py-2 font-mono text-[10.5px] leading-4 text-[var(--text-secondary)]">
+                {sections.map((section) => (
+                  <ActivitySection
+                    edges={detailEdges}
+                    key={section.kind}
+                    scrollable={activity.kind === 'command' && section.kind === 'output'}
+                    section={section}
+                    t={t}
+                    viewportRef={detailScroll}
+                    onScroll={updateDetailEdges}
+                  />
+                ))}
+                {activity.image_urls?.map((url, index) => (
+                  <ActivityImage key={`${url}-${index}`} reference={url} t={t} />
+                ))}
+              </div>
+            )}
           </div>
         )
       )}
     </div>
   )
+}
+
+/**
+ * The steps of a provider's plan. The plan is the point of the activity, so
+ * its steps read as a checklist rather than as the tool's raw payload, and
+ * the state of a step is carried by a shape as well as by its color.
+ */
+function ActivityPlanChecklist({ entries }: { entries: PlanEntryView[] }) {
+  return (
+    <ul className="flex min-w-0 flex-col gap-1.5">
+      {entries.map((entry, index) => (
+        <li key={`${index}-${entry.content}`} className="flex min-w-0 items-start gap-2">
+          <span className="flex w-3 shrink-0 items-center justify-center pt-px">
+            <PlanEntryGlyph status={entry.status} />
+          </span>
+          <span
+            className={cn(
+              'min-w-0 flex-1 text-[12.5px] leading-[17px]',
+              entry.status === 'pending' && 'text-[var(--text-secondary)]',
+              entry.status === 'in_progress' && 'text-[var(--foreground)]',
+              (entry.status === 'completed' || entry.status === 'cancelled') &&
+                'text-[var(--text-tertiary)]',
+            )}
+          >
+            {entry.content}
+          </span>
+        </li>
+      ))}
+    </ul>
+  )
+}
+
+function PlanEntryGlyph({ status }: { status: PlanEntryView['status'] }) {
+  if (status === 'completed') {
+    return <WakuIcon name="check" className="size-3 text-[var(--success)]" />
+  }
+  if (status === 'cancelled') {
+    return <WakuIcon name="x" className="size-3 text-destructive" />
+  }
+  if (status === 'in_progress') {
+    return <span className="size-2 rounded-full bg-[var(--ring)]" />
+  }
+  return <span className="size-2.5 rounded-full border border-[var(--text-tertiary)]" />
 }
 
 type ActivityScrollEdges = { atTop: boolean; atBottom: boolean }

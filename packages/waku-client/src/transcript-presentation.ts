@@ -1,4 +1,4 @@
-import type { ActivityItem, AgentSession } from './generated'
+import type { ActivityItem, ActivityPlan, AgentSession, PlanEntryStatus } from './generated'
 
 export type AssistantResponseFooter = {
   content: string
@@ -6,6 +6,46 @@ export type AssistantResponseFooter = {
 }
 
 export type Translator = (key: string, params?: Record<string, string | number>) => string
+
+/** One step of a provider's plan, prepared for rendering. */
+export type PlanEntryView = {
+  content: string
+  status: PlanEntryStatus
+  /** Whether the step is over, whether it was completed or cancelled. */
+  done: boolean
+}
+
+/**
+ * The plan an activity carries, or null when it carries none. A plan without
+ * steps is not a plan, so it reads as no plan at all.
+ */
+export function activityPlan(activity: ActivityItem): ActivityPlan | null {
+  const plan = activity.plan
+  if (!plan || plan.entries.length === 0) return null
+  return plan
+}
+
+/** The steps of an activity's plan, ready to render as a checklist. */
+export function activityPlanEntries(activity: ActivityItem): PlanEntryView[] {
+  const plan = activityPlan(activity)
+  if (!plan) return []
+  return plan.entries.map((entry) => ({
+    content: entry.content,
+    status: entry.status,
+    done: entry.status === 'completed' || entry.status === 'cancelled',
+  }))
+}
+
+/**
+ * How much of the plan is done: the completed steps over all of them. A
+ * cancelled step is over but not progress, so it does not count.
+ */
+export function activityPlanProgress(activity: ActivityItem): { done: number; total: number } | null {
+  const entries = activityPlanEntries(activity)
+  if (!entries.length) return null
+  const done = entries.filter((entry) => entry.status === 'completed').length
+  return { done, total: entries.length }
+}
 
 export function userMessageRewindTurnCount(
   session: AgentSession,
@@ -234,8 +274,13 @@ export function activityRowDetail(activity: ActivityItem, t?: Translator) {
           ? t('activity.search_for', { query: activity.display_target })
           : `Search for ${activity.display_target}`
         : customTitle
-    case 'plan':
-      return customTitle
+    case 'plan': {
+      const progress = activityPlanProgress(activity)
+      if (!progress) return customTitle
+      return t
+        ? t('activity.plan_progress', { done: progress.done, total: progress.total })
+        : `${progress.done} of ${progress.total} completed`
+    }
     case 'tool':
       if (isAskUserQuestion(activity)) return ''
       return activity.display_target?.trim() || !isGenericActivityTitle(activity)

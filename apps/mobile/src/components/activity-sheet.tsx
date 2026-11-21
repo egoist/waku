@@ -10,10 +10,12 @@ import {
   activityDisclosureSections,
   activityDisplayTitle,
   activityFileChangeStats,
+  activityPlanEntries,
   activityPreview,
   activityRowDetail,
   reasoningTitle,
 } from '@waku/client/transcript-presentation';
+import type { PlanEntryView } from '@waku/client/transcript-presentation';
 import {
   createContext,
   useCallback,
@@ -63,7 +65,8 @@ function activityHasDetail(activity: ActivityItem): boolean {
   return Boolean(
     activityDisclosureSections(activity).length
       || activity.file_changes?.length
-      || activity.image_urls?.length,
+      || activity.image_urls?.length
+      || activityPlanEntries(activity).length,
   );
 }
 
@@ -285,6 +288,7 @@ function ActivityDetail({ activity }: { activity: ActivityItem }) {
   const insets = useSafeAreaInsets();
   const reasoning = activity.reasoning ? activity.reasoning.content.trim() : '';
   const sections = activity.reasoning ? [] : activityDisclosureSections(activity);
+  const planEntries = activityPlanEntries(activity);
   const changes = activity.file_changes ?? [];
   const images = activity.image_urls ?? [];
   const title = activity.reasoning ? reasoningTitle(activity) : activityDisplayTitle(activity);
@@ -316,6 +320,7 @@ function ActivityDetail({ activity }: { activity: ActivityItem }) {
         <ReasoningText content={plainReasoning(reasoning)} live={!activity.complete} />
       ) : (
         <>
+          {planEntries.length > 0 && <PlanChecklist entries={planEntries} />}
           {sections.map((section) => (
             <DetailSection
               content={section.content}
@@ -378,6 +383,72 @@ function ActivityStatus({ activity }: { activity: ActivityItem }) {
     );
   }
   return null;
+}
+
+/** The steps of a provider's plan, one per row. Each row's state is a glyph
+ * plus a word for screen readers, never color alone. */
+function PlanChecklist({ entries }: { entries: PlanEntryView[] }) {
+  const theme = useTheme();
+  return (
+    <View style={styles.plan}>
+      {entries.map((entry, index) => (
+        <View
+          accessible
+          accessibilityLabel={`${planStatusWord(entry.status)}: ${entry.content}`}
+          key={`${index}-${entry.content}`}
+          style={styles.planRow}>
+          <View style={styles.planGlyph}>
+            <PlanGlyph status={entry.status} />
+          </View>
+          <Text style={[styles.planText, { color: planTextColor(entry.status, theme) }]}>
+            {entry.content}
+          </Text>
+        </View>
+      ))}
+    </View>
+  );
+}
+
+function PlanGlyph({ status }: { status: PlanEntryView['status'] }) {
+  const theme = useTheme();
+  if (status === 'completed') {
+    return (
+      <AppSymbol
+        name={{ ios: 'checkmark', android: 'check', web: 'check' }}
+        size={12}
+        tintColor={theme.success}
+      />
+    );
+  }
+  if (status === 'cancelled') {
+    return (
+      <AppSymbol
+        name={{ ios: 'xmark', android: 'close', web: 'close' }}
+        size={12}
+        tintColor={theme.danger}
+      />
+    );
+  }
+  if (status === 'in_progress') {
+    return <View style={[styles.planDot, { backgroundColor: theme.accent }]} />;
+  }
+  return <View style={[styles.planRing, { borderColor: theme.textTertiary }]} />;
+}
+
+function planStatusWord(status: PlanEntryView['status']): string {
+  if (status === 'completed') return 'Completed'
+  if (status === 'cancelled') return 'Cancelled'
+  if (status === 'in_progress') return 'In progress'
+  return 'Pending'
+}
+
+function planTextColor(
+  status: PlanEntryView['status'],
+  theme: ReturnType<typeof useTheme>,
+): string {
+  if (status === 'completed' || status === 'cancelled') return theme.textTertiary
+  if (status === 'in_progress') return theme.text
+  return theme.textSecondary
 }
 
 function DetailSection({
@@ -539,6 +610,12 @@ const styles = StyleSheet.create({
   statusText: { fontSize: 13 },
   stats: { fontVariant: ['tabular-nums'], fontWeight: '600' },
   section: { gap: 6 },
+  plan: { gap: 8 },
+  planRow: { alignItems: 'flex-start', flexDirection: 'row', gap: 9 },
+  planGlyph: { alignItems: 'center', height: 19, justifyContent: 'center', width: 14 },
+  planText: { flex: 1, fontSize: 13.5, lineHeight: 19 },
+  planDot: { borderRadius: 4, height: 8, width: 8 },
+  planRing: { borderRadius: 4, borderWidth: 1.5, height: 8, width: 8 },
   sectionLabel: {
     fontSize: 11.5,
     fontWeight: '600',

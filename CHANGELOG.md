@@ -16,7 +16,7 @@ the original feature bullet instead of adding separate entries for them.
 
 ## [unreleased]
 
-- Show the plan a provider produced in the transcript: a plan tool's steps render as a checklist with each step's state, and the row says how much of the plan is done
+- Show the plan a provider produced in the transcript: a plan tool's steps render as a checklist with each step's state, and the row says how much of the plan is done — in Waku, Waku Web, and the mobile app
 
 ## [0.1.20]
 
