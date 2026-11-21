@@ -233,14 +233,28 @@ fn sdk_agent(
     environment.append(&mut launch.env);
     environment.extend(computer_env);
 
-    // `AcpAgentConfig` deliberately contains only argv and environment. macOS
-    // `env -C` supplies the session cwd without a shell, preserving exact
-    // argument boundaries and the SDK's process-group lifecycle management.
-    let mut args = vec!["-C".to_owned(), cwd.to_owned(), binary.to_owned()];
-    args.extend(launch.args);
-    let config = AcpAgentConfig::new("/usr/bin/env")
-        .args(args)
-        .envs(environment);
+    // `AcpAgentConfig` deliberately contains only argv and environment, so the
+    // session cwd has to travel in the command line. On Unix `env -C` sets it
+    // without a shell, preserving exact argument boundaries and the SDK's
+    // process-group lifecycle management.
+    //
+    // Windows has no `/usr/bin/env`, and spawning through it fails with "the
+    // system cannot find the path specified" before the agent is ever
+    // started, which leaves every ACP provider unusable there. The binary is
+    // launched directly on that platform instead. The session cwd still
+    // reaches the agent in the ACP session request, which the protocol
+    // requires the agent to honour wherever its process was spawned.
+    let config = if cfg!(windows) {
+        AcpAgentConfig::new(binary)
+            .args(launch.args)
+            .envs(environment)
+    } else {
+        let mut args = vec!["-C".to_owned(), cwd.to_owned(), binary.to_owned()];
+        args.extend(launch.args);
+        AcpAgentConfig::new("/usr/bin/env")
+            .args(args)
+            .envs(environment)
+    };
     Ok(AcpAgent::new(config).with_debug(move |line, direction| {
         if direction != LineDirection::Stderr || line.trim().is_empty() {
             return;
@@ -2581,6 +2595,43 @@ mod tests {
         );
         let bare = launch_for(ProviderKind::Grok, None).unwrap();
         assert_eq!(bare.args, ["agent", "stdio"]);
+    }
+
+    #[test]
+    fn acp_launch_uses_the_launcher_the_platform_has() {
+        let launch = launch_for(ProviderKind::Grok, None).unwrap();
+        let agent = sdk_agent(
+            Path::new("/opt/grok/grok"),
+            Path::new("/work/project"),
+            launch,
+            None,
+            Arc::new(Mutex::new(Vec::new())),
+        )
+        .unwrap();
+        let config = agent.config();
+
+        if cfg!(windows) {
+            // There is no `/usr/bin/env` to spawn through, so the agent is
+            // launched directly and learns the session cwd from the session
+            // request instead.
+            assert_eq!(config.command(), Path::new("/opt/grok/grok"));
+            assert_eq!(
+                config.arguments().to_vec(),
+                vec!["agent".to_owned(), "stdio".to_owned()]
+            );
+        } else {
+            assert_eq!(config.command(), Path::new("/usr/bin/env"));
+            assert_eq!(
+                config.arguments().to_vec(),
+                vec![
+                    "-C".to_owned(),
+                    "/work/project".to_owned(),
+                    "/opt/grok/grok".to_owned(),
+                    "agent".to_owned(),
+                    "stdio".to_owned()
+                ]
+            );
+        }
     }
 
     #[test]
