@@ -39,6 +39,9 @@ pub struct SkillLocation {
     #[ts(type = "string")]
     pub root: PathBuf,
     pub project: Option<String>,
+    /// The plugin that ships this skill, when it came from one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plugin: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize, TS)]
@@ -50,6 +53,20 @@ pub struct SkillInstall {
     #[ts(type = "string")]
     pub skill_file: PathBuf,
     pub enabled: bool,
+    /// The plugin that ships this copy, when it came from one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plugin: Option<String>,
+}
+
+impl SkillInstall {
+    /// Where this copy comes from: the ecosystem that reads it, and the
+    /// plugin that ships it when there is one.
+    pub fn label(&self) -> String {
+        match &self.plugin {
+            Some(plugin) => format!("{} · {}", self.source.label(), plugin),
+            None => self.source.label(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize, TS)]
@@ -78,7 +95,7 @@ impl SkillEntry {
     pub fn sources_label(&self) -> String {
         self.installs
             .iter()
-            .map(|install| install.source.label())
+            .map(|install| install.label())
             .collect::<Vec<_>>()
             .join(" · ")
     }

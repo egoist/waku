@@ -815,6 +815,21 @@ impl Waku {
                                             })
                                             .child(SharedString::from(skill.name.clone())),
                                     )
+                                    .when(skill.primary().plugin.is_some(), |element| {
+                                        element.child(
+                                            div()
+                                                .flex_none()
+                                                .text_size(sp(11.5))
+                                                .text_color(theme.text_tertiary)
+                                                .child(SharedString::from(
+                                                    skill
+                                                        .primary()
+                                                        .plugin
+                                                        .clone()
+                                                        .unwrap_or_default(),
+                                                )),
+                                        )
+                                    })
                                     .when(!enabled, |element| {
                                         element.child(
                                             div()
@@ -930,7 +945,7 @@ impl Waku {
         for install in &skill.installs {
             info_rows.push((
                 if grouped {
-                    install.source.label()
+                    install.label()
                 } else {
                     tr!("skills.detail_location")
                 },

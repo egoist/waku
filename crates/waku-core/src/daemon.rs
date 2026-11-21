@@ -321,7 +321,10 @@ impl Backend for WakuBackend {
                 Ok(ResponsePayload::UsageHistory { history })
             }
             Command::LoadSkills { projects } => {
-                let locations = crate::skills::skill_locations(&projects);
+                let mut locations = crate::skills::skill_locations(&projects);
+                // Skills that ship inside an installed plugin live in the
+                // plugin's own directory, not in the ecosystem's skill root.
+                locations.extend(crate::plugin_skills::plugin_skill_locations(&projects));
                 Ok(ResponsePayload::SkillsCatalog {
                     catalog: crate::skills::scan_skills(&locations),
                 })
