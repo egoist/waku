@@ -16,8 +16,6 @@ the original feature bullet instead of adding separate entries for them.
 
 ## [unreleased]
 
-- Add Antigravity as an agent: it connects through its standalone ACP server (`agy_acp_server`, installed from the ACP registry), with no arguments on macOS and Windows and the registry's empty `--uid=` on Linux
-
 ## [0.1.20]
 
 - Support the OpenCode 2.0 release, which now installs as `opencode`: OpenCode runs on its shared background service, OpenCode 2 beta and OpenCode 1 tasks continue as OpenCode tasks, and OpenCode's free models work in Waku tasks
