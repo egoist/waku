@@ -128,8 +128,7 @@ pub(super) fn codex_profile_for_session(
         return None;
     }
     let profile = session.codex_profile.as_deref()?;
-    let known =
-        probe.is_some_and(|probe| probe.codex_profiles.iter().any(|name| name == profile));
+    let known = probe.is_some_and(|probe| probe.codex_profiles.iter().any(|name| name == profile));
     known.then(|| profile.to_owned())
 }
 

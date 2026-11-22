@@ -2160,8 +2160,8 @@ fn the_rail_draws_only_installed_providers_the_settings_left_on() {
 
 #[test]
 fn a_codex_profile_survives_only_while_the_daemon_still_offers_it() {
-    use crate::model::{ProviderKind, ProviderModel, ProviderProbe};
     use crate::app::runtime::codex_profile_for_session;
+    use crate::model::{ProviderKind, ProviderModel, ProviderProbe};
 
     let probe = ProviderProbe {
         provider: ProviderKind::Codex,
