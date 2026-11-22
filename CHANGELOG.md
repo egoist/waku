@@ -16,8 +16,6 @@ the original feature bullet instead of adding separate entries for them.
 
 ## [unreleased]
 
-- Reload files open in the editor panel as the agent edits them, instead of waiting for the panel to regain focus
-
 ## [0.1.20]
 
 - Support the OpenCode 2.0 release, which now installs as `opencode`: OpenCode runs on its shared background service, OpenCode 2 beta and OpenCode 1 tasks continue as OpenCode tasks, and OpenCode's free models work in Waku tasks
