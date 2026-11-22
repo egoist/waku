@@ -15,6 +15,8 @@ use crate::model::{Checkpoint, CheckpointFile, CheckpointStatus, unix_time};
 
 const TURN_START_METADATA_PREFIX: &str = "Waku-Turn-Start: ";
 const EMPTY_TREE: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
+/// The identity snapshot commits are recorded under.
+const SNAPSHOT_AUTHOR: &str = "Waku <waku@localhost>";
 
 #[derive(Debug, Deserialize, Serialize)]
 struct TurnStartMetadata {
@@ -180,7 +182,6 @@ fn capture_worktree_commit_from(
         cwd.join(common_dir)
     };
     let temporary_index = common_dir.join(format!("waku-checkpoint-index-{}", Uuid::new_v4()));
-    let temporary_message = common_dir.join(format!("waku-checkpoint-message-{}", Uuid::new_v4()));
 
     let result = (|| {
         if let Some(head) = head {
@@ -193,33 +194,11 @@ fn capture_worktree_commit_from(
         if tree.is_empty() {
             bail!("git write-tree returned no object id");
         }
-        // The message goes through a file rather than `-m`. A turn start
-        // snapshot embeds one entry per ref in the repository, and an
-        // argument is capped at 128 KiB, so passing the message inline
-        // failed outright on a repository with a few thousand refs.
-        fs::write(&temporary_message, message)?;
-        let mut arguments = vec![
-            "commit-tree".to_owned(),
-            tree,
-            "-F".to_owned(),
-            temporary_message.to_string_lossy().into_owned(),
-        ];
-        for parent in parents {
-            arguments.push("-p".to_owned());
-            arguments.push(parent.clone());
-        }
-        let commit = git_with_identity_and_index(cwd, &temporary_index, &arguments)?
-            .trim()
-            .to_owned();
-        if commit.is_empty() {
-            bail!("git commit-tree returned no object id");
-        }
-        Ok(commit)
+        commit_tree(cwd, &tree, message, parents)
     })();
 
     let _ = fs::remove_file(&temporary_index);
     let _ = fs::remove_file(temporary_index.with_extension("lock"));
-    let _ = fs::remove_file(&temporary_message);
     result
 }
 
@@ -344,34 +323,58 @@ fn empty_tree_commit(cwd: &Path) -> anyhow::Result<String> {
     commit_tree(cwd, EMPTY_TREE, "Waku empty turn diff base", &[])
 }
 
+/// Creates a commit from a tree and returns its object id.
+///
+/// The commit object is written by hand and handed to `git hash-object`
+/// instead of being built by `git commit-tree`. `git commit-tree` carries the
+/// message and every parent on the command line, and a turn start snapshot
+/// has one parent per ref in the repository: a repository with a few hundred
+/// refs already fills the 32,767 characters Windows allows for a command
+/// line, and the process cannot be started there at all. On stdin the same
+/// content costs nothing, on every platform.
 fn commit_tree(
     cwd: &Path,
     tree: &str,
     message: &str,
     parents: &[String],
 ) -> anyhow::Result<String> {
-    let common_dir = git_output(cwd, ["rev-parse", "--git-common-dir"])?
-        .trim()
-        .to_owned();
-    let common_dir = PathBuf::from(common_dir);
-    let common_dir = if common_dir.is_absolute() {
-        common_dir
-    } else {
-        cwd.join(common_dir)
-    };
-    let temporary_index = common_dir.join(format!("waku-checkpoint-index-{}", Uuid::new_v4()));
-    let mut arguments = vec![
-        "commit-tree".to_owned(),
-        tree.to_owned(),
-        "-m".to_owned(),
-        message.to_owned(),
-    ];
+    let timestamp = unix_time();
+    let mut object = String::with_capacity(message.len() + parents.len() * 48 + 128);
+    object.push_str(&format!("tree {tree}\n"));
     for parent in parents {
-        arguments.push("-p".to_owned());
-        arguments.push(parent.clone());
+        object.push_str(&format!("parent {parent}\n"));
     }
-    git_with_identity_and_index(cwd, &temporary_index, &arguments)
-        .map(|commit| commit.trim().to_owned())
+    object.push_str(&format!(
+        "author {SNAPSHOT_AUTHOR} {timestamp} +0000\ncommitter {SNAPSHOT_AUTHOR} {timestamp} +0000\n"
+    ));
+    object.push('\n');
+    object.push_str(message);
+    if !message.ends_with('\n') {
+        object.push('\n');
+    }
+    let mut child = crate::command_env::plain_command("git")
+        .args(["hash-object", "-t", "commit", "-w", "--stdin"])
+        .current_dir(cwd)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .context("failed to execute git")?;
+    child
+        .stdin
+        .take()
+        .ok_or_else(|| anyhow!("git hash-object stdin is unavailable"))?
+        .write_all(object.as_bytes())
+        .context("failed to send the commit object to git")?;
+    let output = child.wait_with_output().context("failed to execute git")?;
+    if !output.status.success() {
+        bail!("{}", command_error(&output));
+    }
+    let commit = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+    if commit.is_empty() {
+        bail!("git hash-object returned no object id");
+    }
+    Ok(commit)
 }
 
 pub fn restore_ref(cwd: &Path, git_ref: &str) -> anyhow::Result<()> {
@@ -732,23 +735,10 @@ where
     I: IntoIterator<Item = S>,
     S: AsRef<OsStr>,
 {
-    git_with_environment(cwd, index, args, false)
+    git_with_environment(cwd, index, args)
 }
 
-fn git_with_identity_and_index<I, S>(cwd: &Path, index: &Path, args: I) -> anyhow::Result<String>
-where
-    I: IntoIterator<Item = S>,
-    S: AsRef<OsStr>,
-{
-    git_with_environment(cwd, index, args, true)
-}
-
-fn git_with_environment<I, S>(
-    cwd: &Path,
-    index: &Path,
-    args: I,
-    identity: bool,
-) -> anyhow::Result<String>
+fn git_with_environment<I, S>(cwd: &Path, index: &Path, args: I) -> anyhow::Result<String>
 where
     I: IntoIterator<Item = S>,
     S: AsRef<OsStr>,
@@ -758,13 +748,6 @@ where
         .args(args)
         .current_dir(cwd)
         .env("GIT_INDEX_FILE", index);
-    if identity {
-        command
-            .env("GIT_AUTHOR_NAME", "Waku")
-            .env("GIT_AUTHOR_EMAIL", "waku@localhost")
-            .env("GIT_COMMITTER_NAME", "Waku")
-            .env("GIT_COMMITTER_EMAIL", "waku@localhost");
-    }
     let output = command.output().context("failed to execute git")?;
     if output.status.success() {
         Ok(String::from_utf8_lossy(&output.stdout).into_owned())
@@ -1207,6 +1190,33 @@ mod tests {
             elapsed.as_secs_f64() < 2.0,
             "reading a {parents}-parent snapshot took {elapsed:?}"
         );
+        fs::remove_dir_all(directory).ok();
+    }
+
+    /// The snapshot commit is written by hand rather than by `git
+    /// commit-tree`, so its header has to keep the shape git expects: the
+    /// message, the parents and the identity must all read back through git
+    /// itself.
+    #[test]
+    fn a_turn_start_snapshot_keeps_its_message_and_identity() {
+        let directory = diverged_repository();
+        let session_id = Uuid::new_v4();
+        capture_turn_start(&directory, session_id, 0).unwrap();
+        let start_ref = turn_start_ref(session_id, 0);
+
+        let author = git_text(&directory, &["log", "-1", "--format=%an <%ae>", &start_ref]);
+        assert_eq!(author, "Waku <waku@localhost>");
+        let committer = git_text(&directory, &["log", "-1", "--format=%cn <%ce>", &start_ref]);
+        assert_eq!(committer, "Waku <waku@localhost>");
+
+        let message = git_text(&directory, &["log", "-1", "--format=%B", &start_ref]);
+        assert!(
+            message.contains(TURN_START_METADATA_PREFIX),
+            "the snapshot message should carry its metadata"
+        );
+        let metadata = turn_start_metadata(&directory, &start_ref).unwrap();
+        assert!(metadata.refs.contains_key("refs/heads/main"));
+
         fs::remove_dir_all(directory).ok();
     }
 }
