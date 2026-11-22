@@ -16,8 +16,6 @@ the original feature bullet instead of adding separate entries for them.
 
 ## [unreleased]
 
-- Start ACP providers on Windows: the agent was spawned through a Unix-only `/usr/bin/env`, which failed before the agent ran and left every ACP provider unusable there
-
 ## [0.1.20]
 
 - Support the OpenCode 2.0 release, which now installs as `opencode`: OpenCode runs on its shared background service, OpenCode 2 beta and OpenCode 1 tasks continue as OpenCode tasks, and OpenCode's free models work in Waku tasks
