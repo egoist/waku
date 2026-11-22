@@ -16,8 +16,6 @@ the original feature bullet instead of adding separate entries for them.
 
 ## [unreleased]
 
-- Fix an overflow panic when a Codex fork request carries the maximum turn count, reachable only from a direct daemon client
-
 ## [0.1.20]
 
 - Support the OpenCode 2.0 release, which now installs as `opencode`: OpenCode runs on its shared background service, OpenCode 2 beta and OpenCode 1 tasks continue as OpenCode tasks, and OpenCode's free models work in Waku tasks
