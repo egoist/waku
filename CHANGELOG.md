@@ -16,8 +16,6 @@ the original feature bullet instead of adding separate entries for them.
 
 ## [unreleased]
 
-- Switch the access mode from the keyboard with cmd-shift-M / ctrl-shift-M, wrapping through the chip's menu order instead of reaching for the mouse
-
 ## [0.1.20]
 
 - Support the OpenCode 2.0 release, which now installs as `opencode`: OpenCode runs on its shared background service, OpenCode 2 beta and OpenCode 1 tasks continue as OpenCode tasks, and OpenCode's free models work in Waku tasks
