@@ -982,6 +982,10 @@ models.service_tier:
   en: Service Tier
 models.context_window:
   en: Context Window
+models.codex_profile:
+  en: Codex Profile
+models.codex_default_profile:
+  en: Default Configuration
 
 model_option.none:
   en: None

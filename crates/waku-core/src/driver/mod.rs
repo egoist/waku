@@ -190,6 +190,10 @@ pub struct DriverStartOptions {
     pub service_tier: Option<String>,
     pub context_window: Option<String>,
     pub agent_preset: Option<String>,
+    /// The Codex config profile this session runs under. Codex reads its
+    /// configuration when the process starts, so the profile belongs to the
+    /// start rather than to a turn.
+    pub codex_profile: Option<String>,
     pub computer_use_enabled: bool,
     pub provider_cursor: Option<ProviderResumeCursor>,
 }
@@ -204,6 +208,10 @@ pub struct SessionOptions {
     pub reasoning_effort: Option<String>,
     pub service_tier: Option<String>,
     pub context_window: Option<String>,
+    /// The Codex config profile this session runs under. A transport that
+    /// cannot change its configuration in place answers that the change needs
+    /// a new process.
+    pub codex_profile: Option<String>,
 }
 
 pub(crate) fn start_local(

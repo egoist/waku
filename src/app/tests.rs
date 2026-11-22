@@ -1929,6 +1929,7 @@ fn switched_off_providers_leave_the_picker_except_for_their_locked_session() {
         path: Some(std::path::PathBuf::from(format!("/bin/{}", provider.id()))),
         models: vec![ProviderModel::new(model, model)],
         agent_presets: Vec::new(),
+        codex_profiles: Vec::new(),
     };
     let probes = [
         probe(ProviderKind::Claude, "claude-sonnet-5"),
@@ -2018,6 +2019,7 @@ fn tab_cycle_walks_favorites_then_usable_providers_in_rail_order() {
         path: installed.then(|| std::path::PathBuf::from(format!("/bin/{}", provider.id()))),
         models: vec![ProviderModel::new("model", "model")],
         agent_presets: Vec::new(),
+        codex_profiles: Vec::new(),
     };
     let probes = [
         probe(ProviderKind::Claude, true),
@@ -2066,6 +2068,7 @@ fn the_picker_is_empty_only_once_detection_has_answered() {
         path: installed.then(|| std::path::PathBuf::from(format!("/bin/{}", provider.id()))),
         models: vec![ProviderModel::new("model", "model")],
         agent_presets: Vec::new(),
+        codex_profiles: Vec::new(),
     };
     // What every probe looks like before detection answers: seeded with a
     // fallback catalog and not yet installed.
@@ -2113,6 +2116,7 @@ fn the_rail_draws_only_installed_providers_the_settings_left_on() {
         path: installed.then(|| std::path::PathBuf::from(format!("/bin/{}", provider.id()))),
         models: vec![ProviderModel::new("model", "model")],
         agent_presets: Vec::new(),
+        codex_profiles: Vec::new(),
     };
     let probes = [
         probe(ProviderKind::Claude, true),
@@ -2152,4 +2156,38 @@ fn the_rail_draws_only_installed_providers_the_settings_left_on() {
         Some(ProviderKind::Claude),
         ProviderKind::Claude
     ));
+}
+
+#[test]
+fn a_codex_profile_survives_only_while_the_daemon_still_offers_it() {
+    use crate::model::{ProviderKind, ProviderModel, ProviderProbe};
+    use crate::app::runtime::codex_profile_for_session;
+
+    let probe = ProviderProbe {
+        provider: ProviderKind::Codex,
+        installed: true,
+        path: Some(std::path::PathBuf::from("/bin/codex")),
+        models: vec![ProviderModel::new("gpt-5-codex", "GPT-5 Codex")],
+        agent_presets: Vec::new(),
+        codex_profiles: vec!["work".to_owned()],
+    };
+
+    let mut session = AgentSession::new(Uuid::new_v4(), ProviderKind::Codex);
+    session.codex_profile = Some("work".to_owned());
+    assert_eq!(
+        codex_profile_for_session(&session, Some(&probe)),
+        Some("work".to_owned())
+    );
+
+    // A profile the daemon no longer reports — the file was deleted — falls
+    // back to the base configuration instead of naming a profile Codex cannot
+    // read.
+    session.codex_profile = Some("gone".to_owned());
+    assert_eq!(codex_profile_for_session(&session, Some(&probe)), None);
+    assert_eq!(codex_profile_for_session(&session, None), None);
+
+    // Another provider has no profiles at all.
+    let mut claude = AgentSession::new(Uuid::new_v4(), ProviderKind::Claude);
+    claude.codex_profile = Some("work".to_owned());
+    assert_eq!(codex_profile_for_session(&claude, Some(&probe)), None);
 }

@@ -546,6 +546,10 @@ pub struct ProviderProbe {
     pub models: Vec<ProviderModel>,
     #[serde(default)]
     pub agent_presets: Vec<ProviderAgentPreset>,
+    /// The Codex config profiles the daemon host can run a session under.
+    /// Empty for every other provider.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub codex_profiles: Vec<String>,
 }
 
 impl ProviderProbe {
@@ -957,6 +961,11 @@ pub struct AgentSession {
     pub reasoning_effort: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub service_tier: Option<String>,
+    /// The Codex config profile this session runs under, when it runs under
+    /// one. Codex reads its configuration when the app-server starts, so the
+    /// profile is fixed for the life of the runtime.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub codex_profile: Option<String>,
     /// Selected context window, when the provider exposes more than one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_window: Option<String>,
@@ -1037,6 +1046,7 @@ impl AgentSession {
             runtime_mode: RuntimeMode::FullAccess,
             reasoning_effort: None,
             service_tier: None,
+            codex_profile: None,
             context_window: None,
             agent_preset: None,
             status: SessionStatus::Idle,
@@ -1074,6 +1084,7 @@ impl AgentSession {
             runtime_mode: RuntimeMode::default(),
             reasoning_effort: None,
             service_tier: None,
+            codex_profile: None,
             context_window: None,
             agent_preset: None,
             status: self.status,

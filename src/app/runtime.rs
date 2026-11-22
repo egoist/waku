@@ -114,6 +114,25 @@ pub(super) fn session_has_active_provider_turn(session: &AgentSession) -> bool {
             .is_some_and(|turn| turn.status == TurnStatus::Running && turn.provider_turn_started)
 }
 
+/// The Codex config profile a session runs under.
+///
+/// A profile only means something to Codex, and only while the file it names
+/// is still there: a session that was restored after the profile was deleted
+/// falls back to the base configuration rather than starting a process Codex
+/// cannot read.
+pub(super) fn codex_profile_for_session(
+    session: &AgentSession,
+    probe: Option<&ProviderProbe>,
+) -> Option<String> {
+    if session.provider != ProviderKind::Codex {
+        return None;
+    }
+    let profile = session.codex_profile.as_deref()?;
+    let known =
+        probe.is_some_and(|probe| probe.codex_profiles.iter().any(|name| name == profile));
+    known.then(|| profile.to_owned())
+}
+
 /// Merge the daemon's list-only session projection into the desktop catalog.
 ///
 /// Existing rows may already contain a hydrated transcript, so only list
@@ -1470,6 +1489,7 @@ impl Waku {
                             path: None,
                             models: crate::model_catalog::fallback_models(provider),
                             agent_presets: crate::model_catalog::fallback_agent_presets(provider),
+                            codex_profiles: Vec::new(),
                         },
                     };
                     if provider_detection_tx.send(probe).is_ok() {
@@ -2598,7 +2618,18 @@ impl Waku {
             reasoning_effort,
             service_tier,
             context_window,
+            codex_profile: self.codex_profile_for_session(session),
         }
+    }
+
+    /// The Codex config profile a session runs under.
+    ///
+    /// A profile only means something to Codex, and only while the file it
+    /// names is still there: a session that was restored after the profile
+    /// was deleted falls back to the base configuration rather than starting
+    /// a process Codex cannot read.
+    pub(super) fn codex_profile_for_session(&self, session: &AgentSession) -> Option<String> {
+        codex_profile_for_session(session, self.provider_probe(ProviderKind::Codex))
     }
 
     pub(super) fn agent_preset_for_session(&self, session: &AgentSession) -> Option<String> {
@@ -2722,6 +2753,7 @@ impl Waku {
             reasoning_effort,
             service_tier,
             context_window,
+            codex_profile,
         } = self.session_options(&session);
         Ok(DriverStartRequest {
             session_id: session.id,
@@ -2735,6 +2767,7 @@ impl Waku {
                 service_tier,
                 context_window,
                 agent_preset,
+                codex_profile,
                 computer_use_enabled: self.state.computer_use_enabled,
                 provider_cursor: session.provider_cursor.clone(),
             },

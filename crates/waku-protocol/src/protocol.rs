@@ -277,6 +277,11 @@ pub struct WireDriverStartOptions {
     pub service_tier: Option<String>,
     pub context_window: Option<String>,
     pub agent_preset: Option<String>,
+    /// The Codex config profile this session runs under. Codex reads its
+    /// configuration when the app-server starts, so the profile belongs to the
+    /// start rather than to a turn.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub codex_profile: Option<String>,
     pub computer_use_enabled: bool,
     pub provider_cursor: Option<Value>,
 }
@@ -289,6 +294,11 @@ pub struct WireSessionOptions {
     pub reasoning_effort: Option<String>,
     pub service_tier: Option<String>,
     pub context_window: Option<String>,
+    /// The Codex config profile this session runs under. Changing it needs a
+    /// new Codex process, so the driver answers that it cannot apply the
+    /// change in place.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub codex_profile: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, TS)]

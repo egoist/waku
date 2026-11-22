@@ -480,6 +480,8 @@ models.standard: 标准
 models.reasoning: 推理强度
 models.service_tier: 服务等级
 models.context_window: 上下文窗口
+models.codex_profile: Codex 配置文件
+models.codex_default_profile: 默认配置
 model_option.none: 无
 model_option.minimal: 最低
 model_option.low: 低

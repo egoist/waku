@@ -1260,6 +1260,7 @@ impl StateStore {
         session.runtime_mode = stored.runtime_mode;
         session.reasoning_effort = stored.reasoning_effort;
         session.service_tier = stored.service_tier;
+        session.codex_profile = stored.codex_profile;
         session.context_window = stored.context_window;
         session.context_usage = stored.context_usage;
         session.runtime_event_cursor = stored.runtime_event_cursor;
@@ -1543,6 +1544,7 @@ fn session_skeleton(row: SessionColumns) -> Option<AgentSession> {
         runtime_mode: RuntimeMode::default(),
         reasoning_effort: None,
         service_tier: None,
+        codex_profile: None,
         context_window: None,
         agent_preset: None,
         status: serde_json::from_value(serde_json::Value::String(status)).ok()?,

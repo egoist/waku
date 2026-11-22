@@ -216,6 +216,7 @@ impl PiDriver {
             agent_preset: _,
             computer_use_enabled,
             provider_cursor,
+            codex_profile: _,
         } = options;
         if mode != RuntimeMode::FullAccess {
             return Err(anyhow!(
@@ -1761,6 +1762,7 @@ mod tests {
                 agent_preset: None,
                 computer_use_enabled: false,
                 provider_cursor: None,
+                codex_profile: None,
             },
             events,
         )
@@ -1821,6 +1823,7 @@ mod tests {
             reasoning_effort: Some("high".to_owned()),
             service_tier: None,
             context_window: None,
+            codex_profile: None,
         };
 
         assert!(driver.apply_options(options(RuntimeMode::FullAccess)));
@@ -2008,6 +2011,7 @@ mod tests {
                 agent_preset: None,
                 computer_use_enabled: false,
                 provider_cursor: None,
+                codex_profile: None,
             },
             events,
         )

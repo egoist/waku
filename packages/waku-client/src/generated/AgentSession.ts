@@ -29,6 +29,12 @@ auto_title?: string | null, project_id: string,
  */
 workspace?: SessionWorkspace, provider: ProviderKind, model?: string | null, runtime_mode: RuntimeMode, reasoning_effort?: string | null, service_tier?: string | null,
 /**
+ * The Codex config profile this session runs under, when it runs under
+ * one. Codex reads its configuration when the app-server starts, so the
+ * profile is fixed for the life of the runtime.
+ */
+codex_profile?: string | null,
+/**
  * Selected context window, when the provider exposes more than one.
  */
 context_window?: string | null,

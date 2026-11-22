@@ -1105,6 +1105,29 @@ impl Waku {
         }
     }
 
+    /// The Codex config profile a session runs under.
+    ///
+    /// Codex reads its configuration when the app-server starts, so a
+    /// different profile needs a different process: the runtime is replaced
+    /// rather than reconfigured, and the next prompt starts it with the new
+    /// profile.
+    pub(super) fn set_codex_profile(&mut self, profile: Option<String>, cx: &mut Context<Self>) {
+        let Some(session) = self.selected_session_mut() else {
+            return;
+        };
+        if session.provider != ProviderKind::Codex || session.is_busy() {
+            return;
+        }
+        if session.codex_profile.as_deref() == profile.as_deref() {
+            return;
+        }
+        let session_id = session.id;
+        session.codex_profile = profile;
+        self.reset_session_runtime(session_id);
+        self.save();
+        cx.notify();
+    }
+
     pub(super) fn set_context_window(&mut self, window: String, cx: &mut Context<Self>) {
         if let Some(session) = self.selected_session_mut()
             && session.context_window.as_deref() != Some(window.as_str())

@@ -1412,6 +1412,7 @@ mod tests {
                         agent_preset: None,
                         computer_use_enabled: false,
                         provider_cursor: None,
+                        codex_profile: None,
                     },
                 },
             )
@@ -1479,6 +1480,7 @@ mod tests {
                         agent_preset: None,
                         computer_use_enabled: false,
                         provider_cursor: None,
+                        codex_profile: None,
                     },
                 },
             )
@@ -1596,6 +1598,7 @@ mod tests {
                         agent_preset: None,
                         computer_use_enabled: false,
                         provider_cursor: None,
+                        codex_profile: None,
                     },
                 },
             )
@@ -2253,6 +2256,7 @@ mod tests {
             service_tier: None,
             context_window: None,
             agent_preset: None,
+            codex_profile: None,
             computer_use_enabled: false,
             provider_cursor: None,
         }

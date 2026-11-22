@@ -15,6 +15,16 @@ pub fn provider_probe(provider: ProviderKind, binary_override: Option<&str>) -> 
         path,
         models: crate::model_catalog::fallback_models(provider),
         agent_presets: crate::model_catalog::fallback_agent_presets(provider),
+        codex_profiles: codex_profiles(provider),
+    }
+}
+
+/// The config profiles the daemon host can run a Codex session under. Every
+/// other provider has none.
+fn codex_profiles(provider: ProviderKind) -> Vec<String> {
+    match provider {
+        ProviderKind::Codex => crate::codex_profile::list_profiles(),
+        _ => Vec::new(),
     }
 }
 
@@ -82,6 +92,7 @@ mod tests {
             path: Some("/usr/bin/codex".into()),
             models: crate::model_catalog::fallback_models(ProviderKind::Codex),
             agent_presets: Vec::new(),
+            codex_profiles: Vec::new(),
         };
         let cached = vec![ProviderModel::new("cached-model", "Cached model").default()];
 

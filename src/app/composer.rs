@@ -1463,9 +1463,19 @@ impl Waku {
         let theme = Theme::current(cx);
         let session = self.selected_session()?;
         let model = self.model_metadata_for_session(session)?;
+        // Codex reads a named config profile when its app-server starts, so the
+        // profile belongs to the same control as the model's other options.
+        let codex_profiles = if session.provider == ProviderKind::Codex {
+            self.provider_probe(ProviderKind::Codex)
+                .map(|probe| probe.codex_profiles.clone())
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
         if model.reasoning_efforts.is_empty()
             && model.service_tiers.is_empty()
             && model.context_windows.is_empty()
+            && codex_profiles.is_empty()
         {
             return None;
         }
@@ -1570,13 +1580,21 @@ impl Waku {
             });
 
         let fast = selected_tier == "fast" || tier_label.eq_ignore_ascii_case("fast");
-        let trigger_label = match (
-            effort_label.unwrap_or_else(|| tier_label.clone()),
-            window_label,
-        ) {
-            (label, Some(window)) => format!("{label} · {window}"),
-            (label, None) => label,
-        };
+        // The active profile reads on the chip too: it decides which provider
+        // the session talks to, which the tier and the effort say nothing
+        // about.
+        let selected_profile = session
+            .codex_profile
+            .clone()
+            .filter(|profile| codex_profiles.iter().any(|known| known == profile));
+        let mut trigger_parts = vec![effort_label.unwrap_or_else(|| tier_label.clone())];
+        if let Some(window) = window_label {
+            trigger_parts.push(window);
+        }
+        if let Some(profile) = selected_profile.as_ref() {
+            trigger_parts.push(profile.clone());
+        }
+        let trigger_label = trigger_parts.join(" · ");
         let reasoning_efforts = model.reasoning_efforts.clone();
         let default_effort = model.default_reasoning_effort.clone();
         let service_tiers = model.service_tiers.clone();
@@ -1669,6 +1687,42 @@ impl Waku {
                                 move |_, cx| {
                                     let _ = weak.update(cx, |this, cx| {
                                         this.set_context_window(window.clone(), cx);
+                                    });
+                                },
+                            ),
+                        );
+                    }
+                }
+                if !codex_profiles.is_empty() {
+                    if !reasoning_efforts.is_empty()
+                        || !service_tiers.is_empty()
+                        || !context_windows.is_empty()
+                    {
+                        items.push(MenuItem::Separator);
+                    }
+                    items.push(MenuItem::Header(tr!("models.codex_profile").into()));
+                    let weak_default = weak.clone();
+                    items.push(
+                        traits_choice(
+                            theme,
+                            tr!("models.codex_default_profile"),
+                            true,
+                            selected_profile.is_none(),
+                        )
+                        .on_click(move |_, cx| {
+                            let _ = weak_default.update(cx, |this, cx| {
+                                this.set_codex_profile(None, cx);
+                            });
+                        }),
+                    );
+                    for profile in codex_profiles.clone() {
+                        let weak = weak.clone();
+                        let selected = selected_profile.as_deref() == Some(profile.as_str());
+                        items.push(
+                            traits_choice(theme, profile.clone(), false, selected).on_click(
+                                move |_, cx| {
+                                    let _ = weak.update(cx, |this, cx| {
+                                        this.set_codex_profile(Some(profile.clone()), cx);
                                     });
                                 },
                             ),

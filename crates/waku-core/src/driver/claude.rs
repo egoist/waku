@@ -179,6 +179,7 @@ impl ClaudeDriver {
             agent_preset: _,
             computer_use_enabled: _,
             provider_cursor,
+            codex_profile: _,
         } = options;
         let (resume_session_id, resume_at) = match provider_cursor {
             Some(ProviderResumeCursor::Claude {
@@ -1890,6 +1891,7 @@ mod tests {
                 agent_preset: None,
                 computer_use_enabled: false,
                 provider_cursor: None,
+                codex_profile: None,
             },
             events,
         )
@@ -1958,6 +1960,7 @@ mod tests {
                 agent_preset: None,
                 computer_use_enabled: false,
                 provider_cursor: None,
+                codex_profile: None,
             },
             events,
         )

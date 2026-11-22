@@ -24,6 +24,7 @@ pub mod blob_store;
 pub mod checkpoint;
 mod claude_metadata;
 pub mod claude_session;
+mod codex_profile;
 pub mod codex_session;
 pub mod command_env;
 pub mod composer_complete;

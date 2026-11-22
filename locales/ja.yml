@@ -505,6 +505,8 @@ models.standard: 標準
 models.reasoning: 推論レベル
 models.service_tier: サービスティア
 models.context_window: コンテキストウィンドウ
+models.codex_profile: Codex プロファイル
+models.codex_default_profile: デフォルト設定
 
 model_option.none: なし
 model_option.minimal: 最小

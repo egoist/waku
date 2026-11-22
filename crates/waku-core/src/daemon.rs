@@ -785,6 +785,7 @@ impl Backend for WakuBackend {
                     service_tier: options.service_tier,
                     context_window: options.context_window,
                     agent_preset: options.agent_preset,
+                    codex_profile: options.codex_profile,
                     computer_use_enabled: options.computer_use_enabled,
                     provider_cursor: options
                         .provider_cursor
@@ -913,6 +914,7 @@ fn merge_stale_session_metadata(existing: &mut AgentSession, incoming: AgentSess
         existing.runtime_mode = incoming.runtime_mode;
         existing.reasoning_effort = incoming.reasoning_effort;
         existing.service_tier = incoming.service_tier;
+        existing.codex_profile = incoming.codex_profile;
         existing.context_window = incoming.context_window;
         existing.agent_preset = incoming.agent_preset;
         existing.updated_at = incoming.updated_at;
@@ -1357,6 +1359,7 @@ impl WakuBackend {
                 service_tier: source.service_tier.clone(),
                 context_window: source.context_window.clone(),
                 agent_preset: source.agent_preset.clone(),
+                codex_profile: source.codex_profile.clone(),
                 computer_use_enabled: false,
                 provider_cursor: source.provider_cursor.clone(),
             },
@@ -1517,6 +1520,7 @@ impl WakuBackend {
                 service_tier: source.service_tier.clone(),
                 context_window: source.context_window.clone(),
                 agent_preset: source.agent_preset.clone(),
+                codex_profile: source.codex_profile.clone(),
                 computer_use_enabled: false,
                 provider_cursor: source.provider_cursor.clone(),
             },
@@ -1759,6 +1763,7 @@ fn handle_driver_command(
                     reasoning_effort: options.reasoning_effort,
                     service_tier: options.service_tier,
                     context_window: options.context_window,
+                    codex_profile: options.codex_profile,
                 }),
             });
         }

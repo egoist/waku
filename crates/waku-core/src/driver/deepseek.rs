@@ -109,6 +109,7 @@ impl DeepSeekDriver {
             agent_preset,
             computer_use_enabled: _,
             provider_cursor,
+            codex_profile: _,
         } = options;
         let (requested_session_id, resuming) = match provider_cursor {
             Some(ProviderResumeCursor::DeepSeek { session_id }) if !session_id.is_empty() => {
@@ -171,6 +172,7 @@ impl DeepSeekDriver {
             reasoning_effort,
             service_tier,
             context_window: None,
+            codex_profile: None,
         };
         apply_session_options(
             &server,

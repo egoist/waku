@@ -121,6 +121,7 @@ impl AcpDriver {
             agent_preset: _,
             computer_use_enabled,
             provider_cursor,
+            codex_profile: _,
         } = options;
         let fork_context = match &provider_cursor {
             Some(ProviderResumeCursor::Cursor { fork_context, .. }) => fork_context.clone(),
@@ -2636,6 +2637,7 @@ mod tests {
                 agent_preset: None,
                 computer_use_enabled: false,
                 provider_cursor: None,
+                codex_profile: None,
             },
             events,
         )
@@ -2689,6 +2691,7 @@ mod tests {
                 agent_preset: None,
                 computer_use_enabled: false,
                 provider_cursor: None,
+                codex_profile: None,
             },
             events,
         )
@@ -2747,6 +2750,7 @@ mod tests {
                 agent_preset: None,
                 computer_use_enabled: false,
                 provider_cursor: None,
+                codex_profile: None,
             },
             events,
         )
