@@ -1151,6 +1151,12 @@ mod tests {
         let workspace = Path::new(env!("CARGO_MANIFEST_DIR"));
         let inside = workspace.join("src/app.rs");
         let outside = workspace.join("../kero/src/app.rs");
+        // A key is the path as the platform spells it, so the file viewer
+        // and this lookup agree on Windows as well.
+        let native = Path::new("src")
+            .join("app.rs")
+            .to_string_lossy()
+            .into_owned();
 
         assert_eq!(
             activity_changed_editor_keys(
@@ -1163,11 +1169,7 @@ mod tests {
                 ],
                 Some(workspace),
             ),
-            vec![
-                "src/app.rs".to_owned(),
-                "src/app.rs".to_owned(),
-                "src/lib.rs".to_owned()
-            ]
+            vec![native, "src/app.rs".to_owned(), "src/lib.rs".to_owned()]
         );
         assert!(activity_changed_editor_keys(&["src/app.rs".into()], None).is_empty());
     }
