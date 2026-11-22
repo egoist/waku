@@ -16,7 +16,6 @@ the original feature bullet instead of adding separate entries for them.
 
 ## [unreleased]
 
-- Run a Codex task under a config profile: pick one of the profiles in your Codex home from the composer's model options, and the task starts with that profile's settings
 ## [0.1.20]
 
 - Support the OpenCode 2.0 release, which now installs as `opencode`: OpenCode runs on its shared background service, OpenCode 2 beta and OpenCode 1 tasks continue as OpenCode tasks, and OpenCode's free models work in Waku tasks
