@@ -476,6 +476,12 @@ mod tests {
         std::fs::write(path, contents).unwrap();
     }
 
+    /// A path as a JSON string, with the escaping a JSON string needs. Windows
+    /// separators are backslashes, and a backslash is an escape in JSON.
+    fn json_path(path: &Path) -> String {
+        serde_json::to_string(&path.to_string_lossy().into_owned()).unwrap()
+    }
+
     #[test]
     fn claude_plugins_come_from_the_installed_list() {
         let root = temp_root("claude-list");
@@ -490,8 +496,8 @@ mod tests {
         std::fs::write(
             root.join("plugins/installed_plugins.json"),
             format!(
-                r#"{{"version":2,"plugins":{{"plugin@market":[{{"scope":"user","installPath":"{}"}}]}}}}"#,
-                plugin.display()
+                r#"{{"version":2,"plugins":{{"plugin@market":[{{"scope":"user","installPath":{}}}]}}}}"#,
+                json_path(&plugin)
             ),
         )
         .unwrap();
@@ -515,8 +521,8 @@ mod tests {
         std::fs::write(
             &list,
             format!(
-                r#"{{"version":1,"plugins":{{"plugin@market":{{"version":"1.0.0","installPath":"{}"}}}}}}"#,
-                plugin.display()
+                r#"{{"version":1,"plugins":{{"plugin@market":{{"version":"1.0.0","installPath":{}}}}}}}"#,
+                json_path(&plugin)
             ),
         )
         .unwrap();
@@ -536,9 +542,9 @@ mod tests {
         std::fs::write(
             &list,
             format!(
-                r#"{{"version":2,"plugins":{{"plugin@market":[{{"scope":"project","projectPath":"{}","installPath":"{}"}}]}}}}"#,
-                root.join("work").display(),
-                plugin.display()
+                r#"{{"version":2,"plugins":{{"plugin@market":[{{"scope":"project","projectPath":{},"installPath":{}}}]}}}}"#,
+                json_path(&root.join("work")),
+                json_path(&plugin)
             ),
         )
         .unwrap();
@@ -618,8 +624,8 @@ mod tests {
         std::fs::write(
             &list,
             format!(
-                r#"{{"version":2,"plugins":{{"plugin@market":[{{"scope":"user","installPath":"{}"}}]}}}}"#,
-                plugin.display()
+                r#"{{"version":2,"plugins":{{"plugin@market":[{{"scope":"user","installPath":{}}}]}}}}"#,
+                json_path(&plugin)
             ),
         )
         .unwrap();
