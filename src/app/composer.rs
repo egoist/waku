@@ -1338,6 +1338,10 @@ impl Waku {
                 let next_models = available_models.clone();
                 let previous_models = available_models.clone();
                 let confirm_models = available_models.clone();
+                // The drawn headers travel with the rows: a row's place in the
+                // list is not its row index once a header sits above it.
+                let next_groups = sub_provider_groups.clone();
+                let previous_groups = sub_provider_groups.clone();
                 let next_weak = weak.clone();
                 let previous_weak = weak.clone();
                 let next_tab_weak = weak.clone();
@@ -1361,12 +1365,22 @@ impl Waku {
                     // focused text field.
                     .on_action(move |_: &SelectNextEntry, _, cx| {
                         let _ = next_weak.update(cx, |this, cx| {
-                            this.move_model_picker_highlight("down", &next_models, cx);
+                            this.move_model_picker_highlight(
+                                "down",
+                                &next_models,
+                                &next_groups,
+                                cx,
+                            );
                         });
                     })
                     .on_action(move |_: &SelectPreviousEntry, _, cx| {
                         let _ = previous_weak.update(cx, |this, cx| {
-                            this.move_model_picker_highlight("up", &previous_models, cx);
+                            this.move_model_picker_highlight(
+                                "up",
+                                &previous_models,
+                                &previous_groups,
+                                cx,
+                            );
                         });
                     })
                     .on_action(move |_: &SelectNextTab, _, cx| {
@@ -1417,6 +1431,7 @@ impl Waku {
         &mut self,
         key: &str,
         models: &[(ProviderKind, ProviderModel)],
+        groups: &[(usize, String)],
         cx: &mut Context<Self>,
     ) {
         let current = self
@@ -1426,7 +1441,8 @@ impl Waku {
             return;
         };
         self.model_picker_highlight = Some(next);
-        self.model_picker_scroll.scroll_to_item(next);
+        self.model_picker_scroll
+            .scroll_to_item(picker_child_index(next, groups));
         cx.notify();
     }
 
@@ -1470,18 +1486,29 @@ impl Waku {
         let locked_provider = session
             .filter(|session| !session.messages.is_empty())
             .map(|session| session.provider);
-        let index = visible_picker_models(
+        let models = visible_picker_models(
             &self.probes,
             &self.state.favorite_models,
             &self.state.disabled_providers,
             locked_provider,
             self.model_picker_tab,
             "",
-        )
-        .iter()
-        .position(|(kind, model)| *kind == provider && selected_model == Some(model.id.as_str()))
-        .unwrap_or(0);
-        self.model_picker_scroll.scroll_to_item(index);
+        );
+        let index = models
+            .iter()
+            .position(|(kind, model)| {
+                *kind == provider && selected_model == Some(model.id.as_str())
+            })
+            .unwrap_or(0);
+        // The list drawn here is the unfiltered one, so it carries the same
+        // group headers the picker draws.
+        let groups = if matches!(self.model_picker_tab, ModelPickerTab::Provider(_)) {
+            picker_sub_provider_groups(&models)
+        } else {
+            Vec::new()
+        };
+        self.model_picker_scroll
+            .scroll_to_item(picker_child_index(index, &groups));
     }
 
     /// Take the row the selection is on, defaulting to the first so `enter`
@@ -3925,6 +3952,21 @@ pub(super) fn picker_sub_provider_groups(
         .filter(|(_, name)| !name.is_empty())
         .map(|(index, name)| (index, name.to_owned()))
         .collect()
+}
+
+/// The index a model row is drawn at among the picker's list children.
+///
+/// A group header is drawn as a child of its own, right above the first row
+/// of its group, so every model below a header sits further down the list
+/// than its row index. The scroll handle counts children, not models, so
+/// scrolling to a row has to use the drawn index or the list scrolls to the
+/// wrong row.
+pub(super) fn picker_child_index(model_index: usize, groups: &[(usize, String)]) -> usize {
+    model_index
+        + groups
+            .iter()
+            .filter(|(start, _)| *start <= model_index)
+            .count()
 }
 
 pub(super) fn model_picker_subtitle(provider: ProviderKind, sub_provider: Option<&str>) -> String {

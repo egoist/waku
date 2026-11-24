@@ -1966,6 +1966,42 @@ fn picker_sub_provider_groups_split_a_repeating_id_list_only_when_needed() {
 }
 
 #[test]
+fn picker_scrolls_to_the_row_it_drew_not_to_its_row_index() {
+    use super::composer::{picker_child_index, picker_sub_provider_groups};
+    use crate::model::ProviderModel;
+
+    let model = |id: &str, sub_provider: Option<&str>| {
+        let mut model = ProviderModel::new(id, id);
+        model.sub_provider = sub_provider.map(str::to_owned);
+        (ProviderKind::OpenCode, model)
+    };
+
+    // A header is drawn as a child of its own, so the scroll handle — which
+    // counts children — needs the drawn index, not the row index.
+    let models = [
+        model("gpt-5.6-luna", Some("Github Copilot")),
+        model("gpt-5.6-sol", Some("Github Copilot")),
+        model("gpt-5.6-luna", Some("Opencode Go")),
+        model("muse-spark-1.2", Some("Opencode Go")),
+    ];
+    let groups = picker_sub_provider_groups(&models);
+    // The drawn list is header, row, row, header, row, row.
+    assert_eq!(picker_child_index(0, &groups), 1);
+    assert_eq!(picker_child_index(1, &groups), 2);
+    assert_eq!(picker_child_index(2, &groups), 4);
+    assert_eq!(picker_child_index(3, &groups), 5);
+
+    // An ungrouped list keeps the row index.
+    let flat = [
+        model("gpt-5.6-luna", Some("Github Copilot")),
+        model("gpt-5.6-sol", Some("Github Copilot")),
+    ];
+    let groups = picker_sub_provider_groups(&flat);
+    assert!(groups.is_empty());
+    assert_eq!(picker_child_index(1, &groups), 1);
+}
+
+#[test]
 fn switched_off_providers_leave_the_picker_except_for_their_locked_session() {
     use super::ModelPickerTab;
     use super::composer::visible_picker_models;
