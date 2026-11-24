@@ -155,6 +155,7 @@ enum PaletteAction {
     FocusComposer,
     CopyIdentifier(PaletteIdentifier),
     ChooseModel,
+    CycleModel,
     ToggleUsage,
     CollapseSidebarGroups,
     ToggleSidebar,
@@ -733,6 +734,19 @@ impl Waku {
                 Some(crate::platform::primary_shortcut("⌘/", "Ctrl+/")),
                 PaletteAction::ChooseModel,
                 "choose change select model provider agent",
+                next(),
+            ));
+        }
+
+        if can_choose_model {
+            // Cycling opens no popover, so it also runs from Settings.
+            commands.push(CommandPaletteItem::command(
+                PaletteSection::Commands,
+                tr!("command_palette.cycle_model"),
+                "icons/bot.svg",
+                Some(crate::platform::primary_shortcut("⌘⌥M", "Ctrl+Alt+M")),
+                PaletteAction::CycleModel,
+                "cycle next model provider switch",
                 next(),
             ));
         }
@@ -1595,6 +1609,10 @@ impl Waku {
                 self.select_session(session_id, cx);
                 let focus = self.composer_focus(cx);
                 window.focus(&focus, cx);
+            }
+            PaletteAction::CycleModel => {
+                self.settings_page = None;
+                self.cycle_model_action(&CycleModel, window, cx);
             }
             PaletteAction::ChooseModel | PaletteAction::ToggleUsage => {
                 // These popovers are rendered by the composer. If the command

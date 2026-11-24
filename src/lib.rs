@@ -82,6 +82,7 @@ actions!(
         CancelTaskSwitch,
         FocusComposer,
         ToggleModelPicker,
+        CycleModel,
         ToggleUsagePanel,
         SaveFile,
         CancelTurn,
@@ -256,6 +257,9 @@ pub fn run() {
                 KeyBinding::new("escape", CancelTaskSwitch, Some("TaskSwitcher")),
                 KeyBinding::new("secondary-l", FocusComposer, None),
                 KeyBinding::new("secondary-/", ToggleModelPicker, None),
+                // Quick switching without opening the picker. On the alt chord
+                // because command + shift + M belongs to CycleAccessMode.
+                KeyBinding::new("secondary-alt-m", CycleModel, Some("Waku")),
                 KeyBinding::new("secondary-u", ToggleUsagePanel, None),
                 KeyBinding::new("secondary-s", SaveFile, None),
                 KeyBinding::new("escape", CancelTurn, Some("Waku")),
@@ -463,6 +467,7 @@ pub(crate) fn set_app_menus(cx: &mut App, updater_available: bool) {
                 MenuItem::action(tr!("menu.toggle_right_panel"), ToggleRightPanel),
                 MenuItem::action(tr!("menu.focus_composer"), FocusComposer),
                 MenuItem::action(tr!("menu.toggle_model_picker"), ToggleModelPicker),
+                MenuItem::action(tr!("menu.cycle_model"), CycleModel),
                 MenuItem::action(tr!("menu.toggle_usage_panel"), ToggleUsagePanel),
             ],
         },

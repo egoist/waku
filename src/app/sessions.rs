@@ -1,3 +1,4 @@
+use super::composer::{next_picker_highlight, visible_picker_models};
 use super::*;
 
 fn retain_runtime_after_cancel(provider: ProviderKind) -> bool {
@@ -996,6 +997,50 @@ impl Waku {
             }
             crate::ui::menu::toggle_popover(&handle, MenuAlign::AboveLeft, window, cx);
         });
+    }
+
+    /// Primary + Alt + M: step to the next model in the session's provider
+    /// catalog, wrapping at both ends — quick switching without opening the
+    /// picker. Cycles the provider tab's display order, so the chip lands where
+    /// a click on the next row would.
+    pub(super) fn cycle_model_action(
+        &mut self,
+        _: &CycleModel,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.settings_page.is_some() {
+            return;
+        }
+        let Some(session) = self.selected_session() else {
+            return;
+        };
+        let provider = session.provider;
+        if !session.can_choose_model(provider) {
+            return;
+        }
+        let selected = self
+            .catalog_model_id_for_session(session)
+            .map(str::to_owned);
+        // A started session is bound to its provider, so the cycle stays
+        // inside the catalog it is already using.
+        let locked_provider = (!session.messages.is_empty()).then_some(provider);
+        let models = visible_picker_models(
+            &self.probes,
+            &self.state.favorite_models,
+            &self.state.disabled_providers,
+            locked_provider,
+            ModelPickerTab::Provider(provider),
+            "",
+        );
+        let current = models.iter().position(|(kind, model)| {
+            *kind == provider && selected.as_deref() == Some(model.id.as_str())
+        });
+        let Some(next) = next_picker_highlight(current, models.len(), "down") else {
+            return;
+        };
+        let (next_provider, next_model) = &models[next];
+        self.choose_model(*next_provider, next_model.id.clone(), cx);
     }
 
     /// Discovery is not requested here: launch already requested it for every

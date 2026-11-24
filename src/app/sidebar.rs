@@ -1985,6 +1985,12 @@ impl Waku {
                         } else if key == "f10" && event.keystroke.modifiers.shift {
                             keyboard_menu.open_context_menu(window, cx);
                             cx.stop_propagation();
+                        } else if key == "backspace" && event.keystroke.modifiers.secondary() {
+                            // Command + delete on a session, matching the
+                            // context menu's Remove, which also deletes without a
+                            // prompt.
+                            this.remove_session(session_id, cx);
+                            cx.stop_propagation();
                         }
                     }))
                     .on_click(cx.listener(move |this, _, _, cx| {

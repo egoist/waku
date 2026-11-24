@@ -40,6 +40,8 @@ menu.focus_composer:
   en: Focus Composer
 menu.toggle_model_picker:
   en: Toggle Model Picker
+menu.cycle_model:
+  en: Cycle Model
 menu.toggle_usage_panel:
   en: Toggle Usage Panel
 menu.window:
@@ -94,6 +96,8 @@ command_palette.open_project:
   en: Open project…
 command_palette.choose_model:
   en: Choose model…
+command_palette.cycle_model:
+  en: Cycle model
 command_palette.copy_task_id:
   en: Copy Task ID
 command_palette.copy_agent_cli_thread_id:
