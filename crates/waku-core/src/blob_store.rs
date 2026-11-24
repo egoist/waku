@@ -13,6 +13,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::SystemTime;
 
 use base64::Engine as _;
+use sha2::{Digest as _, Sha256};
 
 pub use waku_protocol::blob::SCHEME as BLOB_SCHEME;
 
@@ -20,17 +21,14 @@ pub use waku_protocol::blob::SCHEME as BLOB_SCHEME;
 /// a favicon-sized image, and tests use tiny fixtures.
 const MIN_EXTERNALIZED_BYTES: usize = 8 * 1024;
 
-/// Blob file names are `<hash>.<ext>`; the hash is FNV-1a over the bytes, which
-/// is enough to deduplicate identical screenshots without pulling in a crypto
-/// dependency. A collision would only ever alias two identical-length payloads,
-/// and the length is folded into the digest below.
-fn fingerprint(bytes: &[u8]) -> u64 {
-    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
-    for byte in bytes {
-        hash ^= u64::from(*byte);
-        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
-    }
-    hash ^ (bytes.len() as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15)
+/// Blob file names are `<sha256>.<ext>`, which makes content addressing
+/// collision-proof instead of relying on a 64-bit FNV-1a digest that could
+/// alias two different payloads of the same length. References are opaque —
+/// resolution only parses the name out of the `waku-blob:` string — so blobs
+/// written by older builds under the FNV-1a name still resolve and sweep
+/// normally; only newly written payloads get the longer name.
+fn fingerprint(bytes: &[u8]) -> String {
+    format!("{:x}", Sha256::digest(bytes))
 }
 
 fn extension_for_mime(mime_type: &str) -> &'static str {
@@ -98,11 +96,7 @@ impl BlobStore {
     /// Clipboard paste calls this off the UI thread, then resolves the
     /// reference to the real path that providers can read.
     pub fn store_image_bytes(&self, mime_type: &str, bytes: &[u8]) -> io::Result<String> {
-        let name = format!(
-            "{:016x}.{}",
-            fingerprint(bytes),
-            extension_for_mime(mime_type)
-        );
+        let name = format!("{}.{}", fingerprint(bytes), extension_for_mime(mime_type));
         self.write_blob(&name, bytes)?;
         Ok(format!("{BLOB_SCHEME}{name}"))
     }
@@ -263,6 +257,48 @@ mod tests {
             .unwrap()
             .count();
         assert_eq!(shard_count, 1);
+
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn new_blobs_are_named_by_their_sha256() {
+        let root = temporary_root();
+        let store = BlobStore::new(root.clone());
+        let reference = store.store_data_url(&data_url("image/png", &vec![7u8; 64 * 1024]));
+
+        let stem = reference
+            .strip_prefix(BLOB_SCHEME)
+            .and_then(|name| name.strip_suffix(".png"))
+            .unwrap();
+        assert_eq!(stem.len(), 64);
+        assert!(stem.bytes().all(|byte| byte.is_ascii_hexdigit()));
+
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn legacy_fnv_named_blobs_still_resolve() {
+        let root = temporary_root();
+        let store = BlobStore::new(root.clone());
+        // Blobs written before the store switched to SHA-256 keep their
+        // 16-hex-digit FNV-1a names inside persisted sessions. Resolution
+        // only parses the reference string — it never recomputes the hash —
+        // so those blobs must keep resolving and surviving sweeps.
+        let legacy = "0123456789abcdef.png";
+        fs::create_dir_all(root.join(&legacy[..2])).unwrap();
+        fs::write(root.join(&legacy[..2]).join(legacy), b"old image").unwrap();
+
+        let reference = format!("{BLOB_SCHEME}{legacy}");
+        assert_eq!(
+            fs::read(store.path_for(&reference).unwrap()).unwrap(),
+            b"old image"
+        );
+        assert_eq!(
+            store.retain(&HashSet::from([reference.clone()])).unwrap(),
+            0
+        );
+        assert!(store.path_for(&reference).unwrap().exists());
 
         fs::remove_dir_all(root).ok();
     }
