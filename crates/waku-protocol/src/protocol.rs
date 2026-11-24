@@ -353,6 +353,18 @@ pub enum ServerMessage {
     TaskStateChanged {
         revision: u64,
     },
+    /// The reconnecting client asked to resume one runtime's event journal
+    /// from a sequence the journal had already rolled past, so its replay
+    /// was necessarily incomplete. Clients should rehydrate the session
+    /// instead of trusting the truncated stream.
+    ReplayGap {
+        session_id: Uuid,
+        runtime_id: Uuid,
+        /// The sequence the client asked to resume after.
+        requested_after: u64,
+        /// The oldest event the journal still holds.
+        earliest_available: u64,
+    },
     ShuttingDown,
 }
 

@@ -1839,6 +1839,9 @@ fn event_to_wire(event: DriverEvent) -> anyhow::Result<WireDriverEvent> {
         DriverEvent::RuntimeEventCursorAdvanced(_) => {
             bail!("client-only runtime cursors cannot be sent by the daemon")
         }
+        DriverEvent::ReplayGap { .. } => {
+            bail!("replay gaps are reported by the hub, not sent by a provider runtime")
+        }
         DriverEvent::Connected { provider_cursor } => {
             ("connected", serde_json::to_value(provider_cursor)?)
         }

@@ -330,6 +330,52 @@ fn run_client(
                             .lock()
                             .retain(|subscriber| subscriber.send(revision).is_ok());
                     }
+                    ServerMessage::ReplayGap {
+                        session_id,
+                        runtime_id,
+                        requested_after,
+                        earliest_available,
+                    } => {
+                        // The daemon could not replay from the cursor we
+                        // resumed with — its journal had already rolled past
+                        // it. Surface it on the session's event channel as a
+                        // driver event so the app can rehydrate from the
+                        // authoritative session state instead of trusting the
+                        // truncated stream.
+                        let gap = SequencedEvent {
+                            session_id,
+                            runtime_id,
+                            epoch: inner
+                                .last_sequences
+                                .lock()
+                                .get(&(session_id, runtime_id))
+                                .map(|cursor| cursor.epoch)
+                                .unwrap_or_default(),
+                            sequence: earliest_available,
+                            event: waku_protocol::WireDriverEvent::new(
+                                "replayGap",
+                                serde_json::json!({
+                                    "requestedAfter": requested_after,
+                                    "earliestAvailable": earliest_available,
+                                }),
+                            ),
+                        };
+                        let key = (session_id, runtime_id);
+                        {
+                            let sessions = inner.sessions.lock();
+                            if let Some(events) = sessions.get(&key) {
+                                let _ = events.send(gap.clone());
+                            }
+                        }
+                        {
+                            let mut pending = inner.pending_events.lock();
+                            let buffered = pending.entry(key).or_default();
+                            buffered.push_back(gap);
+                            while buffered.len() > MAX_BUFFERED_EVENTS_PER_RUNTIME {
+                                buffered.pop_front();
+                            }
+                        }
+                    }
                     ServerMessage::ShuttingDown => break,
                     ServerMessage::Hello { .. } | ServerMessage::Rejected { .. } => {}
                 }

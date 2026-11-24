@@ -285,15 +285,26 @@ impl Hub {
         let messages = subscriber.messages.clone();
         state.subscribers.insert(id, subscriber);
         for (&(session_id, runtime_id), events) in &state.journal {
-            let sequence = resume_from
-                .iter()
-                .find(|cursor| {
-                    cursor.session_id == session_id
-                        && cursor.runtime_id == runtime_id
-                        && cursor.epoch == self.epoch
-                })
-                .map(|cursor| cursor.sequence)
-                .unwrap_or_default();
+            let cursor = resume_from.iter().find(|cursor| {
+                cursor.session_id == session_id
+                    && cursor.runtime_id == runtime_id
+                    && cursor.epoch == self.epoch
+            });
+            let sequence = cursor.map(|cursor| cursor.sequence).unwrap_or_default();
+            // The journal rolled past the client's resume point, so the
+            // replay is missing events. Tell it rather than let the client
+            // treat a truncated history as complete.
+            if cursor.is_some()
+                && let Some(earliest_available) = events.front().map(|event| event.sequence)
+                && earliest_available > sequence + 1
+            {
+                let _ = messages.try_send(ServerMessage::ReplayGap {
+                    session_id,
+                    runtime_id,
+                    requested_after: sequence,
+                    earliest_available,
+                });
+            }
             for event in events.iter().filter(|event| event.sequence > sequence) {
                 if messages.len() >= MAX_QUEUED_MESSAGES_PER_SUBSCRIBER
                     || messages
@@ -1175,6 +1186,115 @@ mod tests {
             observer_rx.recv_timeout(Duration::from_secs(1)),
             Ok(ServerMessage::TaskStateChanged { revision: 1 })
         ));
+    }
+
+    #[test]
+    fn a_subscriber_resuming_inside_the_journal_plays_only_what_it_missed() {
+        let hub = Hub::default();
+        let session_id = Uuid::new_v4();
+        let runtime_id = Uuid::new_v4();
+        hub.begin_runtime(session_id, runtime_id);
+        for index in 1..=3 {
+            hub.emit(
+                session_id,
+                runtime_id,
+                WireDriverEvent::new("textDelta", json!(index)),
+                true,
+            );
+        }
+
+        let (tx, rx) = unbounded();
+        hub.subscribe(
+            &[ReplayCursor {
+                session_id,
+                runtime_id,
+                epoch: hub.epoch,
+                sequence: 2,
+            }],
+            Subscriber::new(tx).0,
+        );
+
+        let replayed: Vec<SequencedEvent> = rx
+            .try_iter()
+            .filter_map(|message| match message {
+                ServerMessage::Event(event) => Some(event),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(replayed.len(), 1);
+        assert_eq!(replayed[0].sequence, 3);
+    }
+
+    #[test]
+    fn a_subscriber_resuming_before_the_journal_is_told_it_lost_events() {
+        let hub = Hub::default();
+        let session_id = Uuid::new_v4();
+        let runtime_id = Uuid::new_v4();
+        hub.begin_runtime(session_id, runtime_id);
+        // Overflow the journal so its head is well past the resume cursor.
+        for index in 0..(MAX_REPLAY_EVENTS_PER_SESSION + 10) {
+            hub.emit(
+                session_id,
+                runtime_id,
+                WireDriverEvent::new("textDelta", json!(index)),
+                true,
+            );
+        }
+        // The journal dropped the first ten events, so event 3 no longer
+        // exists to replay.
+        let (tx, rx) = unbounded();
+        hub.subscribe(
+            &[ReplayCursor {
+                session_id,
+                runtime_id,
+                epoch: hub.epoch,
+                sequence: 3,
+            }],
+            Subscriber::new(tx).0,
+        );
+
+        let gap = rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        assert!(matches!(
+            gap,
+            ServerMessage::ReplayGap {
+                session_id: reported_session,
+                runtime_id: reported_runtime,
+                requested_after: 3,
+                earliest_available: 11,
+            } if reported_session == session_id && reported_runtime == runtime_id
+        ));
+        // The replay itself still delivers everything the journal kept.
+        let first_event = rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        assert!(matches!(
+            first_event,
+            ServerMessage::Event(SequencedEvent { sequence: 11, .. })
+        ));
+    }
+
+    #[test]
+    fn a_fresh_subscriber_gets_no_gap_for_events_it_never_had() {
+        let hub = Hub::default();
+        let session_id = Uuid::new_v4();
+        let runtime_id = Uuid::new_v4();
+        hub.begin_runtime(session_id, runtime_id);
+        hub.emit(
+            session_id,
+            runtime_id,
+            WireDriverEvent::new("textDelta", json!(1)),
+            true,
+        );
+
+        let (tx, rx) = unbounded();
+        hub.subscribe(&[], Subscriber::new(tx).0);
+
+        let first = rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        assert!(
+            matches!(
+                first,
+                ServerMessage::Event(SequencedEvent { sequence: 1, .. })
+            ),
+            "a client that never held a cursor gets the full replay, not a gap"
+        );
     }
 
     #[test]

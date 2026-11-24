@@ -1930,6 +1930,19 @@ pub enum DriverEvent {
         success: bool,
         summary: Option<String>,
     },
+    /// The daemon could not replay this runtime's journal from the client's
+    /// resume cursor — the journal had already dropped the next event the
+    /// client needed. Any deltas the client missed between the cursor and the
+    /// oldest replayed event are lost; the session's persisted state is the
+    /// authority and the app rehydrates it.
+    ///
+    /// Client-only like [`Self::RuntimeEventCursorAdvanced`]: the daemon emits
+    /// it as a `ServerMessage::ReplayGap`, which the client re-sends on the
+    /// session's event channel so it lands in the same order as the events it
+    /// describes.
+    ReplayGap {
+        requested_after: u64,
+    },
     Error(String),
     ProcessExited,
 }

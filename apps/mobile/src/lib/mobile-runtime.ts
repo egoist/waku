@@ -241,6 +241,7 @@ export function sessionCwd(session: AgentSession, project: Project): string {
 }
 
 export function runtimeEventAlreadyApplied(session: AgentSession, event: SequencedEvent): boolean {
+  if (event.event.kind === 'replayGap') return false;
   const cursor = session.runtime_event_cursor;
   return Boolean(
     cursor && cursor.runtime_id === event.runtimeId && cursor.epoch === event.epoch &&

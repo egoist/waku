@@ -121,6 +121,9 @@ pub fn event_to_wire(event: DriverEvent) -> anyhow::Result<WireDriverEvent> {
         ),
         DriverEvent::Error(error) => ("error", Value::String(error)),
         DriverEvent::ProcessExited => ("processExited", Value::Null),
+        DriverEvent::ReplayGap { requested_after } => {
+            ("replayGap", json!({ "requestedAfter": requested_after }))
+        }
     };
     Ok(WireDriverEvent::new(kind, payload))
 }
@@ -214,8 +217,20 @@ pub fn event_from_wire(event: WireDriverEvent) -> anyhow::Result<DriverEvent> {
         }
         "error" => DriverEvent::Error(serde_json::from_value(payload)?),
         "processExited" => DriverEvent::ProcessExited,
+        "replayGap" => {
+            let gap: ReplayGapWire = serde_json::from_value(payload)?;
+            DriverEvent::ReplayGap {
+                requested_after: gap.requested_after,
+            }
+        }
         kind => bail!("daemon sent an unsupported driver event {kind:?}"),
     })
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ReplayGapWire {
+    requested_after: u64,
 }
 
 #[derive(Deserialize)]
@@ -316,6 +331,18 @@ mod tests {
             event_from_wire(cleared).unwrap(),
             DriverEvent::GoalUpdated(None)
         ));
+    }
+
+    #[test]
+    fn a_replay_gap_round_trips_through_the_daemon_wire() {
+        let wire = event_to_wire(DriverEvent::ReplayGap { requested_after: 3 }).unwrap();
+        assert_eq!(wire.kind, "replayGap");
+        assert_eq!(wire.payload["requestedAfter"], 3);
+
+        let DriverEvent::ReplayGap { requested_after } = event_from_wire(wire).unwrap() else {
+            panic!("the event changed variants during its wire round trip");
+        };
+        assert_eq!(requested_after, 3);
     }
 
     #[test]

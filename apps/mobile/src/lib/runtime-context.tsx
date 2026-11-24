@@ -397,6 +397,15 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
       }
       const result = reduceRuntimeEvent(state.current, event, clock, entry.lastDriverError);
       state.current = result.session;
+      if (event.event.kind === 'replayGap') {
+        // The daemon could not replay this runtime's journal from the cursor
+        // we resumed with. The persisted session is the authority for what
+        // the provider produced meanwhile — refetch it rather than leave the
+        // transcript silently missing turns.
+        void queryClient.invalidateQueries({
+          queryKey: daemonKeys.session(profileId, session.id),
+        });
+      }
       state.mutated = true;
       if (result.permission !== undefined) {
         setPermissions((values) => ({ ...values, [session.id]: result.permission ?? undefined }));

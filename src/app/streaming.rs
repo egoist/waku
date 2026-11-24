@@ -252,6 +252,19 @@ impl Waku {
                     session.runtime_event_cursor = Some(cursor);
                 }
             }
+            DriverEvent::ReplayGap { .. } => {
+                // The daemon's journal rolled past this client's resume
+                // cursor, so the events between it and the first replayed
+                // event are gone. The daemon's persisted session is the
+                // authority for what the provider produced in the meantime —
+                // rehydrate it rather than leave the transcript silently
+                // missing turns.
+                if let Some(session) = self.state.session_mut(session_id) {
+                    session.runtime_event_cursor = None;
+                    session.detail_loaded = false;
+                }
+                self.ensure_session_loaded(session_id, cx);
+            }
             DriverEvent::Connected { provider_cursor } => {
                 runtime.last_driver_error = None;
                 runtime.last_background_refresh_at = Instant::now();

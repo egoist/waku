@@ -447,6 +447,40 @@ export class WakuClient {
       for (const listener of this.taskStateListeners) listener(message.revision);
       return;
     }
+    if (message.type === "replayGap") {
+      // The daemon could not replay this runtime's journal from the cursor we
+      // resumed with — its journal had already rolled past it. Surface the gap
+      // on the session's event channel as the same envelope the replayed
+      // events use, so each runtime can rehydrate from the authoritative
+      // session state instead of trusting the truncated stream.
+      const key = subscriptionKey(message.sessionId, message.runtimeId);
+      const previous = this.sequences.get(key);
+      const event: SequencedEvent = {
+        sessionId: message.sessionId,
+        runtimeId: message.runtimeId,
+        epoch: previous?.epoch ?? NIL_UUID,
+        sequence: message.earliestAvailable,
+        event: {
+          kind: "replayGap",
+          payload: {
+            requestedAfter: message.requestedAfter,
+            earliestAvailable: message.earliestAvailable,
+          },
+        },
+      };
+      const listeners = this.subscriptions.get(key);
+      if (listeners?.size) {
+        for (const listener of listeners) listener(event);
+      } else {
+        const buffered = this.pendingEvents.get(key) ?? [];
+        buffered.push(event);
+        if (buffered.length > MAX_BUFFERED_EVENTS_PER_RUNTIME) {
+          buffered.splice(0, buffered.length - MAX_BUFFERED_EVENTS_PER_RUNTIME);
+        }
+        this.pendingEvents.set(key, buffered);
+      }
+      return;
+    }
     if (message.type === "shuttingDown") {
       this.socket?.close(1000, "daemon shutting down");
     }

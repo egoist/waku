@@ -511,6 +511,15 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
         }
         const result = reduceRuntimeEvent(current, event, undefined, entry.lastDriverError)
         cacheSession(result.session)
+        if (event.event.kind === 'replayGap') {
+          // The daemon could not replay this runtime's journal from the
+          // cursor we resumed with. The persisted session is the authority
+          // for what the provider produced meanwhile — refetch it rather
+          // than leave the transcript silently missing turns.
+          void queryClient.invalidateQueries({
+            queryKey: daemonKeys.session(config.address, session.id),
+          })
+        }
         scheduleProjectionPersist(session.id)
         if (result.permission !== undefined) {
           setPermissions((previous) => ({
@@ -1407,6 +1416,7 @@ function mergeSessionSummary(previous: AgentSession, next: AgentSession): AgentS
 }
 
 function runtimeEventAlreadyApplied(session: AgentSession, event: SequencedEvent) {
+  if (event.event.kind === 'replayGap') return false
   const cursor = session.runtime_event_cursor
   return Boolean(
     cursor

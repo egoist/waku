@@ -2,4 +2,12 @@
 import type { ResponseOutcome } from "./ResponseOutcome";
 import type { SequencedEvent } from "./SequencedEvent";
 
-export type ServerMessage = { "type": "hello", protocolVersion: number, daemonVersion: string, } | { "type": "rejected", message: string, } | { "type": "response", requestId: string, outcome: ResponseOutcome, } | { "type": "event" } & SequencedEvent | { "type": "taskStateChanged", revision: number, } | { "type": "shuttingDown" };
+export type ServerMessage = { "type": "hello", protocolVersion: number, daemonVersion: string, } | { "type": "rejected", message: string, } | { "type": "response", requestId: string, outcome: ResponseOutcome, } | { "type": "event" } & SequencedEvent | { "type": "taskStateChanged", revision: number, } | { "type": "replayGap", sessionId: string, runtimeId: string,
+/**
+ * The sequence the client asked to resume after.
+ */
+requestedAfter: number,
+/**
+ * The oldest event the journal still holds.
+ */
+earliestAvailable: number, } | { "type": "shuttingDown" };
