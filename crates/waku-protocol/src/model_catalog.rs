@@ -113,7 +113,9 @@ fn reasoning_options<const N: usize>(efforts: [&str; N]) -> Vec<ProviderModelOpt
 pub fn grok_model_reasoning_efforts(id: &str) -> Option<&'static [&'static str]> {
     match id.to_ascii_lowercase().as_str() {
         "grok-4.5" => Some(&["low", "medium", "high"]),
-        "grok-4.6" => Some(&["low", "medium", "high", "xhigh"]),
+        "grok-4.6" | "grok-4.7" | "grok-4.7-build-fast" => {
+            Some(&["low", "medium", "high", "xhigh"])
+        }
         _ => None,
     }
 }
@@ -298,6 +300,16 @@ mod tests {
             grok_model_reasoning_efforts("grok-4.6"),
             Some(&["low", "medium", "high", "xhigh"][..])
         );
+        // Grok 4.7 and its build-fast variant both advertise the full effort
+        // ladder over ACP (`supportsReasoningEffort`, verified against
+        // `grok agent stdio` 1.0.92).
+        for id in ["grok-4.7", "grok-4.7-build-fast"] {
+            assert_eq!(
+                grok_model_reasoning_efforts(id),
+                Some(&["low", "medium", "high", "xhigh"][..]),
+                "expected an effort menu for {id}"
+            );
+        }
         // Custom models and unknown spellings get no menu.
         assert_eq!(grok_model_reasoning_efforts("grok-build"), None);
         assert_eq!(grok_model_reasoning_efforts("my-custom-test"), None);
