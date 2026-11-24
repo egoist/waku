@@ -2,6 +2,10 @@
 
 use crate::model::{ProviderAgentPreset, ProviderKind, ProviderModel, ProviderModelOption};
 
+/// The catalog a provider is offered before its own discovery answers.
+///
+/// This is the single definition of the fallback: the desktop app and the
+/// daemon both read it, so a provider's entry only has to be changed here.
 pub fn fallback_models(provider: ProviderKind) -> Vec<ProviderModel> {
     match provider {
         ProviderKind::Amp => [
@@ -55,16 +59,30 @@ pub fn fallback_models(provider: ProviderKind) -> Vec<ProviderModel> {
             )),
             ProviderModel::new("claude-haiku-4-5", "Claude Haiku 4.5"),
         ],
+        // Cursor's full catalog is account-specific and comes from ACP
+        // `cursor/list_available_models`. Auto remains the provider-owned
+        // default and keeps older CLIs selectable if discovery is unavailable.
         ProviderKind::Cursor => {
             vec![ProviderModel::new("auto", tr!("model_option.auto")).default()]
         }
-        ProviderKind::DeepSeek
-        | ProviderKind::Fx
-        | ProviderKind::Grok
-        | ProviderKind::Kimi
-        | ProviderKind::OpenCode
-        | ProviderKind::OhMyPi
-        | ProviderKind::Pi => Vec::new(),
+        // Harness reports its account/configuration-specific catalog from its
+        // Host. An invented fallback would make unavailable routes selectable.
+        ProviderKind::DeepSeek => Vec::new(),
+        // Fx resolves its catalog through the user's active Gateway or
+        // subscription login. An invented fallback could expose an unusable
+        // route, so discovery is authoritative.
+        ProviderKind::Fx => Vec::new(),
+        // Discovery through the adopted background service is authoritative;
+        // a fabricated catalog would offer models the server rejects.
+        ProviderKind::OpenCode => Vec::new(),
+        // Grok's catalog comes from `grok models`, which includes any custom
+        // model the user configured. An invented fallback would offer a model
+        // the CLI rejects, so discovery is authoritative.
+        ProviderKind::Grok => Vec::new(),
+        // Pi, Oh My Pi, and Kimi Code all take their catalog from the user's
+        // configured LLM providers. A fabricated fallback would make
+        // unavailable models look selectable.
+        ProviderKind::Kimi | ProviderKind::OhMyPi | ProviderKind::Pi => Vec::new(),
     }
 }
 
@@ -309,6 +327,23 @@ mod tests {
         // A fabricated fallback would offer a model the CLI rejects, so
         // discovery is authoritative and the pre-discovery picker is empty.
         assert!(fallback_models(ProviderKind::Grok).is_empty());
+    }
+
+    #[test]
+    fn no_provider_fallback_names_two_defaults() {
+        // The picker takes the default row as the provider's starting model,
+        // so a second one would make the choice ambiguous.
+        for provider in ProviderKind::ALL {
+            let defaults = fallback_models(provider)
+                .iter()
+                .filter(|model| model.is_default)
+                .count();
+            assert!(
+                defaults <= 1,
+                "{} names {defaults} defaults in its fallback",
+                provider.id()
+            );
+        }
     }
 
     #[test]
