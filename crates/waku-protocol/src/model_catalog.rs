@@ -20,25 +20,18 @@ pub fn fallback_models(provider: ProviderKind) -> Vec<ProviderModel> {
         })
         .collect(),
         ProviderKind::Codex => [
-            ProviderModel::new("gpt-5.6-sol", "GPT-5.6-Sol").default(),
-            ProviderModel::new("gpt-5.6-terra", "GPT-5.6-Terra"),
-            ProviderModel::new("gpt-5.6-luna", "GPT-5.6-Luna"),
-            ProviderModel::new("gpt-5.5", "GPT-5.5"),
-            ProviderModel::new("gpt-5.4", "GPT-5.4"),
+            codex_fallback_model("gpt-6.2-sol", "GPT-6.2-Sol", "low", true).default(),
+            codex_fallback_model("gpt-6.2-astra", "GPT-6.2-Astra", "low", true),
+            codex_fallback_model("gpt-6.1-terra", "GPT-6.1 Terra", "low", true),
+            codex_fallback_model("gpt-6.1-sol", "GPT-6.1-Sol", "low", true),
+            codex_fallback_model("gpt-6-astra", "GPT-6-Astra", "medium", true),
+            codex_fallback_model("gpt-6-sol", "GPT-6-Sol", "medium", true),
+            codex_fallback_model("gpt-6-luna", "GPT-6-Luna", "medium", false),
+            codex_fallback_model("gpt-5.6-sol", "GPT-5.6-Sol", "low", true),
+            codex_fallback_model("gpt-5.6-terra", "GPT-5.6-Terra", "medium", true),
+            codex_fallback_model("gpt-5.6-luna", "GPT-5.6-Luna", "medium", false),
         ]
         .into_iter()
-        .map(|model| {
-            model
-                .reasoning(
-                    reasoning_options(["low", "medium", "high", "xhigh"]),
-                    "medium",
-                )
-                .service_tiers(
-                    [ProviderModelOption::new("fast", tr!("model_option.fast"))
-                        .description(tr!("model_option.fast_description"))],
-                    "default",
-                )
-        })
         .collect(),
         ProviderKind::Claude => vec![
             claude_long_context(claude_ultracode_model("claude-fable-5", "Claude Fable 5")),
@@ -66,6 +59,37 @@ pub fn fallback_models(provider: ProviderKind) -> Vec<ProviderModel> {
         | ProviderKind::OhMyPi
         | ProviderKind::Pi => Vec::new(),
     }
+}
+
+/// One entry of the hardcoded Codex fallback, which only shows before the
+/// first successful discovery, so it must stay limited to models the CLI
+/// still serves. Mirrors `codex app-server`'s `model/list` at the CLI version
+/// Waku was last verified against (0.171.0): every current model climbs to
+/// `ultra` except the Luna pair, which stops at `max`, and the faster serving
+/// tier is named `priority` (older CLIs called it `fast`; both spellings are
+/// recognized wherever the tier is applied).
+fn codex_fallback_model(
+    id: &str,
+    name: &str,
+    default_effort: &str,
+    offers_ultra: bool,
+) -> ProviderModel {
+    ProviderModel::new(id, name)
+        .reasoning(
+            if offers_ultra {
+                reasoning_options(["low", "medium", "high", "xhigh", "max", "ultra"])
+            } else {
+                reasoning_options(["low", "medium", "high", "xhigh", "max"])
+            },
+            default_effort,
+        )
+        .service_tiers(
+            [
+                ProviderModelOption::new("priority", tr!("model_option.fast"))
+                    .description(tr!("model_option.fast_description")),
+            ],
+            "default",
+        )
 }
 
 pub fn fallback_agent_presets(provider: ProviderKind) -> Vec<ProviderAgentPreset> {
@@ -309,6 +333,19 @@ mod tests {
         // A fabricated fallback would offer a model the CLI rejects, so
         // discovery is authoritative and the pre-discovery picker is empty.
         assert!(fallback_models(ProviderKind::Grok).is_empty());
+    }
+
+    #[test]
+    fn codex_fallback_matches_the_current_cli_catalog() {
+        let models = fallback_models(ProviderKind::Codex);
+
+        let ids: Vec<_> = models.iter().map(|model| model.id.as_str()).collect();
+        assert_eq!(ids.first(), Some(&"gpt-6.2-sol"));
+        assert!(models[0].is_default);
+        assert!(!ids.contains(&"gpt-5.5"));
+        assert!(!ids.contains(&"gpt-5.4"));
+        // The faster serving tier keeps the CLI's provider-owned id.
+        assert_eq!(models[0].service_tiers[0].id, "priority");
     }
 
     #[test]

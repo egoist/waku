@@ -39,25 +39,18 @@ pub fn fallback_models(provider: ProviderKind) -> Vec<ProviderModel> {
         })
         .collect(),
         ProviderKind::Codex => [
-            ProviderModel::new("gpt-5.6-sol", "GPT-5.6-Sol").default(),
-            ProviderModel::new("gpt-5.6-terra", "GPT-5.6-Terra"),
-            ProviderModel::new("gpt-5.6-luna", "GPT-5.6-Luna"),
-            ProviderModel::new("gpt-5.5", "GPT-5.5"),
-            ProviderModel::new("gpt-5.4", "GPT-5.4"),
+            codex_fallback_model("gpt-6.2-sol", "GPT-6.2-Sol", "low", true).default(),
+            codex_fallback_model("gpt-6.2-astra", "GPT-6.2-Astra", "low", true),
+            codex_fallback_model("gpt-6.1-terra", "GPT-6.1 Terra", "low", true),
+            codex_fallback_model("gpt-6.1-sol", "GPT-6.1-Sol", "low", true),
+            codex_fallback_model("gpt-6-astra", "GPT-6-Astra", "medium", true),
+            codex_fallback_model("gpt-6-sol", "GPT-6-Sol", "medium", true),
+            codex_fallback_model("gpt-6-luna", "GPT-6-Luna", "medium", false),
+            codex_fallback_model("gpt-5.6-sol", "GPT-5.6-Sol", "low", true),
+            codex_fallback_model("gpt-5.6-terra", "GPT-5.6-Terra", "medium", true),
+            codex_fallback_model("gpt-5.6-luna", "GPT-5.6-Luna", "medium", false),
         ]
         .into_iter()
-        .map(|model| {
-            model
-                .reasoning(
-                    reasoning_options(["low", "medium", "high", "xhigh"]),
-                    "medium",
-                )
-                .service_tiers(
-                    [ProviderModelOption::new("fast", tr!("model_option.fast"))
-                        .description(tr!("model_option.fast_description"))],
-                    "default",
-                )
-        })
         .collect(),
         ProviderKind::Claude => vec![
             claude_long_context(claude_ultracode_model("claude-fable-5", "Claude Fable 5")),
@@ -99,6 +92,37 @@ pub fn fallback_models(provider: ProviderKind) -> Vec<ProviderModel> {
         // unavailable models look selectable.
         ProviderKind::Kimi | ProviderKind::OhMyPi | ProviderKind::Pi => Vec::new(),
     }
+}
+
+/// One entry of the hardcoded Codex fallback, which only shows before the
+/// first successful discovery, so it must stay limited to models the CLI
+/// still serves. Mirrors `codex app-server`'s `model/list` at the CLI version
+/// Waku was last verified against (0.171.0): every current model climbs to
+/// `ultra` except the Luna pair, which stops at `max`, and the faster serving
+/// tier is named `priority` (older CLIs called it `fast`; both spellings are
+/// recognized wherever the tier is applied).
+fn codex_fallback_model(
+    id: &str,
+    name: &str,
+    default_effort: &str,
+    offers_ultra: bool,
+) -> ProviderModel {
+    ProviderModel::new(id, name)
+        .reasoning(
+            if offers_ultra {
+                reasoning_options(["low", "medium", "high", "xhigh", "max", "ultra"])
+            } else {
+                reasoning_options(["low", "medium", "high", "xhigh", "max"])
+            },
+            default_effort,
+        )
+        .service_tiers(
+            [
+                ProviderModelOption::new("priority", tr!("model_option.fast"))
+                    .description(tr!("model_option.fast_description")),
+            ],
+            "default",
+        )
 }
 
 pub fn fallback_agent_presets(provider: ProviderKind) -> Vec<ProviderAgentPreset> {
@@ -1641,6 +1665,68 @@ mod tests {
         );
         assert!(models[1].is_default);
         assert_eq!(models[1].service_tiers[0].id, "fast");
+    }
+
+    #[test]
+    fn codex_fallback_lists_the_catalog_the_cli_still_serves() {
+        let models = fallback_models(ProviderKind::Codex);
+
+        // Mirrors `codex app-server`'s `model/list` (verified against CLI
+        // 0.171.0): the 6.x generation leads, the 5.x generation survives
+        // only as the 5.6 trio, and gpt-5.5/gpt-5.4 are no longer served.
+        assert_eq!(
+            models
+                .iter()
+                .map(|model| model.id.as_str())
+                .collect::<Vec<_>>(),
+            [
+                "gpt-6.2-sol",
+                "gpt-6.2-astra",
+                "gpt-6.1-terra",
+                "gpt-6.1-sol",
+                "gpt-6-astra",
+                "gpt-6-sol",
+                "gpt-6-luna",
+                "gpt-5.6-sol",
+                "gpt-5.6-terra",
+                "gpt-5.6-luna",
+            ]
+        );
+        let default = models
+            .iter()
+            .find(|model| model.is_default)
+            .expect("exactly one default model");
+        assert_eq!(default.id, "gpt-6.2-sol");
+        assert_eq!(default.default_reasoning_effort.as_deref(), Some("low"));
+
+        let efforts = |id: &str| {
+            models
+                .iter()
+                .find(|model| model.id == id)
+                .unwrap()
+                .reasoning_efforts
+                .iter()
+                .map(|option| option.id.as_str())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            efforts("gpt-6.2-sol"),
+            ["low", "medium", "high", "xhigh", "max", "ultra"]
+        );
+        // The Luna pair tops out at max.
+        assert_eq!(
+            efforts("gpt-6-luna"),
+            ["low", "medium", "high", "xhigh", "max"]
+        );
+        assert_eq!(
+            efforts("gpt-5.6-luna"),
+            ["low", "medium", "high", "xhigh", "max"]
+        );
+
+        // The current CLI names its faster serving tier `priority`; the label
+        // keeps the product vocabulary.
+        assert_eq!(default.service_tiers[0].id, "priority");
+        assert_eq!(default.default_service_tier.as_deref(), Some("default"));
     }
 
     #[test]
