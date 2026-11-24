@@ -1918,6 +1918,54 @@ fn computer_use_navigation_is_debug_only() {
 }
 
 #[test]
+fn picker_sub_provider_groups_split_a_repeating_id_list_only_when_needed() {
+    use super::composer::picker_sub_provider_groups;
+    use crate::model::ProviderModel;
+
+    let model = |id: &str, sub_provider: Option<&str>| {
+        let mut model = ProviderModel::new(id, id);
+        model.sub_provider = sub_provider.map(str::to_owned);
+        (ProviderKind::OpenCode, model)
+    };
+
+    // One sub-provider, or none at all, is not a grouping.
+    let flat = [
+        model("gpt-5.6-luna", Some("Github Copilot")),
+        model("gpt-5.6-sol", Some("Github Copilot")),
+    ];
+    assert!(picker_sub_provider_groups(&flat).is_empty());
+    let ungrouped = [model("gpt-5.6-luna", None), model("gpt-5.6-sol", None)];
+    assert!(picker_sub_provider_groups(&ungrouped).is_empty());
+
+    // Contiguous runs each get a header before their first row, so the index
+    // still addresses the model and never the header.
+    let split = [
+        model("gpt-5.6-luna", Some("Github Copilot")),
+        model("gpt-5.6-sol", Some("Github Copilot")),
+        model("gpt-5.6-luna", Some("Opencode Go")),
+        model("muse-spark-1.2", Some("Opencode Go")),
+    ];
+    assert_eq!(
+        picker_sub_provider_groups(&split),
+        vec![
+            (0usize, "Github Copilot".to_owned()),
+            (2, "Opencode Go".to_owned())
+        ]
+    );
+
+    // A run of models with no sub-provider carries no header of its own.
+    let mixed = [
+        model("claude-sonnet-5", None),
+        model("gpt-5.6-luna", Some("Github Copilot")),
+        model("gpt-5.6-sol", Some("Github Copilot")),
+    ];
+    assert_eq!(
+        picker_sub_provider_groups(&mixed),
+        vec![(1usize, "Github Copilot".to_owned())]
+    );
+}
+
+#[test]
 fn switched_off_providers_leave_the_picker_except_for_their_locked_session() {
     use super::ModelPickerTab;
     use super::composer::visible_picker_models;

@@ -983,6 +983,15 @@ impl Waku {
         let highlight = self
             .model_picker_highlight
             .filter(|index| *index < available_models.len());
+        // Grouping is a property of one provider's unfiltered list: a live
+        // query mixes providers, and favorites are deliberately cross-provider.
+        // Headers are not rows, so the highlight index still counts models.
+        let sub_provider_groups =
+            if searching || !matches!(selected_tab, ModelPickerTab::Provider(_)) {
+                Vec::new()
+            } else {
+                picker_sub_provider_groups(&available_models)
+            };
         let scroll = self.model_picker_scroll.clone();
         let scrollbar_state = self.model_picker_scrollbar.clone();
 
@@ -1176,8 +1185,39 @@ impl Waku {
                     );
                 }
 
+                let mut next_group = 0usize;
                 for (row_index, (kind, model)) in available_models.iter().enumerate() {
                     let kind = *kind;
+                    // The group name moves to its own row, so a grouped row
+                    // shows the model id instead — the part that tells two
+                    // same-named models from different providers apart.
+                    let subtitle = if sub_provider_groups.is_empty() {
+                        model_picker_subtitle(kind, model.sub_provider.as_deref())
+                    } else {
+                        model.id.clone()
+                    };
+                    if let Some((_, name)) = sub_provider_groups
+                        .get(next_group)
+                        .filter(|(index, _)| *index == row_index)
+                    {
+                        next_group += 1;
+                        let name = name.clone();
+                        rows = rows.child(
+                            div()
+                                .h(px(24.0))
+                                .px(px(12.0))
+                                .flex()
+                                .items_end()
+                                .pb(px(3.0))
+                                .child(
+                                    div()
+                                        .text_size(sp(11.0))
+                                        .font_weight(FontWeight::SEMIBOLD)
+                                        .text_color(theme.text_ghost)
+                                        .child(SharedString::from(name)),
+                                ),
+                        );
+                    }
                     let is_selected =
                         kind == provider && selected_model.as_deref() == Some(model.id.as_str());
                     let is_highlighted = highlight == Some(row_index);
@@ -1189,7 +1229,6 @@ impl Waku {
                     let select_popover = popover.clone();
                     let favorite_model_id = model.id.clone();
                     let favorite_weak = weak.clone();
-                    let subtitle = model_picker_subtitle(kind, model.sub_provider.as_deref());
                     rows = rows.child(
                         div()
                             .id(SharedString::from(format!(
@@ -3849,6 +3888,43 @@ pub(super) fn picker_rail_shows_provider(
         .any(|probe| probe.provider == kind && probe.installed);
     let switched_off = disabled_providers.contains(&kind) && locked_provider != Some(kind);
     installed && !switched_off
+}
+
+/// Sub-provider group starts for one provider's model list, as
+/// `(row index, group name)`.
+///
+/// OpenCode and Pi report models whose ids repeat across upstream providers —
+/// `gpt-5.6-luna` can appear under two of them — so a flat list is ambiguous.
+/// Each contiguous run of one sub-provider gets a header before its first row.
+/// Models with no sub-provider never get a header, and a list that does not
+/// actually split gets none at all, so a single-source provider keeps the
+/// plain rows it had.
+pub(super) fn picker_sub_provider_groups(
+    models: &[(ProviderKind, ProviderModel)],
+) -> Vec<(usize, String)> {
+    let mut runs: Vec<(usize, &str)> = Vec::new();
+    for (index, (_, model)) in models.iter().enumerate() {
+        let sub_provider = model
+            .sub_provider
+            .as_deref()
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+            .unwrap_or_default();
+        if runs
+            .last()
+            .map(|(_, previous)| *previous != sub_provider)
+            .unwrap_or(true)
+        {
+            runs.push((index, sub_provider));
+        }
+    }
+    if runs.len() < 2 {
+        return Vec::new();
+    }
+    runs.into_iter()
+        .filter(|(_, name)| !name.is_empty())
+        .map(|(index, name)| (index, name.to_owned()))
+        .collect()
 }
 
 pub(super) fn model_picker_subtitle(provider: ProviderKind, sub_provider: Option<&str>) -> String {
