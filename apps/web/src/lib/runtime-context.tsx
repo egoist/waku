@@ -451,7 +451,7 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
         const key = daemonKeys.session(config.address, session.id)
         let current = queryClient.getQueryData<AgentSession>(key)
         if (!current || runtimeEventAlreadyApplied(current, event)) return
-        if (event.event.kind === 'connected' || event.event.kind === 'turnStarted' || event.event.kind === 'turnFinished') {
+        if (event.event.kind === 'connected' || event.event.kind === 'turnStarted') {
           entry.lastDriverError = null
         } else if (event.event.kind === 'error' && typeof event.event.payload === 'string') {
           entry.lastDriverError = event.event.payload
@@ -510,6 +510,9 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
           }
         }
         const result = reduceRuntimeEvent(current, event, undefined, entry.lastDriverError)
+        // The reducer reads the error as a failed turn's fallback before the
+        // turn's settle clears it.
+        if (event.event.kind === 'turnFinished') entry.lastDriverError = null
         cacheSession(result.session)
         scheduleProjectionPersist(session.id)
         if (result.permission !== undefined) {

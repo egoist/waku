@@ -10,17 +10,17 @@ use super::{
     StreamDeltaKind, TranscriptRowKind::*, active_navigation_turn_index,
     append_text_delta_to_session, assistant_response_footer, assistant_response_footer_index,
     assistant_response_footer_time, compact_driver_error, disclosure_leading_space, fenced_code,
-    fitted_file_tree_width, fitted_panel_widths, folded_transcript_row_kinds,
-    format_worked_duration, format_working_elapsed, maintain_transcript_anchor, message_opens_turn,
-    message_starts_followup_turn, navigation_preview_snippet, navigation_rail_fade_visibility,
-    navigation_rail_height, navigation_rail_scale, paused_toast_duration, pop_stream_batch,
-    push_transcript_activity, response_footer_message_index, response_row_turn_id,
-    session_accepts_turn_output, session_is_reapable, should_refresh_branch_after_activity,
-    should_show_navigation_rail, should_show_scroll_to_bottom, task_id_from_notification_tag,
-    task_notification_tag, transcript_anchor_end_space, transcript_navigation_turns,
-    transcript_rests_at_tail, transcript_row_kinds, transcript_row_splice,
-    transcript_rows_fingerprint, widened_panel_width_for_file_editor,
-    widened_panel_width_for_review,
+    finished_turn_fallback, fitted_file_tree_width, fitted_panel_widths,
+    folded_transcript_row_kinds, format_worked_duration, format_working_elapsed,
+    maintain_transcript_anchor, message_opens_turn, message_starts_followup_turn,
+    navigation_preview_snippet, navigation_rail_fade_visibility, navigation_rail_height,
+    navigation_rail_scale, paused_toast_duration, pop_stream_batch, push_transcript_activity,
+    response_footer_message_index, response_row_turn_id, session_accepts_turn_output,
+    session_is_reapable, should_refresh_branch_after_activity, should_show_navigation_rail,
+    should_show_scroll_to_bottom, task_id_from_notification_tag, task_notification_tag,
+    transcript_anchor_end_space, transcript_navigation_turns, transcript_rests_at_tail,
+    transcript_row_kinds, transcript_row_splice, transcript_rows_fingerprint,
+    widened_panel_width_for_file_editor, widened_panel_width_for_review,
 };
 use crate::git_branch::BranchEntry;
 use crate::model::{
@@ -2152,4 +2152,34 @@ fn the_rail_draws_only_installed_providers_the_settings_left_on() {
         Some(ProviderKind::Claude),
         ProviderKind::Claude
     ));
+}
+
+/// A turn that fails without producing a message used to read like a plain
+/// stop. The reason it failed with — the last error the driver reported — is
+/// the message that belongs there, the same reason `ProcessExited` shows.
+#[test]
+fn a_failed_turn_keeps_the_driver_error_as_its_message() {
+    assert_eq!(
+        finished_turn_fallback(false, None, Some("rate limit exceeded".into())),
+        "rate limit exceeded"
+    );
+    // A provider summary outranks the raw error.
+    assert_eq!(
+        finished_turn_fallback(
+            false,
+            Some("The agent declined the turn".into()),
+            Some("rate limit exceeded".into()),
+        ),
+        "The agent declined the turn"
+    );
+    // A successful turn's fallback is a completion, never the last error.
+    assert_eq!(
+        finished_turn_fallback(true, None, Some("rate limit exceeded".into())),
+        tr!("session.turn_completed")
+    );
+    // With nothing to name, a failed turn still reads as a stop.
+    assert_eq!(
+        finished_turn_fallback(false, None, None),
+        tr!("session.stopped_before_response")
+    );
 }

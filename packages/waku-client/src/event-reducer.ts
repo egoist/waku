@@ -53,7 +53,7 @@ export function reduceRuntimeEvent(
   current: AgentSession,
   wire: SequencedEvent,
   clock: ReducerClock = defaultClock,
-  processExitError: string | null = null,
+  lastDriverError: string | null = null,
 ): RuntimeEventResult {
   const session = clone(current)
   const { kind, payload } = wire.event
@@ -240,7 +240,13 @@ export function reduceRuntimeEvent(
       result.settled = settleTurn(
         session,
         success ? 'completed' : 'failed',
-        typeof value?.summary === 'string' ? value.summary : null,
+        typeof value?.summary === 'string'
+          ? value.summary
+          : // A failed turn that produced no message keeps the reason it
+            // failed with, the same reason processExited shows.
+            success
+            ? null
+            : lastDriverError,
         clock,
       )
       result.permission = null
@@ -287,7 +293,7 @@ export function reduceRuntimeEvent(
       result.settled = settleTurn(
         session,
         'failed',
-        processExitError ?? 'The agent exited before responding.',
+        lastDriverError ?? 'The agent exited before responding.',
         clock,
       )
       result.permission = null

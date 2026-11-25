@@ -115,6 +115,49 @@ describe('promptSubmitted', () => {
   })
 })
 
+describe('turnFinished', () => {
+  test('a failed turn with no message keeps the driver’s error', () => {
+    const result = reduceRuntimeEvent(
+      runningSession(),
+      event('turnFinished', { success: false, summary: null }),
+      clock,
+      'rate limit exceeded',
+    )
+
+    expect(result.session.messages.at(-1)).toMatchObject({
+      turn_id: 'turn',
+      role: 'assistant',
+      content: 'rate limit exceeded',
+    })
+    expect(result.session.status).toBe('failed')
+  })
+
+  test('a provider summary outranks the driver’s error', () => {
+    const result = reduceRuntimeEvent(
+      runningSession(),
+      event('turnFinished', { success: false, summary: 'The agent declined the turn' }),
+      clock,
+      'rate limit exceeded',
+    )
+
+    expect(result.session.messages.at(-1)?.content).toBe('The agent declined the turn')
+  })
+
+  test('a successful turn never shows the driver’s error', () => {
+    const result = reduceRuntimeEvent(
+      runningSession(),
+      event('turnFinished', { success: true, summary: null }),
+      clock,
+      'rate limit exceeded',
+    )
+
+    expect(result.session.messages.at(-1)?.content).toBe(
+      'The turn completed without a text response.',
+    )
+    expect(result.session.status).toBe('idle')
+  })
+})
+
 test('MCP tool identity survives partial updates and stays separate in expanded details', () => {
   const call = {
     id: 'tool-1', source_id: 'call-1', kind: 'tool' as const,

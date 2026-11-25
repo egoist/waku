@@ -611,7 +611,9 @@ impl Waku {
                     },
                 );
                 let previous_kinds = self.snapshot_selected_transcript_rows(session_id);
-                runtime.last_driver_error = None;
+                // Taken up here: a failure with no message to show still
+                // deserves the reason it failed with, not the generic stop.
+                let last_driver_error = runtime.last_driver_error.take();
                 // A settled turn moved the account's rate-limit needles; ask
                 // that provider's plan meter to refresh once its backoff
                 // allows.
@@ -668,13 +670,7 @@ impl Waku {
                     if needs_fallback {
                         session.push_message(
                             MessageRole::Assistant,
-                            summary.unwrap_or_else(|| {
-                                if success {
-                                    tr!("session.turn_completed")
-                                } else {
-                                    tr!("session.stopped_before_response")
-                                }
-                            }),
+                            finished_turn_fallback(success, summary, last_driver_error),
                         );
                     }
                 }
@@ -944,6 +940,25 @@ pub(super) fn stream_delta_text(event: &DriverEvent, kind: StreamDeltaKind) -> O
         | (StreamDeltaKind::Reasoning, DriverEvent::ReasoningDelta(text)) => Some(text),
         _ => None,
     }
+}
+
+/// The message a finished turn shows when it produced none of its own: the
+/// provider's summary first, then the last error the driver reported — a turn
+/// that failed with an error should not read like a plain stop.
+pub(super) fn finished_turn_fallback(
+    success: bool,
+    summary: Option<String>,
+    last_driver_error: Option<String>,
+) -> String {
+    summary
+        .or(last_driver_error.filter(|_| !success))
+        .unwrap_or_else(|| {
+            if success {
+                tr!("session.turn_completed")
+            } else {
+                tr!("session.stopped_before_response")
+            }
+        })
 }
 
 pub(super) fn compact_driver_error(error: &str) -> String {

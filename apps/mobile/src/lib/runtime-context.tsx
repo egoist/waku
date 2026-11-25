@@ -346,7 +346,7 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
       removeRuntime: boolean;
     }
     const reduceOne = (state: FlushState, event: SequencedEvent) => {
-      if (event.event.kind === 'connected' || event.event.kind === 'turnStarted' || event.event.kind === 'turnFinished') {
+      if (event.event.kind === 'connected' || event.event.kind === 'turnStarted') {
         entry.lastDriverError = null;
       } else if (event.event.kind === 'error' && typeof event.event.payload === 'string') {
         entry.lastDriverError = event.event.payload;
@@ -396,6 +396,9 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
         }
       }
       const result = reduceRuntimeEvent(state.current, event, clock, entry.lastDriverError);
+      // The reducer reads the error as a failed turn's fallback before the
+      // turn's settle clears it.
+      if (event.event.kind === 'turnFinished') entry.lastDriverError = null;
       state.current = result.session;
       state.mutated = true;
       if (result.permission !== undefined) {
