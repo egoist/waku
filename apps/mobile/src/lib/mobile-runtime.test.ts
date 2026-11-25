@@ -6,6 +6,7 @@ import {
   beginTurn,
   createSession,
   createResumedSession,
+  localFailureEvent,
   queueSubmission,
   runtimeEventAlreadyApplied,
   sessionBusy,
@@ -109,6 +110,19 @@ describe('mobile runtime projection', () => {
     expect(shouldApplyRuntimeEvent(current, permission)).toBe(true);
     expect(shouldApplyRuntimeEvent(current, text)).toBe(false);
     expect(shouldApplyRuntimeEvent({ ...current, status: 'working' }, permission)).toBe(false);
+  });
+
+  test('a locally settled failure does not claim a daemon sequence', () => {
+    // The prompt request failed after the daemon may already have accepted
+    // it, so the settle must not look like a daemon event — otherwise the
+    // replay drops the real `promptSubmitted` on the same sequence.
+    const current = session({
+      runtime_event_cursor: { runtime_id: 'runtime', epoch: 'epoch', sequence: 4 },
+    });
+    const synthetic = localFailureEvent(current, 'runtime', 'daemon unreachable');
+    expect(synthetic.epoch).toBe('local');
+    expect(synthetic.sequence).toBe(0);
+    expect(runtimeEventAlreadyApplied(current, synthetic)).toBe(false);
   });
 
   test('creates a provider-neutral isolated draft', () => {

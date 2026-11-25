@@ -236,6 +236,20 @@ export function applySessionOptions(
   };
 }
 
+/** A locally synthesized settle for a prompt request that failed in flight.
+ * It uses a local epoch and sequence 0: the daemon may still have accepted
+ * the prompt, so the event must not claim a real sequence the replay would
+ * then drop as already seen. */
+export function localFailureEvent(session: AgentSession, runtimeId: string, summary: string): SequencedEvent {
+  return {
+    sessionId: session.id,
+    runtimeId,
+    epoch: 'local',
+    sequence: 0,
+    event: { kind: 'turnFinished', payload: { success: false, summary } },
+  };
+}
+
 export function sessionCwd(session: AgentSession, project: Project): string {
   return session.workspace?.kind === 'worktree' ? session.workspace.path : project.path;
 }

@@ -40,6 +40,7 @@ import {
   applySessionOptions,
   beginTurn,
   createSession,
+  localFailureEvent,
   providerPromptForSubmission,
   queueSubmission,
   sessionBusy,
@@ -634,14 +635,11 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
       const latest = queryClient.getQueryData<AgentSession>(
         daemonKeys.session(profileId, current.id),
       ) ?? current;
-      const cursor = latest.runtime_event_cursor;
-      const failed = reduceRuntimeEvent(latest, {
-        sessionId: latest.id,
-        runtimeId: runtime?.runtimeId ?? Crypto.randomUUID(),
-        epoch: cursor?.epoch ?? `mobile-${Date.now()}`,
-        sequence: (cursor?.sequence ?? 0) + 1,
-        event: { kind: 'turnFinished', payload: { success: false, summary: errorMessage(cause) } },
-      }, clock).session;
+      const failed = reduceRuntimeEvent(
+        latest,
+        localFailureEvent(latest, runtime?.runtimeId ?? Crypto.randomUUID(), errorMessage(cause)),
+        clock,
+      ).session;
       cacheSession(failed);
       await persistOrdered(failed).catch(() => failed);
       throw cause;
