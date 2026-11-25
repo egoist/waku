@@ -633,6 +633,23 @@ impl Waku {
                     .and_then(AgentSession::active_turn_id)
                     .is_none()
                 {
+                    // A provider TurnFinished with no running turn left is a
+                    // duplicate or stale settle. Nothing is marked Running,
+                    // but a session list projection — or a session whose turn
+                    // rows were never hydrated — may still show busy, so
+                    // reconcile the status to the truth instead of leaving it
+                    // stranded (#50).
+                    if let Some(session) = self.state.session_mut(session_id)
+                        && session.status.is_busy()
+                    {
+                        session.status = if success {
+                            SessionStatus::Idle
+                        } else {
+                            SessionStatus::Failed
+                        };
+                        session.updated_at = unix_time();
+                        self.state.mark_session_dirty(session_id);
+                    }
                     return true;
                 }
                 let task_notification = cx.active_window().is_none().then(|| {
