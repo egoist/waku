@@ -21,7 +21,9 @@ import {
   persistProject,
   persistSession,
   probeProvider,
+  queueSubmission,
   removeSession,
+  restoreQueuedMessage,
   sameProviderSession,
   selectableProjects,
   writeWorkspaceTextFile,
@@ -44,6 +46,22 @@ describe('applyComposerDraftChanges', () => {
 
     await expect(applyComposerDraftChanges(client, changes)).resolves.toBeUndefined()
     expect(command).toEqual({ type: 'applyComposerDraftChanges', changes })
+  })
+})
+
+describe('restoreQueuedMessage', () => {
+  test('a follow-up that a failed send dropped comes back unchanged', () => {
+    const draft = createSession('project', 'codex', false)
+    const queued = queueSubmission(draft, 'follow up', 'follow up', [])
+    const message = queued.queued_messages![0]
+
+    // The queue is drained, the send fails, and the message is put back.
+    const later = { ...message, id: 'later', content: 'later message' }
+    const drained = { ...queued, queued_messages: [later] }
+    const restored = restoreQueuedMessage(drained, message)
+
+    expect(restored.queued_messages).toEqual([message, later])
+    expect(restoreQueuedMessage(restored, message).queued_messages).toEqual([message, later])
   })
 })
 

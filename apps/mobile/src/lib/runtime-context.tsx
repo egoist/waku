@@ -42,6 +42,7 @@ import {
   createSession,
   providerPromptForSubmission,
   queueSubmission,
+  restoreQueuedMessage,
   sessionBusy,
   sessionCwd,
   sessionIsRunning,
@@ -295,13 +296,27 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
         queued_messages: latest.queued_messages?.slice(1),
       };
       cacheSession(dequeued);
-      const persisted = await persistOrdered(dequeued);
-      await sendPromptRef.current?.(
-        persisted,
-        next.display_content ?? next.content,
-        next.attachments ?? [],
-        next.content,
-      );
+      try {
+        const persisted = await persistOrdered(dequeued);
+        if (!sendPromptRef.current) throw new Error('Prompt sender is unavailable');
+        await sendPromptRef.current(
+          persisted,
+          next.display_content ?? next.content,
+          next.attachments ?? [],
+          next.content,
+        );
+      } catch (cause) {
+        // The message left the queue and the send failed, so nothing holds it
+        // any more. Put it back — the desktop restores a failed submission to
+        // the composer for the same reason.
+        const current = queryClient.getQueryData<AgentSession>(
+          daemonKeys.session(profileId, sessionId),
+        ) ?? dequeued;
+        const restored = restoreQueuedMessage(current, next, clock);
+        cacheSession(restored);
+        await persistOrdered(restored);
+        throw cause;
+      }
     } catch (cause) {
       setErrors((values) => ({ ...values, [sessionId]: errorMessage(cause) }));
     } finally {

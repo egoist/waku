@@ -5,6 +5,7 @@ import type {
   ProviderKind,
   ProviderSessionHistory,
   ProviderSessionSummary,
+  QueuedMessage,
   RuntimeMode,
   SequencedEvent,
 } from '@waku/client';
@@ -164,6 +165,18 @@ export function queueSubmission(
       },
     ],
   };
+}
+
+/** Put a follow-up back after its send failed: the same transport text and
+ * the same attachments, so the user does not have to type it again. */
+export function restoreQueuedMessage(
+  session: AgentSession,
+  message: QueuedMessage,
+  clock: MobileRuntimeClock,
+): AgentSession {
+  const queued = session.queued_messages ?? [];
+  if (queued.some((item) => item.id === message.id)) return session;
+  return { ...session, queued_messages: [message, ...queued], updated_at: clock.nowSeconds() };
 }
 
 export function providerPromptForSubmission(

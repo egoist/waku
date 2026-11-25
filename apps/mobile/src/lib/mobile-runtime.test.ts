@@ -7,6 +7,7 @@ import {
   createSession,
   createResumedSession,
   queueSubmission,
+  restoreQueuedMessage,
   runtimeEventAlreadyApplied,
   sessionBusy,
   sessionCwd,
@@ -163,6 +164,23 @@ describe('mobile runtime projection', () => {
     }]);
     expect(queued.updated_at).toBe(99);
     expect(busy.queued_messages ?? []).toEqual([]);
+  });
+
+  test('a failed queued follow-up send puts the same message back', () => {
+    const clock = {
+      nowSeconds: () => 99,
+      randomUUID: () => 'queued',
+    };
+    const queued = queueSubmission(session({ status: 'working' }), '', clock, [attachment]);
+    const message = queued.queued_messages![0]!;
+
+    // The queue is drained, the send fails, and the message is put back.
+    const later = { ...message, id: 'later', content: 'later message' };
+    const drained = { ...queued, queued_messages: [later] };
+    const restored = restoreQueuedMessage(drained, message, clock);
+
+    expect(restored.queued_messages).toEqual([message, later]);
+    expect(restoreQueuedMessage(restored, message, clock).queued_messages).toEqual([message, later]);
   });
 
   test('uses a hydrated turn to correct a lagging running status', () => {

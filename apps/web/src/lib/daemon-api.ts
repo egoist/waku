@@ -699,6 +699,43 @@ export function sameProviderSession(
     && providerSessionNativeId(left) === providerSessionNativeId(right)
 }
 
+/** A follow-up waiting for the turn to settle. */
+export type QueuedMessage = NonNullable<AgentSession['queued_messages']>[number]
+
+/** A prompt sent while a turn is live becomes a queued follow-up that drains
+ * once the turn settles. */
+export function queueSubmission(
+  session: AgentSession,
+  displayContent: string,
+  providerPrompt: string,
+  attachments: MessageAttachment[] = [],
+): AgentSession {
+  return {
+    ...session,
+    updated_at: unixTime(),
+    queued_messages: [
+      ...(session.queued_messages ?? []),
+      {
+        id: crypto.randomUUID(),
+        content: providerPrompt,
+        display_content: attachments.length || providerPrompt !== displayContent
+          ? displayContent
+          : null,
+        attachments,
+        created_at: unixTime(),
+      },
+    ],
+  }
+}
+
+/** Put a follow-up back after its send failed: the same transport text and
+ * the same attachments, so the user does not have to type it again. */
+export function restoreQueuedMessage(session: AgentSession, message: QueuedMessage): AgentSession {
+  const queued = session.queued_messages ?? []
+  if (queued.some((item) => item.id === message.id)) return session
+  return { ...session, queued_messages: [message, ...queued], updated_at: unixTime() }
+}
+
 export function beginTurn(
   session: AgentSession,
   prompt: string,

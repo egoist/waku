@@ -33,6 +33,8 @@ import {
   materializeWorktree,
   persistSession,
   probeProvider,
+  queueSubmission,
+  restoreQueuedMessage,
   sessionCwd,
   type TaskState,
 } from './daemon-api'
@@ -415,13 +417,27 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
             queued_messages: latest.queued_messages?.slice(1),
           }
           cacheSession(dequeued)
-          const persisted = await persistOrdered(dequeued)
-          await sendPromptRef.current?.(
-            persisted,
-            nextQueued.display_content ?? nextQueued.content,
-            nextQueued.attachments ?? [],
-            nextQueued.content,
-          )
+          try {
+            const persisted = await persistOrdered(dequeued)
+            if (!sendPromptRef.current) throw new Error('Prompt sender is unavailable')
+            await sendPromptRef.current(
+              persisted,
+              nextQueued.display_content ?? nextQueued.content,
+              nextQueued.attachments ?? [],
+              nextQueued.content,
+            )
+          } catch (error) {
+            // The message left the queue and the send failed, so nothing
+            // holds it any more. Put it back — the desktop restores a failed
+            // submission to the composer for the same reason.
+            const latest = queryClient.getQueryData<AgentSession>(
+              daemonKeys.session(config.address, saved.id),
+            ) ?? dequeued
+            const restored = restoreQueuedMessage(latest, nextQueued)
+            cacheSession(restored)
+            await persistOrdered(restored)
+            throw error
+          }
         })
         .catch((error) => toast.error(errorMessage(error)))
         .finally(() => {
@@ -1352,30 +1368,6 @@ function noticeObjective(objective: string): string {
   const characters = [...objective]
   if (characters.length <= 120) return objective
   return `${characters.slice(0, 119).join('').trimEnd()}…`
-}
-
-function queueSubmission(
-  session: AgentSession,
-  displayContent: string,
-  providerPrompt: string,
-  attachments: MessageAttachment[],
-): AgentSession {
-  return {
-    ...session,
-    updated_at: Math.floor(Date.now() / 1_000),
-    queued_messages: [
-      ...(session.queued_messages ?? []),
-      {
-        id: crypto.randomUUID(),
-        content: providerPrompt,
-        display_content: attachments.length || providerPrompt !== displayContent
-          ? displayContent
-          : null,
-        attachments,
-        created_at: Math.floor(Date.now() / 1_000),
-      },
-    ],
-  }
 }
 
 export function useRuntime() {
