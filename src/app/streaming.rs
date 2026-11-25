@@ -477,15 +477,15 @@ impl Waku {
                 }
             }
             DriverEvent::SteerAccepted { message } => {
+                // Drivers echo the submitted text verbatim, so an unmatched
+                // acceptance belongs to another client's steer — taking the
+                // oldest local entry would stamp this client's presentation
+                // and attachments onto a message that is not its own.
                 let submission = runtime
                     .pending_steers
                     .iter()
                     .position(|submission| submission.prompt == message)
                     .and_then(|index| runtime.pending_steers.remove(index))
-                    // Providers normally echo the exact transport text, but a
-                    // normalized echo still acknowledges the oldest pending
-                    // steer. Preserve its attachment presentation metadata.
-                    .or_else(|| runtime.pending_steers.pop_front())
                     .unwrap_or_else(|| ComposerSubmission::plain(message.clone()));
                 // The provider folded the message into the live turn. Append
                 // it to the same turn so the transcript mirrors the provider
@@ -500,12 +500,14 @@ impl Waku {
                 }
             }
             DriverEvent::SteerRejected { message, reason } => {
+                // Same matching as the acceptance: an unmatched rejection is
+                // another client's steer, and its message goes back without
+                // this client's presentation metadata.
                 let submission = runtime
                     .pending_steers
                     .iter()
                     .position(|submission| submission.prompt == message)
                     .and_then(|index| runtime.pending_steers.remove(index))
-                    .or_else(|| runtime.pending_steers.pop_front())
                     .unwrap_or_else(|| ComposerSubmission::plain(message));
                 let (busy, settled_cleanly) = self
                     .state
