@@ -1,9 +1,9 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::io;
-use std::net::{TcpListener, TcpStream};
+use std::net::{IpAddr, TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Weak};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, bail};
 use crossbeam_channel::{Receiver, Sender, bounded, unbounded};
@@ -32,6 +32,17 @@ const SOCKET_POLL_INTERVAL: Duration = Duration::from_millis(25);
 const SOCKET_WRITE_STALL_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_HANDSHAKE_MESSAGE_BYTES: usize = 64 * 1024;
 const MAX_CONNECTIONS: usize = 64;
+/// Wrong-token hellos from one address are answered with a growing delay
+/// before that address may connect again: 1s after the first failure,
+/// doubling to this cap. Waku's own clients stop after the first
+/// `rejected`, so only a brute-force loop ever accumulates failures.
+const AUTH_BACKOFF_CAP: Duration = Duration::from_secs(30);
+/// An address with no failures for this long is forgotten, so one stale
+/// token tried long ago cannot still be holding a gate open.
+const AUTH_FAILURE_TTL: Duration = Duration::from_secs(600);
+/// Bound on tracked addresses, so a spray of source addresses cannot grow
+/// the limiter without bound. Eviction drops the oldest failures first.
+const AUTH_MAX_TRACKED_ADDRESSES: usize = 4096;
 const MAX_REPLAY_EVENTS_PER_SESSION: usize = 2048;
 /// Per-subscriber cap on queued daemon messages. A subscriber that falls this
 /// far behind live events is dropped instead of buffered for, so a stalled
@@ -548,6 +559,83 @@ impl RequestDispatcher {
     }
 }
 
+/// Per-address throttle on failed token attempts. When the daemon is
+/// exposed beyond loopback, a wrong-token hello can otherwise be retried at
+/// network speed: the connection cap barely throttles it, because a rejected
+/// connection frees its slot at once. The token compare itself stays
+/// constant-time (`token_matches`); this only throttles how often a wrong
+/// answer may be offered.
+///
+/// Loopback is exempt: every local app shares 127.0.0.1/::1, so one
+/// misconfigured client would otherwise gate the rest, and a local process
+/// can read the daemon token from disk anyway — the gate protects the
+/// exposed socket, not the machine's owner.
+#[derive(Default)]
+struct AuthRateLimiter {
+    failures: HashMap<IpAddr, AuthFailure>,
+}
+
+struct AuthFailure {
+    count: u32,
+    gated_until: Instant,
+}
+
+impl AuthRateLimiter {
+    /// How long a new connection from `address` must wait, if it is gated.
+    fn retry_after(&self, address: IpAddr, now: Instant) -> Option<Duration> {
+        if address.is_loopback() {
+            return None;
+        }
+        let failure = self.failures.get(&address)?;
+        failure
+            .gated_until
+            .checked_duration_since(now)
+            .filter(|wait| !wait.is_zero())
+    }
+
+    fn record_failure(&mut self, address: IpAddr, now: Instant) {
+        if address.is_loopback() {
+            return;
+        }
+        self.prune(now);
+        let failure = self.failures.entry(address).or_insert(AuthFailure {
+            count: 0,
+            gated_until: now,
+        });
+        failure.count = failure.count.saturating_add(1);
+        let shift = failure.count.saturating_sub(1).min(5);
+        let backoff = Duration::from_secs(1 << shift).min(AUTH_BACKOFF_CAP);
+        failure.gated_until = now + backoff;
+    }
+
+    /// A successful hello clears the address, so a client that fixes a stale
+    /// token recovers at once instead of serving the rest of the backoff.
+    fn record_success(&mut self, address: IpAddr) {
+        self.failures.remove(&address);
+    }
+
+    /// Forgets quiet and expired entries, and bounds the map by evicting the
+    /// least recently gated addresses once the cap is exceeded.
+    fn prune(&mut self, now: Instant) {
+        self.failures.retain(|_, failure| {
+            failure
+                .gated_until
+                .checked_add(AUTH_FAILURE_TTL)
+                .is_none_or(|forget_at| forget_at > now)
+        });
+        while self.failures.len() >= AUTH_MAX_TRACKED_ADDRESSES {
+            let Some((&oldest, _)) = self
+                .failures
+                .iter()
+                .min_by_key(|(_, failure)| failure.gated_until)
+            else {
+                break;
+            };
+            self.failures.remove(&oldest);
+        }
+    }
+}
+
 pub fn serve(
     listener: TcpListener,
     token: String,
@@ -562,9 +650,20 @@ pub fn serve(
     let dispatcher = Arc::new(RequestDispatcher::new(backend.clone(), hub.clone()));
     let options = Arc::new(options);
     let active_connections = Arc::new(AtomicUsize::new(0));
+    let auth_limiter = Arc::new(Mutex::new(AuthRateLimiter::default()));
     while !shutdown.load(Ordering::Acquire) {
         match listener.accept() {
-            Ok((stream, _)) => {
+            Ok((stream, address)) => {
+                // A gated address gets its connection dropped before it can
+                // burn a thread or even offer a token; the drop is silent, so
+                // the gate reveals nothing about why the connection failed.
+                if auth_limiter
+                    .lock()
+                    .retry_after(address.ip(), Instant::now())
+                    .is_some()
+                {
+                    continue;
+                }
                 if active_connections
                     .fetch_update(Ordering::AcqRel, Ordering::Acquire, |active| {
                         (active < MAX_CONNECTIONS).then_some(active + 1)
@@ -579,13 +678,17 @@ pub fn serve(
                 let hub = hub.clone();
                 let shutdown = shutdown.clone();
                 let options = options.clone();
+                let auth_gate = AuthGate {
+                    peer: address.ip(),
+                    limiter: auth_limiter.clone(),
+                };
                 std::thread::Builder::new()
                     .name("waku-daemon-connection".into())
                     .spawn(move || {
                         let _connection_permit = connection_permit;
-                        if let Err(error) =
-                            handle_connection(stream, &token, dispatcher, hub, shutdown, &options)
-                        {
+                        if let Err(error) = handle_connection(
+                            stream, auth_gate, &token, dispatcher, hub, shutdown, &options,
+                        ) {
                             eprintln!("waku-daemon connection ended: {error:#}");
                         }
                     })
@@ -602,8 +705,16 @@ pub fn serve(
     Ok(())
 }
 
+/// One connection's view of the failed-auth throttle: who it is, and the
+/// shared table it reports to.
+struct AuthGate {
+    peer: IpAddr,
+    limiter: Arc<Mutex<AuthRateLimiter>>,
+}
+
 fn handle_connection(
     stream: TcpStream,
+    auth_gate: AuthGate,
     expected_token: &str,
     dispatcher: Arc<RequestDispatcher>,
     hub: Arc<Hub>,
@@ -635,6 +746,7 @@ fn handle_connection(
             resume_from,
             ..
         } if protocol_version == PROTOCOL_VERSION && token_matches(expected_token, &token) => {
+            auth_gate.limiter.lock().record_success(auth_gate.peer);
             resume_from
         }
         ClientMessage::Hello {
@@ -651,6 +763,10 @@ fn handle_connection(
             return Ok(());
         }
         ClientMessage::Hello { .. } => {
+            auth_gate
+                .limiter
+                .lock()
+                .record_failure(auth_gate.peer, Instant::now());
             write_json(
                 &mut socket,
                 &ServerMessage::Rejected {
@@ -1088,6 +1204,92 @@ mod tests {
     use serde_json::json;
     use std::path::PathBuf;
     use waku_client::{DaemonClient, DaemonSupervisor};
+
+    fn remote_address(last_octet: u8) -> IpAddr {
+        IpAddr::from([192, 0, 2, last_octet])
+    }
+
+    #[test]
+    fn a_failed_hello_gates_the_address_with_a_doubling_backoff() {
+        let mut limiter = AuthRateLimiter::default();
+        let address = remote_address(1);
+        let mut now = Instant::now();
+
+        for (attempt, expected) in [1u64, 2, 4, 8, 16].iter().enumerate() {
+            assert!(limiter.retry_after(address, now).is_none());
+            limiter.record_failure(address, now);
+            assert_eq!(
+                limiter.retry_after(address, now),
+                Some(Duration::from_secs(*expected)),
+                "attempt {} should gate for {expected}s",
+                attempt + 1
+            );
+            now += Duration::from_secs(*expected) + Duration::from_millis(1);
+        }
+
+        limiter.record_failure(address, now);
+        assert_eq!(
+            limiter.retry_after(address, now),
+            Some(Duration::from_secs(32).min(AUTH_BACKOFF_CAP)),
+        );
+    }
+
+    #[test]
+    fn a_successful_hello_clears_the_gate() {
+        let mut limiter = AuthRateLimiter::default();
+        let address = remote_address(2);
+        let now = Instant::now();
+
+        limiter.record_failure(address, now);
+        limiter.record_failure(address, now);
+        assert!(limiter.retry_after(address, now).is_some());
+
+        limiter.record_success(address);
+        assert!(limiter.retry_after(address, now).is_none());
+    }
+
+    #[test]
+    fn loopback_is_never_gated() {
+        let mut limiter = AuthRateLimiter::default();
+        let now = Instant::now();
+        for address in [
+            IpAddr::from([127, 0, 0, 1]),
+            IpAddr::from([0, 0, 0, 0, 0, 0, 0, 1]),
+        ] {
+            for _ in 0..8 {
+                limiter.record_failure(address, now);
+            }
+            assert!(limiter.retry_after(address, now).is_none());
+        }
+        assert!(limiter.failures.is_empty());
+    }
+
+    #[test]
+    fn a_quiet_address_is_forgotten() {
+        let mut limiter = AuthRateLimiter::default();
+        let offender = remote_address(3);
+        let now = Instant::now();
+
+        limiter.record_failure(offender, now);
+        // The gate itself expires quickly; the entry lingers only until it
+        // has been quiet for the TTL, then a fresh failure starts over.
+        let later = now + AUTH_BACKOFF_CAP + AUTH_FAILURE_TTL + Duration::from_secs(1);
+        limiter.record_failure(remote_address(4), later);
+
+        assert!(limiter.retry_after(offender, later).is_none());
+        assert!(!limiter.failures.contains_key(&offender));
+    }
+
+    #[test]
+    fn tracked_addresses_stay_bounded() {
+        let mut limiter = AuthRateLimiter::default();
+        let now = Instant::now();
+        for index in 0..AUTH_MAX_TRACKED_ADDRESSES + 10 {
+            let address = IpAddr::from([192, 0, (index >> 8) as u8, index as u8]);
+            limiter.record_failure(address, now);
+        }
+        assert!(limiter.failures.len() <= AUTH_MAX_TRACKED_ADDRESSES);
+    }
 
     #[derive(Default)]
     struct TestBackend {
