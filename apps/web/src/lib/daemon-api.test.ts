@@ -24,6 +24,7 @@ import {
   removeSession,
   sameProviderSession,
   selectableProjects,
+  sessionBusy,
   writeWorkspaceTextFile,
   type DaemonDirectory,
 } from './daemon-api'
@@ -44,6 +45,18 @@ describe('applyComposerDraftChanges', () => {
 
     await expect(applyComposerDraftChanges(client, changes)).resolves.toBeUndefined()
     expect(command).toEqual({ type: 'applyComposerDraftChanges', changes })
+  })
+})
+
+describe('sessionBusy', () => {
+  test('a parked task still owns its runtime', () => {
+    // The provider parks a turn while detached work runs; the turn stays
+    // open, so a message sent now belongs behind it.
+    expect(sessionBusy({ status: 'background' })).toBe(true)
+    expect(sessionBusy({ status: 'working' })).toBe(true)
+    expect(sessionBusy({ status: 'waiting' })).toBe(true)
+    expect(sessionBusy({ status: 'idle' })).toBe(false)
+    expect(sessionBusy({ status: 'failed' })).toBe(false)
   })
 })
 

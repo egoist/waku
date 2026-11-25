@@ -699,6 +699,18 @@ export function sameProviderSession(
     && providerSessionNativeId(left) === providerSessionNativeId(right)
 }
 
+/** A session that is connecting, working, waiting or parked still owns its
+ * runtime: a message sent now belongs behind the open turn, not beside it.
+ * The mobile client keeps the same list in `sessionBusy`. */
+export function sessionBusy(session: Pick<AgentSession, 'status'>): boolean {
+  return (
+    session.status === 'connecting' ||
+    session.status === 'working' ||
+    session.status === 'waiting' ||
+    session.status === 'background'
+  )
+}
+
 export function beginTurn(
   session: AgentSession,
   prompt: string,

@@ -33,6 +33,7 @@ import {
   materializeWorktree,
   persistSession,
   probeProvider,
+  sessionBusy,
   sessionCwd,
   type TaskState,
 } from './daemon-api'
@@ -473,7 +474,11 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
         if (event.event.kind === 'steerAccepted') {
           const payload = event.event.payload as { message?: string }
           const pending = pendingSteers.current.get(session.id)?.shift()
-          if (pending) {
+          // The provider folded a steer into the live turn. Ours is pending
+          // here; another client's is not, and its message belongs in this
+          // transcript just the same — the desktop and the mobile mirror it.
+          const content = payload.message ?? pending?.providerPrompt
+          if (content) {
             const turnId = current.turns.at(-1)?.id ?? null
             current = {
               ...current,
@@ -483,12 +488,14 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
                   id: crypto.randomUUID(),
                   turn_id: turnId,
                   role: 'user',
-                  content: payload.message ?? pending.providerPrompt,
+                  content,
                   display_content:
-                    pending.attachments.length || pending.providerPrompt !== pending.displayContent
+                    pending && (
+                      pending.attachments.length || pending.providerPrompt !== pending.displayContent
+                    )
                       ? pending.displayContent
                       : null,
-                  attachments: pending.attachments,
+                  attachments: pending?.attachments ?? [],
                   created_at: Math.floor(Date.now() / 1_000),
                   streaming: false,
                 },
@@ -631,9 +638,7 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
         daemonKeys.session(config.address, inputSession.id),
       ) ?? inputSession
       if (
-        currentSession.status === 'connecting' ||
-        currentSession.status === 'working' ||
-        currentSession.status === 'waiting' ||
+        sessionBusy(currentSession) ||
         checkpointCaptures.current.has(currentSession.id)
       ) {
         const queued = queueSubmission(currentSession, prompt, providerPrompt, attachments)
