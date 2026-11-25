@@ -878,11 +878,16 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
               && !pursuit.provider_turn_started
               && !cached.messages.some((message) => message.turn_id === pursuit.id)
             ) {
-              cacheSession({
+              const unwound = {
                 ...cached,
-                status: 'idle',
+                status: 'idle' as const,
                 turns: cached.turns.slice(0, -1),
-              })
+              }
+              cacheSession(unwound)
+              // The pursuit was persisted optimistically, so the daemon has
+              // to unwind too — otherwise it keeps a task that looks running
+              // with no provider behind it.
+              void persistOrdered(unwound).catch((error) => toast.error(errorMessage(error)))
             }
           }, 30_000)
         }
@@ -900,7 +905,11 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
           return
         }
       } catch (error) {
-        if (restoreOnFailure) cacheSession(restoreOnFailure)
+        if (restoreOnFailure) {
+          cacheSession(restoreOnFailure)
+          void persistOrdered(restoreOnFailure)
+            .catch((cause) => toast.error(errorMessage(cause)))
+        }
         throw error
       }
 
@@ -986,7 +995,11 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
         await client.notify({ type: 'goal', operation }, session.id, runtimeId)
       } catch (error) {
         removeRuntime(session.id)
-        if (restoreOnFailure) cacheSession(restoreOnFailure)
+        if (restoreOnFailure) {
+          cacheSession(restoreOnFailure)
+          void persistOrdered(restoreOnFailure)
+            .catch((cause) => toast.error(errorMessage(cause)))
+        }
         throw error
       }
     },
