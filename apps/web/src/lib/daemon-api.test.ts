@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 import type {
+  AgentSession,
   ComposerDraftChange,
   DaemonSettings,
   Project,
@@ -24,6 +25,7 @@ import {
   removeSession,
   sameProviderSession,
   selectableProjects,
+  withDaemonCheckpoints,
   writeWorkspaceTextFile,
   type DaemonDirectory,
 } from './daemon-api'
@@ -61,6 +63,48 @@ describe('beginTurn', () => {
     })
     expect(active.turns).toHaveLength(1)
     expect(draft.messages).toHaveLength(0)
+  })
+})
+
+describe('withDaemonCheckpoints', () => {
+  test('keeps the newer local state and takes the daemon’s checkpoint', () => {
+    const checkpoint = { type: 'git' } as never
+    const older: AgentSession = {
+      ...beginTurn(createSession('project', 'codex', false), 'Go'),
+      turns: [{
+        id: 'turn',
+        turn_count: 1,
+        status: 'completed',
+        provider_turn_started: true,
+        provider_resume_at: null,
+        started_at: 100,
+        completed_at: 110,
+        checkpoint,
+      }],
+    }
+    // While the save was in flight a new event landed: a message the older
+    // snapshot does not have.
+    const newer: AgentSession = {
+      ...older,
+      turns: older.turns.map((turn) => ({ ...turn, checkpoint: null })),
+      messages: [
+        ...older.messages,
+        {
+          id: 'reply',
+          turn_id: 'turn',
+          role: 'assistant',
+          content: 'Done',
+          created_at: 120,
+          streaming: false,
+        },
+      ],
+    }
+
+    const merged = withDaemonCheckpoints(newer, older)
+    expect(merged.messages.at(-1)).toMatchObject({ content: 'Done' })
+    expect(merged.turns[0]!.checkpoint).toEqual(checkpoint)
+    // And nothing changes when the reply's checkpoint matches the local one.
+    expect(withDaemonCheckpoints(older, older)).toBe(older)
   })
 })
 

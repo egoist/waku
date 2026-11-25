@@ -34,6 +34,7 @@ import {
   persistSession,
   probeProvider,
   sessionCwd,
+  withDaemonCheckpoints,
   type TaskState,
 } from './daemon-api'
 import {
@@ -160,6 +161,10 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
   const entries = useRef(new Map<string, RuntimeEntry>())
   const attachRequests = useRef(new Map<string, Promise<boolean>>())
   const persistenceTails = useRef(new Map<string, Promise<AgentSession>>())
+  /* Generation per session, advanced by every cacheSession: a save reply that
+   * lands after newer local writes cannot roll the cache back to the
+   * snapshot it saved. */
+  const cacheGenerations = useRef(new Map<string, number>())
   const checkpointCaptures = useRef(new Map<string, Promise<AgentSession>>())
   const projectionPersistTimers = useRef(new Map<string, number>())
   const saveGenerations = useRef(new Map<string, number>())
@@ -190,6 +195,10 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
   const cacheSession = useCallback(
     (session: AgentSession, project?: Project) => {
       if (!config) return
+      cacheGenerations.current.set(
+        session.id,
+        (cacheGenerations.current.get(session.id) ?? 0) + 1,
+      )
       queryClient.setQueryData(
         daemonKeys.session(config.address, session.id),
         session,
@@ -220,10 +229,26 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
       if (!client) {
         return Promise.reject(new Error(translate(localeRef.current, 'errors.daemon_disconnected')))
       }
+      const generation = cacheGenerations.current.get(session.id)
       const previous = persistenceTails.current.get(session.id)
       const operation = (previous ?? Promise.resolve(session))
         .catch(() => session)
         .then(() => persistSession(client, session, project))
+        .then((saved) => {
+          // The reply describes the snapshot that was saved. Runtime events
+          // committed while it was in flight are newer than that snapshot, so
+          // keep them and take only what the daemon owns — turn checkpoints —
+          // from the reply. The mobile client has the same guard.
+          const latest = config
+            ? queryClient.getQueryData<AgentSession>(
+                daemonKeys.session(config.address, session.id),
+              )
+            : undefined
+          if (cacheGenerations.current.get(session.id) !== generation && latest) {
+            return withDaemonCheckpoints(latest, saved)
+          }
+          return saved
+        })
       persistenceTails.current.set(session.id, operation)
       void operation
         .finally(() => {
@@ -234,7 +259,7 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
         .catch(() => {})
       return operation
     },
-    [client],
+    [client, config, queryClient],
   )
 
   const scheduleProjectionPersist = useCallback(

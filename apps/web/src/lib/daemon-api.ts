@@ -699,6 +699,25 @@ export function sameProviderSession(
     && providerSessionNativeId(left) === providerSessionNativeId(right)
 }
 
+/** `latest` is newer than the snapshot `saved` answers. Take only what the
+ * daemon owns from the reply — the checkpoints it captured — and keep every
+ * other field of the newer state. Mirrors the mobile client's merge. */
+export function withDaemonCheckpoints(latest: AgentSession, saved: AgentSession): AgentSession {
+  let changed = false
+  const turns = latest.turns.map((turn) => {
+    const stored = saved.turns.find((candidate) => candidate.turn_count === turn.turn_count)
+    if (
+      !stored?.checkpoint
+      || JSON.stringify(stored.checkpoint) === JSON.stringify(turn.checkpoint)
+    ) {
+      return turn
+    }
+    changed = true
+    return { ...turn, checkpoint: stored.checkpoint }
+  })
+  return changed ? { ...latest, turns } : latest
+}
+
 export function beginTurn(
   session: AgentSession,
   prompt: string,
