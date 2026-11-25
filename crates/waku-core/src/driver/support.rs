@@ -269,6 +269,29 @@ pub(super) fn classify_tool(name: &str) -> ActivityKind {
     ActivityKind::from_tool_name(name)
 }
 
+/// A provider's newline between reasoning tokens is not output.
+///
+/// The transcript renders a soft break as a line break, so a provider that
+/// streams a newline between its reasoning tokens shows one token per line.
+/// GLM through OpenRouter alternates a text chunk and a newline-only chunk
+/// (`"The"`, `"\n"`, `" tracking"`), and the worse turns accumulate blank
+/// lines between tokens, which read as paragraph breaks.
+///
+/// Whitespace is not content, and the token that follows a dropped newline
+/// carries its own spacing. A lone space is the word spacing a token does
+/// not carry, so it stays. This applies to a PROVIDER's text only: the
+/// separators Waku writes itself (Codex's between reasoning parts) are
+/// structure, not noise.
+pub(super) fn provider_reasoning_delta(text: &str) -> Option<&str> {
+    if text.is_empty() {
+        return None;
+    }
+    if text.trim().is_empty() && text.contains('\n') {
+        return None;
+    }
+    Some(text)
+}
+
 /// OpenCode's permission policy.
 ///
 /// `permission_responses` translates every durable "always" choice into a
@@ -399,6 +422,19 @@ mod tests {
     use std::collections::HashMap;
 
     use super::*;
+
+    #[test]
+    fn a_providers_whitespace_only_reasoning_is_dropped() {
+        assert_eq!(provider_reasoning_delta("The"), Some("The"));
+        assert_eq!(provider_reasoning_delta(" tracking"), Some(" tracking"));
+        // A newline between tokens is noise: the transcript renders a soft
+        // break as a line break, so it would show one token per line.
+        assert_eq!(provider_reasoning_delta("\n"), None);
+        assert_eq!(provider_reasoning_delta("\n\n"), None);
+        // A lone space is the word spacing a token does not carry.
+        assert_eq!(provider_reasoning_delta(" "), Some(" "));
+        assert_eq!(provider_reasoning_delta(""), None);
+    }
 
     fn computer_use_config() -> computer_use_runtime::ComputerUseConfig {
         computer_use_runtime::ComputerUseConfig {

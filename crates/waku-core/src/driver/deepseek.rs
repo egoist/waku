@@ -705,7 +705,11 @@ fn handle_session_event(
                 }
                 Some("reasoning-delta") => {
                     state.streamed_steps.insert((turn, step));
-                    if let Some(text) = chunk.get("text").and_then(Value::as_str) {
+                    if let Some(text) = chunk
+                        .get("text")
+                        .and_then(Value::as_str)
+                        .and_then(super::support::provider_reasoning_delta)
+                    {
                         let _ = events.send(DriverEvent::ReasoningDelta(text.to_owned()));
                     }
                 }
@@ -729,7 +733,9 @@ fn handle_session_event(
                             let _ = events.send(DriverEvent::TextDelta(text.to_owned()));
                         }
                         (Some("reasoning"), Some(text)) => {
-                            let _ = events.send(DriverEvent::ReasoningDelta(text.to_owned()));
+                            if let Some(text) = super::support::provider_reasoning_delta(text) {
+                                let _ = events.send(DriverEvent::ReasoningDelta(text.to_owned()));
+                            }
                         }
                         _ => {}
                     }

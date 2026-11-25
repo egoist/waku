@@ -1420,7 +1420,7 @@ fn handle_pi_message(
                     if let Some(delta) = update
                         .get("delta")
                         .and_then(Value::as_str)
-                        .filter(|delta| !delta.is_empty())
+                        .and_then(super::support::provider_reasoning_delta)
                     {
                         state.message_saw_reasoning = true;
                         let _ = events.send(DriverEvent::ReasoningDelta(delta.to_owned()));
@@ -1569,7 +1569,7 @@ fn emit_completed_message_fallback(
                 if let Some(thinking) = block
                     .get("thinking")
                     .and_then(Value::as_str)
-                    .filter(|thinking| !thinking.is_empty())
+                    .and_then(super::support::provider_reasoning_delta)
                 {
                     state.message_saw_reasoning = true;
                     let _ = events.send(DriverEvent::ReasoningDelta(thinking.to_owned()));

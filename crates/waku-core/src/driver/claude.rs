@@ -1397,7 +1397,7 @@ fn handle_message(
                     if let Some(text) = delta
                         .get("thinking")
                         .and_then(Value::as_str)
-                        .filter(|text| !text.is_empty())
+                        .and_then(super::support::provider_reasoning_delta)
                     {
                         state.saw_reasoning_delta = true;
                         let _ = events.send(DriverEvent::ReasoningDelta(text.to_owned()));
@@ -1444,7 +1444,7 @@ fn handle_message(
                         if let Some(text) = block
                             .get("thinking")
                             .and_then(Value::as_str)
-                            .filter(|text| !text.is_empty())
+                            .and_then(super::support::provider_reasoning_delta)
                         {
                             let _ = events.send(DriverEvent::ReasoningDelta(text.to_owned()));
                         }
@@ -2503,6 +2503,41 @@ mod tests {
         assert!(matches!(&seen[3], DriverEvent::RichActivity(item)
                 if item.complete && item.output.as_deref() == Some("hi")));
         assert_eq!(seen.len(), 4, "replayed prompt or control noise leaked");
+    }
+
+    /// A provider that streams a newline between its reasoning tokens would
+    /// show one token per line: the transcript renders a soft break as a line
+    /// break. GLM through OpenRouter alternates a text chunk and a
+    /// newline-only chunk, and the worse turns accumulate blank lines
+    /// between the tokens, which read as paragraph breaks.
+    #[test]
+    fn a_providers_whitespace_only_reasoning_is_not_output() {
+        let (events, event_rx, commands, _command_rx, turn, mut state) = harness();
+        let wire = [
+            json!({"type":"stream_event","event":{"type":"message_start","message":{"role":"assistant"}}}),
+            json!({"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"thinking_delta","thinking":"The"}}}),
+            json!({"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"thinking_delta","thinking":"\n"}}}),
+            json!({"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"thinking_delta","thinking":" tracking"}}}),
+            json!({"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"thinking_delta","thinking":"\n\n"}}}),
+            json!({"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"thinking_delta","thinking":" got"}}}),
+            // A lone space is the word spacing a token does not carry.
+            json!({"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"thinking_delta","thinking":" "}}}),
+            json!({"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"thinking_delta","thinking":"upstream"}}}),
+        ];
+        for message in wire {
+            handle_message(&message, "s", &events, &commands, &turn, true, &mut state);
+        }
+
+        let mut reasoning = String::new();
+        let mut deltas = 0;
+        while let Ok(event) = event_rx.try_recv() {
+            if let DriverEvent::ReasoningDelta(text) = event {
+                reasoning.push_str(&text);
+                deltas += 1;
+            }
+        }
+        assert_eq!(reasoning, "The tracking got upstream");
+        assert_eq!(deltas, 5, "a whitespace-only delta reached the transcript");
     }
 
     #[test]

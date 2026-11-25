@@ -1830,7 +1830,12 @@ fn handle_codex_message(
                         let _ = events.send(DriverEvent::ReasoningDelta("\n\n".to_owned()));
                     }
                 }
-                let _ = events.send(DriverEvent::ReasoningDelta(delta.to_owned()));
+                // The separator above is Waku's own structure. The provider's
+                // text is not: a whitespace-only delta is noise, and the
+                // transcript renders a soft break as a line break.
+                if let Some(delta) = super::support::provider_reasoning_delta(delta) {
+                    let _ = events.send(DriverEvent::ReasoningDelta(delta.to_owned()));
+                }
             }
         }
         "item/commandExecution/outputDelta" => {
@@ -3303,6 +3308,65 @@ mod tests {
             reasoning,
             "**Evaluating cleanup**\n\n**Analyzing methods** and detection"
         );
+    }
+
+    /// A provider's whitespace-only reasoning text is noise: the transcript
+    /// renders a soft break as a line break, so it would show one token per
+    /// line. The separator WAKU writes between Codex's reasoning parts is
+    /// structure and stays.
+    #[test]
+    fn a_providers_whitespace_only_reasoning_is_not_output() {
+        let thread_id = Mutex::new(Some("thread-1".to_owned()));
+        let turn_id = Mutex::new(Some("turn-1".to_owned()));
+        let turn_ids = Mutex::new(vec!["turn-1".to_owned()]);
+        let pending_rollbacks = Mutex::new(HashMap::new());
+        let pending_steers = Mutex::new(HashMap::new());
+        let background_rpcs = Mutex::new(BackgroundRpcState::default());
+        let goal_rpcs = Mutex::new(GoalRpcState::default());
+        let (goal_commands, _goal_command_rx) = unbounded();
+        let (event_tx, event_rx) = unbounded();
+        let mut stream_state = CodexStreamState::default();
+
+        let deltas = [
+            (0, "**Evaluating cleanup**"),
+            (0, "\n"),
+            (0, " and detection"),
+            (1, "\n\n"),
+        ];
+        for (summary_index, delta) in deltas {
+            handle_codex_message(
+                json!({
+                    "method": "item/reasoning/summaryTextDelta",
+                    "params": {
+                        "threadId": "thread-1",
+                        "turnId": "turn-1",
+                        "itemId": "item-1",
+                        "summaryIndex": summary_index,
+                        "delta": delta,
+                    }
+                }),
+                &thread_id,
+                &turn_id,
+                &turn_ids,
+                &pending_rollbacks,
+                &pending_steers,
+                &background_rpcs,
+                &goal_rpcs,
+                &goal_commands,
+                &event_tx,
+                &mut stream_state,
+            );
+        }
+
+        let mut reasoning = String::new();
+        while let Ok(event) = event_rx.try_recv() {
+            match event {
+                DriverEvent::ReasoningDelta(delta) => reasoning.push_str(&delta),
+                other => panic!("expected reasoning deltas, got {other:?}"),
+            }
+        }
+
+        assert_eq!(reasoning, "**Evaluating cleanup** and detection\n\n");
     }
 
     #[test]

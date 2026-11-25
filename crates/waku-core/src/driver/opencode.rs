@@ -1424,11 +1424,16 @@ fn append_suffix(
     }
     let delta = suffix.to_owned();
     seen.push_str(&delta);
-    let _ = events.send(if reasoning {
-        DriverEvent::ReasoningDelta(delta)
-    } else {
-        DriverEvent::TextDelta(delta)
-    });
+    if reasoning {
+        // A provider's whitespace-only reasoning text is noise: the
+        // transcript renders a soft break as a line break, so it would show
+        // one token per line.
+        if let Some(delta) = super::support::provider_reasoning_delta(&delta) {
+            let _ = events.send(DriverEvent::ReasoningDelta(delta.to_owned()));
+        }
+        return;
+    }
+    let _ = events.send(DriverEvent::TextDelta(delta));
 }
 
 fn repair_tool(
@@ -1967,11 +1972,16 @@ fn stream_delta(
             .text_mut()
             .push_str(delta);
     }
-    let _ = events.send(if reasoning {
-        DriverEvent::ReasoningDelta(delta.to_owned())
-    } else {
-        DriverEvent::TextDelta(delta.to_owned())
-    });
+    if reasoning {
+        // A provider's whitespace-only reasoning text is noise: the
+        // transcript renders a soft break as a line break, so it would show
+        // one token per line.
+        if let Some(delta) = super::support::provider_reasoning_delta(delta) {
+            let _ = events.send(DriverEvent::ReasoningDelta(delta.to_owned()));
+        }
+        return;
+    }
+    let _ = events.send(DriverEvent::TextDelta(delta.to_owned()));
 }
 
 fn end_part(data: &Value, state: &mut StreamState, reasoning: bool) {
@@ -2699,6 +2709,32 @@ mod tests {
             !rendered.contains("SECRET"),
             "provider control state must never reach a transcript"
         );
+    }
+
+    /// A provider that streams a newline between its reasoning tokens would
+    /// show one token per line: the transcript renders a soft break as a line
+    /// break. The reconnect repair replays the whole body instead of the
+    /// increments, so the newline is dropped out of the delta while the body
+    /// it belongs to stays accounted for.
+    #[test]
+    fn a_providers_whitespace_only_reasoning_is_not_output() {
+        let mut harness = Harness::new(RuntimeMode::FullAccess);
+        harness.feed(step_started("msg_1"));
+        harness.feed(json!({"type": "session.reasoning.started", "data": {"assistantMessageID": "msg_1", "ordinal": 0}}));
+        for body in ["The", "\n", " tracking", "\n\n"] {
+            harness.feed(json!({"type": "session.reasoning.delta", "data": {"assistantMessageID": "msg_1", "ordinal": 0, "delta": body}}));
+        }
+
+        let mut reasoning = String::new();
+        let mut deltas = 0;
+        for event in harness.drain() {
+            if let DriverEvent::ReasoningDelta(text) = event {
+                reasoning.push_str(&text);
+                deltas += 1;
+            }
+        }
+        assert_eq!(reasoning, "The tracking");
+        assert_eq!(deltas, 2, "a whitespace-only delta reached the transcript");
     }
 
     /// Text and reasoning share ONE ordinal namespace per assistant message,

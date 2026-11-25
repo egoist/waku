@@ -452,7 +452,7 @@ fn handle_message(
                             if let Some(text) = block
                                 .get("thinking")
                                 .and_then(Value::as_str)
-                                .filter(|text| !text.is_empty())
+                                .and_then(super::support::provider_reasoning_delta)
                             {
                                 let _ = events.send(DriverEvent::ReasoningDelta(text.to_owned()));
                             }
