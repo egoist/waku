@@ -760,6 +760,18 @@ impl Waku {
             }
             DriverEvent::ProcessExited => {
                 self.mark_background_work_lost(session_id);
+                // Steers the provider never answered die with the runtime;
+                // the submissions belong back on the queue, not in the void.
+                if !runtime.pending_steers.is_empty()
+                    && let Some(session) = self.state.session_mut(session_id)
+                {
+                    session.queued_messages.extend(
+                        runtime
+                            .pending_steers
+                            .drain(..)
+                            .map(|submission| submission.into_queued_message()),
+                    );
+                }
                 let previous_kinds = self.snapshot_selected_transcript_rows(session_id);
                 self.finish_streaming_assistant(session_id);
                 self.complete_turn_blocks(session_id);

@@ -3389,8 +3389,21 @@ impl Waku {
                     self.splice_transcript_rows_after_visibility_change(&previous_kinds);
                     self.restore_composer_submission(submission, cx);
                     self.show_toast(tr!("errors.create_worktree", error = error));
+                } else {
+                    // A composer restore writes the selected task's draft, so
+                    // a failure behind another task puts the submission back
+                    // on that task's own queue instead of losing it.
+                    self.enqueue_follow_up_submission(session_id, submission, cx);
                 }
                 cx.notify();
+                // The optimistic turn was persisted eagerly; the unwind has
+                // to reach disk too, deferred off this frame like the
+                // optimistic save below the success path.
+                cx.spawn(async move |waku, cx| {
+                    cx.background_executor().timer(STREAM_FRAME_INTERVAL).await;
+                    let _ = waku.update(cx, |waku, _| waku.save());
+                })
+                .detach();
                 return;
             }
         };
