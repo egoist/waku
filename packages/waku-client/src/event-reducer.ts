@@ -486,7 +486,19 @@ function settleTurn(
   finishStreamingMessages(session)
   completeActivities(session)
   const turn = activeTurn(session)
-  if (!turn) return false
+  if (!turn) {
+    // A provider settle with no running turn left is a duplicate or stale
+    // settle. Nothing is marked Running, but a session list projection — or
+    // a session whose turn rows were never hydrated — may still show busy,
+    // so reconcile the status to the truth instead of leaving it stranded
+    // (the same reconcile the desktop's TurnFinished handler does).
+    if (['connecting', 'working', 'waiting', 'background'].includes(session.status)) {
+      session.status = status === 'completed' ? 'idle' : 'failed'
+      session.updated_at = clock.nowSeconds()
+      return true
+    }
+    return false
+  }
   const hasAssistant = session.messages.some(
     (message) => message.turn_id === turn.id && message.role === 'assistant',
   )
