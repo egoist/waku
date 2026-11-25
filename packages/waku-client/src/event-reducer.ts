@@ -49,6 +49,11 @@ const defaultClock: ReducerClock = {
   randomUUID: () => crypto.randomUUID(),
 }
 
+/** The providers that can start a turn on their own — Codex, Claude Code and
+ * OpenCode. The desktop keeps the same list; a turn from one of them has to
+ * get a turn of its own here too, or every event of it is dropped. */
+const PROVIDER_INITIATED_TURNS = new Set<string>(['codex', 'claude', 'openCode'])
+
 export function reduceRuntimeEvent(
   current: AgentSession,
   wire: SequencedEvent,
@@ -111,14 +116,16 @@ export function reduceRuntimeEvent(
         turn.provider_turn_started = true
         session.status = 'working'
       } else if (
-        (session.provider === 'codex' || session.provider === 'claude')
+        PROVIDER_INITIATED_TURNS.has(session.provider)
         && !['connecting', 'working', 'waiting', 'background'].includes(session.status)
       ) {
         // Some providers start turns on their own: Codex goal continuation
-        // pursues an active goal whenever the thread is idle, and Claude Code
+        // pursues an active goal whenever the thread is idle, Claude Code
         // re-enters the model once a backgrounded command, subagent or monitor
-        // settles. Give the turn a transcript home — there is no user message
-        // for it — so its work streams in instead of being dropped.
+        // settles, and OpenCode's shared service resumes a session after a
+        // restart or runs one the user's own client prompted. Give the turn a
+        // transcript home — there is no user message for it — so its work
+        // streams in instead of being dropped.
         session.turns.push({
           id: clock.randomUUID(),
           turn_count: session.turns.length + 1,

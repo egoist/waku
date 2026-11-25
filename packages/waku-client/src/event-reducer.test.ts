@@ -115,6 +115,30 @@ describe('promptSubmitted', () => {
   })
 })
 
+describe('turnStarted', () => {
+  test('a turn OpenCode starts on its own gets a turn of its own', () => {
+    // OpenCode's shared service resumes a session after a restart, or runs a
+    // turn the user's own OpenCode client prompted. The desktop opens a turn
+    // for it; without one here the whole turn is dropped.
+    const session: AgentSession = { ...idleSession(), provider: 'openCode' }
+    const started = apply(session, 'turnStarted', null)
+
+    expect(started.status).toBe('working')
+    expect(started.turns).toHaveLength(2)
+    expect(started.turns.at(-1)).toMatchObject({
+      status: 'running',
+      provider_turn_started: true,
+    })
+
+    // Its output streams instead of being dropped.
+    const replied = apply(started, 'textDelta', 'Resumed.')
+    expect(replied.messages.at(-1)).toMatchObject({
+      role: 'assistant',
+      content: 'Resumed.',
+    })
+  })
+})
+
 test('MCP tool identity survives partial updates and stays separate in expanded details', () => {
   const call = {
     id: 'tool-1', source_id: 'call-1', kind: 'tool' as const,
