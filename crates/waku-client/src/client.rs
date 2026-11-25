@@ -16,7 +16,7 @@ use uuid::Uuid;
 use waku_protocol::MAX_WIRE_MESSAGE_BYTES;
 use waku_protocol::{
     ClientMessage, Command, PROTOCOL_VERSION, ReplayCursor, Request, ResponseOutcome,
-    ResponsePayload, RpcError, SequencedEvent, ServerMessage,
+    ResponsePayload, RpcError, SequencedEvent, ServerMessage, WireDriverEvent,
 };
 
 const READ_POLL_INTERVAL: Duration = Duration::from_millis(25);
@@ -318,9 +318,13 @@ fn run_client(
                                 let mut pending = inner.pending_events.lock();
                                 let buffered = pending.entry(key).or_default();
                                 buffered.push_back(event);
-                                while buffered.len() > MAX_BUFFERED_EVENTS_PER_RUNTIME {
-                                    buffered.pop_front();
-                                }
+                                let epoch = inner
+                                    .last_sequences
+                                    .lock()
+                                    .get(&key)
+                                    .map(|cursor| cursor.epoch)
+                                    .unwrap_or_default();
+                                bound_replay_queue(key, buffered, epoch);
                             }
                         }
                     }
@@ -359,6 +363,37 @@ fn run_client(
     // `processExited` event emitted by the daemon.
     drop(std::mem::take(&mut *inner.sessions.lock()));
     inner.task_state_subscribers.lock().clear();
+}
+
+/// Rolls a pre-subscription replay queue back to its bound. The same
+/// journal-boundary rule the daemon enforces applies here: when the local
+/// queue drops an event, the next subscriber must learn the gap instead of
+/// reading a silently truncated history, so the first surviving event is
+/// replaced by a synthetic `replayGap` that names where the replay resumes.
+fn bound_replay_queue(
+    (session_id, runtime_id): (Uuid, Uuid),
+    buffered: &mut VecDeque<SequencedEvent>,
+    epoch: Uuid,
+) {
+    while buffered.len() > MAX_BUFFERED_EVENTS_PER_RUNTIME {
+        buffered.pop_front();
+    }
+    if let Some(earliest_available) = buffered.front().map(|head| head.sequence) {
+        let gap = SequencedEvent {
+            session_id,
+            runtime_id,
+            epoch,
+            sequence: earliest_available,
+            event: WireDriverEvent::new(
+                "replayGap",
+                serde_json::json!({
+                    "requestedAfter": 0,
+                    "earliestAvailable": earliest_available,
+                }),
+            ),
+        };
+        buffered[0] = gap;
+    }
 }
 
 fn set_client_read_timeout(
@@ -431,5 +466,66 @@ mod tests {
             daemon_url("wss://waku.example.test/old?ignored=1").unwrap(),
             "wss://waku.example.test/v1"
         );
+    }
+
+    /// When the pre-subscription replay queue rolls past an event, the next
+    /// subscriber must see a `replayGap` instead of a silently truncated
+    /// history — the same signal the daemon's own journal sends.
+    #[test]
+    fn a_truncated_replay_queue_inserts_a_replay_gap() {
+        let (outgoing, _outgoing_rx) = unbounded();
+        let inner = Arc::new(ClientInner {
+            outgoing,
+            pending: Mutex::new(HashMap::new()),
+            sessions: Mutex::new(HashMap::new()),
+            pending_events: Mutex::new(HashMap::new()),
+            task_state_subscribers: Mutex::new(Vec::new()),
+            last_sequences: Mutex::new(HashMap::new()),
+            disconnected: AtomicBool::new(false),
+        });
+        let client = DaemonClient { inner };
+        let session_id = Uuid::new_v4();
+        let runtime_id = Uuid::new_v4();
+        let key = (session_id, runtime_id);
+
+        // Overflow the buffer the way the socket thread does, then drain it
+        // through the real subscribe path — which is what turns the first
+        // surviving event into a replay gap.
+        {
+            let mut pending = client.inner.pending_events.lock();
+            let buffered = pending.entry(key).or_default();
+            for index in 0..MAX_BUFFERED_EVENTS_PER_RUNTIME + 5 {
+                buffered.push_back(SequencedEvent {
+                    session_id,
+                    runtime_id,
+                    epoch: Uuid::new_v4(),
+                    sequence: index as u64,
+                    event: WireDriverEvent::new("textDelta", serde_json::json!(index)),
+                });
+            }
+            let epoch = Uuid::new_v4();
+            bound_replay_queue(key, buffered, epoch);
+        }
+
+        let receiver = client.subscribe(session_id, runtime_id);
+        let mut events = Vec::new();
+        while let Ok(event) = receiver.try_recv() {
+            events.push(event);
+        }
+
+        assert_eq!(events.len(), MAX_BUFFERED_EVENTS_PER_RUNTIME);
+        let head = &events[0];
+        assert_eq!(head.event.kind, "replayGap");
+        assert_eq!(head.event.payload["earliestAvailable"], 5);
+        assert_eq!(head.sequence, 5);
+        // Only the first surviving event is rewritten; the rest of the
+        // replay is untouched and still in order.
+        assert!(
+            events
+                .iter()
+                .skip(1)
+                .all(|event| event.event.kind == "textDelta")
+        );
+        assert_eq!(events.last().unwrap().sequence, 4100);
     }
 }
