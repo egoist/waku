@@ -54,6 +54,9 @@ interface RuntimeSummary {
 }
 
 interface RuntimeEntry extends RuntimeSummary {
+  /** Latest projection, retained while subscribed even if the screen's
+   * query is evicted — an evicted entry never means the runtime is dead. */
+  session: AgentSession | null
   lastDriverError: string | null
   unsubscribe: () => void
 }
@@ -190,6 +193,8 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
   const cacheSession = useCallback(
     (session: AgentSession, project?: Project) => {
       if (!config) return
+      const entry = entries.current.get(session.id)
+      if (entry) entry.session = session
       queryClient.setQueryData(
         daemonKeys.session(config.address, session.id),
         session,
@@ -246,7 +251,7 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
         projectionPersistTimers.current.delete(sessionId)
         const latest = queryClient.getQueryData<AgentSession>(
           daemonKeys.session(config.address, sessionId),
-        )
+        ) ?? entries.current.get(sessionId)?.session
         if (latest) {
           void persistOrdered(latest).catch((error) => toast.error(errorMessage(error)))
         }
@@ -442,6 +447,7 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
         runtimeId,
         supportsSteer: false,
         starting: true,
+        session,
         lastDriverError: null,
         unsubscribe: () => {},
       }
@@ -449,7 +455,10 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
       setRuntimes((current) => ({ ...current, [session.id]: publicRuntime(entry) }))
       const unsubscribe = client.subscribe(session.id, runtimeId, (event) => {
         const key = daemonKeys.session(config.address, session.id)
-        let current = queryClient.getQueryData<AgentSession>(key)
+        // The screen's query can be evicted while the runtime keeps
+        // streaming. The entry's own projection is the live copy then —
+        // an evicted entry never means the runtime is dead.
+        let current = queryClient.getQueryData<AgentSession>(key) ?? entry.session
         if (!current || runtimeEventAlreadyApplied(current, event)) return
         if (event.event.kind === 'connected' || event.event.kind === 'turnStarted' || event.event.kind === 'turnFinished') {
           entry.lastDriverError = null
