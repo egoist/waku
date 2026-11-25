@@ -8,7 +8,7 @@
 
 use std::fs;
 use std::io;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::SystemTime;
 
@@ -66,9 +66,32 @@ pub fn is_blob_reference(value: &str) -> bool {
     waku_protocol::blob::is_reference(value)
 }
 
+/// Whether a blob name is one file name, never a path.
+///
+/// The name reaches the daemon from a client and from a provider's payload,
+/// so anything that could leave the store's root has to be refused. A
+/// separator and a parent reference are obvious. A drive prefix (`C:`) is
+/// not: joining one drops the root, so `C:\Windows\System32\etc\hosts`
+/// would be read from the drive instead of from the store, and `C:hosts`
+/// would be read from the drive's current directory. The name is refused the
+/// same way on every platform, so the rule does not change with the host.
+fn is_blob_name(name: &str) -> bool {
+    if name.is_empty()
+        || name.contains('/')
+        || name.contains('\\')
+        || name.contains(':')
+        || name.contains("..")
+    {
+        return false;
+    }
+    // One normal component and nothing else: no root, no prefix, no parent.
+    let mut components = Path::new(name).components();
+    matches!(components.next(), Some(Component::Normal(_))) && components.next().is_none()
+}
+
 fn resolve_path(root: &Path, reference: &str) -> Option<PathBuf> {
     let name = reference.strip_prefix(BLOB_SCHEME)?;
-    if name.is_empty() || name.contains('/') || name.contains("..") {
+    if !is_blob_name(name) {
         return None;
     }
     let shard = name.get(..2)?;
@@ -320,5 +343,38 @@ mod tests {
         let store = BlobStore::new(temporary_root());
         assert!(store.path_for("waku-blob:../../etc/passwd").is_none());
         assert!(store.path_for("data:image/png;base64,AAAA").is_none());
+    }
+
+    /// A blob name is a file name. A name that carries a path — a separator, a
+    /// parent reference, or a drive prefix — would resolve outside the store:
+    /// joining a drive-prefixed name drops the root, so the daemon would read
+    /// the file the name points at.
+    #[test]
+    fn a_blob_name_cannot_leave_the_store() {
+        let root = temporary_root();
+        let store = BlobStore::new(root.clone());
+        for reference in [
+            r"C:\Windows\System32\drivers\etc\hosts",
+            r"..\hosts",
+            r"sub\hosts.png",
+            "C:hosts",
+            "C:",
+            "sub/hosts.png",
+            "",
+            ".",
+            "..",
+        ] {
+            assert!(
+                store.path_for(&format!("waku-blob:{reference}")).is_none(),
+                "a blob reference must not resolve to {reference:?}"
+            );
+        }
+
+        // A real blob still resolves, and it resolves under the store's root.
+        let reference = store.store_data_url(&data_url("image/png", &vec![9u8; 16 * 1024]));
+        let path = store.path_for(&reference).unwrap();
+        assert!(path.starts_with(&root), "{path:?} left {root:?}");
+
+        fs::remove_dir_all(root).ok();
     }
 }
