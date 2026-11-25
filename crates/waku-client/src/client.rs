@@ -375,6 +375,9 @@ fn bound_replay_queue(
     buffered: &mut VecDeque<SequencedEvent>,
     epoch: Uuid,
 ) {
+    if buffered.len() <= MAX_BUFFERED_EVENTS_PER_RUNTIME {
+        return;
+    }
     while buffered.len() > MAX_BUFFERED_EVENTS_PER_RUNTIME {
         buffered.pop_front();
     }
