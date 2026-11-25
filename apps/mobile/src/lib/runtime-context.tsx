@@ -80,6 +80,19 @@ interface PendingSubmission {
   attachments: MessageAttachment[];
 }
 
+/** Remove the pending steer the provider named, or the oldest one when it
+ * did not name any (or echoed it normalized). Mirrors the desktop's
+ * match-then-pop on `pending_steers`. */
+function takePendingSteer(
+  steers: PendingSubmission[] | undefined,
+  message: string | undefined,
+): PendingSubmission | undefined {
+  if (!steers?.length) return undefined;
+  const index = message ? steers.findIndex((steer) => steer.providerPrompt === message) : -1;
+  const [steer] = steers.splice(index >= 0 ? index : 0, 1);
+  return steer;
+}
+
 /** Stream deltas commit at ≤ ~8.3 Hz, the desktop stream pump's cadence: the
  * transcript re-renders per commit, not per provider chunk. Interactive
  * events (permissions, turn lifecycle) flush the buffer immediately. */
@@ -356,7 +369,7 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
         // The provider folded a steer into the live turn. Ours is pending
         // here; another client's is not, and its message belongs in this
         // transcript just the same — the desktop mirrors it too.
-        const pending = pendingSteers.current.get(session.id)?.shift();
+        const pending = takePendingSteer(pendingSteers.current.get(session.id), payload.message);
         const content = payload.message ?? pending?.providerPrompt;
         if (content) {
           state.current = {
@@ -379,21 +392,23 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
           };
         }
       } else if (event.event.kind === 'steerRejected') {
-        const pending = pendingSteers.current.get(session.id)?.shift();
-        if (pending) {
-          state.current = queueSubmission(
-            state.current,
-            pending.displayContent,
-            clock,
-            pending.attachments,
-            pending.providerPrompt,
-          );
-          void persistOrdered(state.current).catch(() => {});
-          setErrors((values) => ({
-            ...values,
-            [session.id]: 'The agent couldn’t take that mid-turn, so it was queued for the next turn.',
-          }));
-        }
+        const payload = event.event.payload as { message?: string };
+        const pending = takePendingSteer(pendingSteers.current.get(session.id), payload.message);
+        // A steer can also be refused after it was reported as accepted —
+        // the entry is already gone, but the message still has to go back
+        // to the queue instead of being lost. The desktop does the same.
+        state.current = queueSubmission(
+          state.current,
+          pending?.displayContent ?? payload.message ?? '',
+          clock,
+          pending?.attachments ?? [],
+          pending?.providerPrompt ?? payload.message ?? '',
+        );
+        void persistOrdered(state.current).catch(() => {});
+        setErrors((values) => ({
+          ...values,
+          [session.id]: 'The agent couldn’t take that mid-turn, so it was queued for the next turn.',
+        }));
       }
       const result = reduceRuntimeEvent(state.current, event, clock, entry.lastDriverError);
       state.current = result.session;

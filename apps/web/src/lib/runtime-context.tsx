@@ -472,7 +472,8 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
         }
         if (event.event.kind === 'steerAccepted') {
           const payload = event.event.payload as { message?: string }
-          const pending = pendingSteers.current.get(session.id)?.shift()
+          const steers = pendingSteers.current.get(session.id)
+          const pending = takePendingSteer(steers, payload.message)
           if (pending) {
             const turnId = current.turns.at(-1)?.id ?? null
             current = {
@@ -496,18 +497,21 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
             }
           }
         } else if (event.event.kind === 'steerRejected') {
-          const pending = pendingSteers.current.get(session.id)?.shift()
-          if (pending) {
-            current = queueSubmission(
-              current,
-              pending.displayContent,
-              pending.providerPrompt,
-              pending.attachments,
-            )
-            cacheSession(current)
-            void persistOrdered(current).catch((error) => toast.error(errorMessage(error)))
-            toast.error(translate(localeRef.current, 'session.steer_rejected_plain'))
-          }
+          const payload = event.event.payload as { message?: string }
+          const steers = pendingSteers.current.get(session.id)
+          const pending = takePendingSteer(steers, payload.message)
+          // A steer can also be refused after it was reported as accepted —
+          // the entry is already gone, but the message still has to go back
+          // to the queue instead of being lost. The desktop does the same.
+          current = queueSubmission(
+            current,
+            pending?.displayContent ?? payload.message ?? '',
+            pending?.providerPrompt ?? payload.message ?? '',
+            pending?.attachments ?? [],
+          )
+          cacheSession(current)
+          void persistOrdered(current).catch((error) => toast.error(errorMessage(error)))
+          toast.error(translate(localeRef.current, 'session.steer_rejected_plain'))
         }
         const result = reduceRuntimeEvent(current, event, undefined, entry.lastDriverError)
         cacheSession(result.session)
@@ -1352,6 +1356,25 @@ function noticeObjective(objective: string): string {
   const characters = [...objective]
   if (characters.length <= 120) return objective
   return `${characters.slice(0, 119).join('').trimEnd()}…`
+}
+
+interface PendingSteer {
+  providerPrompt: string
+  displayContent: string
+  attachments: MessageAttachment[]
+}
+
+/** Remove the pending steer the provider named, or the oldest one when it
+ * did not name any (or echoed it normalized). Mirrors the desktop's
+ * match-then-pop on `pending_steers`. */
+function takePendingSteer(
+  steers: PendingSteer[] | undefined,
+  message: string | undefined,
+): PendingSteer | undefined {
+  if (!steers?.length) return undefined
+  const index = message ? steers.findIndex((steer) => steer.providerPrompt === message) : -1
+  const [steer] = steers.splice(index >= 0 ? index : 0, 1)
+  return steer
 }
 
 function queueSubmission(
