@@ -1925,7 +1925,7 @@ impl Waku {
     /// the daemon-host picker the web client opens instead.
     fn prompt_for_attachments(&mut self, cx: &mut Context<Self>) {
         if self.daemon.is_remote() {
-            self.show_toast(tr!("errors.remote_project_picker"));
+            self.show_toast(tr!("composer.attach_remote_unavailable"));
             cx.notify();
             return;
         }

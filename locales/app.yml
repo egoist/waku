@@ -1209,6 +1209,8 @@ composer.attach_files:
   en: Attach a file or image
 composer.attach_files_title:
   en: Attach files
+composer.attach_remote_unavailable:
+  en: Attaching files from the daemon host needs a remote file picker, which is not available yet
 composer.stop:
   en: Stop
 composer.stop_confirm:

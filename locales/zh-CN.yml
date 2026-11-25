@@ -590,6 +590,7 @@ composer.attach_daemon: 从守护进程主机附加文件或文件夹
 composer.attach_daemon_title: 从守护进程主机附加
 composer.attach_files: 附加文件或图片
 composer.attach_files_title: 附加文件
+composer.attach_remote_unavailable: 附加守护进程主机上的文件需要远程文件选择器，但该功能尚不可用
 composer.stop: 停止
 composer.stop_confirm: 再按一次 Escape 停止
 composer.steer_current: 引导当前回合
