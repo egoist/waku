@@ -5,10 +5,12 @@ import type {
   ReviewDiffSource,
 } from '@waku/client'
 import { ContextMenu } from '@base-ui/react/context-menu'
-import { createContext, useCallback, useContext, useEffect, useRef, useState, type ReactNode, type RefObject } from 'react'
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode, type RefObject } from 'react'
 import { Virtuoso, type ListItem, type VirtuosoHandle } from 'react-virtuoso'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
+import remarkMath from 'remark-math'
+import rehypeKatex from 'rehype-katex'
 import { PreviewableImage } from '@/components/image-preview'
 import { FileTypeIcon, WakuIcon, type WakuIconName } from '@/components/waku-icon'
 import { readAttachmentImage } from '@/lib/attachments'
@@ -20,6 +22,8 @@ import {
   createMarkdownVeilState,
   markdownVeilPlugin,
 } from '@/lib/markdown-veil'
+import { useRenderMath } from '@/lib/render-math'
+import { rewriteTexDelimiters } from '@/lib/tex-delimiters'
 import type {
   BackgroundWorkItem,
   BackgroundWorkKey,
@@ -1383,16 +1387,27 @@ function Markdown({
   streaming?: boolean
 }) {
   const onOpenLink = useContext(TranscriptLinkContext)
+  const renderMath = useRenderMath()
+  // The LaTeX-style delimiters are rewritten before the parse, so the veil
+  // measures the same text the parser sees: its offsets are source offsets.
+  const source = useMemo(() => (renderMath ? rewriteTexDelimiters(text) : text), [renderMath, text])
+  // Every formula the rewriter leaves behind carries a dollar, so a source
+  // without one has no math in it — and needs neither the math extension nor
+  // the KaTeX pass.
+  const hasMath = renderMath && source.includes('$')
   // Match the painter's attach semantics: text already present when this row
   // mounts is the baseline; only later appends dissolve in.
-  const veil = useRef(createMarkdownVeilState(text))
+  const veil = useRef(createMarkdownVeilState(source))
   const now = Date.now()
-  const chunks = advanceMarkdownVeil(veil.current, text, streaming, now)
+  const chunks = advanceMarkdownVeil(veil.current, source, streaming, now)
   return (
     <div className={cn('markdown min-w-0', compact && '[&>*:first-child]:mt-0 [&>*:last-child]:mb-0')}>
       <ReactMarkdown
-        remarkPlugins={[remarkGfm]}
-        rehypePlugins={chunks.length ? [markdownVeilPlugin(chunks, now)] : []}
+        remarkPlugins={hasMath ? [remarkGfm, remarkMath] : [remarkGfm]}
+        rehypePlugins={[
+          ...(chunks.length ? [markdownVeilPlugin(chunks, now)] : []),
+          ...(hasMath ? [rehypeKatex] : []),
+        ]}
         components={{
           a: ({ children, href, ...props }) => (
             <a

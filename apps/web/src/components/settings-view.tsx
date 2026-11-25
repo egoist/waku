@@ -32,6 +32,7 @@ import {
   languageLabel,
   useI18n,
 } from '@/lib/i18n'
+import { useRenderMath, writeRenderMath } from '@/lib/render-math'
 import { cn } from '@/lib/utils'
 
 export type SettingsPageId =
@@ -167,6 +168,7 @@ export function SettingsView({
 function GeneralSettings() {
   const { t } = useI18n()
   const [analytics, setAnalytics] = useStoredBoolean('waku.analytics-enabled', true)
+  const renderMath = useRenderMath()
   return (
     <div>
       <SettingsCard>
@@ -181,6 +183,13 @@ function GeneralSettings() {
           description={t('settings.share_anonymous_usage_data_description')}
         />
         <Toggle checked={analytics} label={t('settings.share_anonymous_usage_data')} onChange={setAnalytics} />
+      </SettingsCard>
+      <SettingsCard row>
+        <SettingText
+          title={t('settings.render_math')}
+          description={t('settings.render_math_description')}
+        />
+        <Toggle checked={renderMath} label={t('settings.render_math')} onChange={writeRenderMath} />
       </SettingsCard>
     </div>
   )
