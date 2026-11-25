@@ -1919,6 +1919,34 @@ impl Waku {
         )
     }
 
+    /// Ask the OS for the files to stage as attachments, then feed them to
+    /// the same path a drop takes. A path the OS dialog returns names a file
+    /// on this machine, so a remote daemon's attachments have to come from
+    /// the daemon-host picker the web client opens instead.
+    fn prompt_for_attachments(&mut self, cx: &mut Context<Self>) {
+        if self.daemon.is_remote() {
+            self.show_toast(tr!("errors.remote_project_picker"));
+            cx.notify();
+            return;
+        }
+        let receiver = cx.prompt_for_paths(gpui::PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: true,
+            prompt: Some(tr!("composer.attach_files").into()),
+        });
+        cx.spawn(async move |waku, cx| {
+            if let Ok(Ok(Some(paths))) = receiver.await
+                && !paths.is_empty()
+            {
+                let _ = waku.update(cx, |waku, cx| {
+                    waku.stage_attachment_paths(&paths, cx);
+                });
+            }
+        })
+        .detach();
+    }
+
     /// Stage files dropped onto the composer as attachment chips. The mention
     /// each chip will submit takes the autocomplete's form: relative to the
     /// project root when the file is inside it, absolute otherwise,
@@ -2803,6 +2831,36 @@ impl Waku {
                         .child(self.render_access_control(cx))
                         .children(self.render_goal_control(cx))
                         .child(div().flex_1())
+                        .child(
+                            div()
+                                .id("attach-files")
+                                .w(px(26.0))
+                                .h(px(26.0))
+                                .rounded_full()
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .cursor_default()
+                                .hover(|element| element.bg(theme.overlay))
+                                .active(|element| element.opacity(0.8))
+                                .track_focus(&self.composer_attach_focus)
+                                .tab_index(0)
+                                .tab_stop(true)
+                                .focus_visible(|element| {
+                                    element.border_1().border_color(theme.accent)
+                                })
+                                .child(icon("icons/paperclip.svg", 15.0, theme.text_secondary))
+                                .tooltip(Tooltip::text(tr!("composer.attach_files_title")))
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.prompt_for_attachments(cx);
+                                }))
+                                .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
+                                    if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                                        this.prompt_for_attachments(cx);
+                                        cx.stop_propagation();
+                                    }
+                                })),
+                        )
                         .child(match submit_action {
                             ComposerSubmitAction::Preparing => div()
                                 .id("send-or-stop")

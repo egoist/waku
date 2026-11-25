@@ -1205,6 +1205,10 @@ composer.attach_daemon:
   en: Attach a file or folder from the daemon host
 composer.attach_daemon_title:
   en: Attach from daemon host
+composer.attach_files:
+  en: Attach a file or image
+composer.attach_files_title:
+  en: Attach files
 composer.stop:
   en: Stop
 composer.stop_confirm:

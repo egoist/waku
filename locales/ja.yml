@@ -617,6 +617,8 @@ composer.queue_placeholder: フォローアップを追加…
 composer.prompt_placeholder: Waku に作業を依頼…
 composer.attach_daemon: デーモンホストからファイルまたはフォルダを添付
 composer.attach_daemon_title: デーモンホストから添付
+composer.attach_files: ファイルまたは画像を添付
+composer.attach_files_title: ファイルを添付
 composer.stop: 停止
 composer.stop_confirm: もう一度 Escape を押すと停止します
 composer.steer_current: 現在のターンに指示を追加

@@ -1061,6 +1061,9 @@ pub struct Waku {
     /// without consulting the environment or account database in a frame.
     home_directory: Option<PathBuf>,
     composer: Entity<ComposerInput>,
+    /// The attach button's focus handle, so the button stays on the same tab
+    /// path as the composer it belongs to.
+    composer_attach_focus: FocusHandle,
     user_input_answer: Entity<TextInput>,
     /// Drafts are independent of transcript persistence: started tasks key by
     /// session id, while blank New Task pages key by project id.
@@ -1989,6 +1992,7 @@ impl Waku {
         });
 
         let composer = cx.new(|cx| ComposerInput::new(window, cx).padding_x(px(14.0), cx));
+        let composer_attach_focus = cx.focus_handle();
         let user_input_answer = cx
             .new(|cx| TextInput::new(window, cx).placeholder(tr!("user_input.other_placeholder")));
         let command_palette_search = cx.new(|cx| {
@@ -2757,6 +2761,7 @@ impl Waku {
                 store,
                 home_directory,
                 composer,
+                composer_attach_focus,
                 user_input_answer,
                 composer_drafts,
                 composer_draft_store,
