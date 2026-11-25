@@ -438,6 +438,23 @@ export class WakuClient {
         buffered.push(message);
         if (buffered.length > MAX_BUFFERED_EVENTS_PER_RUNTIME) {
           buffered.splice(0, buffered.length - MAX_BUFFERED_EVENTS_PER_RUNTIME);
+          // The local replay queue rolled past an event, so the next
+          // subscriber must learn the gap instead of reading a silently
+          // truncated history — the same signal the daemon's journal sends.
+          const earliest = buffered[0]?.sequence ?? message.sequence;
+          buffered[0] = {
+            sessionId: message.sessionId,
+            runtimeId: message.runtimeId,
+            epoch: message.epoch,
+            sequence: earliest,
+            event: {
+              kind: "replayGap",
+              payload: {
+                requestedAfter: 0,
+                earliestAvailable: earliest,
+              },
+            },
+          };
         }
         this.pendingEvents.set(key, buffered);
       }
