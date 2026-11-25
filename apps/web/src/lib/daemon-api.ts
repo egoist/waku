@@ -16,6 +16,7 @@ import type {
   ProviderResumeCursor,
   ProviderSessionHistory,
   ProviderSessionSummary,
+  SequencedEvent,
   ReviewDiffData,
   ReviewDiffSource,
   ResponsePayload,
@@ -697,6 +698,28 @@ export function sameProviderSession(
 ): boolean {
   return left.provider === right.provider
     && providerSessionNativeId(left) === providerSessionNativeId(right)
+}
+
+/** Whether the session's stored cursor already covers this event. */
+export function runtimeEventAlreadyApplied(session: AgentSession, event: SequencedEvent): boolean {
+  const cursor = session.runtime_event_cursor
+  return Boolean(
+    cursor
+      && cursor.runtime_id === event.runtimeId
+      && cursor.epoch === event.epoch
+      && cursor.sequence >= event.sequence,
+  )
+}
+
+/** A skipped event is normally dropped, but a permission or user-input
+ * request must survive a replay: the hydrated session still says `waiting`,
+ * the daemon replays the journal from the fresh client's cursor, and the
+ * request would otherwise never surface again after a reload. The mobile
+ * client has the same exception. */
+export function shouldApplyRuntimeEvent(session: AgentSession, event: SequencedEvent): boolean {
+  if (!runtimeEventAlreadyApplied(session, event)) return true
+  return session.status === 'waiting'
+    && (event.event.kind === 'permission' || event.event.kind === 'userInputRequested')
 }
 
 export function beginTurn(

@@ -1,6 +1,8 @@
 import { describe, expect, test } from 'bun:test'
 import type {
+  AgentSession,
   ComposerDraftChange,
+  SequencedEvent,
   DaemonSettings,
   Project,
   ProviderSessionHistory,
@@ -23,6 +25,7 @@ import {
   probeProvider,
   removeSession,
   sameProviderSession,
+  shouldApplyRuntimeEvent,
   selectableProjects,
   writeWorkspaceTextFile,
   type DaemonDirectory,
@@ -61,6 +64,35 @@ describe('beginTurn', () => {
     })
     expect(active.turns).toHaveLength(1)
     expect(draft.messages).toHaveLength(0)
+  })
+})
+
+describe('shouldApplyRuntimeEvent', () => {
+  test('replays a pending permission after a reload', () => {
+    // The app hydrated the session as waiting, then re-attached and the
+    // daemon replayed the journal. The replayed request carries the same
+    // sequence, so the cursor alone would drop it — and the turn would wait
+    // forever on a decision nothing can present.
+    const session = {
+      ...createSession('project', 'codex', false),
+      status: 'waiting',
+      runtime_event_cursor: { runtime_id: 'runtime', epoch: 'epoch', sequence: 4 },
+    } as AgentSession
+    const permission: SequencedEvent = {
+      sessionId: session.id,
+      runtimeId: 'runtime',
+      epoch: 'epoch',
+      sequence: 4,
+      event: { kind: 'permission', payload: {} as never },
+    }
+    expect(shouldApplyRuntimeEvent(session, permission)).toBe(true)
+    // Other already-applied events still drop, and a working task drops the
+    // replayed request too.
+    expect(shouldApplyRuntimeEvent(session, {
+      ...permission,
+      event: { kind: 'textDelta', payload: 'again' },
+    })).toBe(false)
+    expect(shouldApplyRuntimeEvent({ ...session, status: 'working' }, permission)).toBe(false)
   })
 })
 

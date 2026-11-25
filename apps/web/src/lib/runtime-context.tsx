@@ -34,6 +34,7 @@ import {
   persistSession,
   probeProvider,
   sessionCwd,
+  shouldApplyRuntimeEvent,
   type TaskState,
 } from './daemon-api'
 import {
@@ -450,7 +451,7 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
       const unsubscribe = client.subscribe(session.id, runtimeId, (event) => {
         const key = daemonKeys.session(config.address, session.id)
         let current = queryClient.getQueryData<AgentSession>(key)
-        if (!current || runtimeEventAlreadyApplied(current, event)) return
+        if (!current || !shouldApplyRuntimeEvent(current, event)) return
         if (event.event.kind === 'connected' || event.event.kind === 'turnStarted' || event.event.kind === 'turnFinished') {
           entry.lastDriverError = null
         } else if (event.event.kind === 'error' && typeof event.event.payload === 'string') {
@@ -1404,16 +1405,6 @@ function mergeSessionSummary(previous: AgentSession, next: AgentSession): AgentS
     context_usage: next.context_usage,
     runtime_event_cursor: next.runtime_event_cursor,
   }
-}
-
-function runtimeEventAlreadyApplied(session: AgentSession, event: SequencedEvent) {
-  const cursor = session.runtime_event_cursor
-  return Boolean(
-    cursor
-      && cursor.runtime_id === event.runtimeId
-      && cursor.epoch === event.epoch
-      && cursor.sequence >= event.sequence,
-  )
 }
 
 function publicRuntime(runtime: RuntimeEntry): RuntimeSummary {
