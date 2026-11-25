@@ -1389,6 +1389,8 @@ errors.provider_invalid_json:
   en: "%{provider} sent invalid JSON: %{error}"
 errors.provider_exited:
   en: "%{provider} exited with %{status}"
+errors.provider_closed_connection:
+  en: "%{provider} closed the connection"
 errors.provider_rpc_exited:
   en: "%{provider} RPC exited with %{status}"
 errors.read_provider_exit_status:

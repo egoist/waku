@@ -541,7 +541,29 @@ async fn run_sdk_connection(
             .await;
             let mut fork_context = fork_context;
 
-            while let Ok(command) = commands.recv().await {
+            // The agent can end its side without failing: a clean exit is not a
+            // protocol error, and the SDK says so — the foreground is expected
+            // to observe the connection's close, because the connection does
+            // not end on its own. Without this the driver waits for a command
+            // that can never be answered: the session stays "working", every
+            // later prompt fails at once with "incoming transport closed",
+            // and nothing tells the app the agent is gone.
+            loop {
+                let next = smol::future::or(async { Some(commands.recv().await) }, async {
+                    connection.incoming_closed().await;
+                    None
+                })
+                .await;
+                let Some(command) = next else {
+                    let _ = events.send(DriverEvent::Error(tr!(
+                        "errors.provider_closed_connection",
+                        provider = provider.display_name()
+                    )));
+                    break;
+                };
+                let Ok(command) = command else {
+                    break;
+                };
                 match command {
                     CommandMessage::Prompt(text) => {
                         let text = fork_context
@@ -2082,6 +2104,162 @@ mod tests {
         SessionConfigSelectOption, SessionMode, SessionModeState, ToolCallUpdate,
         ToolCallUpdateFields,
     };
+
+    /// A fake ACP agent: it answers `initialize` and `session/new`, then ends
+    /// its side cleanly — the way an agent that quits on its own does.
+    ///
+    /// The protocol is newline-delimited JSON on stdin and stdout, so the
+    /// agent is a shell script that answers the two requests the driver makes
+    /// before it starts waiting for commands.
+    #[cfg(unix)]
+    fn write_fake_agent(keeps_running: bool) -> std::path::PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+
+        let path = std::env::temp_dir().join(format!("waku-fake-acp-{}", uuid::Uuid::new_v4()));
+        let ending = if keeps_running {
+            // Stay alive until the driver closes the connection.
+            "while IFS= read -r request; do :; done\n"
+        } else {
+            "exit 0\n"
+        };
+        std::fs::write(
+            &path,
+            format!(
+                "#!/bin/sh\n\
+                 answer() {{\n\
+                 \x20 id=$(printf '%s' \"$1\" | sed -n 's/.*\"id\":\"\\([^\"]*\\)\".*/\\1/p')\n\
+                 \x20 printf '{{\"jsonrpc\":\"2.0\",\"id\":\"%s\",\"result\":%s}}\\n' \"$id\" \"$2\"\n\
+                 }}\n\
+                 read -r request\n\
+                 answer \"$request\" '{{\"protocolVersion\":1,\"agentCapabilities\":{{}}}}'\n\
+                 read -r request\n\
+                 answer \"$request\" '{{\"sessionId\":\"waku_fake_session\"}}'\n\
+                 {ending}"
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        path
+    }
+
+    /// An agent can end its side without failing: a clean exit is not a
+    /// protocol error. The driver has to notice it, or the runtime keeps
+    /// waiting for a command that can never be answered — the session stays
+    /// "working" and every later prompt fails at once.
+    #[test]
+    #[cfg(unix)]
+    fn a_clean_agent_exit_is_reported_as_a_process_exit() {
+        let binary = write_fake_agent(false);
+        let (events, event_rx) = crate::driver::test_event_channel();
+        let driver = AcpDriver::start(
+            ProviderKind::Cursor,
+            DriverStartOptions {
+                binary: binary.clone(),
+                cwd: std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")),
+                mode: RuntimeMode::FullAccess,
+                model: None,
+                reasoning_effort: None,
+                service_tier: None,
+                context_window: None,
+                agent_preset: None,
+                computer_use_enabled: false,
+                provider_cursor: None,
+            },
+            events,
+        )
+        .expect("the ACP session should open");
+
+        let mut exited = false;
+        let mut reported = None;
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        while std::time::Instant::now() < deadline {
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            match event_rx.recv_timeout(remaining) {
+                Ok(DriverEvent::ProcessExited) => {
+                    exited = true;
+                    break;
+                }
+                Ok(DriverEvent::Error(error)) => {
+                    reported = Some(error);
+                }
+                Ok(_) => {}
+                Err(_) => break,
+            }
+        }
+        drop(driver);
+        std::fs::remove_file(&binary).ok();
+
+        assert!(
+            exited,
+            "the driver never reported the agent's exit, so the session would stay working forever"
+        );
+        assert!(
+            reported
+                .as_deref()
+                .is_some_and(|error| error.contains("Cursor")),
+            "the exit was not reported: {reported:?}"
+        );
+    }
+
+    /// A session that is closed is not an agent that went away. The driver
+    /// shuts the connection down itself, and that must not be reported as the
+    /// provider closing it.
+    #[test]
+    #[cfg(unix)]
+    fn closing_a_session_does_not_report_the_agent_as_gone() {
+        let binary = write_fake_agent(true);
+        let (events, event_rx) = crate::driver::test_event_channel();
+        let driver = AcpDriver::start(
+            ProviderKind::Cursor,
+            DriverStartOptions {
+                binary: binary.clone(),
+                cwd: std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")),
+                mode: RuntimeMode::FullAccess,
+                model: None,
+                reasoning_effort: None,
+                service_tier: None,
+                context_window: None,
+                agent_preset: None,
+                computer_use_enabled: false,
+                provider_cursor: None,
+            },
+            events,
+        )
+        .expect("the ACP session should open");
+
+        // Wait for the session to be established before closing it.
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        loop {
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            match event_rx.recv_timeout(remaining) {
+                Ok(DriverEvent::Connected { .. }) => break,
+                Ok(DriverEvent::Error(error)) => panic!("the agent reported: {error}"),
+                Ok(_) => {}
+                Err(_) => panic!("the agent never reported its session"),
+            }
+        }
+        drop(driver);
+
+        let mut reported = None;
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        while std::time::Instant::now() < deadline {
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            match event_rx.recv_timeout(remaining) {
+                Ok(DriverEvent::Error(error)) => {
+                    reported = Some(error);
+                    break;
+                }
+                Ok(_) => {}
+                Err(_) => break,
+            }
+        }
+        std::fs::remove_file(&binary).ok();
+
+        assert!(
+            reported.is_none(),
+            "closing a session reported the provider as gone: {reported:?}"
+        );
+    }
 
     fn select_config_option(
         id: &str,

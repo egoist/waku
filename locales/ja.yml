@@ -713,6 +713,7 @@ errors.provider_transport_write_short: "%{provider} の通信への書き込み�
 errors.provider_transport_read: "%{provider} の通信の読み込みに失敗しました：%{error}"
 errors.provider_invalid_json: "%{provider} から無効な JSON が送信されました：%{error}"
 errors.provider_exited: "%{provider} が %{status} で終了しました"
+errors.provider_closed_connection: "%{provider} が接続を閉じました"
 errors.provider_rpc_exited: "%{provider} RPC が %{status} で終了しました"
 errors.read_provider_exit_status: "%{provider} の終了ステータスを読み取れませんでした：%{error}"
 errors.initialize_provider: "%{provider} を初期化できませんでした：%{error}"
