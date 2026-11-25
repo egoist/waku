@@ -292,14 +292,35 @@ struct PendingPrompt {
     request_id: RequestId,
     extension_id: Option<String>,
     session_id: String,
+    /// The text this request was sent with, when it steers a turn that is
+    /// already running. Nothing for the request that started the turn.
+    steer: Option<String>,
+}
+
+/// What is left of a turn once one of its requests settles.
+#[derive(Debug, Eq, PartialEq)]
+enum PromptSettlement {
+    /// The settled request was the last one in flight: its result ends the
+    /// turn.
+    Last,
+    /// Other requests are still in flight, so the turn keeps running. `steer`
+    /// is the text of the settled request, when it was a steer.
+    Ongoing { steer: Option<String> },
 }
 
 impl PendingPrompts {
-    fn insert(&mut self, request_id: RequestId, extension_id: Option<String>, session_id: String) {
+    fn insert(
+        &mut self,
+        request_id: RequestId,
+        extension_id: Option<String>,
+        session_id: String,
+        steer: Option<String>,
+    ) {
         self.0.push(PendingPrompt {
             request_id,
             extension_id,
             session_id,
+            steer,
         });
     }
 
@@ -307,16 +328,20 @@ impl PendingPrompts {
         self.0.is_empty()
     }
 
-    fn settle_request(&mut self, request_id: &RequestId) -> bool {
-        let Some(index) = self
+    /// Takes the request out. `None` means it had been settled already: a
+    /// provider's completion notification can settle a request before the
+    /// SDK's own response arrives.
+    fn settle_request(&mut self, request_id: &RequestId) -> Option<PromptSettlement> {
+        let index = self
             .0
             .iter()
-            .position(|prompt| &prompt.request_id == request_id)
-        else {
-            return false;
-        };
-        self.0.remove(index);
-        self.0.is_empty()
+            .position(|prompt| &prompt.request_id == request_id)?;
+        let steer = self.0.remove(index).steer;
+        Some(if self.is_empty() {
+            PromptSettlement::Last
+        } else {
+            PromptSettlement::Ongoing { steer }
+        })
     }
 
     fn settle_extension(&mut self, session_id: &str, extension_id: Option<&str>) -> bool {
@@ -562,6 +587,7 @@ async fn run_sdk_connection(
                             grok_title_home.clone(),
                             title_refresh.clone(),
                             stream_state.clone(),
+                            false,
                         ) {
                             let _ = events.send(DriverEvent::Error(error.to_string()));
                             let _ = events.send(DriverEvent::TurnFinished {
@@ -592,6 +618,7 @@ async fn run_sdk_connection(
                             grok_title_home.clone(),
                             title_refresh.clone(),
                             stream_state.clone(),
+                            true,
                         ) {
                             Ok(()) => {
                                 let _ = events.send(DriverEvent::SteerAccepted { message: text });
@@ -1290,6 +1317,9 @@ fn send_prompt(
     grok_title_home: Option<std::path::PathBuf>,
     title_refresh: super::title_refresh::NativeTitleRefresh,
     stream_state: Arc<Mutex<AcpStreamState>>,
+    // Whether the text steers a turn that is already running, rather than
+    // starting one.
+    steer: bool,
 ) -> agent_client_protocol::Result<()> {
     stream_state.lock().produced_content = false;
     // Read before the turn runs, so the failure lookup cannot mistake an
@@ -1298,6 +1328,7 @@ fn send_prompt(
         .then(|| crate::kimi_session::wire_offset(native_session_id));
     let extension_id =
         (provider == ProviderKind::Grok).then(|| format!("waku-{}", uuid::Uuid::new_v4()));
+    let steer_text = steer.then(|| text.clone());
     let mut request = PromptRequest::new(
         session_id.clone(),
         vec![ContentBlock::Text(TextContent::new(text))],
@@ -1314,27 +1345,37 @@ fn send_prompt(
         request_id.clone(),
         extension_id,
         native_session_id.to_owned(),
+        steer_text,
     );
     let callback_request_id = request_id.clone();
     let callback_requests = prompt_requests.clone();
     let callback_events = events.clone();
     let native_session_id = native_session_id.to_owned();
     let registered = sent.on_receiving_result(async move |result| {
-        if settle_prompt_request(&callback_requests, &callback_request_id) {
-            // Only an empty turn pays for this lookup, so a healthy turn never
-            // waits on Kimi's records.
-            let native_failure = wire_offset
+        let settlement = settle_prompt_request(&callback_requests, &callback_request_id);
+        // Only an empty turn pays for this lookup, so a healthy turn never
+        // waits on Kimi's records.
+        let native_failure = if matches!(settlement, Some(PromptSettlement::Last)) {
+            wire_offset
                 .filter(|_| !stream_state.lock().produced_content)
-                .and_then(|offset| crate::kimi_session::turn_failure(&native_session_id, offset));
-            let success = finish_prompt(result, native_failure, &callback_events);
-            if provider == ProviderKind::Grok && success {
-                start_grok_title_refresh(
-                    grok_title_home.as_deref(),
-                    &native_session_id,
-                    &title_refresh,
-                    callback_events,
-                );
-            }
+                .and_then(|offset| crate::kimi_session::turn_failure(&native_session_id, offset))
+        } else {
+            None
+        };
+        let success = settle_prompt_result(
+            result,
+            settlement,
+            native_failure,
+            provider,
+            &callback_events,
+        );
+        if provider == ProviderKind::Grok && success {
+            start_grok_title_refresh(
+                grok_title_home.as_deref(),
+                &native_session_id,
+                &title_refresh,
+                callback_events,
+            );
         }
         Ok(())
     });
@@ -1344,8 +1385,53 @@ fn send_prompt(
     registered
 }
 
-fn settle_prompt_request(prompt_requests: &Mutex<PendingPrompts>, request_id: &RequestId) -> bool {
+fn settle_prompt_request(
+    prompt_requests: &Mutex<PendingPrompts>,
+    request_id: &RequestId,
+) -> Option<PromptSettlement> {
     prompt_requests.lock().settle_request(request_id)
+}
+
+/// Applies one request's result to the turn it belongs to, and returns whether
+/// the turn ended successfully. A turn that keeps running has not ended.
+fn settle_prompt_result(
+    result: agent_client_protocol::Result<PromptResponse>,
+    settlement: Option<PromptSettlement>,
+    native_failure: Option<String>,
+    provider: ProviderKind,
+    events: &impl DriverEventSink,
+) -> bool {
+    match settlement {
+        Some(PromptSettlement::Last) => finish_prompt(result, native_failure, events),
+        // This result cannot end the turn, but a failure in it still has to
+        // reach the user.
+        Some(PromptSettlement::Ongoing { steer }) => {
+            match (result, steer) {
+                // The driver reports a steer as accepted as soon as the SDK
+                // takes it, and the app then shows the message in the turn. An
+                // agent can still refuse it — Kimi answers a second prompt
+                // with "another turn is already in progress" — and nothing
+                // else would say the agent never read it. Reported as a
+                // refused steer, the app keeps the message instead.
+                (Err(error), Some(message)) => {
+                    let _ = events.send(DriverEvent::SteerRejected {
+                        message,
+                        reason: tr!(
+                            "errors.provider_rejected_steer",
+                            provider = provider.display_name(),
+                            error = error
+                        ),
+                    });
+                }
+                (Err(error), None) => {
+                    let _ = events.send(DriverEvent::Error(error.to_string()));
+                }
+                (Ok(_), _) => {}
+            }
+            false
+        }
+        None => false,
+    }
 }
 
 fn finish_xai_prompt_complete(
@@ -2407,22 +2493,126 @@ mod tests {
         let requests = Mutex::new(PendingPrompts::default());
         requests
             .lock()
-            .insert(RequestId::Str("first".into()), None, "session".into());
-        requests
-            .lock()
-            .insert(RequestId::Str("steer".into()), None, "session".into());
-        assert!(!settle_prompt_request(
-            &requests,
-            &RequestId::Str("first".into())
+            .insert(RequestId::Str("first".into()), None, "session".into(), None);
+        requests.lock().insert(
+            RequestId::Str("steer".into()),
+            None,
+            "session".into(),
+            Some("use pnpm".into()),
+        );
+        assert_eq!(
+            settle_prompt_request(&requests, &RequestId::Str("first".into())),
+            Some(PromptSettlement::Ongoing { steer: None })
+        );
+        assert_eq!(
+            settle_prompt_request(&requests, &RequestId::Str("steer".into())),
+            Some(PromptSettlement::Last)
+        );
+        // The SDK's response to a request that a completion notification
+        // settled already.
+        assert_eq!(
+            settle_prompt_request(&requests, &RequestId::Str("steer".into())),
+            None
+        );
+    }
+
+    /// Kimi takes a steer off the wire and then refuses it. The refusal
+    /// arrives while the first prompt is still running, so it cannot end the
+    /// turn — but the app has already been told the steer was accepted, and
+    /// has to be told otherwise.
+    #[test]
+    fn a_refused_steer_is_reported_and_the_turn_keeps_running() {
+        let (events, event_rx) = crate::driver::test_event_channel();
+        let refused = agent_client_protocol::Error::new(
+            -32600,
+            "Invalid request: another turn is already in progress",
+        )
+        .data(json!({ "code": "turn.agent_busy" }));
+
+        assert!(!settle_prompt_result(
+            Err(refused),
+            Some(PromptSettlement::Ongoing {
+                steer: Some("use pnpm".into()),
+            }),
+            None,
+            ProviderKind::Kimi,
+            &events,
         ));
-        assert!(settle_prompt_request(
-            &requests,
-            &RequestId::Str("steer".into())
+
+        match event_rx.try_recv().unwrap() {
+            DriverEvent::SteerRejected { message, reason } => {
+                assert_eq!(message, "use pnpm");
+                assert!(
+                    reason.starts_with("Kimi Code rejected the steer: ")
+                        && reason.contains("another turn is already in progress"),
+                    "the refusal is reported without its reason: {reason}"
+                );
+            }
+            other => panic!("expected a rejected steer, got {other:?}"),
+        }
+        assert!(
+            event_rx.try_recv().is_err(),
+            "a refused steer ended the turn that was still running"
+        );
+    }
+
+    /// The request that started the turn can fail too, while a steer is still
+    /// running. Its failure cannot end the turn either, and used to vanish.
+    #[test]
+    fn a_failed_prompt_is_reported_while_a_steer_is_still_running() {
+        let (events, event_rx) = crate::driver::test_event_channel();
+        let failed = agent_client_protocol::Error::new(-32603, "Internal error");
+
+        assert!(!settle_prompt_result(
+            Err(failed.clone()),
+            Some(PromptSettlement::Ongoing { steer: None }),
+            None,
+            ProviderKind::Cursor,
+            &events,
         ));
-        assert!(!settle_prompt_request(
-            &requests,
-            &RequestId::Str("steer".into())
+        assert!(matches!(
+            event_rx.try_recv().unwrap(),
+            DriverEvent::Error(error) if error == failed.to_string()
         ));
+        assert!(
+            event_rx.try_recv().is_err(),
+            "a failed prompt ended the turn while a steer was still running"
+        );
+    }
+
+    /// A steer the agent takes is settled by its own result: the turn is still
+    /// the first prompt's to end.
+    #[test]
+    fn an_answered_steer_adds_nothing_to_a_running_turn() {
+        let (events, event_rx) = crate::driver::test_event_channel();
+
+        assert!(!settle_prompt_result(
+            Ok(PromptResponse::new(StopReason::EndTurn)),
+            Some(PromptSettlement::Ongoing {
+                steer: Some("use pnpm".into()),
+            }),
+            None,
+            ProviderKind::Grok,
+            &events,
+        ));
+        assert!(event_rx.try_recv().is_err());
+    }
+
+    /// Grok's completion notification settles a request before the SDK's
+    /// response to it arrives. That later response belongs to a turn that has
+    /// already ended.
+    #[test]
+    fn a_response_to_a_settled_request_adds_nothing() {
+        let (events, event_rx) = crate::driver::test_event_channel();
+
+        assert!(!settle_prompt_result(
+            Err(agent_client_protocol::Error::new(-32603, "Internal error")),
+            None,
+            None,
+            ProviderKind::Grok,
+            &events,
+        ));
+        assert!(event_rx.try_recv().is_err());
     }
 
     #[test]
@@ -2433,6 +2623,7 @@ mod tests {
             request_id.clone(),
             Some("waku-prompt".into()),
             "grok-session".into(),
+            None,
         );
         let (events, event_rx) = crate::driver::test_event_channel();
 
@@ -2455,7 +2646,7 @@ mod tests {
                 summary: None
             }
         ));
-        assert!(!settle_prompt_request(&requests, &request_id));
+        assert_eq!(settle_prompt_request(&requests, &request_id), None);
         assert!(event_rx.try_recv().is_err());
     }
 
@@ -2793,5 +2984,219 @@ mod tests {
                 "the turn failed without naming a reason"
             ),
         }
+    }
+
+    /// Kimi refuses a steer outright: a second `session/prompt` while its turn
+    /// is running is answered with "Invalid request: another turn is already in
+    /// progress". The driver reports the steer as accepted before that answer
+    /// arrives — the protocol gives nothing earlier to go on — so the refusal
+    /// is what tells the user the message was never read.
+    #[test]
+    #[ignore = "requires an installed, authenticated kimi"]
+    fn a_steer_kimi_refuses_is_reported_as_rejected() {
+        let binary = crate::command_env::find_executable("kimi").expect("kimi is not installed");
+        let (events, event_rx) = crate::driver::test_event_channel();
+        let driver = AcpDriver::start(
+            ProviderKind::Kimi,
+            DriverStartOptions {
+                binary,
+                cwd: std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")),
+                mode: RuntimeMode::FullAccess,
+                model: None,
+                reasoning_effort: None,
+                service_tier: None,
+                context_window: None,
+                agent_preset: None,
+                computer_use_enabled: false,
+                provider_cursor: None,
+            },
+            events,
+        )
+        .expect("the ACP session should open");
+
+        loop {
+            match event_rx
+                .recv_timeout(Duration::from_secs(60))
+                .expect("the agent should report its session")
+            {
+                DriverEvent::Connected {
+                    provider_cursor: Some(ProviderResumeCursor::Kimi { .. }),
+                } => break,
+                DriverEvent::Error(error) => panic!("the agent reported: {error}"),
+                _ => {}
+            }
+        }
+        driver.prompt("Write the numbers 1 to 80, one per line, with no other text.".into());
+
+        let steer = "STEER: stop counting and reply with the single word PINEAPPLE.";
+        let mut steered = false;
+        let mut rejection = None;
+        let mut finished = None;
+        let deadline = std::time::Instant::now() + Duration::from_secs(120);
+        while rejection.is_none() || finished.is_none() {
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            let Ok(event) = event_rx.recv_timeout(remaining) else {
+                break;
+            };
+            match event {
+                // The turn is under way once the agent has said anything.
+                DriverEvent::TextDelta(text) | DriverEvent::ReasoningDelta(text)
+                    if !steered && !text.is_empty() =>
+                {
+                    steered = true;
+                    driver.steer(steer.into());
+                }
+                DriverEvent::SteerRejected { message, reason } => {
+                    rejection = Some((message, reason));
+                    // Nothing more is needed from the turn.
+                    driver.cancel();
+                }
+                DriverEvent::TurnFinished { success, .. } => finished = Some(success),
+                _ => {}
+            }
+        }
+        drop(driver);
+
+        let (message, reason) = rejection
+            .unwrap_or_else(|| panic!("Kimi refused the steer and the driver reported nothing"));
+        assert_eq!(message, steer);
+        assert!(
+            reason.starts_with("Kimi Code rejected the steer: ")
+                && reason.contains("another turn is already in progress"),
+            "the refusal is reported without the agent's reason: {reason}"
+        );
+        assert!(
+            finished.is_some(),
+            "the turn did not settle after the refused steer"
+        );
+    }
+
+    /// A fake ACP agent that refuses to be steered, the way Kimi does: it
+    /// starts the first prompt and never answers it, announces that it is
+    /// working, and answers every later prompt with an error.
+    #[cfg(unix)]
+    fn write_unsteerable_agent() -> std::path::PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+
+        let path = std::env::temp_dir().join(format!("waku-fake-acp-{}", uuid::Uuid::new_v4()));
+        std::fs::write(
+            &path,
+            r#"#!/bin/sh
+id() { printf '%s' "$1" | sed -n 's/.*"id":"\([^"]*\)".*/\1/p'; }
+read -r request
+printf '{"jsonrpc":"2.0","id":"%s","result":{"protocolVersion":1,"agentCapabilities":{}}}\n' "$(id "$request")"
+read -r request
+printf '{"jsonrpc":"2.0","id":"%s","result":{"sessionId":"waku_fake_session"}}\n' "$(id "$request")"
+prompts=0
+while IFS= read -r request; do
+  case "$request" in
+    *'"method":"session/prompt"'*)
+      prompts=$((prompts + 1))
+      if [ "$prompts" -eq 1 ]; then
+        printf '{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"waku_fake_session","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"counting"}}}}\n'
+      else
+        printf '{"jsonrpc":"2.0","id":"%s","error":{"code":-32600,"message":"Invalid request: another turn is already in progress","data":{"code":"turn.agent_busy"}}}\n' "$(id "$request")"
+      fi
+      ;;
+  esac
+done
+"#,
+        )
+        .unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        path
+    }
+
+    /// Removes a fake agent's script when the test ends, however it ends.
+    #[cfg(unix)]
+    struct FakeAgentCleanup(std::path::PathBuf);
+
+    #[cfg(unix)]
+    impl Drop for FakeAgentCleanup {
+        fn drop(&mut self) {
+            std::fs::remove_file(&self.0).ok();
+        }
+    }
+
+    /// An agent can take a steering message off the wire and then refuse it.
+    /// Kimi answers a second `session/prompt` with "another turn is already in
+    /// progress". By then the driver has reported the steer as accepted — the
+    /// protocol offers nothing earlier to go on — and the app has put the
+    /// message in the transcript. The refusal has to be reported, or the user
+    /// sees a message as delivered that the agent never read.
+    #[test]
+    #[cfg(unix)]
+    fn a_steer_the_agent_refuses_is_reported_as_rejected() {
+        let binary = write_unsteerable_agent();
+        let _cleanup = FakeAgentCleanup(binary.clone());
+        let (events, event_rx) = crate::driver::test_event_channel();
+        let driver = AcpDriver::start(
+            ProviderKind::Cursor,
+            DriverStartOptions {
+                binary: binary.clone(),
+                cwd: std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")),
+                mode: RuntimeMode::FullAccess,
+                model: None,
+                reasoning_effort: None,
+                service_tier: None,
+                context_window: None,
+                agent_preset: None,
+                computer_use_enabled: false,
+                provider_cursor: None,
+            },
+            events,
+        )
+        .expect("the ACP session should open");
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+
+        driver.prompt("count to ten".into());
+        let mut started = false;
+        let mut accepted = false;
+        let mut rejection = None;
+        let mut ended = false;
+        loop {
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            let Ok(event) = event_rx.recv_timeout(remaining) else {
+                break;
+            };
+            match event {
+                // The agent's first words are the earliest sign that its turn
+                // has started, so the steer goes out once they arrive.
+                DriverEvent::TextDelta(_) if !started => {
+                    started = true;
+                    driver.steer("use roman numerals".into());
+                }
+                DriverEvent::SteerAccepted { .. } => accepted = true,
+                DriverEvent::SteerRejected { message, reason } => {
+                    rejection = Some((message, reason));
+                    break;
+                }
+                // The first prompt is still open, so neither of these belongs
+                // to a refused steer.
+                DriverEvent::TurnFinished { .. } | DriverEvent::Error(_) => {
+                    ended = true;
+                    break;
+                }
+                _ => {}
+            }
+        }
+        drop(driver);
+
+        assert!(started, "the agent's first turn never started");
+        assert!(accepted, "the driver never reported the steer as accepted");
+        let (message, reason) = rejection.unwrap_or_else(|| {
+            panic!("the agent refused the steer and the driver reported nothing")
+        });
+        assert_eq!(message, "use roman numerals");
+        assert!(
+            reason.starts_with(ProviderKind::Cursor.display_name())
+                && reason.contains("another turn is already in progress"),
+            "the rejection carries neither the provider nor the agent's reason: {reason}"
+        );
+        assert!(
+            !ended,
+            "a refused steer ended the turn that was still running"
+        );
     }
 }
