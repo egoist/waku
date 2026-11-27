@@ -86,6 +86,34 @@ describe('desktop transcript language', () => {
     expect(activityDisplayTitle(question)).toBe('Ask questions')
   })
 
+  test('uses desktop tool aliases and namespaces when choosing semantic activity titles', () => {
+    const cases: Array<[ActivityItem['kind'], string, string]> = [
+      ['command', 'Bash', 'Running command'],
+      ['fileChange', 'Edit', 'Editing files'],
+      ['fileSearch', 'mcp__filesystem__Glob', 'Searching files'],
+      ['fileRead', 'read_text_file', 'Reading file'],
+      ['fileList', 'ls', 'Listing files'],
+      ['plan', 'TodoWrite', 'Updating plan'],
+    ]
+    for (const [kind, title, expected] of cases) {
+      expect(activityDisplayTitle({ ...activity(kind, false), title })).toBe(expected)
+    }
+    expect(activityDisplayTitle({ ...activity('tool', false), title: 'CustomReview' }))
+      .toBe('Custom Review')
+  })
+
+  test('treats only the desktop labels as generic activity titles', () => {
+    // The desktop keeps a provider's own name unless it is exactly the
+    // desktop's own label for that kind, so a tool called `Exec` keeps its
+    // identity instead of collapsing into a generic command row.
+    expect(activityDisplayTitle({ ...activity('command', false), title: 'Exec' }))
+      .toBe('Exec')
+    expect(activityDisplayTitle({ ...activity('command', true), title: 'Run command' }))
+      .toBe('Ran command')
+    expect(activityDisplayTitle({ ...activity('tool', false), title: 'tool' }))
+      .toBe('Tool')
+  })
+
   test('derives the same provider-neutral activity titles as desktop', () => {
     expect(activityDisplayTitle({
       ...activity('fileChange', true),

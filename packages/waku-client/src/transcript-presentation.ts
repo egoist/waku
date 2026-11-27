@@ -76,7 +76,7 @@ export function activityDisplayTitle(activity: ActivityItem, t?: Translator) {
         : changes.length > 1
           ? t ? t('activity.file_count', { count: changes.length }) : `${changes.length} files`
           : null
-      if (!subject && !isGenericActivityTitle(activity)) return activity.title
+      if (!subject && !isGenericActivityTitle(activity, t)) return activity.title
       if (!activity.complete) return t
         ? t(subject ? 'activity.editing_named_file' : 'activity.editing_files', subject ? { file: subject } : undefined)
         : subject ? `Editing ${subject}` : 'Editing files'
@@ -89,7 +89,7 @@ export function activityDisplayTitle(activity: ActivityItem, t?: Translator) {
     }
     case 'fileRead': {
       const file = target ? pathName(target) : null
-      if (!file && !isGenericActivityTitle(activity)) return activity.title
+      if (!file && !isGenericActivityTitle(activity, t)) return activity.title
       if (!activity.complete) return t
         ? t(file ? 'activity.reading_named_file' : 'activity.reading_file', file ? { file } : undefined)
         : file ? `Reading ${file}` : 'Reading file'
@@ -101,7 +101,7 @@ export function activityDisplayTitle(activity: ActivityItem, t?: Translator) {
         : file ? `Read ${file}` : 'Read file'
     }
     case 'fileSearch': {
-      if (!target && !isGenericActivityTitle(activity)) return activity.title
+      if (!target && !isGenericActivityTitle(activity, t)) return activity.title
       if (!activity.complete) return t
         ? t(target ? 'activity.searching_files_for' : 'activity.searching_files', target ? { query: target } : undefined)
         : target ? `Searching files for ${target}` : 'Searching files'
@@ -114,7 +114,7 @@ export function activityDisplayTitle(activity: ActivityItem, t?: Translator) {
     }
     case 'fileList': {
       const directory = target ? pathName(target) : null
-      if (!directory && !isGenericActivityTitle(activity)) return activity.title
+      if (!directory && !isGenericActivityTitle(activity, t)) return activity.title
       if (!activity.complete) return t
         ? t(directory ? 'activity.listing_files_in' : 'activity.listing_files', directory ? { directory } : undefined)
         : directory ? `Listing files in ${directory}` : 'Listing files'
@@ -144,7 +144,7 @@ export function activityDisplayTitle(activity: ActivityItem, t?: Translator) {
           ? t ? t('activity.named_command_failed', { command: target }) : `Command failed: ${target}`
           : t ? t('activity.ran_named_command', { command: target }) : `Ran ${target}`
       }
-      if (!isGenericActivityTitle(activity)) return activity.title
+      if (!isGenericActivityTitle(activity, t)) return activity.title
       if (!activity.complete) return t ? t('activity.running_command') : 'Running command'
       return activity.failed
         ? t ? t('activity.command_failed') : 'Command failed'
@@ -156,13 +156,13 @@ export function activityDisplayTitle(activity: ActivityItem, t?: Translator) {
           ? t ? t('activity.web_search_failed_for', { query: target }) : `Failed to search the web for ${target}`
           : t ? t('activity.searched_web_for', { query: target }) : `Searched the web for ${target}`
       }
-      if (!isGenericActivityTitle(activity)) return activity.title
+      if (!isGenericActivityTitle(activity, t)) return activity.title
       if (!activity.complete) return t ? t('activity.searching_web') : 'Searching the web'
       return activity.failed
         ? t ? t('activity.web_search_failed') : 'Failed to search the web'
         : t ? t('activity.searched_the_web') : 'Searched the web'
     case 'plan':
-      if (!isGenericActivityTitle(activity)) return activity.title
+      if (!isGenericActivityTitle(activity, t)) return activity.title
       if (!activity.complete) return t ? t('activity.updating_plan') : 'Updating plan'
       return activity.failed
         ? t ? t('activity.plan_update_failed') : 'Failed to update plan'
@@ -207,7 +207,7 @@ export function activityActionLabel(activity: ActivityItem, t?: Translator) {
 }
 
 export function activityRowDetail(activity: ActivityItem, t?: Translator) {
-  const customTitle = !isGenericActivityTitle(activity) ? activity.title : ''
+  const customTitle = !isGenericActivityTitle(activity, t) ? activity.title : ''
   switch (activity.kind) {
     case 'reasoning':
       return reasoningTitle(activity, t)
@@ -238,7 +238,7 @@ export function activityRowDetail(activity: ActivityItem, t?: Translator) {
       return customTitle
     case 'tool':
       if (isAskUserQuestion(activity)) return ''
-      return activity.display_target?.trim() || !isGenericActivityTitle(activity)
+      return activity.display_target?.trim() || !isGenericActivityTitle(activity, t)
         ? activityToolDisplayName(activity, t)
         : ''
   }
@@ -619,22 +619,73 @@ function activityToolDisplayName(activity: ActivityItem, t?: Translator) {
   }
   const target = activity.display_target?.trim()
   if (target) return target
-  if (!isGenericActivityTitle(activity)) return humanizeToolName(activity.title)
+  if (!isGenericActivityTitle(activity, t)) return humanizeToolName(activity.title)
   return t ? t('activity.tool') : 'Tool'
 }
 
-function isGenericActivityTitle(activity: ActivityItem) {
-  const normalized = activity.title.trim().toLocaleLowerCase().replace(/[\s_-]+/g, '')
-  const generic = {
-    command: ['command', 'runcommand', 'shell', 'shellcommand', 'execute', 'exec'],
-    fileChange: ['filechange', 'editfile', 'writefile', 'patch', 'applypatch'],
-    fileRead: ['fileread', 'readfile', 'read'],
-    fileSearch: ['filesearch', 'searchfiles', 'findfiles', 'grep'],
-    fileList: ['filelist', 'listfiles', 'listdirectory', 'ls'],
-    search: ['search', 'websearch'],
-    plan: ['plan', 'planupdated', 'updateplan'],
-    tool: ['tool'],
-    reasoning: ['reasoning'],
-  }[activity.kind]
-  return generic.includes(normalized)
+// The desktop treats a title as generic when the name resolves to the row's
+// own kind, or when the title is exactly the desktop's own label for that
+// kind. Those labels are translated, so a localized client compares against
+// its own catalog.
+const GENERIC_ACTIVITY_TITLE_KEYS: Partial<Record<ActivityItem['kind'], string[]>> = {
+  command: ['activity.run_command'],
+  fileChange: ['activity.edit_file', 'activity.write_file'],
+  fileRead: ['activity.read_file'],
+  fileSearch: ['activity.search_files', 'activity.find_files'],
+  fileList: ['activity.list_files'],
+  plan: ['activity.plan_updated'],
+}
+
+const GENERIC_ACTIVITY_TITLE_FALLBACKS: Record<string, string> = {
+  'activity.run_command': 'Run command',
+  'activity.edit_file': 'Edit file',
+  'activity.write_file': 'Write file',
+  'activity.read_file': 'Read file',
+  'activity.search_files': 'Search files',
+  'activity.find_files': 'Find files',
+  'activity.list_files': 'List files',
+  'activity.plan_updated': 'Plan updated',
+  'activity.tool': 'Tool',
+}
+
+function isGenericActivityTitle(activity: ActivityItem, t?: Translator) {
+  const name = toolNameLeaf(activity.title)
+    .trim()
+    .toLocaleLowerCase()
+    .replace(/[\s-]+/g, '_')
+    .replace(/_/g, '')
+  const kindByToolName: Record<string, ActivityItem['kind']> = {
+    todo: 'plan', todowrite: 'plan', updateplan: 'plan', plan: 'plan',
+    bash: 'command', command: 'command', execute: 'command', executecommand: 'command',
+    commandexecution: 'command', runcommand: 'command', runterminalcommand: 'command',
+    shell: 'command', shellcommand: 'command', terminal: 'command',
+    applypatch: 'fileChange', create: 'fileChange', createfile: 'fileChange',
+    delete: 'fileChange', deletefile: 'fileChange', edit: 'fileChange',
+    filechange: 'fileChange', fileedit: 'fileChange', editfile: 'fileChange',
+    move: 'fileChange', movefile: 'fileChange', multiedit: 'fileChange',
+    notebookedit: 'fileChange', patch: 'fileChange', rename: 'fileChange',
+    renamefile: 'fileChange', replace: 'fileChange', savefile: 'fileChange',
+    strreplace: 'fileChange', write: 'fileChange', writefile: 'fileChange',
+    read: 'fileRead', fileread: 'fileRead', readfile: 'fileRead', readtextfile: 'fileRead',
+    viewfile: 'fileRead', filesearch: 'fileSearch', find: 'fileSearch',
+    findfiles: 'fileSearch', glob: 'fileSearch', grep: 'fileSearch', ripgrep: 'fileSearch',
+    searchfiles: 'fileSearch', searchinfiles: 'fileSearch', directorylist: 'fileList',
+    filelist: 'fileList', list: 'fileList', listdirectory: 'fileList', listfiles: 'fileList',
+    ls: 'fileList', readdir: 'fileList', search: 'search', searchtool: 'search',
+    webfetch: 'search', websearch: 'search',
+  }
+  if (kindByToolName[name] === activity.kind) return true
+  const keys = GENERIC_ACTIVITY_TITLE_KEYS[activity.kind]
+  if (keys) {
+    return keys.some((key) => activity.title === genericActivityTitle(t, key))
+  }
+  if (activity.kind === 'tool') {
+    return activity.title.toLowerCase() === 'tool'
+      || activity.title === genericActivityTitle(t, 'activity.tool')
+  }
+  return false
+}
+
+function genericActivityTitle(t: Translator | undefined, key: string): string {
+  return t ? t(key) : GENERIC_ACTIVITY_TITLE_FALLBACKS[key] ?? key
 }
