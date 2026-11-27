@@ -174,6 +174,10 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
       }>
     >(),
   )
+  // Steers the provider took, which the transcript already shows. Kept until
+  // the next turn starts, so a refusal that lands afterwards can take its
+  // message back out instead of queueing a second copy of it.
+  const acceptedSteers = useRef(new Map<string, AcceptedSteer[]>())
   const responseForksInFlight = useRef(new Map<string, number>())
   const messageRewindsInFlight = useRef(new Map<string, number>())
   const [runtimes, setRuntimes] = useState<Record<string, RuntimeSummary>>({})
@@ -461,6 +465,11 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
             event.event.payload as PlanUsage,
           )
         }
+        if (event.event.kind === 'turnStarted') {
+          // Steers belong to the turn the provider folded them into; a new
+          // turn starts that bookkeeping over, as the desktop does.
+          acceptedSteers.current.delete(session.id)
+        }
         if (event.event.kind === 'backgroundWork') {
           const backgroundEvent = decodeBackgroundWorkEvent(event.event.payload)
           if (backgroundEvent) {
@@ -476,12 +485,21 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
           const pending = takePendingSteer(steers, payload.message)
           if (pending) {
             const turnId = current.turns.at(-1)?.id ?? null
+            const id = crypto.randomUUID()
+            // The provider folded the message into the live turn. Remember the
+            // message it produced: a provider can take a steer and refuse it
+            // afterwards, and the refusal has to take this copy back out
+            // rather than queue a second one.
+            acceptedSteers.current.set(session.id, [
+              ...(acceptedSteers.current.get(session.id) ?? []),
+              { ...pending, id },
+            ])
             current = {
               ...current,
               messages: [
                 ...current.messages,
                 {
-                  id: crypto.randomUUID(),
+                  id,
                   turn_id: turnId,
                   role: 'user',
                   content: payload.message ?? pending.providerPrompt,
@@ -500,14 +518,25 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
           const payload = event.event.payload as { message?: string }
           const steers = pendingSteers.current.get(session.id)
           const pending = takePendingSteer(steers, payload.message)
-          // A steer can also be refused after it was reported as accepted —
-          // the entry is already gone, but the message still has to go back
-          // to the queue instead of being lost. The desktop does the same.
+          // A provider can take a steer and refuse it afterwards. Acceptance
+          // already put the message in the running turn, so take that copy
+          // back out and queue what the user actually wrote — the desktop
+          // does the same, and without it the text appears twice.
+          const accepted = takeAcceptedSteer(
+            acceptedSteers.current.get(session.id),
+            payload.message,
+          )
+          if (accepted) {
+            current = {
+              ...current,
+              messages: current.messages.filter((message) => message.id !== accepted.id),
+            }
+          }
           current = queueSubmission(
             current,
-            pending?.displayContent ?? payload.message ?? '',
-            pending?.providerPrompt ?? payload.message ?? '',
-            pending?.attachments ?? [],
+            accepted?.displayContent ?? pending?.displayContent ?? payload.message ?? '',
+            accepted?.providerPrompt ?? pending?.providerPrompt ?? payload.message ?? '',
+            accepted?.attachments ?? pending?.attachments ?? [],
           )
           cacheSession(current)
           void persistOrdered(current).catch((error) => toast.error(errorMessage(error)))
@@ -1085,6 +1114,7 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
       persistenceTails.current.delete(sessionId)
       saveGenerations.current.delete(sessionId)
       pendingSteers.current.delete(sessionId)
+      acceptedSteers.current.delete(sessionId)
       setPermissions((current) => removeRecordKey(current, sessionId))
       setUserInputs((current) => removeRecordKey(current, sessionId))
       setBackgroundWork((current) => removeRecordKey(current, sessionId))
@@ -1299,6 +1329,7 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
     checkpointCaptures.current.clear()
     saveGenerations.current.clear()
     pendingSteers.current.clear()
+    acceptedSteers.current.clear()
     responseForksInFlight.current.clear()
     messageRewindsInFlight.current.clear()
     setRuntimes({})
@@ -1364,6 +1395,14 @@ interface PendingSteer {
   attachments: MessageAttachment[]
 }
 
+/** A steer the provider reported as accepted, paired with the transcript
+ * message that acceptance appended for it. */
+interface AcceptedSteer extends PendingSteer {
+  /** Identifies the appended message exactly, so a refusal removes that one
+   * and never an earlier message that happens to carry the same text. */
+  id: string
+}
+
 /** Remove the pending steer the provider named, or the oldest one when it
  * did not name any (or echoed it normalized). Mirrors the desktop's
  * match-then-pop on `pending_steers`. */
@@ -1371,6 +1410,18 @@ function takePendingSteer(
   steers: PendingSteer[] | undefined,
   message: string | undefined,
 ): PendingSteer | undefined {
+  if (!steers?.length) return undefined
+  const index = message ? steers.findIndex((steer) => steer.providerPrompt === message) : -1
+  const [steer] = steers.splice(index >= 0 ? index : 0, 1)
+  return steer
+}
+
+/** Remove the accepted steer the provider named, or the oldest one when it
+ * did not name any. Mirrors the desktop's match-then-pop on `accepted_steers`. */
+function takeAcceptedSteer(
+  steers: AcceptedSteer[] | undefined,
+  message: string | undefined,
+): AcceptedSteer | undefined {
   if (!steers?.length) return undefined
   const index = message ? steers.findIndex((steer) => steer.providerPrompt === message) : -1
   const [steer] = steers.splice(index >= 0 ? index : 0, 1)

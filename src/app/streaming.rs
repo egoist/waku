@@ -310,6 +310,10 @@ impl Waku {
             }
             DriverEvent::TurnStarted => {
                 runtime.last_driver_error = None;
+                // Steers belong to the turn the provider folded them into. A
+                // new turn starts that bookkeeping over, so a refusal from
+                // the previous one can no longer retract anything.
+                runtime.accepted_steers.clear();
                 if let Some(session) = self.state.session_mut(session_id) {
                     if session.active_turn_id().is_some() {
                         // Covers submissions and the optimistic pursuit turn
@@ -491,22 +495,32 @@ impl Waku {
                 // it to the same turn so the transcript mirrors the provider
                 // conversation (no new turn boundary).
                 if let Some(session) = self.state.session_mut(session_id) {
-                    session.push_user_message_with_presentation(
-                        message,
+                    let prompt = message;
+                    let message_id = session.push_user_message_with_presentation(
+                        prompt.clone(),
                         submission.display_content,
                         submission.attachments,
                     );
+                    // Remember what acceptance showed. A provider can take a
+                    // steer and refuse it afterwards, and the refusal has to
+                    // take this copy back out rather than queue a second one.
+                    runtime
+                        .accepted_steers
+                        .push_back(AcceptedSteer { message_id, prompt });
                     session.updated_at = unix_time();
                 }
             }
             DriverEvent::SteerRejected { message, reason } => {
-                let submission = runtime
-                    .pending_steers
-                    .iter()
-                    .position(|submission| submission.prompt == message)
-                    .and_then(|index| runtime.pending_steers.remove(index))
-                    .or_else(|| runtime.pending_steers.pop_front())
-                    .unwrap_or_else(|| ComposerSubmission::plain(message));
+                // A refusal can arrive after the provider already reported the
+                // steer as accepted, which put the message in the running
+                // turn. The agent never read it, so the queued follow-up is
+                // the only copy the user should see.
+                let submission = take_refused_steer(
+                    self.state.session_mut(session_id),
+                    &mut runtime.accepted_steers,
+                    &mut runtime.pending_steers,
+                    message,
+                );
                 let (busy, settled_cleanly) = self
                     .state
                     .sessions
@@ -1038,4 +1052,41 @@ pub(super) fn append_text_delta_to_session(
         session.messages.push(message);
     }
     session.updated_at = unix_time();
+}
+
+/// Resolve the submission a refused steer queues.
+///
+/// A provider can accept a steer and refuse it afterwards, so a refusal is
+/// matched against the steers acceptance already appended first. That match
+/// takes the transcript message back out — the agent never read it, and the
+/// queued follow-up is now the only copy the user sees, where before the text
+/// showed twice. A steer still awaiting its acknowledgement resolves against
+/// `pending_steers` exactly as an acknowledgement does.
+pub(super) fn take_refused_steer(
+    session: Option<&mut AgentSession>,
+    accepted: &mut VecDeque<AcceptedSteer>,
+    pending: &mut VecDeque<ComposerSubmission>,
+    message: String,
+) -> ComposerSubmission {
+    let accepted_steer = accepted
+        .iter()
+        .position(|steer| steer.prompt == message)
+        .and_then(|index| accepted.remove(index))
+        .or_else(|| accepted.pop_front());
+    if let Some(steer) = accepted_steer {
+        let prompt = steer.prompt;
+        return session
+            .and_then(|session| session.take_message(steer.message_id))
+            .map(ComposerSubmission::from_message)
+            // A rewind or a reload already took the message. Queue the text
+            // anyway: dropping it would lose the user's words, which is worse
+            // than the duplicate this guards against.
+            .unwrap_or_else(|| ComposerSubmission::plain(prompt));
+    }
+    pending
+        .iter()
+        .position(|submission| submission.prompt == message)
+        .and_then(|index| pending.remove(index))
+        .or_else(|| pending.pop_front())
+        .unwrap_or_else(|| ComposerSubmission::plain(message))
 }

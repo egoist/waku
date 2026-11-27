@@ -352,6 +352,14 @@ impl ComposerSubmission {
         }
     }
 
+    fn from_message(message: Message) -> Self {
+        Self {
+            prompt: message.content,
+            display_content: message.display_content,
+            attachments: message.attachments,
+        }
+    }
+
     /// Human-facing task text for titles and generated worktree names. An
     /// attachment-only submission uses basenames instead of its transport
     /// paths; providers still receive `prompt` unchanged.
@@ -859,6 +867,11 @@ struct SessionRuntime {
     /// Presentation metadata for steering messages awaiting the provider's
     /// accepted/rejected acknowledgement, in transport order.
     pending_steers: VecDeque<ComposerSubmission>,
+    /// Steers the provider took, which acceptance already appended to the live
+    /// turn. Kept until the next turn starts, so a refusal that lands
+    /// afterwards can take its message back out of the transcript instead of
+    /// queueing a second copy of it.
+    accepted_steers: VecDeque<AcceptedSteer>,
     stream_phase: Option<StreamPhase>,
     /// The parked-turn notification has fired for the turn in flight, so a
     /// wake that parks again does not repeat it. Cleared when the turn ends.
@@ -876,6 +889,17 @@ struct SessionRuntime {
     /// Background-process snapshots are provider IPC. Keep the polling clock
     /// on the runtime so switching tasks never creates duplicate probes.
     last_background_refresh_at: Instant,
+}
+
+/// A steer the provider reported as accepted, paired with the transcript
+/// message that acceptance appended for it.
+struct AcceptedSteer {
+    /// Identifies the appended message exactly, so a refusal removes that one
+    /// and never an earlier message that happens to carry the same text.
+    message_id: Uuid,
+    /// The transport text the provider echoed, matched against a later
+    /// refusal the way `pending_steers` matches an acknowledgement.
+    prompt: String,
 }
 
 #[derive(Clone)]

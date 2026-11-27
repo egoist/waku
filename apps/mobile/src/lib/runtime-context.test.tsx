@@ -151,6 +151,28 @@ describe('mobile runtime history', () => {
       .toMatchObject({ content: 'Review changes carefully', display_content: '/review changes' });
   });
 
+  test('takes a steer the agent refused after taking it back out of the transcript', async () => {
+    const f = fixture();
+    f.queryClient.setQueryData(f.key, f.history);
+    await f.runtime.attachSession(f.history);
+    await f.runtime.steerPrompt(f.history, 'also fix the typo', [], 'also fix the typo');
+    f.emit('steerAccepted', { message: 'also fix the typo' });
+    expect(f.current().messages.at(-1)).toMatchObject({ content: 'also fix the typo' });
+
+    f.emit('steerRejected', { message: 'also fix the typo', reason: 'another turn is already in progress' });
+
+    // Acceptance had already put the message in the running turn. The agent
+    // never read it, so the queue is the only copy the user should see.
+    expect(f.current().messages.map((message) => message.content)).toEqual([
+      'Previous request',
+      'Previous answer',
+      'Current request',
+      'Streaming response',
+    ]);
+    expect(f.current().queued_messages).toHaveLength(1);
+    expect(f.current().queued_messages?.[0]).toMatchObject({ content: 'also fix the typo' });
+  });
+
   test('queues expanded command content without starting another provider turn', async () => {
     const f = fixture();
     f.queryClient.setQueryData(f.key, f.history);

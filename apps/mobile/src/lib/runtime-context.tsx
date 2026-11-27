@@ -80,6 +80,14 @@ interface PendingSubmission {
   attachments: MessageAttachment[];
 }
 
+/** A steer the provider reported as accepted, paired with the transcript
+ * message that acceptance appended for it. */
+interface AcceptedSteer extends PendingSubmission {
+  /** Identifies the appended message exactly, so a refusal removes that one
+   * and never an earlier message that happens to carry the same text. */
+  id: string;
+}
+
 /** Remove the pending steer the provider named, or the oldest one when it
  * did not name any (or echoed it normalized). Mirrors the desktop's
  * match-then-pop on `pending_steers`. */
@@ -87,6 +95,18 @@ function takePendingSteer(
   steers: PendingSubmission[] | undefined,
   message: string | undefined,
 ): PendingSubmission | undefined {
+  if (!steers?.length) return undefined;
+  const index = message ? steers.findIndex((steer) => steer.providerPrompt === message) : -1;
+  const [steer] = steers.splice(index >= 0 ? index : 0, 1);
+  return steer;
+}
+
+/** Remove the accepted steer the provider named, or the oldest one when it
+ * did not name any. Mirrors the desktop's match-then-pop on `accepted_steers`. */
+function takeAcceptedSteer(
+  steers: AcceptedSteer[] | undefined,
+  message: string | undefined,
+): AcceptedSteer | undefined {
   if (!steers?.length) return undefined;
   const index = message ? steers.findIndex((steer) => steer.providerPrompt === message) : -1;
   const [steer] = steers.splice(index >= 0 ? index : 0, 1);
@@ -171,6 +191,10 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
    * snapshot it saved. */
   const cacheGenerations = useRef(new Map<string, number>());
   const pendingSteers = useRef(new Map<string, PendingSubmission[]>());
+  // Steers the provider took, which the transcript already shows. Kept until
+  // the next turn starts, so a refusal that lands afterwards can take its
+  // message back out instead of queueing a second copy of it.
+  const acceptedSteers = useRef(new Map<string, AcceptedSteer[]>());
   const drainingQueues = useRef(new Set<string>());
   const sendPromptRef = useRef<
     ((
@@ -287,6 +311,7 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
     entry?.unsubscribe();
     entries.current.delete(sessionId);
     pendingSteers.current.delete(sessionId);
+    acceptedSteers.current.delete(sessionId);
     setRuntimes((current) => removeKey(current, sessionId));
   }, []);
 
@@ -364,6 +389,11 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
       } else if (event.event.kind === 'error' && typeof event.event.payload === 'string') {
         entry.lastDriverError = event.event.payload;
       }
+      if (event.event.kind === 'turnStarted') {
+        // Steers belong to the turn the provider folded them into; a new turn
+        // starts that bookkeeping over, as the desktop does.
+        acceptedSteers.current.delete(session.id);
+      }
       if (event.event.kind === 'steerAccepted') {
         const payload = event.event.payload as { message?: string };
         // The provider folded a steer into the live turn. Ours is pending
@@ -372,12 +402,25 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
         const pending = takePendingSteer(pendingSteers.current.get(session.id), payload.message);
         const content = payload.message ?? pending?.providerPrompt;
         if (content) {
+          const id = clock.randomUUID();
+          // Remember the message this acceptance appended. A provider can
+          // take a steer and refuse it afterwards, and the refusal has to
+          // take this copy back out rather than queue a second one.
+          acceptedSteers.current.set(session.id, [
+            ...(acceptedSteers.current.get(session.id) ?? []),
+            {
+              id,
+              providerPrompt: content,
+              displayContent: pending?.displayContent ?? content,
+              attachments: pending?.attachments ?? [],
+            },
+          ]);
           state.current = {
             ...state.current,
             messages: [
               ...state.current.messages,
               {
-                id: clock.randomUUID(),
+                id,
                 turn_id: state.current.turns.at(-1)?.id ?? null,
                 role: 'user',
                 content,
@@ -394,15 +437,26 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
       } else if (event.event.kind === 'steerRejected') {
         const payload = event.event.payload as { message?: string };
         const pending = takePendingSteer(pendingSteers.current.get(session.id), payload.message);
-        // A steer can also be refused after it was reported as accepted —
-        // the entry is already gone, but the message still has to go back
-        // to the queue instead of being lost. The desktop does the same.
+        // A provider can take a steer and refuse it afterwards. Acceptance
+        // already put the message in the running turn, so take that copy back
+        // out and queue what the user actually wrote — the desktop does the
+        // same, and without it the text appears twice.
+        const accepted = takeAcceptedSteer(
+          acceptedSteers.current.get(session.id),
+          payload.message,
+        );
+        if (accepted) {
+          state.current = {
+            ...state.current,
+            messages: state.current.messages.filter((message) => message.id !== accepted.id),
+          };
+        }
         state.current = queueSubmission(
           state.current,
-          pending?.displayContent ?? payload.message ?? '',
+          accepted?.displayContent ?? pending?.displayContent ?? payload.message ?? '',
           clock,
-          pending?.attachments ?? [],
-          pending?.providerPrompt ?? payload.message ?? '',
+          accepted?.attachments ?? pending?.attachments ?? [],
+          accepted?.providerPrompt ?? pending?.providerPrompt ?? payload.message ?? '',
         );
         void persistOrdered(state.current).catch(() => {});
         setErrors((values) => ({
@@ -996,6 +1050,7 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
       attachRequests.current.clear();
       persistTails.current.clear();
       pendingSteers.current.clear();
+      acceptedSteers.current.clear();
       drainingQueues.current.clear();
       for (const timer of persistTimers.current.values()) clearTimeout(timer);
       persistTimers.current.clear();

@@ -1524,6 +1524,16 @@ impl AgentSession {
         id
     }
 
+    /// Remove the message with this id and return it, so a caller that takes a
+    /// message back out of the transcript keeps its presentation metadata.
+    pub fn take_message(&mut self, message_id: Uuid) -> Option<Message> {
+        let index = self
+            .messages
+            .iter()
+            .position(|message| message.id == message_id)?;
+        Some(self.messages.remove(index))
+    }
+
     pub fn push_user_message_with_presentation(
         &mut self,
         content: impl Into<String>,
@@ -3569,6 +3579,25 @@ mod tests {
         assert_eq!(message.content, "compare this @/tmp/reference.png");
         assert_eq!(message.visible_content(), "compare this");
         assert_eq!(message.attachments, vec![attachment]);
+    }
+
+    #[test]
+    fn take_message_removes_only_the_named_message() {
+        let mut session = AgentSession::new(Uuid::new_v4(), ProviderKind::Codex);
+        let first = session.push_message(MessageRole::User, "first");
+        session.push_message(MessageRole::Assistant, "answer");
+        let third = session.push_message(MessageRole::User, "third");
+
+        let taken = session.take_message(third).expect("the named message");
+        assert_eq!(taken.content, "third");
+        assert_eq!(session.messages.len(), 2);
+        assert_eq!(session.messages[0].id, first);
+        assert_eq!(
+            session.messages.iter().filter(|m| m.id == third).count(),
+            0,
+            "the taken message is gone, the others stay in order"
+        );
+        assert!(session.take_message(third).is_none(), "and it goes once");
     }
 
     #[test]

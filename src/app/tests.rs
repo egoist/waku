@@ -4,6 +4,8 @@ use super::composer::{
 };
 use super::runtime::{merge_remote_session_catalog, session_has_active_provider_turn};
 use super::settings::visible_settings_pages;
+use super::streaming::take_refused_steer;
+use super::{AcceptedSteer, ComposerSubmission};
 use super::{
     ESCAPE_STOP_CONFIRMATION_TIMEOUT, EscapeStopConfirmation, EscapeStopPress, EscapeStopTarget,
     NAVIGATION_RAIL_TICK_HEIGHT, NAVIGATION_RAIL_TURN_HEIGHT, PendingUserInput, SessionNavigation,
@@ -25,8 +27,9 @@ use super::{
 use crate::git_branch::BranchEntry;
 use crate::model::{
     ActivityItem, ActivityKind, AgentSession, Checkpoint, CheckpointFile, CheckpointStatus,
-    DriverEvent, Message, MessageRole, ProviderKind, ReasoningBlock, RuntimeEventCursor,
-    SessionStatus, TranscriptBlock, TurnStatus, UserInputOption, UserInputQuestion,
+    DriverEvent, Message, MessageAttachment, MessageRole, ProviderKind, ReasoningBlock,
+    RuntimeEventCursor, SessionStatus, TranscriptBlock, TurnStatus, UserInputOption,
+    UserInputQuestion,
 };
 
 #[test]
@@ -70,6 +73,7 @@ fn structured_user_input_preserves_question_order_and_custom_answer_precedence()
 use gpui::{ListAlignment, ListState, Pixels, px};
 use std::{
     collections::{HashSet, VecDeque},
+    path::PathBuf,
     time::{Duration, Instant},
 };
 use uuid::Uuid;
@@ -744,6 +748,148 @@ fn only_the_turn_opening_prompt_is_a_rewind_boundary() {
     );
     assert!(!message_opens_turn(&session.messages, 3));
     assert!(message_opens_turn(&session.messages, 4));
+}
+
+#[test]
+fn a_refusal_after_acceptance_takes_the_transcript_message_back_out() {
+    let mut session = AgentSession::new(Uuid::new_v4(), ProviderKind::Codex);
+    session.begin_turn("review the diff");
+    let accepted = session.push_user_message_with_presentation(
+        "also fix the typo",
+        Some("also fix the typo".to_owned()),
+        Vec::new(),
+    );
+    let mut accepted_steers = VecDeque::from([AcceptedSteer {
+        message_id: accepted,
+        prompt: "also fix the typo".to_owned(),
+    }]);
+    let mut pending = VecDeque::new();
+
+    let submission = take_refused_steer(
+        Some(&mut session),
+        &mut accepted_steers,
+        &mut pending,
+        "also fix the typo".to_owned(),
+    );
+
+    assert_eq!(
+        session.messages.len(),
+        1,
+        "the turn keeps only its own prompt: the refused steer's copy is gone"
+    );
+    assert_eq!(session.messages[0].content, "review the diff");
+    assert_eq!(submission.prompt, "also fix the typo");
+    assert_eq!(
+        submission.display_content.as_deref(),
+        Some("also fix the typo")
+    );
+    assert!(accepted_steers.is_empty());
+}
+
+#[test]
+fn a_refusal_keeps_attachment_presentations_and_earlier_identical_text() {
+    let mut session = AgentSession::new(Uuid::new_v4(), ProviderKind::Codex);
+    session.begin_turn("review the diff");
+    session.push_message(MessageRole::User, "look at screenshot.png");
+    let attachment = MessageAttachment {
+        path: PathBuf::from("/tmp/screenshot.png"),
+        mention: "/tmp/screenshot.png".to_owned(),
+        name: "screenshot.png".to_owned(),
+        is_dir: false,
+        is_image: true,
+        blob_reference: None,
+    };
+    let accepted = session.push_user_message_with_presentation(
+        "look at screenshot.png",
+        Some("look at this".to_owned()),
+        vec![attachment.clone()],
+    );
+    let mut accepted_steers = VecDeque::from([AcceptedSteer {
+        message_id: accepted,
+        prompt: "look at screenshot.png".to_owned(),
+    }]);
+    let mut pending = VecDeque::new();
+
+    let submission = take_refused_steer(
+        Some(&mut session),
+        &mut accepted_steers,
+        &mut pending,
+        "look at screenshot.png".to_owned(),
+    );
+
+    assert_eq!(
+        session.messages.len(),
+        2,
+        "only the accepted copy goes; the earlier message with the same text stays"
+    );
+    assert_eq!(session.messages[1].content, "look at screenshot.png");
+    assert_eq!(submission.attachments, vec![attachment]);
+    assert_eq!(submission.display_content.as_deref(), Some("look at this"));
+}
+
+#[test]
+fn a_refusal_still_queues_a_steer_that_was_never_accepted() {
+    let mut session = AgentSession::new(Uuid::new_v4(), ProviderKind::Codex);
+    session.begin_turn("review the diff");
+    let mut accepted_steers = VecDeque::new();
+    let mut pending = VecDeque::from([ComposerSubmission {
+        prompt: "and this".to_owned(),
+        display_content: Some("and this".to_owned()),
+        attachments: Vec::new(),
+    }]);
+
+    let submission = take_refused_steer(
+        Some(&mut session),
+        &mut accepted_steers,
+        &mut pending,
+        "and this".to_owned(),
+    );
+
+    assert_eq!(session.messages.len(), 1, "nothing is taken back out");
+    assert_eq!(submission.prompt, "and this");
+    assert!(pending.is_empty());
+}
+
+#[test]
+fn a_refusal_queues_the_text_when_a_rewind_already_took_the_message() {
+    let mut session = AgentSession::new(Uuid::new_v4(), ProviderKind::Codex);
+    session.begin_turn("review the diff");
+    let mut accepted_steers = VecDeque::from([AcceptedSteer {
+        message_id: Uuid::new_v4(),
+        prompt: "lost to a rewind".to_owned(),
+    }]);
+    let mut pending = VecDeque::new();
+
+    let submission = take_refused_steer(
+        Some(&mut session),
+        &mut accepted_steers,
+        &mut pending,
+        "lost to a rewind".to_owned(),
+    );
+
+    assert_eq!(submission.prompt, "lost to a rewind");
+    assert_eq!(submission.display_content, None);
+    assert_eq!(session.messages.len(), 1);
+    assert!(accepted_steers.is_empty());
+}
+
+#[test]
+fn a_refusal_without_a_session_still_drains_the_steer_bookkeeping() {
+    let mut accepted_steers = VecDeque::from([AcceptedSteer {
+        message_id: Uuid::new_v4(),
+        prompt: "detached".to_owned(),
+    }]);
+    let mut pending = VecDeque::new();
+
+    let submission = take_refused_steer(
+        None,
+        &mut accepted_steers,
+        &mut pending,
+        "detached".to_owned(),
+    );
+
+    assert_eq!(submission.prompt, "detached");
+    assert!(accepted_steers.is_empty(), "the entry must not linger");
 }
 
 #[test]
