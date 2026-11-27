@@ -189,19 +189,19 @@ export class WakuClient {
         handshakeSettled = true;
         clearTimeout(connectTimer);
         if (this.rejectConnect === failHandshake) this.rejectConnect = undefined;
+        // Abandon the socket: whatever it reports later must not touch this
+        // client, which may already be on its next attempt.
+        ++this.connectionGeneration;
         this.setConnectionState("disconnected");
         reject(error);
       };
       this.rejectConnect = failHandshake;
       connectTimer = setTimeout(() => {
         if (handshakeSettled) return;
-        // Abandon the socket: whatever it reports later must not touch this
-        // client, which may already be on its next attempt.
-        ++this.connectionGeneration;
-        if (this.socket === socket) this.socket = undefined;
         failHandshake(
           new WakuConnectionError("timeout", "timed out connecting to Waku daemon"),
         );
+        if (this.socket === socket) this.socket = undefined;
         socket.close(1000, "connect timeout");
       }, this.connectTimeoutMs);
 
@@ -226,6 +226,7 @@ export class WakuClient {
           failHandshake(
             new WakuConnectionError("handshake", "Waku daemon sent invalid JSON"),
           );
+          socket.close(1002, "invalid JSON");
           return;
         }
 
@@ -448,7 +449,14 @@ export class WakuClient {
       return;
     }
     if (message.type === "shuttingDown") {
-      this.socket?.close(1000, "daemon shutting down");
+      // The daemon is going away. Report it now instead of waiting for the
+      // socket's close event, which a lost connection may never deliver.
+      const socket = this.socket;
+      ++this.connectionGeneration;
+      this.markDisconnected(
+        new WakuConnectionError("closed", "Waku daemon disconnected"),
+      );
+      socket?.close(1000, "daemon shutting down");
     }
   }
 

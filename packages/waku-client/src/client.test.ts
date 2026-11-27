@@ -52,6 +52,10 @@ class FakeSocket implements WebSocketLike {
     this.emit("message", { data: JSON.stringify(message) });
   }
 
+  receiveRaw(data: string): void {
+    this.emit("message", { data });
+  }
+
   private emit(type: string, event?: unknown): void {
     for (const listener of this.listeners.get(type) ?? []) listener(event);
   }
@@ -374,6 +378,48 @@ describe("WakuClient connection failures", () => {
     sockets[1]!.receive({ type: "hello", protocolVersion: PROTOCOL_VERSION, daemonVersion: "test" });
     await again;
     expect(client.connected).toBe(true);
+  });
+
+  test("a failed handshake closes its socket and ignores its later frames", async () => {
+    const { client, sockets } = fixture();
+    const events: unknown[] = [];
+    client.subscribe("session", "runtime", (event) => events.push(event));
+    const connected = client.connect();
+    const socket = sockets[0]!;
+    socket.open();
+    socket.receiveRaw("not json");
+    await expect(connected).rejects.toThrow(WakuConnectionError);
+    expect(socket.readyState).toBe(3);
+    expect(client.connectionState).toBe("disconnected");
+
+    // A stray frame on the abandoned socket must not reach the client.
+    socket.receive({
+      type: "event",
+      sessionId: "session",
+      runtimeId: "runtime",
+      epoch: "e",
+      sequence: 1,
+    });
+    expect(events).toEqual([]);
+    expect(client.replayCursors()).toEqual([]);
+  });
+
+  test("a daemon that is shutting down disconnects the client at once", async () => {
+    const { client, sockets } = fixture();
+    const states: string[] = [];
+    client.subscribeConnectionState((state) => states.push(state));
+    const socket = await connect(client, sockets);
+    const pending = client.request(
+      { type: "getSettings" },
+      undefined,
+      undefined,
+      { timeoutMs: 50 },
+    );
+    socket.receive({ type: "shuttingDown" });
+    await expect(pending).rejects.toThrow(WakuConnectionError);
+    expect(client.connected).toBe(false);
+    expect(client.connectionState).toBe("disconnected");
+    expect(states.at(-1)).toBe("disconnected");
   });
 
   test("lets a request shorten its own timeout", async () => {
