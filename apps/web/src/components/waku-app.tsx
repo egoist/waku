@@ -29,9 +29,10 @@ import { Sidebar } from '@/components/sidebar'
 import { StartupScreen } from '@/components/startup-screen'
 import type { SettingsPageId } from '@/components/settings-view'
 import { Transcript } from '@/components/transcript'
-import { WakuIcon } from '@/components/waku-icon'
+import { PROVIDERS, WakuIcon } from '@/components/waku-icon'
 import {
   useComposerDrafts,
+  useDaemonSettings,
   useSession,
   useSessionTurnRefs,
   useTaskState,
@@ -65,7 +66,9 @@ import { useDaemon } from '@/lib/daemon-context'
 import { useI18n } from '@/lib/i18n'
 import {
   browserComposerPreferenceStorage,
+  newTaskProvider,
   readComposerPreferences,
+  writeComposerPreferences,
 } from '@/lib/composer-preferences'
 import {
   browserNavigationStorage,
@@ -111,6 +114,7 @@ export function WakuApp() {
     saveSession,
   } = useRuntime()
   const taskState = useTaskState()
+  const settings = useDaemonSettings()
   const loadedComposerDrafts = useComposerDrafts()
   const selected = useSession(search.session)
   const [displayed, setDisplayed] = useState<AgentSession | null>(null)
@@ -867,16 +871,35 @@ export function WakuApp() {
   }
 
   function createRememberedSession(projectId: string): AgentSession {
-    const preferences = readComposerPreferences(
-      browserComposerPreferenceStorage(),
-      config?.address ?? 'disconnected',
+    const storage = browserComposerPreferenceStorage()
+    const address = config?.address ?? 'disconnected'
+    const preferences = readComposerPreferences(storage, address)
+    // The desktop relocates new work off a provider the user switched off,
+    // clearing the remembered model with it; the client's default lives in
+    // this store, so it normalizes on read instead.
+    const provider = newTaskProvider(
+      preferences.lastProvider,
+      PROVIDERS.map(({ id }) => id).filter(
+        (kind) => !settings.data?.disabled_providers.includes(kind),
+      ),
     )
+    const relocated = provider !== preferences.lastProvider
+    if (relocated) {
+      writeComposerPreferences(storage, address, {
+        ...preferences,
+        lastProvider: provider,
+        lastModel: null,
+        lastReasoningEffort: null,
+        lastServiceTier: null,
+        lastContextWindow: null,
+      })
+    }
     return {
-      ...createSession(projectId, preferences.lastProvider, false),
-      model: preferences.lastModel,
-      reasoning_effort: preferences.lastReasoningEffort,
-      service_tier: preferences.lastServiceTier,
-      context_window: preferences.lastContextWindow,
+      ...createSession(projectId, provider, false),
+      model: relocated ? null : preferences.lastModel,
+      reasoning_effort: relocated ? null : preferences.lastReasoningEffort,
+      service_tier: relocated ? null : preferences.lastServiceTier,
+      context_window: relocated ? null : preferences.lastContextWindow,
     }
   }
 

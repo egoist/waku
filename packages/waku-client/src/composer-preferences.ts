@@ -122,6 +122,25 @@ export function rememberedModelTraits(
   return preferences.modelTraits[modelKey(provider, model)]
 }
 
+/**
+ * The provider a brand-new task should compose on. Switching a provider off
+ * moves the desktop's remembered default to a usable fallback, but the
+ * clients keep their own `lastProvider` in storage, so it must be normalized
+ * here instead of at toggle time. A provider that is still usable stays put;
+ * otherwise the shared default wins, then the first usable provider, then —
+ * when nothing is usable at all — the remembered one so the draft is never
+ * left providerless. When the answer differs from the remembered provider
+ * the caller discards the remembered model traits, as the desktop does.
+ */
+export function newTaskProvider(
+  remembered: ProviderKind,
+  usable: readonly ProviderKind[],
+): ProviderKind {
+  if (usable.includes(remembered)) return remembered
+  if (usable.includes(DEFAULT_PREFERENCES.lastProvider)) return DEFAULT_PREFERENCES.lastProvider
+  return usable[0] ?? remembered
+}
+
 // OpenCode 2 was its own `openCode2` provider while it was in beta. Its release
 // took over the `opencode` command, so preferences saved for it carry over.
 const RENAMED_PROVIDERS = new Map<string, ProviderKind>([['openCode2', 'openCode']])

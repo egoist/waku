@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 import {
+  newTaskProvider,
   readComposerPreferences,
   rememberedModelTraits,
   rememberComposerSession,
@@ -95,6 +96,31 @@ describe('composer preferences', () => {
       serviceTier: null,
       contextWindow: null,
     })
+  })
+})
+
+describe('newTaskProvider', () => {
+  const usable = ['amp', 'claude', 'codex', 'kimi'] as const
+
+  test('keeps a usable remembered provider', () => {
+    expect(newTaskProvider('kimi', [...usable])).toBe('kimi')
+  })
+
+  test('falls back to the shared default when the remembered provider is off', () => {
+    expect(newTaskProvider('fx', [...usable])).toBe('codex')
+    expect(newTaskProvider('kimi', ['amp', 'codex'])).toBe('codex')
+  })
+
+  test('falls back to codex when codex is the only other usable provider', () => {
+    expect(newTaskProvider('claude', ['amp', 'codex'])).toBe('codex')
+  })
+
+  test('falls back to the first usable provider when codex is off too', () => {
+    expect(newTaskProvider('claude', ['amp', 'kimi'])).toBe('amp')
+  })
+
+  test('keeps the remembered provider when nothing is usable', () => {
+    expect(newTaskProvider('claude', [])).toBe('claude')
   })
 })
 
