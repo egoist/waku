@@ -496,6 +496,9 @@ export function assistantResponseFooters(session: AgentSession) {
     const messageIndexes = rows.filter((index): index is number => index !== null)
     const footerIndex = messageIndexes.at(-1)
     if (footerIndex === undefined || session.messages[footerIndex]!.streaming) continue
+    // The desktop attaches its footer only to a turn with something to copy:
+    // a turn whose assistant text is whitespace only gets no footer at all.
+    if (!messageIndexes.some((index) => session.messages[index]!.content.trim())) continue
     const answerStart = turnAnswerStart(rows, (index) => (
       index !== null && Boolean(session.messages[index]?.content.trim())
     ))

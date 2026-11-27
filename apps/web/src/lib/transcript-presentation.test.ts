@@ -233,6 +233,15 @@ describe('desktop transcript language', () => {
     expect(assistantResponseFooters(session).size).toBe(0)
   })
 
+  test('does not publish a footer on a turn whose answer is only whitespace', () => {
+    const session = transcriptSession()
+    session.messages = [
+      message('user', 'Build it', 0),
+      message('assistant', '  \n\t', 1),
+    ]
+    expect(assistantResponseFooters(session).size).toBe(0)
+  })
+
   test('offers prior-message rewind only from a daemon checkpoint and resumable provider', () => {
     const session = transcriptSession()
     session.provider_cursor = { provider: 'codex', threadId: 'thread' }
