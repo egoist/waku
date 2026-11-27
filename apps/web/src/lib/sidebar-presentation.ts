@@ -102,6 +102,19 @@ export function sessionHasStarted(session: AgentSession): boolean {
   )
 }
 
+/**
+ * The desktop commits a rename unless the input equals the session's STORED
+ * title (sidebar.rs `commit_session_rename`), not the displayed one: when the
+ * row shows an auto title, confirming the prefilled text pins it as a
+ * user-owned title so a later provider-side refresh can no longer move it.
+ */
+export function shouldCommitRename(
+  session: Pick<AgentSession, 'title'>,
+  next: string,
+): boolean {
+  return Boolean(next) && next !== session.title
+}
+
 export function sessionTimeLabel(
   session: AgentSession,
   nowSeconds = Math.floor(Date.now() / 1_000),

@@ -8,6 +8,7 @@ import {
   nextSidebarUpdateDelay,
   sessionHasStarted,
   sessionTimeLabel,
+  shouldCommitRename,
   sidebarRows,
 } from './sidebar-presentation'
 
@@ -76,6 +77,16 @@ describe('desktop sidebar presentation', () => {
       'プロジェクトなし',
     )
     expect(groups[0]?.sessions[0]?.projectName).toBe('プロジェクトなし')
+  })
+
+  test('commits a rename that only restates the displayed auto title', () => {
+    // The stored title is still the default; the row shows the auto title.
+    const session = { title: 'New task', auto_title: 'Fix the login bug' } as never as AgentSession
+    expect(shouldCommitRename(session, 'Fix the login bug')).toBe(true)
+    // Confirming the stored title (or clearing the field) is a no-op, and an
+    // empty input never commits.
+    expect(shouldCommitRename(session, 'New task')).toBe(false)
+    expect(shouldCommitRename(session, '')).toBe(false)
   })
 })
 

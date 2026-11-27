@@ -13,6 +13,7 @@ import {
   groupSessions,
   nextSidebarUpdateDelay,
   sessionTimeLabel,
+  shouldCommitRename,
   sidebarRows,
   type DateGroup,
   type SessionItem,
@@ -308,7 +309,7 @@ function SessionRow({
     }
     const next = title.trim()
     setRenaming(false)
-    if (!next || next === currentTitle) {
+    if (!shouldCommitRename(item.session, next)) {
       setTitle(currentTitle)
       return
     }
