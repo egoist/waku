@@ -15,4 +15,6 @@ export * from "./generated";
 export * from "./event-reducer";
 export * from "./transcript-presentation";
 export * from "./composer-preferences";
+export * from "./model-search";
+export * from "./session-status";
 export * from "./provider-probe-cache";

@@ -1,5 +1,6 @@
 import { BottomSheetFlatList } from '@expo/ui/community/bottom-sheet';
 import type { ProviderKind, ProviderModel, RuntimeMode } from '@waku/client';
+import { modelMatchesSearch } from '@waku/client';
 import * as Haptics from 'expo-haptics';
 import { useEffect, useMemo, useState } from 'react';
 import {
@@ -66,7 +67,7 @@ export function ModelSheet({
   const models = probe.data?.models ?? [];
   const defaultModel = models.find((item) => item.is_default) ?? models[0];
   const items = useMemo(
-    () => filterModels(probe.data?.models, search),
+    () => filterModels(probe.data?.models, search, provider),
     [probe.data?.models, search],
   );
 
@@ -301,7 +302,7 @@ export function ModelPickerSheet({
   const preferredModelId = entry?.models.find((item) => item.is_default)?.id
     ?? entry?.models[0]?.id;
   const items = useMemo(
-    () => filterModels(entry?.models, search),
+    () => filterModels(entry?.models, search, browsing ?? undefined),
     [entry?.models, search],
   );
 
@@ -407,15 +408,15 @@ export function ModelPickerSheet({
   );
 }
 
-function filterModels(models: ProviderModel[] | undefined, search: string): ProviderModel[] {
+function filterModels(
+  models: ProviderModel[] | undefined,
+  search: string,
+  provider?: ProviderKind,
+): ProviderModel[] {
   if (!models) return [];
-  const query = search.trim().toLocaleLowerCase();
-  if (!query) return models;
-  return models.filter((item) => (
-    item.name.toLocaleLowerCase().includes(query) ||
-      item.id.toLocaleLowerCase().includes(query) ||
-      item.sub_provider?.toLocaleLowerCase().includes(query)
-  ));
+  if (!search.trim()) return models;
+  const providerName = provider ? providerLabel(provider) : '';
+  return models.filter((item) => modelMatchesSearch(item, providerName, search));
 }
 
 function ModelSearchField({

@@ -1,4 +1,5 @@
 import type { AgentSession, ProviderKind, ProviderModel, ProviderProbe } from '@waku/client'
+import { modelMatchesSearch, sessionStatusIsBusy } from '@waku/client'
 import { Popover } from '@base-ui/react/popover'
 import { useEffect, useRef, useState, type RefObject } from 'react'
 import { ProviderIcon, PROVIDERS, providerMeta, WakuIcon } from '@/components/waku-icon'
@@ -42,6 +43,9 @@ export function ModelPicker({
   const settings = useDaemonSettings()
   const probes = useProviderProbes(open)
   const lockedProvider = session.messages.length ? session.provider : null
+  // A failed session is not busy: the desktop lets the user pick another
+  // model to retry, and refuses only while a turn is running.
+  const busy = sessionStatusIsBusy(session.status)
   const currentModel = currentProbe?.models.find((model) => model.id === session.model)
     ?? currentProbe?.models.find((model) => model.is_default)
     ?? currentProbe?.models[0]
@@ -50,9 +54,11 @@ export function ModelPicker({
 
   useEffect(() => {
     if (!openSignal) return
-    setOpen(true)
+    // A running turn keeps its provider: the desktop refuses to open the
+    // picker while the session is busy.
+    if (!busy) setOpen(true)
     onOpenSignalHandled?.()
-  }, [onOpenSignalHandled, openSignal])
+  }, [busy, onOpenSignalHandled, openSignal])
 
   useEffect(() => {
     if (!open) return
@@ -72,13 +78,13 @@ export function ModelPicker({
     return !settings.data?.disabled_providers.includes(id) && probeMap[id]?.installed
   })
   const rows = (() => {
-    const normalized = query.trim().toLowerCase()
+    const normalized = query.trim()
     const providers = normalized ? usable : usable.filter(({ id }) => tab === 'favorites' || id === tab)
     return providers.flatMap(({ id }) => (probeMap[id]?.models ?? [])
       .filter((model) => {
         const key = `${id}:${model.id}`
         if (!normalized && tab === 'favorites' && !favorites.includes(key)) return false
-        return !normalized || `${model.name} ${model.id} ${model.sub_provider ?? ''} ${providerMeta(id).name}`.toLowerCase().includes(normalized)
+        return !normalized || modelMatchesSearch(model, providerMeta(id).name, normalized)
       })
       .map((model) => ({ provider: id, model })))
   })()
@@ -132,7 +138,7 @@ export function ModelPicker({
           'flex h-6 max-w-[224px] items-center gap-1.5 rounded-[6px] px-[7px] text-[11.5px] text-[var(--text-secondary)] outline-none hover:bg-accent focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-50',
           open && 'bg-accent text-foreground',
         )}
-        disabled={session.status !== 'idle'}
+        disabled={busy}
       >
         <ProviderIcon className="size-[10.5px]" provider={session.provider} />
         <span className="truncate">{selectedName}</span>
@@ -159,20 +165,16 @@ export function ModelPicker({
               <WakuIcon className="size-[17px]" name="star" />
             </ModelTab>
             <div className="my-[3px] h-px w-[34px] shrink-0 bg-border" />
-            {PROVIDERS.map((provider) => {
-              const enabled = usable.some((candidate) => candidate.id === provider.id)
-              return (
-                <ModelTab
-                  active={tab === provider.id && !query}
-                  disabled={!enabled}
-                  key={provider.id}
-                  label={provider.name}
-                  onClick={() => { setTab(provider.id); setQuery(''); setHighlight(null) }}
-                >
-                  <ProviderIcon className="size-[18px]" provider={provider.id} />
-                </ModelTab>
-              )
-            })}
+            {usable.map((provider) => (
+              <ModelTab
+                active={tab === provider.id && !query}
+                key={provider.id}
+                label={provider.name}
+                onClick={() => { setTab(provider.id); setQuery(''); setHighlight(null) }}
+              >
+                <ProviderIcon className="size-[18px]" provider={provider.id} />
+              </ModelTab>
+            ))}
           </div>
           <div className="flex min-w-0 flex-1 flex-col bg-card">
             <div className="h-[52px] shrink-0 px-3 pb-2 pt-2.5">

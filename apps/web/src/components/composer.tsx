@@ -790,6 +790,11 @@ export function Composer({
                   service_tier: remembered?.serviceTier
                     ?? model.default_service_tier
                     ?? null,
+                  // The window belongs to the model: a model that offers no
+                  // 1M window must not inherit the previous model's.
+                  context_window: remembered?.contextWindow
+                    ?? model.default_context_window
+                    ?? null,
                   agent_preset: provider === session.provider ? session.agent_preset : null,
                 })
               }}

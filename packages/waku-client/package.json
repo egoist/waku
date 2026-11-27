@@ -10,6 +10,8 @@
     "./composer-preferences": "./src/composer-preferences.ts",
     "./composer-autocomplete": "./src/composer-autocomplete.ts",
     "./fuzzy-search": "./src/fuzzy-search.ts",
+    "./model-search": "./src/model-search.ts",
+    "./session-status": "./src/session-status.ts",
     "./provider-probe-cache": "./src/provider-probe-cache.ts",
     "./protocol": "./src/generated/index.ts"
   },
