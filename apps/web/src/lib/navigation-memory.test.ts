@@ -81,6 +81,28 @@ describe('selected task removal', () => {
     })
   })
 
+  test('a same-second tie opens the later task in the list, like the desktop', () => {
+    const project = { ...createProject('/repos/waku'), id: 'waku' }
+    const removed = { ...createSession(project.id, 'codex', false), id: 'removed' }
+    const first = {
+      ...createSession(project.id, 'codex', false),
+      id: 'first',
+      updated_at: 20,
+    }
+    const second = {
+      ...createSession(project.id, 'claude', false),
+      id: 'second',
+      updated_at: 20,
+    }
+
+    expect(taskRemovalDestination(
+      [project],
+      [project],
+      [first, second],
+      removed,
+    )).toEqual({ kind: 'session', sessionId: 'second' })
+  })
+
   test('creates a fresh projectless workspace after deleting its last task', () => {
     const project = {
       ...createProject('/home/user/.waku/projects/old-task'),

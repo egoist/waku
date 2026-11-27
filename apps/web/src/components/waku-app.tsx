@@ -760,10 +760,17 @@ export function WakuApp() {
 
   async function removeSessionById(sessionId: string) {
     if (!client || !config) throw new Error(t('errors.daemon_disconnected'))
+    if (responseForks[sessionId] !== undefined) {
+      toast.error(t('session.response_fork_in_progress'))
+      return
+    }
     const stateKey = daemonKeys.taskState(config.address)
     const previousState = queryClient.getQueryData<TaskState>(stateKey)
     const removedIndex = previousState?.sessions.findIndex((session) => session.id === sessionId) ?? -1
     const removed = removedIndex >= 0 ? previousState?.sessions[removedIndex] : undefined
+    const removedProject = removed
+      ? previousState?.projects.find((project) => project.id === removed.project_id)
+      : undefined
     queryClient.setQueryData<TaskState>(stateKey, (currentState) => currentState && ({
       ...currentState,
       sessions: currentState.sessions.filter((session) => session.id !== sessionId),
@@ -771,6 +778,19 @@ export function WakuApp() {
     try {
       await closeSession(sessionId)
       const next = await removeSession(client, sessionId)
+      // The desktop deletes the removed task's checkpoint refs from the
+      // repository so its git objects are no longer pinned; fire-and-forget,
+      // like the desktop's background spawn.
+      if (removed && removedProject) {
+        void client.request({
+          type: 'workspace',
+          operation: {
+            type: 'deleteSessionRefs',
+            cwd: sessionCwd(removed, removedProject),
+            session_id: sessionId,
+          },
+        }).catch(() => {})
+      }
       queryClient.setQueryData(stateKey, next)
       queryClient.removeQueries({ queryKey: daemonKeys.session(config.address, sessionId) })
       removeStoredComposerDraft({ type: 'session', sessionId })

@@ -870,11 +870,30 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
       await client.request({ type: 'closeSession' }, sessionId, runtime.runtimeId).catch(() => {});
       removeRuntime(sessionId);
     }
+    const removed = queryClient.getQueryData<AgentSession>(
+      daemonKeys.session(profileId, sessionId),
+    );
+    const removedProject = queryClient.getQueryData<TaskState>(
+      daemonKeys.taskState(profileId),
+    )?.projects.find((project) => project.id === removed?.project_id);
     const timer = persistTimers.current.get(sessionId);
     if (timer) clearTimeout(timer);
     persistTimers.current.delete(sessionId);
     await persistTails.current.get(sessionId)?.catch(() => {});
     await removeDaemonSession(client, sessionId);
+    // The desktop deletes the removed task's checkpoint refs from the
+    // repository so its git objects are no longer pinned; fire-and-forget,
+    // like the desktop's background spawn.
+    if (removed && removedProject) {
+      void client.request({
+        type: 'workspace',
+        operation: {
+          type: 'deleteSessionRefs',
+          cwd: sessionCwd(removed, removedProject),
+          session_id: sessionId,
+        },
+      }).catch(() => {});
+    }
     queryClient.removeQueries({ queryKey: daemonKeys.session(profileId, sessionId) });
     queryClient.setQueryData<TaskState>(daemonKeys.taskState(profileId), (current) => (
       current

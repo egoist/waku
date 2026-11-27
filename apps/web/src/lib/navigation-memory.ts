@@ -39,7 +39,13 @@ export function taskRemovalDestination(
 ): TaskRemovalDestination {
   const nextSession = nextSessions
     .filter((session) => session.project_id === removed.project_id)
-    .sort((left, right) => right.updated_at - left.updated_at)[0]
+    .reduce<AgentSession | undefined>(
+      // Rust's max_by_key keeps the last of several equally-recent sessions,
+      // so a same-second tie opens the later one, as the desktop does.
+      (latest, session) =>
+        !latest || session.updated_at >= latest.updated_at ? session : latest,
+      undefined,
+    )
   if (nextSession) return { kind: 'session', sessionId: nextSession.id }
 
   const removedProject = previousProjects.find((project) => project.id === removed.project_id)
