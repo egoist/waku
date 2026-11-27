@@ -588,10 +588,18 @@ function activeTurn(session: AgentSession) {
 }
 
 function acceptsTurnOutput(session: AgentSession) {
-  return Boolean(
-    activeTurn(session)
-      && ['connecting', 'working', 'waiting', 'background'].includes(session.status),
-  )
+  const turn = activeTurn(session)
+  if (!turn || !['connecting', 'working', 'waiting', 'background'].includes(session.status)) {
+    return false
+  }
+  // Foreground output is stronger evidence of a started provider turn than a
+  // replayed lifecycle cursor: a client that attached mid-turn, or missed the
+  // `turnStarted` event, must not keep steering queued while output is visibly
+  // streaming. Mirror the desktop's `session_accepts_turn_output` and repair
+  // both pieces of transient state the missed event would otherwise strand.
+  turn.provider_turn_started = true
+  if (session.status === 'connecting') session.status = 'working'
+  return true
 }
 
 function isActivityKind(value: unknown): value is ActivityKind {

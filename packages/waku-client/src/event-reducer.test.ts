@@ -146,6 +146,51 @@ test('MCP tool identity survives partial updates and stays separate in expanded 
   ])
 })
 
+describe('a missed turnStarted', () => {
+  // A client that attached mid-turn, or dropped the lifecycle event, still
+  // receives the turn's output. Foreground output is the stronger evidence, so
+  // the reducer repairs the two pieces of state the missed event stranded —
+  // the desktop's `session_accepts_turn_output` does the same.
+  test('streamed text marks the turn provider-started and promotes connecting to working', () => {
+    const session = runningSession()
+    expect(session.status).toBe('connecting')
+    expect(session.turns.at(-1)?.provider_turn_started).toBe(false)
+
+    const replied = apply(session, 'textDelta', 'Working on it')
+
+    expect(replied.status).toBe('working')
+    expect(replied.turns.at(-1)?.provider_turn_started).toBe(true)
+    expect(replied.messages.at(-1)).toMatchObject({ role: 'assistant', content: 'Working on it' })
+  })
+
+  test('reasoning and activity output repair the same state', () => {
+    const reasoned = apply(runningSession(), 'reasoningDelta', 'thinking')
+    expect(reasoned.status).toBe('working')
+    expect(reasoned.turns.at(-1)?.provider_turn_started).toBe(true)
+
+    const active = apply(runningSession(), 'activity', {
+      id: 'tool-1',
+      kind: 'tool',
+      title: 'Run tests',
+      complete: false,
+    })
+    expect(active.status).toBe('working')
+    expect(active.turns.at(-1)?.provider_turn_started).toBe(true)
+  })
+
+  test('a working session keeps its status and an idle one repairs nothing', () => {
+    const working = apply({ ...runningSession(), status: 'working' }, 'textDelta', 'more')
+    expect(working.status).toBe('working')
+    expect(working.turns.at(-1)?.provider_turn_started).toBe(true)
+
+    const idle = idleSession()
+    const late = apply(idle, 'textDelta', 'arrived after the turn settled')
+    expect(late.status).toBe('idle')
+    expect(late.messages).toEqual(idle.messages)
+    expect(late.turns).toEqual(idle.turns)
+  })
+})
+
 function apply(session: AgentSession, kind: string, payload: unknown) {
   return reduceRuntimeEvent(session, event(kind, payload), clock).session
 }
