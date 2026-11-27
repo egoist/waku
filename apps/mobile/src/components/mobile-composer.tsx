@@ -369,8 +369,16 @@ export function MobileComposer({
       if (await localCommands.execute(prompt, commands)) return;
       const providerPrompt = composerProviderPrompt(session.provider, prompt, commands, submittedAttachments);
       onSubmitted?.();
-      if (canSteer) await runtime.steerPrompt(session, prompt, submittedAttachments, providerPrompt);
-      else await runtime.sendPrompt(session, prompt, submittedAttachments, providerPrompt);
+      if (canSteer) {
+        await runtime.steerPrompt(
+          session,
+          prompt,
+          submittedAttachments,
+          composerProviderPrompt(session.provider, prompt, commands, submittedAttachments, { steer: true }),
+        );
+      } else {
+        await runtime.sendPrompt(session, prompt, submittedAttachments, providerPrompt);
+      }
       draftSync.removeSubmittedDraft();
       setDraft('');
       setAttachments([]);

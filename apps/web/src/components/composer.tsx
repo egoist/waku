@@ -56,6 +56,7 @@ import {
   mergeComposerCommands,
   parseGoalSubmission,
   replaceComposerTrigger,
+  resolvedSkillSubmission,
   toggledFastServiceTier,
   type ComposerAutocompleteRow,
 } from '@/lib/composer-autocomplete'
@@ -357,12 +358,17 @@ export function Composer({
   function providerPromptOverride(
     submittedPrompt: string,
     submittedAttachments: MessageAttachment[],
+    options?: { steer?: boolean },
   ): string | undefined {
-    const expanded = expandedComposerSubmission(
-      session.provider,
-      submittedPrompt.trim(),
-      availableCommands,
-    )
+    // A steer joins a running turn and is delivered as typed: only the
+    // provider-native skill syntax is resolved there, as on the desktop.
+    const expanded = options?.steer
+      ? resolvedSkillSubmission(session.provider, submittedPrompt.trim(), availableCommands)
+      : expandedComposerSubmission(
+        session.provider,
+        submittedPrompt.trim(),
+        availableCommands,
+      )
     if (expanded === null) return undefined
     return [
       expanded,
@@ -499,7 +505,7 @@ export function Composer({
         session,
         submittedPrompt,
         submittedAttachments,
-        providerPromptOverride(submittedPrompt, submittedAttachments),
+        providerPromptOverride(submittedPrompt, submittedAttachments, { steer: true }),
       )
       onComposerDraftSubmitted?.()
       setPrompt('')

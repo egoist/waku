@@ -212,20 +212,41 @@ export function expandedComposerSubmission(
   prompt: string,
   commands: SlashCommand[],
 ): string | null {
+  const skill = resolvedSkillSubmission(provider, prompt, commands)
+  if (skill !== null) return skill
   if (!prompt.startsWith('/')) return null
   const invocation = prompt.slice(1)
   const whitespace = invocation.search(/\s/u)
   const name = whitespace < 0 ? invocation : invocation.slice(0, whitespace)
   const args = whitespace < 0 ? '' : invocation.slice(whitespace).trim()
-  const skill = commands.find((item) => item.name === name && item.scope === 'Skill')
-  if (skill) {
-    if (provider === 'codex' || provider === 'fx') return `$${invocation}`
-    if (provider === 'pi' || provider === 'ohMyPi') return `/skill:${invocation}`
-  }
   const command = commands.find((item) => item.name === name && item.template !== null)
   return command?.template === null || command?.template === undefined
     ? null
     : expandCommandTemplate(command.template, args)
+}
+
+/**
+ * Resolve only provider-native skill syntax, without expanding templates.
+ *
+ * A message steered into a running turn is delivered as typed: the template
+ * expansion belongs to a new turn, so the desktop resolves skills and nothing
+ * else on that path.
+ */
+export function resolvedSkillSubmission(
+  provider: ProviderKind,
+  prompt: string,
+  commands: SlashCommand[],
+): string | null {
+  if (provider !== 'codex' && provider !== 'fx' && provider !== 'pi' && provider !== 'ohMyPi') {
+    return null
+  }
+  if (!prompt.startsWith('/')) return null
+  const invocation = prompt.slice(1)
+  const whitespace = invocation.search(/\s/u)
+  const name = whitespace < 0 ? invocation : invocation.slice(0, whitespace)
+  const skill = commands.find((item) => item.name === name && item.scope === 'Skill')
+  if (!skill) return null
+  return provider === 'codex' || provider === 'fx' ? `$${invocation}` : `/skill:${invocation}`
 }
 
 function commandScopeRank(scope: SlashCommand['scope']): number {

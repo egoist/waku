@@ -10,6 +10,7 @@ import {
   mergeComposerCommands,
   parseGoalSubmission,
   replaceComposerTrigger,
+  resolvedSkillSubmission,
   toggledFastServiceTier,
 } from './composer-autocomplete'
 
@@ -122,6 +123,21 @@ describe('slash command templates', () => {
       .toBe('$deploy production')
     expect(expandedComposerSubmission('pi', '/deploy production', commands))
       .toBe('/skill:deploy production')
+  })
+
+  test('resolves only skill syntax for a message steered into a running turn', () => {
+    const commands = [
+      command('deploy', 'Skill', '', null),
+      command('review', 'Project', '', 'Review $ARGUMENTS'),
+    ]
+    // A steer is delivered as typed: the template expansion belongs to a new
+    // turn, so only the provider-native skill syntax is resolved.
+    expect(resolvedSkillSubmission('codex', '/deploy production', commands))
+      .toBe('$deploy production')
+    expect(resolvedSkillSubmission('pi', '/deploy production', commands))
+      .toBe('/skill:deploy production')
+    expect(resolvedSkillSubmission('claude', '/deploy production', commands)).toBeNull()
+    expect(resolvedSkillSubmission('codex', '/review src', commands)).toBeNull()
   })
 })
 

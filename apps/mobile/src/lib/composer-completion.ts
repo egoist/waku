@@ -2,6 +2,7 @@ import type { FileEntry, MessageAttachment, ProviderKind, SlashCommand } from '@
 import {
   composerAutocompleteRows,
   expandedComposerSubmission,
+  resolvedSkillSubmission,
   type ComposerAutocompleteRow,
   type ComposerTrigger,
 } from '@waku/client/composer-autocomplete';
@@ -118,8 +119,13 @@ export function composerProviderPrompt(
   prompt: string,
   commands: SlashCommand[],
   attachments: MessageAttachment[] = [],
+  options?: { steer?: boolean },
 ): string | undefined {
-  const expanded = expandedComposerSubmission(provider, prompt.trim(), commands);
+  // A steer joins a running turn and is delivered as typed: only the
+  // provider-native skill syntax is resolved there, as on the desktop.
+  const expanded = options?.steer
+    ? resolvedSkillSubmission(provider, prompt.trim(), commands)
+    : expandedComposerSubmission(provider, prompt.trim(), commands);
   if (expanded === null) return undefined;
   return [expanded, attachments.map((attachment) => `@${attachment.mention}`).join(' ')]
     .filter(Boolean).join(' ');
