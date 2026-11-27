@@ -56,7 +56,7 @@ export interface CommandPaletteActions {
 export function CommandPalette({
   open,
   taskState,
-  selectedSessionId,
+  selectedSession,
   sidebarVisible,
   rightPanelVisible,
   canChooseModel,
@@ -68,7 +68,8 @@ export function CommandPalette({
 }: {
   open: boolean
   taskState: TaskState
-  selectedSessionId?: string
+  /** The task the palette's identifier commands copy from. */
+  selectedSession?: AgentSession
   sidebarVisible: boolean
   rightPanelVisible: boolean
   canChooseModel: boolean
@@ -274,7 +275,7 @@ export function CommandPalette({
         taskState,
         query,
         matches: matchesQuery === query.trim() ? matches : [],
-        selectedSessionId,
+        selectedSession,
         sidebarVisible,
         rightPanelVisible,
         canChooseModel,
@@ -560,7 +561,7 @@ function buildItems({
   taskState,
   query,
   matches,
-  selectedSessionId,
+  selectedSession,
   sidebarVisible,
   rightPanelVisible,
   canChooseModel,
@@ -573,7 +574,7 @@ function buildItems({
   taskState: TaskState
   query: string
   matches: SessionMessageMatch[]
-  selectedSessionId?: string
+  selectedSession?: AgentSession
   sidebarVisible: boolean
   rightPanelVisible: boolean
   canChooseModel: boolean
@@ -595,16 +596,50 @@ function buildItems({
     command('open-project', commandSection, t('command_palette.open_project'), 'folder', shortcut('⌘O', 'Ctrl+O'), `open add folder project workspace repository repo ${t('command_palette.open_project')}`, actions.openProject),
   ]
   if (canChooseModel) commands.push(command('choose-model', commandSection, t('command_palette.choose_model'), 'bot', shortcut('⌘/', 'Ctrl+/'), `choose change select model provider agent ${t('command_palette.choose_model')}`, actions.chooseModel))
-  if (searching) {
-    commands.push(command('focus-composer', 'commands', t('menu.focus_composer'), 'pencil', shortcut('⌘L', 'Ctrl+L'), `focus composer prompt input message ${t('menu.focus_composer')}`, actions.focusComposer))
-    if (canToggleUsage) {
-      commands.push(command('toggle-usage', 'commands', t('menu.toggle_usage_panel'), 'gauge', shortcut('⌘U', 'Ctrl+U'), `toggle usage limits rate quota panel ${t('menu.toggle_usage_panel')}`, actions.toggleUsage))
+  // The desktop's empty-query palette lists the whole command set (only the
+  // section changes once a query filters it), so these never gate on typing.
+  commands.push(
+    command('focus-composer', commandSection, t('menu.focus_composer'), 'pencil', shortcut('⌘L', 'Ctrl+L'), `focus composer prompt input message ${t('menu.focus_composer')}`, actions.focusComposer),
+  )
+  // The desktop's identifier commands exist only while a task is selected.
+  if (selectedSession) {
+    commands.push(command(
+      'copy-task-id',
+      commandSection,
+      t('command_palette.copy_task_id'),
+      'copy',
+      undefined,
+      'copy task id uuid identifier session debug',
+      () => {
+        void navigator.clipboard.writeText(selectedSession.id)
+        toast.success(t('command_palette.task_id_copied'))
+      },
+    ))
+    const nativeId = selectedSession.provider_cursor
+      ? providerSessionNativeId(selectedSession.provider_cursor)
+      : null
+    if (nativeId?.trim()) {
+      commands.push(command(
+        'copy-agent-cli-thread-id',
+        commandSection,
+        t('command_palette.copy_agent_cli_thread_id'),
+        'copy',
+        undefined,
+        'copy agent cli thread id native session uuid identifier codex claude debug',
+        () => {
+          void navigator.clipboard.writeText(nativeId)
+          toast.success(t('command_palette.agent_cli_thread_id_copied'))
+        },
+      ))
     }
-    commands.push(
-      command('toggle-sidebar', 'commands', t(sidebarVisible ? 'command_palette.hide_sidebar' : 'command_palette.show_sidebar'), 'panelLeft', shortcut('⌘B', 'Ctrl+B'), 'toggle show hide left sidebar history tasks', actions.toggleSidebar),
-      command('toggle-right-panel', 'commands', t(rightPanelVisible ? 'command_palette.hide_right_panel' : 'command_palette.show_right_panel'), 'panelRight', shortcut('⇧⌘B', 'Ctrl+Shift+B'), 'toggle show hide right panel files review diff terminal', actions.toggleRightPanel),
-    )
   }
+  if (canToggleUsage) {
+    commands.push(command('toggle-usage', commandSection, t('menu.toggle_usage_panel'), 'gauge', shortcut('⌘U', 'Ctrl+U'), `toggle usage limits rate quota panel ${t('menu.toggle_usage_panel')}`, actions.toggleUsage))
+  }
+  commands.push(
+    command('toggle-sidebar', commandSection, t(sidebarVisible ? 'command_palette.hide_sidebar' : 'command_palette.show_sidebar'), 'panelLeft', shortcut('⌘B', 'Ctrl+B'), 'toggle show hide left sidebar history tasks', actions.toggleSidebar),
+    command('toggle-right-panel', commandSection, t(rightPanelVisible ? 'command_palette.hide_right_panel' : 'command_palette.show_right_panel'), 'panelRight', shortcut('⇧⌘B', 'Ctrl+Shift+B'), 'toggle show hide right panel files review diff terminal', actions.toggleRightPanel),
+  )
   for (const page of SETTINGS_PAGES) {
     commands.push(command(
       `settings-${page.id}`,
@@ -629,7 +664,7 @@ function buildItems({
         : t('sidebar.unknown_project')
       const match = matchBySession.get(session.id)
       const branch = session.workspace?.kind === 'worktree' ? session.workspace.branch : null
-      const detail = [projectName, branch ? `#${branch}` : null, session.id === selectedSessionId ? t('command_palette.current') : null].filter(Boolean).join(' · ')
+      const detail = [projectName, branch ? `#${branch}` : null, session.id === selectedSession?.id ? t('command_palette.current') : null].filter(Boolean).join(' · ')
       const keywords = `${displayTitle(session)} ${project?.name ?? ''} ${project?.path ?? ''} ${branch ?? ''} ${session.provider} ${session.model ?? ''} task session chat conversation`
       const metadataScore = fuzzyScore(query, keywords)
       const contentScore = match ? fuzzyScore(query, match.snippet) ?? 0 : null
@@ -655,12 +690,15 @@ function buildItems({
     .slice(0, 12)
     .map(({ recency: _, order: __, score: ___, ...item }) => item)
 
+  // The desktop ranks Commands/Suggested/Sessions/Providers before Tasks
+  // (command_palette.rs query_rank); keep the same order so a query that
+  // matches both lists reads the same way.
   const sectionRank: Record<PaletteSection, number> = {
-    tasks: 0,
+    commands: 0,
+    suggested: 0,
     sessions: 0,
     providers: 0,
-    commands: 1,
-    suggested: 1,
+    tasks: 1,
     settings: 2,
   }
   const matchingCommands = commands

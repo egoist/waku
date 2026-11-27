@@ -972,7 +972,7 @@ export function WakuApp() {
       initialView={paletteInitialView}
       open={paletteOpen}
       rightPanelVisible={rightPanelVisible}
-      selectedSessionId={search.session}
+      selectedSession={activeSession ?? undefined}
       sidebarVisible={sidebarVisible}
       taskState={taskState.data}
       onOpenChange={setPaletteOpen}
