@@ -262,14 +262,19 @@ export function WorkingStrip({ session }: { session: AgentSession }) {
     return () => clearInterval(timer);
   }, []);
   const elapsed = startedAt ? Math.max(0, now - startedAt) : 0;
+  // A parked turn is waiting on detached work, not working: like the desktop
+  // ("Waiting for background tasks") it shows the wait, not the flavour word
+  // or the elapsed counter.
   const word = session.status === 'waiting'
     ? 'Waiting for you'
-    : `${FLAVOUR_WORDS[(flavourSeed(session.id) + Math.floor(elapsed / 7)) % FLAVOUR_WORDS.length]}…`;
+    : session.status === 'background'
+      ? 'Waiting for background tasks'
+      : `${FLAVOUR_WORDS[(flavourSeed(session.id) + Math.floor(elapsed / 7)) % FLAVOUR_WORDS.length]}…`;
   return (
     <View accessibilityLiveRegion="polite" style={styles.workingStrip}>
       <ActivityIndicator color={theme.textTertiary} size="small" />
       <Text style={[styles.workingText, { color: theme.textTertiary }]}>{word}</Text>
-      {startedAt != null && session.status !== 'waiting' && (
+      {startedAt != null && session.status !== 'waiting' && session.status !== 'background' && (
         <Text style={[styles.workingElapsed, { color: theme.textGhost }]}>
           {formatElapsed(elapsed)}
         </Text>
