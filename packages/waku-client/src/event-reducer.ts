@@ -477,6 +477,46 @@ function pushActivity(session: AgentSession, activity: ActivityItem) {
   })
 }
 
+/**
+ * Settle a running turn the way the desktop's Stop does.
+ *
+ * The turn ends as interrupted and the session returns to idle, so the
+ * transcript reads "You stopped after …" instead of reading a turn the
+ * user cancelled as a failure. A turn that produced no answer says so
+ * instead of failing.
+ *
+ * Returns the settled session, or `null` when no turn was running.
+ */
+export function settleCancelledTurn(
+  current: AgentSession,
+  clock: ReducerClock = defaultClock,
+  stoppedMessage = 'Stopped',
+): AgentSession | null {
+  const session = clone(current)
+  finishStreamingMessages(session)
+  completeActivities(session)
+  const turn = activeTurn(session)
+  if (!turn) return null
+  const hasAssistant = session.messages.some(
+    (message) => message.turn_id === turn.id && message.role === 'assistant',
+  )
+  if (!hasAssistant) {
+    session.messages.push({
+      id: clock.randomUUID(),
+      turn_id: turn.id,
+      role: 'assistant',
+      content: stoppedMessage,
+      created_at: clock.nowSeconds(),
+      streaming: false,
+    })
+  }
+  turn.status = 'interrupted'
+  turn.completed_at = clock.nowSeconds()
+  session.last_reply_at = turn.completed_at
+  session.status = 'idle'
+  return session
+}
+
 function settleTurn(
   session: AgentSession,
   status: TurnStatus,

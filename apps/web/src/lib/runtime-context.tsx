@@ -43,6 +43,7 @@ import {
 } from './provider-probe-cache'
 import {
   reduceRuntimeEvent,
+  settleCancelledTurn,
   type PendingPermission,
   type PendingUserInput,
 } from './event-reducer'
@@ -1058,9 +1059,27 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
       if (!client) throw new Error(translate(localeRef.current, 'errors.daemon_disconnected'))
       const runtime = entries.current.get(sessionId)
       if (!runtime) throw new Error(translate(localeRef.current, 'errors.no_live_runtime'))
+      // The desktop settles the turn where the user stops it: the turn ends
+      // as interrupted and the session returns to idle, so the transcript
+      // reads "You stopped after …" instead of a failed turn.
+      if (config) {
+        const key = daemonKeys.session(config.address, sessionId)
+        const current = queryClient.getQueryData<AgentSession>(key)
+        const settled = current
+          ? settleCancelledTurn(
+            current,
+            undefined,
+            translate(localeRef.current, 'session.stopped'),
+          )
+          : null
+        if (settled) {
+          cacheSession(settled)
+          await persistOrdered(settled)
+        }
+      }
       await client.request({ type: 'cancel' }, sessionId, runtime.runtimeId)
     },
-    [client],
+    [cacheSession, client, config, persistOrdered, queryClient],
   )
 
   const closeSession = useCallback(

@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 
-import { reduceRuntimeEvent } from './event-reducer'
+import { reduceRuntimeEvent, settleCancelledTurn } from './event-reducer'
 import { activityDisclosureSections } from './transcript-presentation'
 import type { AgentSession, SequencedEvent } from './generated'
 
@@ -235,3 +235,44 @@ function runningSession(): AgentSession {
     ],
   }
 }
+
+describe('settleCancelledTurn', () => {
+  test('a stopped turn ends as interrupted and the session returns to idle', () => {
+    const settled = settleCancelledTurn(runningSession(), clock)
+    expect(settled).not.toBeNull()
+    expect(settled!.turns.at(-1)).toMatchObject({
+      id: 'turn',
+      status: 'interrupted',
+      completed_at: 200,
+    })
+    expect(settled!.status).toBe('idle')
+    // A turn that produced no answer says so instead of failing.
+    expect(settled!.messages.at(-1)).toMatchObject({
+      turn_id: 'turn',
+      role: 'assistant',
+      content: 'Stopped',
+    })
+  })
+
+  test('an answer the provider already sent is kept', () => {
+    const session = runningSession()
+    session.messages.push({
+      id: 'reply',
+      turn_id: 'turn',
+      role: 'assistant',
+      content: 'Working on it',
+      created_at: 150,
+      streaming: true,
+    })
+    const settled = settleCancelledTurn(session, clock)
+    expect(settled!.messages.map((message) => message.content)).toEqual([
+      'Go',
+      'Working on it',
+    ])
+    expect(settled!.messages.at(-1)!.streaming).toBe(false)
+  })
+
+  test('a session without a running turn is left alone', () => {
+    expect(settleCancelledTurn(idleSession(), clock)).toBeNull()
+  })
+})

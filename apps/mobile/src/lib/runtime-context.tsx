@@ -9,7 +9,7 @@ import type {
   SequencedEvent,
   UserInputAnswer,
 } from '@waku/client';
-import { reduceRuntimeEvent } from '@waku/client/event-reducer';
+import { reduceRuntimeEvent, settleCancelledTurn } from '@waku/client/event-reducer';
 import { writeProviderProbeCache } from '@waku/client/provider-probe-cache';
 import * as Crypto from 'expo-crypto';
 import {
@@ -765,8 +765,21 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
     if (!client) throw new Error('Waku daemon is disconnected');
     const runtime = entries.current.get(sessionId);
     if (!runtime) throw new Error('This task has no live agent runtime');
+    // The desktop settles the turn where the user stops it: the turn ends as
+    // interrupted and the session returns to idle, so the transcript reads
+    // "You stopped after …" instead of a failed turn.
+    const profileId = daemon.activeProfile?.id;
+    if (profileId) {
+      const key = daemonKeys.session(profileId, sessionId);
+      const current = queryClient.getQueryData<AgentSession>(key);
+      const settled = current ? settleCancelledTurn(current) : null;
+      if (settled) {
+        cacheSession(settled);
+        await persistOrdered(settled);
+      }
+    }
     await client.request({ type: 'cancel' }, sessionId, runtime.runtimeId);
-  }, [daemon.client]);
+  }, [cacheSession, daemon.activeProfile?.id, daemon.client, persistOrdered, queryClient]);
 
   const markWorking = useCallback((sessionId: string) => {
     const profileId = daemon.activeProfile?.id;
