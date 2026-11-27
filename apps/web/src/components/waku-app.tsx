@@ -161,7 +161,7 @@ export function WakuApp() {
   const [draftProject, setDraftProject] = useState<Project | null>(null)
   const hydratedSelected = selected.data?.id === search.session ? selected.data : null
   const current = newTaskMode ? null : hydratedSelected ?? displayed
-  useDocumentTitle(newTaskMode ? t('menu.new_task') : current ? displayTitle(current) : null)
+  useDocumentTitle(newTaskMode ? t('menu.new_task') : current ? displayTitle(current, t) : null)
   const currentProject = current
     ? taskState.data?.projects.find((project) => project.id === current.project_id)
     : undefined
@@ -1014,7 +1014,7 @@ export function WakuApp() {
           project={activeProject}
           session={activeSession}
           sidebarVisible={sidebarVisible}
-          title={newTaskMode ? t('menu.new_task') : current ? displayTitle(current) : 'Waku'}
+          title={newTaskMode ? t('menu.new_task') : current ? displayTitle(current, t) : 'Waku'}
         />
 
         {newTaskMode ? (

@@ -630,14 +630,14 @@ function buildItems({
       const match = matchBySession.get(session.id)
       const branch = session.workspace?.kind === 'worktree' ? session.workspace.branch : null
       const detail = [projectName, branch ? `#${branch}` : null, session.id === selectedSessionId ? t('command_palette.current') : null].filter(Boolean).join(' · ')
-      const keywords = `${displayTitle(session)} ${project?.name ?? ''} ${project?.path ?? ''} ${branch ?? ''} ${session.provider} ${session.model ?? ''} task session chat conversation`
+      const keywords = `${displayTitle(session, t)} ${project?.name ?? ''} ${project?.path ?? ''} ${branch ?? ''} ${session.provider} ${session.model ?? ''} task session chat conversation`
       const metadataScore = fuzzyScore(query, keywords)
       const contentScore = match ? fuzzyScore(query, match.snippet) ?? 0 : null
       const score = Math.max(metadataScore ?? -1, contentScore ?? -1)
       return score < 0 ? null : {
         id: `task-${session.id}`,
         section: 'tasks' as const,
-        label: displayTitle(session),
+        label: displayTitle(session, t),
         detail,
         content: match ? { source: t(match.source === 'user' ? 'command_palette.you' : 'command_palette.agent'), snippet: match.snippet } : undefined,
         provider: session.provider,

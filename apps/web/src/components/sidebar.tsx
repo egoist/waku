@@ -295,11 +295,11 @@ function SessionRow({
 }) {
   const [menuOpen, setMenuOpen] = useState(false)
   const [renaming, setRenaming] = useState(false)
-  const [title, setTitle] = useState(displayTitle(item.session))
+  const [title, setTitle] = useState(() => displayTitle(item.session, t))
   const skipRenameCommit = useRef(false)
   const rowButton = useRef<HTMLButtonElement>(null)
   const restoreMenuFocus = useRef(false)
-  const currentTitle = displayTitle(item.session)
+  const currentTitle = displayTitle(item.session, t)
 
   async function commitRename() {
     if (skipRenameCommit.current) {

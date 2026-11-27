@@ -748,9 +748,16 @@ export function beginTurn(
   }
 }
 
-export function displayTitle(session: AgentSession): string {
+/** The desktop's localized_session_title: a task still on its default title
+ * reads the translated `session.new_task`, so the sidebar and palette speak
+ * the UI language instead of a hardcoded English literal. Without a
+ * translator (or when the key is missing) the English default stands. */
+export function displayTitle(
+  session: AgentSession,
+  t?: (key: string, params?: Record<string, string | number>) => string,
+): string {
   if (session.title !== 'New task' && session.title.trim()) return session.title
-  return session.auto_title?.trim() || 'New Task'
+  return session.auto_title?.trim() || t?.('session.new_task') || 'New Task'
 }
 
 export function sessionCwd(session: AgentSession, project: Project): string {
