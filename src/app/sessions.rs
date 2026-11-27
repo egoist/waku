@@ -93,7 +93,34 @@ impl Waku {
         }
         self.activate_session(session_id, cx);
     }
+}
 
+/// What a hydration fetch should do when it meets the local entry.
+pub(super) enum HydrationMeet {
+    /// Swap the fetched snapshot in.
+    Replace,
+    /// A live runtime owns the entry: its attached snapshot and everything
+    /// it has streamed since are newer than the fetched row, and the attach
+    /// already carries the full history, so a wholesale replace would roll
+    /// the transcript back. Opening a busy task races exactly this way —
+    /// `apply_remote_task_state` attaches busy sessions while their
+    /// hydration is still in flight.
+    KeepLive,
+    /// The session vanished while the fetch was in flight.
+    Missing,
+}
+
+pub(super) fn hydration_meets_entry(has_runtime: bool, entry_exists: bool) -> HydrationMeet {
+    if !entry_exists {
+        HydrationMeet::Missing
+    } else if has_runtime {
+        HydrationMeet::KeepLive
+    } else {
+        HydrationMeet::Replace
+    }
+}
+
+impl Waku {
     /// Loads a session's transcript if startup only fetched its list columns.
     ///
     /// The SQLite query and daemon round trip both stay off the UI thread. The
@@ -125,16 +152,29 @@ impl Waku {
                 waku.session_hydrations.remove(&session_id);
                 match result {
                     Ok(session) => {
-                        let replaced = if let Some(existing) = waku
-                            .state
-                            .sessions
-                            .iter_mut()
-                            .find(|existing| existing.id == session_id)
-                        {
-                            *existing = session;
-                            true
-                        } else {
-                            false
+                        let replaced = match hydration_meets_entry(
+                            waku.runtimes.contains_key(&session_id),
+                            waku.state
+                                .sessions
+                                .iter()
+                                .any(|existing| existing.id == session_id),
+                        ) {
+                            HydrationMeet::KeepLive => true,
+                            HydrationMeet::Missing => false,
+                            HydrationMeet::Replace => {
+                                match waku
+                                    .state
+                                    .sessions
+                                    .iter_mut()
+                                    .find(|existing| existing.id == session_id)
+                                {
+                                    Some(existing) => {
+                                        *existing = session;
+                                        true
+                                    }
+                                    None => false,
+                                }
+                            }
                         };
                         let pending = waku
                             .pending_session_activation

@@ -2153,3 +2153,30 @@ fn the_rail_draws_only_installed_providers_the_settings_left_on() {
         ProviderKind::Claude
     ));
 }
+
+#[test]
+fn a_hydration_snapshot_never_replaces_a_live_runtime_entry() {
+    use super::sessions::{HydrationMeet, hydration_meets_entry};
+
+    // The ordinary case: no runtime, the entry exists, the snapshot swaps in.
+    assert!(matches!(
+        hydration_meets_entry(false, true),
+        HydrationMeet::Replace
+    ));
+    // The session vanished while the fetch was in flight.
+    assert!(matches!(
+        hydration_meets_entry(false, false),
+        HydrationMeet::Missing
+    ));
+    // Opening a busy task attaches a runtime while the hydration is still in
+    // flight; the attached snapshot and everything the runtime has streamed
+    // since are newer than the fetched row, so the entry is kept as-is.
+    assert!(matches!(
+        hydration_meets_entry(true, true),
+        HydrationMeet::KeepLive
+    ));
+    assert!(matches!(
+        hydration_meets_entry(true, false),
+        HydrationMeet::Missing
+    ));
+}
