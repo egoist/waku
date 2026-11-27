@@ -564,6 +564,8 @@ type TranscriptRenderItem =
       kind: 'working'
       key: 'working'
       startedAt: number
+      /** The turn is parked on detached work, not running. */
+      parked: boolean
     }
   | {
       kind: 'tail'
@@ -697,6 +699,7 @@ function buildTranscriptItems(
       kind: 'working',
       key: 'working',
         startedAt: running.started_at,
+        parked: session.status === 'background',
     })
     }
   }
@@ -798,7 +801,7 @@ function TranscriptItemView({
       />
     )
   } else if (item.kind === 'working') {
-    content = <WorkingIndicator startedAt={item.startedAt} t={t} />
+    content = <WorkingIndicator parked={item.parked} startedAt={item.startedAt} t={t} />
   } else {
     content = (
       <MessageRow
@@ -958,7 +961,15 @@ function TurnFold({
   )
 }
 
-function WorkingIndicator({ startedAt, t }: { startedAt: number; t: Translator }) {
+function WorkingIndicator({
+  startedAt,
+  parked,
+  t,
+}: {
+  startedAt: number
+  parked: boolean
+  t: Translator
+}) {
   const [now, setNow] = useState(() => Math.floor(Date.now() / 1_000))
   useEffect(() => {
     let timeout = 0
@@ -977,9 +988,11 @@ function WorkingIndicator({ startedAt, t }: { startedAt: number; t: Translator }
         <span className="size-1 animate-pulse rounded-full bg-current [animation-delay:240ms] motion-reduce:animate-none" />
       </span>
       <span className="font-medium">
-        {t('transcript.working_for', {
-          duration: formatWorkingElapsed(Math.max(0, now - startedAt), t),
-        })}
+        {parked
+          ? t('transcript.waiting_background')
+          : t('transcript.working_for', {
+            duration: formatWorkingElapsed(Math.max(0, now - startedAt), t),
+          })}
       </span>
     </div>
   )
