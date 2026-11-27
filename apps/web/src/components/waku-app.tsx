@@ -29,9 +29,10 @@ import { Sidebar } from '@/components/sidebar'
 import { StartupScreen } from '@/components/startup-screen'
 import type { SettingsPageId } from '@/components/settings-view'
 import { Transcript } from '@/components/transcript'
-import { WakuIcon } from '@/components/waku-icon'
+import { PROVIDERS, WakuIcon } from '@/components/waku-icon'
 import {
   useComposerDrafts,
+  useDaemonSettings,
   useSession,
   useSessionTurnRefs,
   useTaskState,
@@ -111,6 +112,7 @@ export function WakuApp() {
     saveSession,
   } = useRuntime()
   const taskState = useTaskState()
+  const settings = useDaemonSettings()
   const loadedComposerDrafts = useComposerDrafts()
   const selected = useSession(search.session)
   const [displayed, setDisplayed] = useState<AgentSession | null>(null)
@@ -968,7 +970,16 @@ export function WakuApp() {
       actions={paletteActions}
       canChooseModel={Boolean(activeSession && !['connecting', 'working', 'waiting', 'background'].includes(activeSession.status))}
       canToggleUsage={Boolean(activeSession)}
-      currentProvider={activeSession?.provider ?? 'codex'}
+      // The desktop's default_resume_provider: the selected task's provider,
+      // else the first provider the user has not switched off (the shared
+      // PROVIDERS order matches ProviderKind::ALL), else Codex.
+      currentProvider={
+        activeSession?.provider
+        ?? PROVIDERS.map(({ id }) => id).find(
+          (kind) => !settings.data?.disabled_providers.includes(kind),
+        )
+        ?? 'codex'
+      }
       initialView={paletteInitialView}
       open={paletteOpen}
       rightPanelVisible={rightPanelVisible}
