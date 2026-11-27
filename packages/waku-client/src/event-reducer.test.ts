@@ -146,6 +146,90 @@ test('MCP tool identity survives partial updates and stays separate in expanded 
   ])
 })
 
+describe('activity label updates', () => {
+  // A provider that reports a call's arguments once, then completes it with a
+  // bare update, sends a generic label where the specific one belongs. The
+  // desktop keeps the richer label unless the update carries its own
+  // arguments; a full update is authoritative, a bare completion is not.
+  const started = {
+    id: 'tool-1',
+    source_id: 'call-1',
+    kind: 'tool' as const,
+    title: 'Edit',
+    detail: null,
+    arguments: null,
+    display_target: 'src/main.rs',
+    display_description: 'Edit src/main.rs',
+    failed: false,
+    complete: false,
+  }
+
+  function activities(session: AgentSession) {
+    const block = session.transcript_blocks.at(-1)
+    if (!block || block.content.kind !== 'activities') throw new Error('Expected activities')
+    return block.content.data
+  }
+
+  test('a completion update without arguments keeps the richer label', () => {
+    const session = runningSession()
+    const started_ = apply(session, 'richActivity', started)
+    expect(activities(started_)[0]).toMatchObject({
+      display_target: 'src/main.rs',
+      display_description: 'Edit src/main.rs',
+    })
+
+    const completed = apply(started_, 'richActivity', {
+      ...started,
+      id: 'update-1',
+      arguments: null,
+      display_target: 'file',
+      display_description: null,
+      output: '1 file changed',
+      complete: true,
+    })
+
+    expect(activities(completed)[0]).toMatchObject({
+      display_target: 'src/main.rs',
+      display_description: 'Edit src/main.rs',
+      output: '1 file changed',
+      complete: true,
+    })
+  })
+
+  test('an update that carries its own arguments is authoritative', () => {
+    const session = runningSession()
+    const started_ = apply(session, 'richActivity', started)
+    const updated = apply(started_, 'richActivity', {
+      ...started,
+      id: 'update-2',
+      arguments: '{"path":"lib/app.ts"}',
+      display_target: 'lib/app.ts',
+      display_description: 'Edit lib/app.ts',
+    })
+
+    expect(activities(updated)[0]).toMatchObject({
+      display_target: 'lib/app.ts',
+      display_description: 'Edit lib/app.ts',
+      arguments: '{"path":"lib/app.ts"}',
+    })
+  })
+
+  test('a label the call never had is filled in', () => {
+    const session = runningSession()
+    const started_ = apply(session, 'richActivity', { ...started, display_target: null })
+    expect(activities(started_)[0]?.display_target).toBeNull()
+
+    const updated = apply(started_, 'richActivity', {
+      ...started,
+      id: 'update-3',
+      display_target: 'file',
+      complete: true,
+    })
+
+    expect(activities(updated)[0]).toMatchObject({ display_target: 'file', complete: true })
+  })
+})
+
 function apply(session: AgentSession, kind: string, payload: unknown) {
   return reduceRuntimeEvent(session, event(kind, payload), clock).session
 }

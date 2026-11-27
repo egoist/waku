@@ -441,6 +441,20 @@ function upsertActivity(
         : activity.title === incoming.title && !activity.complete,
     )
     if (!matching) continue
+    // A completion update for a call whose arguments were never reported
+    // carries a generic label where the richer one it started with belongs.
+    // The desktop keeps the richer label unless the update brings its own
+    // arguments — a full update is authoritative, a bare completion is not.
+    const hasArguments = incoming.arguments != null
+    const displayTarget =
+      incoming.display_target != null && (matching.display_target == null || hasArguments)
+        ? incoming.display_target
+        : matching.display_target
+    const displayDescription =
+      incoming.display_description != null &&
+      (matching.display_description == null || hasArguments)
+        ? incoming.display_description
+        : matching.display_description
     Object.assign(matching, {
       ...incoming,
       id: matching.id,
@@ -453,8 +467,8 @@ function upsertActivity(
       file_changes: incoming.file_changes?.length
         ? incoming.file_changes
         : matching.file_changes,
-      display_target: incoming.display_target ?? matching.display_target,
-      display_description: incoming.display_description ?? matching.display_description,
+      display_target: displayTarget,
+      display_description: displayDescription,
       reasoning: incoming.reasoning ?? matching.reasoning,
     })
     return
