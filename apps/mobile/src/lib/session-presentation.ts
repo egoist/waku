@@ -104,6 +104,22 @@ export function sessionHasStarted(session: AgentSession): boolean {
   );
 }
 
+/** One row per project and a single "No project" row: every projectless task
+ * creates its own workspace project, and the desktop's picker and the web's
+ * `selectableProjects` both collapse those repeats to one entry. */
+export function selectableProjects(projects: Project[]): Project[] {
+  const seen = new Set<string>();
+  let hasProjectless = false;
+  return projects.filter((project) => {
+    if (seen.has(project.id)) return false;
+    seen.add(project.id);
+    if (project.name !== 'No project') return true;
+    if (hasProjectless) return false;
+    hasProjectless = true;
+    return true;
+  });
+}
+
 export function sessionTimestamp(session: AgentSession): number {
   // Match desktop: a submitted/replied turn promotes the task, while metadata
   // edits such as rename leave it in its existing date group.

@@ -57,7 +57,7 @@ import {
   type ModelTraitSelection,
 } from '@/lib/model-traits';
 import { useRuntime } from '@/lib/runtime-context';
-import { providerLabel } from '@/lib/session-presentation';
+import { providerLabel, selectableProjects } from '@/lib/session-presentation';
 
 type SheetKind =
   | 'daemon'
@@ -95,6 +95,7 @@ export default function NewTaskScreen() {
   );
   const modelCatalog = useAllProviderModels(installedProviders);
   const projects = taskState.data?.projects ?? [];
+  const projectChoices = useMemo(() => selectableProjects(projects), [projects]);
   const selectedProject = projects.find((item) => item.id === projectId);
   const projectless = selectedProject?.name === 'No project';
   const branches = useQuery({
@@ -465,7 +466,7 @@ export default function NewTaskScreen() {
       />
 
       <Sheet onDismiss={() => setOpenSheet(null)} title="Project" visible={openSheet === 'project'}>
-        {projects.map((project) => (
+        {projectChoices.map((project) => (
           <SheetRow
             description={project.path}
             key={project.id}

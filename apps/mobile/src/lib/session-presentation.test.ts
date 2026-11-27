@@ -12,6 +12,7 @@ import {
   findActivityBlock,
   groupSessions,
   relativeSessionTime,
+  selectableProjects,
   sessionDateGroup,
   stabilizeTranscriptRows,
 } from './session-presentation';
@@ -277,6 +278,16 @@ describe('mobile session presentation', () => {
     expect(stable[2]).not.toBe(before[2]!);
     expect(stable[2]!.kind === 'md' && stable[2].source).toBe('Two more');
     expect(stabilizeTranscriptRows(stable, stabilizeTranscriptRows(stable, after))).toBe(stable);
+  });
+
+  test('collapses the projectless repeats to one row, like the desktop picker', () => {
+    const project = { id: 'p1', name: 'Waku', path: '/repos/waku', created_at: 1 };
+    const projectlessA = { id: 'p2', name: 'No project', path: '/home/.waku/projects/a', created_at: 2 };
+    const projectlessB = { id: 'p3', name: 'No project', path: '/home/.waku/projects/b', created_at: 3 };
+    expect(selectableProjects([project, projectlessA, projectlessB])).toEqual([
+      project,
+      projectlessA,
+    ]);
   });
 });
 
