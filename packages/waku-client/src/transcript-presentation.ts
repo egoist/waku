@@ -7,12 +7,38 @@ export type AssistantResponseFooter = {
 
 export type Translator = (key: string, params?: Record<string, string | number>) => string
 
+/** Keep in sync with ProviderKind::supports_conversation_rollback. */
+export function providerSupportsConversationRollback(provider: AgentSession['provider']): boolean {
+  return [
+    'amp', 'claude', 'codex', 'cursor', 'deepSeek', 'openCode', 'grok', 'ohMyPi', 'pi',
+  ].includes(provider)
+}
+
+/** Keep in sync with ProviderKind::supports_conversation_fork. */
+export function providerSupportsConversationFork(provider: AgentSession['provider']): boolean {
+  return [
+    'amp', 'claude', 'codex', 'cursor', 'deepSeek', 'openCode', 'grok', 'ohMyPi', 'pi',
+  ].includes(provider)
+}
+
 export function userMessageRewindTurnCount(
   session: AgentSession,
   message: AgentSession['messages'][number],
   availableRetainedTurnCounts: ReadonlySet<number>,
 ): number | null {
-  if (message.role !== 'user' || !['idle', 'failed'].includes(session.status)) return null
+  if (
+    message.role !== 'user'
+    || !['idle', 'failed'].includes(session.status)
+    || !providerSupportsConversationRollback(session.provider)
+  ) return null
+  const messageIndex = session.messages.findIndex((candidate) => candidate.id === message.id)
+  if (messageIndex < 0 || !message.turn_id) return null
+  // A steer shares its turn with the opening prompt, but the turn's
+  // checkpoint can only rewind that opening prompt. Mirror the desktop's
+  // message_opens_turn boundary before offering the affordance.
+  if (session.messages.slice(0, messageIndex).some((earlier) =>
+    earlier.turn_id === message.turn_id && earlier.role === 'user',
+  )) return null
   const turn = message.turn_id
     ? session.turns.find((candidate) => candidate.id === message.turn_id)
     : undefined

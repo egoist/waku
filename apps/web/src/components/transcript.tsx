@@ -45,6 +45,7 @@ import {
   turnAnswerStart,
   turnFoldLabel,
   userMessageRewindTurnCount,
+  responseForkTurnCount,
 } from '@/lib/transcript-presentation'
 import type { AssistantResponseFooter, Translator } from '@/lib/transcript-presentation'
 import {
@@ -702,23 +703,6 @@ function buildTranscriptItems(
   }
   items.push({ kind: 'tail', key: 'tail' })
   return items
-}
-
-function responseForkTurnCount(
-  session: AgentSession,
-  message: AgentSession['messages'][number],
-  footer: AssistantResponseFooter | null,
-  turn?: AgentSession['turns'][number],
-): number | null {
-  if (
-    !footer
-    || message.role !== 'assistant'
-    || !['idle', 'failed'].includes(session.status)
-    || !session.provider_cursor
-    || session.provider_cursor.provider !== session.provider
-    || !turn?.provider_turn_started
-  ) return null
-  return turn.turn_count
 }
 
 function TranscriptItemView({

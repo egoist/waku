@@ -18,6 +18,9 @@ import {
   turnAnswerStart,
   turnFoldLabel,
   userMessageRewindTurnCount,
+  providerSupportsConversationFork,
+  providerSupportsConversationRollback,
+  responseForkTurnCount,
   formatMessageTime,
   formatWorkingElapsed,
 } from './transcript-presentation'
@@ -247,6 +250,47 @@ describe('desktop transcript language', () => {
     session.provider_cursor = { provider: 'codex', threadId: 'thread' }
     session.status = 'working'
     expect(userMessageRewindTurnCount(session, firstMessage, new Set([0]))).toBeNull()
+  })
+
+  test('offers rewind only on the opening user message of a turn', () => {
+    const session = transcriptSession()
+    session.provider_cursor = { provider: 'codex', threadId: 'thread' }
+    const steer = message('user', 'Also change the title', 4)
+    session.messages.push(steer)
+
+    expect(userMessageRewindTurnCount(session, session.messages[0]!, new Set([0]))).toBe(1)
+    expect(userMessageRewindTurnCount(session, steer, new Set([0]))).toBeNull()
+  })
+
+  test('hides rewind and fork for providers without turn-aware rollback', () => {
+    const session = transcriptSession()
+    const firstMessage = session.messages[0]!
+    for (const provider of ['fx', 'kimi'] as const) {
+      session.provider = provider
+      session.provider_cursor = provider === 'fx'
+        ? { provider: 'fx', sessionId: 'fx-session' }
+        : { provider: 'kimi', sessionId: 'kimi-session' }
+      expect(providerSupportsConversationRollback(provider)).toBe(false)
+      expect(userMessageRewindTurnCount(session, firstMessage, new Set([0]))).toBeNull()
+      expect(providerSupportsConversationFork(provider)).toBe(false)
+      session.messages[1] = message('assistant', 'An answer', 1)
+      expect(responseForkTurnCount(
+        session,
+        session.messages[1]!,
+        { content: 'An answer', timestamp: 200 },
+        session.turns[0],
+      )).toBeNull()
+    }
+    expect(providerSupportsConversationRollback('codex')).toBe(true)
+    expect(providerSupportsConversationFork('codex')).toBe(true)
+    session.provider = 'codex'
+    session.provider_cursor = { provider: 'codex', threadId: 'thread' }
+    expect(responseForkTurnCount(
+      session,
+      session.messages[1]!,
+      { content: 'An answer', timestamp: 200 },
+      session.turns[0],
+    )).toBe(1)
   })
 })
 
