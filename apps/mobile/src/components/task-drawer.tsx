@@ -212,6 +212,16 @@ function TaskDrawerContent({
           onPress: () => {
             void runtime.deleteSession(session.id)
               .then(() => Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success))
+              .then(() => {
+                // The desktop selects the next task when the removed one was
+                // the open one; the drawer only needs to leave the deleted
+                // transcript instead of sitting on a task that no longer
+                // exists.
+                if (selectedSessionId === session.id) {
+                  onClose();
+                  router.dismissTo('/');
+                }
+              })
               .catch((cause) => {
                 Alert.alert(
                   'Couldn’t delete task',
