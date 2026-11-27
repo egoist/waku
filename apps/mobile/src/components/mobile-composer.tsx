@@ -1,3 +1,7 @@
+import {
+  catalogModel,
+  cursorSuffixServiceTier,
+} from '@waku/client/model-catalog';
 import type {
   AgentSession,
   MessageAttachment,
@@ -196,9 +200,13 @@ export function MobileComposer({
   const [traitsSheetOpen, setTraitsSheetOpen] = useState(false);
   const modelProbe = useProviderModels(session.provider);
   const models = modelProbe.data?.models ?? [];
+  const catalogMatch = session.model
+    ? catalogModel(session.provider, models, session.model)
+    : undefined;
   const activeModel = session.model
-    ? models.find((item) => item.id === session.model)
+    ? catalogMatch?.model
     : models.find((item) => item.is_default) ?? models[0];
+  const activeModelSuffix = catalogMatch?.suffix ?? '';
   const busy = sessionBusy(session);
   const liveRuntime = runtime.runtimes[session.id];
   const canSteer = busy && Boolean(liveRuntime?.supportsSteer) && session.status !== 'connecting';
@@ -247,7 +255,9 @@ export function MobileComposer({
   const localCommands = useComposerLocalCommands({
     provider: session.provider,
     model: activeModel,
-    serviceTier: session.service_tier,
+    serviceTier: session.service_tier
+      ?? cursorSuffixServiceTier(activeModelSuffix, activeModel?.service_tiers ?? [])
+      ?? null,
     runtimeMode: session.runtime_mode,
     goal: session.thread_goal,
     contextKey: session.id,
@@ -587,6 +597,7 @@ export function MobileComposer({
             serviceTier: session.service_tier ?? null,
             contextWindow: session.context_window ?? null,
           }}
+          suffix={activeModelSuffix}
           visible={traitsSheetOpen}
         />
       )}

@@ -95,6 +95,7 @@ export function SessionView({
   const modelLabel = modelDisplayName(
     models,
     session?.model ?? models?.find((item) => item.is_default)?.id ?? models?.[0]?.id ?? null,
+    session?.provider,
   );
   const modelIcon = session ? PROVIDER_MENU_ICONS[session.provider] : undefined;
   const [taskSurface, setTaskSurface] = useState<TaskSurface | null>(null);

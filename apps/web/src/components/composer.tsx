@@ -1,5 +1,10 @@
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { Popover } from '@base-ui/react/popover'
+import {
+  catalogModel,
+  cursorSuffixReasoningEffort,
+  cursorSuffixServiceTier,
+} from '@waku/client/model-catalog'
 import type {
   AgentSession,
   BranchSnapshot,
@@ -209,9 +214,13 @@ export function Composer({
   const permission = permissions[session.id]
   const userInput = userInputs[session.id]
   const runtime = runtimes[session.id]
-  const selectedModel = probe.data?.models.find((model) => model.id === session.model)
-    ?? probe.data?.models.find((model) => model.is_default)
-    ?? probe.data?.models[0]
+  const catalogMatch = session.model
+    ? catalogModel(session.provider, probe.data?.models ?? [], session.model)
+    : undefined
+  const selectedModel = session.model
+    ? catalogMatch?.model
+    : probe.data?.models.find((model) => model.is_default) ?? probe.data?.models[0]
+  const selectedModelSuffix = catalogMatch?.suffix ?? ''
   const hasDraft = Boolean(prompt.trim() || attachments.length)
   const canSteer = busy && session.status !== 'connecting' && runtime?.supportsSteer
   const workspace = session.workspace ?? { kind: 'local' as const }
@@ -393,7 +402,9 @@ export function Composer({
   function executeFastModeToggle(submittedPrompt: string): boolean {
     if (!isFastModeToggleSubmission(session.provider, submittedPrompt, availableCommands)) return false
     const nextTier = toggledFastServiceTier(
-      session.service_tier,
+      session.service_tier
+        ?? cursorSuffixServiceTier(selectedModelSuffix, selectedModel?.service_tiers ?? [])
+        ?? null,
       selectedModel?.service_tiers ?? [],
     )
     if (!nextTier) return false
@@ -799,6 +810,7 @@ export function Composer({
                 model={selectedModel}
                 returnFocus={composerInput}
                 session={session}
+                suffix={selectedModelSuffix}
                 onPatch={savePatch}
               />
             )}
@@ -1391,9 +1403,12 @@ function ModelTraitsControl({
   model,
   onPatch,
   returnFocus,
+  suffix,
 }: {
   session: AgentSession
   model: ProviderModel
+  /** Variant suffix a Cursor model id carries; empty for other providers. */
+  suffix: string
   onPatch: (patch: Partial<AgentSession>) => void
   returnFocus: RefObject<HTMLElement | null>
 }) {
@@ -1401,16 +1416,18 @@ function ModelTraitsControl({
   if (!model.reasoning_efforts.length && !model.service_tiers.length && !model.context_windows.length) {
     return null
   }
+  const suffixEffort = cursorSuffixReasoningEffort(suffix, model.reasoning_efforts)
+  const suffixTier = cursorSuffixServiceTier(suffix, model.service_tiers)
   const effort = session.reasoning_effort
     && model.reasoning_efforts.some((option) => option.id === session.reasoning_effort)
     ? session.reasoning_effort
-    : model.default_reasoning_effort ?? model.reasoning_efforts[0]?.id ?? null
+    : suffixEffort ?? model.default_reasoning_effort ?? model.reasoning_efforts[0]?.id ?? null
   const effortOption = model.reasoning_efforts.find((option) => option.id === effort)
   const effortLabel = effortOption && modelOptionLabel(effortOption.id, effortOption.label, t)
   const tier = session.service_tier
     && (session.service_tier === 'default' || model.service_tiers.some((option) => option.id === session.service_tier))
     ? session.service_tier
-    : model.default_service_tier ?? 'default'
+    : suffixTier ?? model.default_service_tier ?? 'default'
   const tierLabel = tier === 'default'
     ? t('models.standard')
     : modelOptionLabel(tier, model.service_tiers.find((option) => option.id === tier)?.label ?? tier, t)

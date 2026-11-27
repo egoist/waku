@@ -1,4 +1,8 @@
 import type { ProviderModel, ProviderModelOption } from '@waku/client';
+import {
+  cursorSuffixReasoningEffort,
+  cursorSuffixServiceTier,
+} from '@waku/client/model-catalog';
 
 export interface ModelTraitSelection {
   reasoningEffort: string | null;
@@ -20,14 +24,16 @@ export function modelHasConfigurableTraits(model: ProviderModel): boolean {
 export function resolveModelTraitSelection(
   model: ProviderModel,
   selection: ModelTraitSelection,
+  suffix = '',
 ): ModelTraitSelection {
+  const suffixEffort = cursorSuffixReasoningEffort(suffix, model.reasoning_efforts) ?? null;
   return {
     reasoningEffort: resolveOption(
       model.reasoning_efforts,
       selection.reasoningEffort,
-      model.default_reasoning_effort ?? null,
+      suffixEffort ?? model.default_reasoning_effort ?? null,
     ),
-    serviceTier: resolveServiceTier(model, selection.serviceTier),
+    serviceTier: resolveServiceTier(model, selection.serviceTier, suffix),
     contextWindow: resolveOption(
       model.context_windows,
       selection.contextWindow,
@@ -39,8 +45,9 @@ export function resolveModelTraitSelection(
 export function modelTraitSummary(
   model: ProviderModel,
   selection: ModelTraitSelection,
+  suffix = '',
 ): string {
-  const resolved = resolveModelTraitSelection(model, selection);
+  const resolved = resolveModelTraitSelection(model, selection, suffix);
   const labels = [
     optionLabel(model.reasoning_efforts, resolved.reasoningEffort),
     model.service_tiers.length
@@ -53,10 +60,15 @@ export function modelTraitSummary(
   return labels.join(' · ');
 }
 
-export function resolveServiceTier(model: ProviderModel, selected: string | null): string | null {
+export function resolveServiceTier(
+  model: ProviderModel,
+  selected: string | null,
+  suffix = '',
+): string | null {
   if (!model.service_tiers.length) return null;
   if (selected === 'default' || hasOption(model.service_tiers, selected)) return selected;
-  const fallback = model.default_service_tier ?? 'default';
+  const suffixTier = cursorSuffixServiceTier(suffix, model.service_tiers);
+  const fallback = suffixTier ?? model.default_service_tier ?? 'default';
   return fallback === 'default' || hasOption(model.service_tiers, fallback)
     ? fallback
     : 'default';

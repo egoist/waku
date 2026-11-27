@@ -61,4 +61,23 @@ describe('mobile model traits', () => {
       context_windows: [],
     })).toBe(false);
   });
+
+  test('falls back to a Cursor variant suffix before the model default', () => {
+    const unset = { reasoningEffort: null, serviceTier: null, contextWindow: null };
+    expect(resolveModelTraitSelection(model, unset, 'low-fast')).toEqual({
+      reasoningEffort: 'low',
+      serviceTier: 'fast',
+      contextWindow: '200k',
+    });
+    // An explicit user choice still overrides the suffix.
+    expect(resolveModelTraitSelection(model, {
+      reasoningEffort: 'high',
+      serviceTier: 'default',
+      contextWindow: null,
+    }, 'low-fast')).toEqual({
+      reasoningEffort: 'high',
+      serviceTier: 'default',
+      contextWindow: '200k',
+    });
+  });
 });

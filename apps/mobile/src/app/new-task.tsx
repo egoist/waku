@@ -1,6 +1,10 @@
 import { useQuery } from '@tanstack/react-query';
 import type { ProviderKind, RuntimeMode } from '@waku/client';
 import {
+  catalogModel,
+  cursorSuffixServiceTier,
+} from '@waku/client/model-catalog';
+import {
   rememberedModelTraits,
   rememberComposerSession,
   type ComposerPreferences,
@@ -329,13 +333,19 @@ export default function NewTaskScreen() {
   }
 
   const providerModels = modelCatalog.find((entry) => entry.id === provider)?.models ?? [];
+  const catalogMatch = provider && model
+    ? catalogModel(provider, providerModels, model)
+    : undefined;
   const activeModel = model
-    ? providerModels.find((item) => item.id === model)
+    ? catalogMatch?.model
     : providerModels.find((item) => item.is_default) ?? providerModels[0];
+  const activeModelSuffix = catalogMatch?.suffix ?? '';
   const localCommands = useComposerLocalCommands({
     provider,
     model: activeModel,
-    serviceTier,
+    serviceTier: serviceTier
+      ?? cursorSuffixServiceTier(activeModelSuffix, activeModel?.service_tiers ?? [])
+      ?? null,
     runtimeMode,
     contextKey: selectedProject?.id ?? 'new-task',
     onServiceTier: setServiceTier,
@@ -506,6 +516,7 @@ export default function NewTaskScreen() {
           onApply={applyModelTraits}
           onDismiss={() => setOpenSheet(null)}
           selection={{ reasoningEffort, serviceTier, contextWindow }}
+          suffix={activeModelSuffix}
           visible={openSheet === 'traits'}
         />
       )}

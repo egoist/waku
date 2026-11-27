@@ -1,5 +1,6 @@
 import { BottomSheetFlatList } from '@expo/ui/community/bottom-sheet';
 import type { ProviderKind, ProviderModel, RuntimeMode } from '@waku/client';
+import { catalogModel } from '@waku/client/model-catalog';
 import * as Haptics from 'expo-haptics';
 import { useEffect, useMemo, useState } from 'react';
 import {
@@ -40,8 +41,12 @@ export interface ModelSelection {
 export function modelDisplayName(
   models: ProviderModel[] | undefined,
   model: string | null,
+  provider?: ProviderKind,
 ): string {
   if (!model) return 'Default model';
+  if (provider) {
+    return catalogModel(provider, models ?? [], model)?.model.name ?? model;
+  }
   return models?.find((item) => item.id === model)?.name ?? model;
 }
 
@@ -65,6 +70,9 @@ export function ModelSheet({
   const [search, setSearch] = useState('');
   const models = probe.data?.models ?? [];
   const defaultModel = models.find((item) => item.is_default) ?? models[0];
+  const selectedModelId = model
+    ? (catalogModel(provider, models, model)?.model.id ?? model)
+    : defaultModel?.id;
   const items = useMemo(
     () => filterModels(probe.data?.models, search),
     [probe.data?.models, search],
@@ -109,7 +117,7 @@ export function ModelSheet({
               description={item.sub_provider ?? undefined}
               label={item.name}
               onPress={() => pickModel(item)}
-              selected={model === item.id || (!model && defaultModel?.id === item.id)}
+              selected={item.id === selectedModelId}
             />
           )}
           showsVerticalScrollIndicator={false}
@@ -135,16 +143,19 @@ export function ModelTraitsSheet({
   onDismiss,
   model,
   selection,
+  suffix = '',
   onApply,
 }: {
   visible: boolean;
   onDismiss: () => void;
   model: ProviderModel;
   selection: ModelTraitSelection;
+  /** Variant suffix a Cursor model id carries; empty for other providers. */
+  suffix?: string;
   onApply: (changes: Partial<ModelTraitSelection>) => void;
 }) {
   const theme = useTheme();
-  const resolved = resolveModelTraitSelection(model, selection);
+  const resolved = resolveModelTraitSelection(model, selection, suffix);
 
   function pick(changes: Partial<ModelTraitSelection>) {
     void Haptics.selectionAsync();
@@ -176,6 +187,7 @@ export function ModelTraitsSheet({
         model={model}
         onApply={(tier) => pick({ serviceTier: tier })}
         serviceTier={selection.serviceTier}
+        suffix={suffix}
       />
       {model.context_windows.length ? (
         <>
@@ -205,15 +217,17 @@ export function ModelTraitsSheet({
 function ServiceTierOptions({
   model,
   serviceTier,
+  suffix = '',
   onApply,
 }: {
   model: ProviderModel;
   serviceTier: string | null;
+  suffix?: string;
   onApply: (tier: string) => void;
 }) {
   const theme = useTheme();
   if (!model.service_tiers.length) return null;
-  const selected = resolveServiceTier(model, serviceTier);
+  const selected = resolveServiceTier(model, serviceTier, suffix);
 
   return (
     <>
@@ -386,7 +400,9 @@ export function ModelPickerSheet({
                     label={item.name}
                     onPress={() => pickModel(item)}
                     selected={provider === browsing &&
-                      (model === item.id || (!model && item.id === preferredModelId))}
+                      ((model && browsing
+                        ? (catalogModel(browsing, entry?.models ?? [], model)?.model.id ?? model)
+                        : preferredModelId) === item.id)}
                   />
                 )}
                 showsVerticalScrollIndicator={false}

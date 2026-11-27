@@ -9,6 +9,7 @@
     "./transcript-presentation": "./src/transcript-presentation.ts",
     "./composer-preferences": "./src/composer-preferences.ts",
     "./composer-autocomplete": "./src/composer-autocomplete.ts",
+    "./model-catalog": "./src/model-catalog.ts",
     "./fuzzy-search": "./src/fuzzy-search.ts",
     "./provider-probe-cache": "./src/provider-probe-cache.ts",
     "./protocol": "./src/generated/index.ts"

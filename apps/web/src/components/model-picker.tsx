@@ -1,3 +1,4 @@
+import { catalogModel } from '@waku/client/model-catalog'
 import type { AgentSession, ProviderKind, ProviderModel, ProviderProbe } from '@waku/client'
 import { Popover } from '@base-ui/react/popover'
 import { useEffect, useRef, useState, type RefObject } from 'react'
@@ -42,10 +43,10 @@ export function ModelPicker({
   const settings = useDaemonSettings()
   const probes = useProviderProbes(open)
   const lockedProvider = session.messages.length ? session.provider : null
-  const currentModel = currentProbe?.models.find((model) => model.id === session.model)
-    ?? currentProbe?.models.find((model) => model.is_default)
-    ?? currentProbe?.models[0]
-  const selectedModelId = session.model ?? currentModel?.id
+  const currentModel = session.model
+    ? catalogModel(session.provider, currentProbe?.models ?? [], session.model)?.model
+    : currentProbe?.models.find((model) => model.is_default) ?? currentProbe?.models[0]
+  const selectedModelId = currentModel?.id ?? session.model ?? undefined
   const selectedName = currentModel?.name ?? session.model ?? providerMeta(session.provider).shortName
 
   useEffect(() => {
