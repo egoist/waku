@@ -60,7 +60,11 @@ export function mergeComposerCommands(
   }
   return merged.sort((left, right) => {
     const byScope = commandScopeRank(left.scope) - commandScopeRank(right.scope)
-    return byScope || left.name.localeCompare(right.name)
+    if (byScope !== 0) return byScope
+    // The desktop compares names by code point rather than by locale
+    // collation, so `Review` sorts before `compact` and `git-commit` before
+    // `git_commit` on every client.
+    return left.name < right.name ? -1 : left.name > right.name ? 1 : 0
   })
 }
 

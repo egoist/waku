@@ -62,6 +62,21 @@ describe('composer autocomplete', () => {
     ])
   })
 
+  test('orders commands by code point, the way the desktop does', () => {
+    const merged = mergeComposerCommands([
+      command('git_commit', 'Project', '', null),
+      command('git-commit', 'Project', '', null),
+      command('Review', 'Project', '', null),
+      command('compact', 'Project', '', null),
+    ], [])
+    expect(merged.map((command) => command.name)).toEqual([
+      'Review',
+      'compact',
+      'git-commit',
+      'git_commit',
+    ])
+  })
+
   test('recognizes only the resolved Codex fast-mode command', () => {
     const builtin = command('fast', 'Builtin', 'Toggle fast mode', null)
     expect(isFastModeToggleSubmission('codex', '/fast ', [builtin])).toBe(true)
