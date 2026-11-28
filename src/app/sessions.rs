@@ -93,7 +93,17 @@ impl Waku {
         }
         self.activate_session(session_id, cx);
     }
+}
 
+/// What `remove_session_entry` took apart, so the caller can decide where
+/// the reader lands next without re-reading the removed task.
+pub(super) struct RemovedSession {
+    pub(super) was_selected: bool,
+    pub(super) project_id: Uuid,
+    pub(super) projectless: bool,
+}
+
+impl Waku {
     /// Loads a session's transcript if startup only fetched its list columns.
     ///
     /// The SQLite query and daemon round trip both stay off the UI thread. The
@@ -300,14 +310,111 @@ impl Waku {
             cx.notify();
             return;
         }
-        let Some(index) = self
+        let Some(removed) = self.remove_session_entry(session_id, cx) else {
+            return;
+        };
+        self.invalidate_checkpoint_refs();
+        // Only now is the row gone, so the sweep can see which blobs are
+        // genuinely unreferenced. It reads the database and walks the blob
+        // directory, so it stays off the UI thread.
+        let sweep = self.store.blob_sweep();
+        cx.background_executor()
+            .spawn(async move { sweep() })
+            .detach();
+        if removed.was_selected {
+            self.reselect_after_removal(removed.project_id, removed.projectless, cx);
+        } else {
+            self.save();
+            cx.notify();
+        }
+    }
+
+    /// Remove several tasks in one action. Each task goes through the same
+    /// teardown a single removal runs; the selection fallback, the checkpoint
+    /// invalidation and the blob sweep happen once at the end.
+    pub(super) fn remove_sessions(&mut self, session_ids: Vec<Uuid>, cx: &mut Context<Self>) {
+        let mut removed_selected: Option<RemovedSession> = None;
+        let mut removed_any = false;
+        let mut blocked_by_fork = false;
+        for session_id in session_ids {
+            if self.response_fork_preparations.contains_key(&session_id) {
+                blocked_by_fork = true;
+                continue;
+            }
+            if let Some(removed) = self.remove_session_entry(session_id, cx) {
+                removed_any = true;
+                if removed.was_selected {
+                    removed_selected = Some(removed);
+                }
+            }
+        }
+        if blocked_by_fork {
+            self.show_toast(tr!("session.response_fork_in_progress"));
+        }
+        if !removed_any {
+            cx.notify();
+            return;
+        }
+        self.sidebar_selection
+            .retain(|id| self.state.sessions.iter().any(|session| session.id == *id));
+        if self
+            .sidebar_selection_anchor
+            .is_none_or(|anchor| !self.sidebar_selection.contains(&anchor))
+        {
+            self.sidebar_selection_anchor = None;
+        }
+        self.invalidate_checkpoint_refs();
+        let sweep = self.store.blob_sweep();
+        cx.background_executor()
+            .spawn(async move { sweep() })
+            .detach();
+        if let Some(removed) = removed_selected {
+            self.reselect_after_removal(removed.project_id, removed.projectless, cx);
+        } else {
+            self.save();
+            cx.notify();
+        }
+    }
+
+    /// Pick where the reader lands after the selected task is gone: the most
+    /// recently updated task of the same project, else a fresh task.
+    fn reselect_after_removal(
+        &mut self,
+        project_id: Uuid,
+        projectless: bool,
+        cx: &mut Context<Self>,
+    ) {
+        self.state.selected_session = None;
+        let next_session = self
             .state
             .sessions
             .iter()
-            .position(|session| session.id == session_id)
-        else {
-            return;
-        };
+            .filter(|session| session.project_id == project_id)
+            .max_by_key(|session| session.updated_at)
+            .map(|session| session.id);
+        if let Some(session_id) = next_session {
+            self.select_session(session_id, cx);
+        } else if projectless {
+            self.create_projectless_session(cx);
+        } else {
+            self.create_session_for(project_id, self.state.last_provider, cx);
+        }
+    }
+
+    /// The per-task teardown both removal paths share. The caller owns the
+    /// fork guard, the checkpoint invalidation, the blob sweep and whatever
+    /// reselection happens; this only takes the task and its per-task state
+    /// apart, and reports whether the reader was on it.
+    fn remove_session_entry(
+        &mut self,
+        session_id: Uuid,
+        cx: &mut Context<Self>,
+    ) -> Option<RemovedSession> {
+        let index = self
+            .state
+            .sessions
+            .iter()
+            .position(|session| session.id == session_id)?;
         let project_id = self.state.sessions[index].project_id;
         let composer_draft_key =
             crate::persistence::ComposerDraftKey::for_session(&self.state.sessions[index]);
@@ -341,6 +448,7 @@ impl Waku {
         }
         self.session_navigation.remove(session_id);
         self.task_switcher.remove(session_id);
+        self.sidebar_selection.retain(|id| *id != session_id);
         let project_still_used = self
             .state
             .sessions
@@ -369,36 +477,11 @@ impl Waku {
                 })
                 .detach();
         }
-        self.invalidate_checkpoint_refs();
-
-        if was_selected {
-            self.state.selected_session = None;
-            let next_session = self
-                .state
-                .sessions
-                .iter()
-                .filter(|session| session.project_id == project_id)
-                .max_by_key(|session| session.updated_at)
-                .map(|session| session.id);
-            if let Some(session_id) = next_session {
-                self.select_session(session_id, cx);
-            } else if projectless {
-                self.create_projectless_session(cx);
-            } else {
-                self.create_session_for(project_id, self.state.last_provider, cx);
-            }
-        } else {
-            self.save();
-            cx.notify();
-        }
-
-        // Only now is the row gone, so the sweep can see which blobs are
-        // genuinely unreferenced. It reads the database and walks the blob
-        // directory, so it stays off the UI thread.
-        let sweep = self.store.blob_sweep();
-        cx.background_executor()
-            .spawn(async move { sweep() })
-            .detach();
+        Some(RemovedSession {
+            was_selected,
+            project_id,
+            projectless,
+        })
     }
 
     pub(super) fn new_session_action(

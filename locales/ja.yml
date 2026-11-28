@@ -238,6 +238,7 @@ computer_use.permission_check_failed: コンピュータ操作の権限を確認
 common.settings: 設定
 common.copy: コピー
 common.remove: 削除
+common.remove_n_tasks: "%{count} 件のタスクを削除"
 common.rename: 名前を変更
 
 session.new_task: 新規タスク
