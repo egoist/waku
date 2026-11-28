@@ -228,6 +228,7 @@ computer_use.permission_check_failed: 无法检查电脑操作权限
 common.settings: 设置
 common.copy: 复制
 common.remove: 移除
+common.remove_n_tasks: 移除 %{count} 个任务
 common.rename: 重命名
 session.new_task: 新任务
 sidebar.today: 今天

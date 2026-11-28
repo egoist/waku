@@ -1335,6 +1335,12 @@ pub struct Waku {
     /// Groups the user has folded in either sidebar view. This is
     /// intentionally runtime-only, like transcript disclosure state.
     sidebar_collapsed_groups: HashSet<SidebarGroup>,
+    /// Tasks picked with a modifier click for one bulk action. Ordered so a
+    /// range select can extend the same set, and runtime-only: a selection
+    /// means nothing across launches.
+    sidebar_selection: Vec<Uuid>,
+    /// Where a shift-click range grows from, like a text selection's caret.
+    sidebar_selection_anchor: Option<Uuid>,
     /// Number of older sessions revealed inside each project section. This is
     /// runtime-only so every launch starts with the recent three-day view.
     sidebar_project_reveal_counts: HashMap<SidebarGroup, usize>,
@@ -2900,6 +2906,8 @@ impl Waku {
                 session_rename: None,
                 session_rename_input,
                 sidebar_collapsed_groups: HashSet::new(),
+                sidebar_selection: Vec::new(),
+                sidebar_selection_anchor: None,
                 sidebar_project_reveal_counts: HashMap::new(),
                 sidebar_group_header_focuses: RefCell::new(HashMap::new()),
                 sidebar_group_compose_focuses: RefCell::new(HashMap::new()),

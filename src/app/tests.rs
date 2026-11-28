@@ -2153,3 +2153,80 @@ fn the_rail_draws_only_installed_providers_the_settings_left_on() {
         ProviderKind::Claude
     ));
 }
+
+#[test]
+fn sidebar_selection_toggle_seeds_from_the_open_task() {
+    use super::sidebar::sidebar_toggle_selection;
+    use uuid::Uuid;
+
+    let open = Uuid::from_u128(1);
+    let other = Uuid::from_u128(2);
+    let mut selection = Vec::new();
+    let mut anchor = None;
+
+    // A fresh selection starts from the open task — the row already reads
+    // as selected, so the first modifier click picks it up alongside.
+    sidebar_toggle_selection(&mut selection, &mut anchor, other, Some(open));
+    assert_eq!(selection, vec![open, other]);
+    assert_eq!(anchor, Some(other));
+
+    // Toggling the clicked task again drops it and leaves the seed behind.
+    sidebar_toggle_selection(&mut selection, &mut anchor, other, Some(open));
+    assert_eq!(selection, vec![open]);
+    assert_eq!(anchor, None);
+
+    // When the clicked task is the open one the seed is skipped.
+    let mut selection = Vec::new();
+    let mut anchor = None;
+    sidebar_toggle_selection(&mut selection, &mut anchor, open, Some(open));
+    assert_eq!(selection, vec![open]);
+
+    // No open task: the click alone starts the selection.
+    let mut selection = Vec::new();
+    let mut anchor = None;
+    sidebar_toggle_selection(&mut selection, &mut anchor, other, None);
+    assert_eq!(selection, vec![other]);
+    assert_eq!(anchor, Some(other));
+}
+
+#[test]
+fn sidebar_selection_range_fills_between_anchor_and_click() {
+    use super::sidebar::sidebar_range_selection;
+    use uuid::Uuid;
+
+    let ordered: Vec<Uuid> = (1..=6).map(Uuid::from_u128).collect();
+    let mut selection = vec![ordered[1], ordered[3]];
+    let anchor = Some(ordered[1]);
+
+    // A shift-click past the anchor fills forward in drawn-row order.
+    sidebar_range_selection(&mut selection, anchor, &ordered, ordered[4]);
+    assert_eq!(
+        selection,
+        vec![ordered[1], ordered[3], ordered[2], ordered[4]]
+    );
+
+    // The anchor survives, so the next shift-click extends the same range
+    // instead of restarting from the last click.
+    sidebar_range_selection(&mut selection, Some(ordered[1]), &ordered, ordered[0]);
+    assert!(selection.contains(&ordered[0]));
+    assert!(selection.contains(&ordered[1]));
+    assert!(selection.contains(&ordered[2]));
+    assert!(selection.contains(&ordered[3]));
+    assert!(selection.contains(&ordered[4]));
+
+    // No anchor anywhere: a range click behaves like a plain toggle.
+    let mut selection = Vec::new();
+    sidebar_range_selection(&mut selection, None, &ordered, ordered[2]);
+    assert_eq!(selection, vec![ordered[2]]);
+
+    // The anchor fell out of the drawn rows (a filter or group change):
+    // the click just joins.
+    let mut selection = vec![Uuid::from_u128(99)];
+    sidebar_range_selection(
+        &mut selection,
+        Some(Uuid::from_u128(99)),
+        &ordered,
+        ordered[5],
+    );
+    assert!(selection.contains(&ordered[5]));
+}

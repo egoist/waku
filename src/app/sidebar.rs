@@ -1,5 +1,5 @@
 use chrono::{DateTime, Datelike, Days, Local, NaiveDate, Utc};
-use gpui::{KeyBinding, actions};
+use gpui::{ClickEvent, KeyBinding, actions};
 
 use super::*;
 
@@ -350,6 +350,63 @@ pub(super) enum SidebarRow {
 fn sidebar_session_row_index(rows: &[SidebarRow], session_id: Uuid) -> Option<usize> {
     rows.iter()
         .position(|row| *row == SidebarRow::Session(session_id))
+}
+
+/// Toggle one task in the sidebar's multi-selection. The open task reads as
+/// selected already, so a fresh selection starts from it — the first
+/// modifier click picks that task up alongside the clicked one.
+pub(super) fn sidebar_toggle_selection(
+    selection: &mut Vec<Uuid>,
+    anchor: &mut Option<Uuid>,
+    session_id: Uuid,
+    open_session: Option<Uuid>,
+) {
+    if let Some(index) = selection.iter().position(|id| *id == session_id) {
+        selection.remove(index);
+    } else {
+        if selection.is_empty()
+            && let Some(open) = open_session
+            && open != session_id
+        {
+            selection.push(open);
+        }
+        selection.push(session_id);
+    }
+    *anchor = selection.contains(&session_id).then_some(session_id);
+}
+
+/// Fill the selection between the anchor and the clicked task in the order
+/// the rows are drawn. The anchor stays put so repeated shift-clicks extend
+/// the same range rather than restarting it.
+pub(super) fn sidebar_range_selection(
+    selection: &mut Vec<Uuid>,
+    anchor: Option<Uuid>,
+    ordered: &[Uuid],
+    session_id: Uuid,
+) {
+    let Some(anchor) = anchor.or_else(|| selection.first().copied()) else {
+        if !selection.contains(&session_id) {
+            selection.push(session_id);
+        }
+        return;
+    };
+    let (Some(anchor_index), Some(target_index)) = (
+        ordered.iter().position(|id| *id == anchor),
+        ordered.iter().position(|id| *id == session_id),
+    ) else {
+        if !selection.contains(&session_id) {
+            selection.push(session_id);
+        }
+        return;
+    };
+    // The click can sit on either side of the anchor; fill the span between.
+    let start = anchor_index.min(target_index);
+    let end = anchor_index.max(target_index);
+    for id in &ordered[start..=end] {
+        if !selection.contains(id) {
+            selection.push(*id);
+        }
+    }
 }
 
 fn sidebar_row_height(row: SidebarRow) -> Pixels {
@@ -1881,6 +1938,15 @@ impl Waku {
         let menu = self.menu_handle(format!("session-{session_id}"), cx);
         let row_focus = menu.trigger_focus_handle().clone();
         let keyboard_menu = menu.clone();
+        // A context menu opened on a selected row acts on the whole picked
+        // set; one opened outside the selection acts on that row alone.
+        let picked: Vec<Uuid> =
+            if self.sidebar_selection.len() > 1 && self.sidebar_selection.contains(&session_id) {
+                self.sidebar_selection.clone()
+            } else {
+                vec![session_id]
+            };
+        let in_selection = picked.len() > 1;
         let row = div()
             .id(SharedString::from(format!("session-{}", session.id)))
             .w_full()
@@ -1896,6 +1962,9 @@ impl Waku {
             .when(selected, |element| {
                 element.bg(theme.sidebar_item_background)
             })
+            .when(in_selection, |element| {
+                element.bg(theme.sidebar_item_background)
+            })
             .hover(|element| element.bg(theme.sidebar_item_background))
             .active(|element| element.bg(theme.sidebar_item_background))
             .child(
@@ -1905,6 +1974,9 @@ impl Waku {
                     .gap(px(6.0))
                     .overflow_hidden()
                     .line_height(sp(18.0))
+                    .when(in_selection, |element| {
+                        element.child(icon("icons/check.svg", 12.0, theme.accent))
+                    })
                     .child(title)
                     .when(working, |element| {
                         element.child(motion::spin_slow(icon(
@@ -1979,15 +2051,66 @@ impl Waku {
                     .focus_visible(|style| style.border_1().border_color(theme.accent))
                     .on_key_down(cx.listener(move |this, event: &KeyDownEvent, window, cx| {
                         let key = event.keystroke.key.as_str();
-                        if matches!(key, "enter" | "space") {
+                        if matches!(key, "enter" | "space") && !event.keystroke.modifiers.shift {
                             this.select_session(session_id, cx);
                             cx.stop_propagation();
+                        } else if key == "space" && event.keystroke.modifiers.shift {
+                            let open = this.state.selected_session;
+                            sidebar_toggle_selection(
+                                &mut this.sidebar_selection,
+                                &mut this.sidebar_selection_anchor,
+                                session_id,
+                                open,
+                            );
+                            cx.stop_propagation();
+                            cx.notify();
+                        } else if key == "escape" && !this.sidebar_selection.is_empty() {
+                            this.sidebar_selection.clear();
+                            this.sidebar_selection_anchor = None;
+                            cx.stop_propagation();
+                            cx.notify();
                         } else if key == "f10" && event.keystroke.modifiers.shift {
                             keyboard_menu.open_context_menu(window, cx);
                             cx.stop_propagation();
                         }
                     }))
-                    .on_click(cx.listener(move |this, _, _, cx| {
+                    .on_click(cx.listener(move |this, event: &ClickEvent, _, cx| {
+                        let modifiers = event.modifiers();
+                        let mod_click = if cfg!(target_os = "macos") {
+                            modifiers.platform
+                        } else {
+                            modifiers.control
+                        };
+                        if mod_click {
+                            let open = this.state.selected_session;
+                            sidebar_toggle_selection(
+                                &mut this.sidebar_selection,
+                                &mut this.sidebar_selection_anchor,
+                                session_id,
+                                open,
+                            );
+                            cx.notify();
+                            return;
+                        }
+                        if modifiers.shift {
+                            let ordered: Vec<Uuid> = this
+                                .sidebar_rows_cached(Local::now().date_naive(), unix_time())
+                                .iter()
+                                .filter_map(|row| match row {
+                                    SidebarRow::Session(id) => Some(*id),
+                                    _ => None,
+                                })
+                                .collect();
+                            let anchor = this.sidebar_selection_anchor;
+                            sidebar_range_selection(
+                                &mut this.sidebar_selection,
+                                anchor,
+                                &ordered,
+                                session_id,
+                            );
+                            cx.notify();
+                            return;
+                        }
                         this.select_session(session_id, cx);
                     }))
             });
@@ -2009,18 +2132,31 @@ impl Waku {
                 move |_| {
                     let rename_waku = waku.clone();
                     let remove_waku = waku.clone();
-                    vec![
-                        MenuItem::new(tr!("common.rename"), move |window, cx| {
+                    let mut items = Vec::new();
+                    if picked.len() == 1 {
+                        items.push(MenuItem::new(tr!("common.rename"), move |window, cx| {
                             let _ = rename_waku.update(cx, |waku, cx| {
                                 waku.begin_session_rename(session_id, window, cx);
                             });
-                        }),
-                        MenuItem::Separator,
-                        MenuItem::new(tr!("common.remove"), move |_, cx| {
+                        }));
+                        items.push(MenuItem::Separator);
+                        items.push(MenuItem::new(tr!("common.remove"), move |_, cx| {
                             let _ = remove_waku
                                 .update(cx, |waku, cx| waku.remove_session(session_id, cx));
-                        }),
-                    ]
+                        }));
+                    } else {
+                        items.push(MenuItem::Separator);
+                        let remove_ids = picked.clone();
+                        items.push(MenuItem::new(
+                            tr!("common.remove_n_tasks", count = picked.len()),
+                            move |_, cx| {
+                                let ids = remove_ids.clone();
+                                let _ = remove_waku
+                                    .update(cx, |waku, cx| waku.remove_sessions(ids, cx));
+                            },
+                        ));
+                    }
+                    items
                 },
             )
         };
