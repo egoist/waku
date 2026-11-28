@@ -811,6 +811,22 @@ export function WakuApp() {
     }
   }
 
+  // Bulk removal for the sidebar's multi-selection: the full per-task
+  // teardown runs for each id, and the caller learns which ones actually
+  // left so a refused task can stay picked. Failures were toasted per task.
+  async function removeSessionsByIds(sessionIds: string[]): Promise<string[]> {
+    const removed: string[] = []
+    for (const sessionId of sessionIds) {
+      try {
+        await removeSessionById(sessionId)
+        removed.push(sessionId)
+      } catch {
+        // removeSessionById already restored the row and toasted the failure.
+      }
+    }
+    return removed
+  }
+
   function chooseProject(project: Project) {
     if (draftProject && draftProject.id !== project.id) {
       moveStoredComposerDraft(
@@ -988,6 +1004,7 @@ export function WakuApp() {
           onMobileOpenChange={setMobileSidebar}
           onNewTask={() => startNewTask()}
           onRemoveSession={removeSessionById}
+          onRemoveSessions={removeSessionsByIds}
           onRenameSession={renameSession}
           onSearch={() => openCommandPalette('commands')}
           onSelectSession={selectSession}

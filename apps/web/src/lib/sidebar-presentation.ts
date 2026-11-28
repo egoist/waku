@@ -63,6 +63,45 @@ export function sidebarRows(
   return rows
 }
 
+export function sidebarSelectionToggle(
+  selection: readonly string[],
+  sessionId: string,
+  openSessionId?: string,
+): { selection: string[]; anchor: string | null } {
+  if (selection.includes(sessionId)) {
+    return { selection: selection.filter((id) => id !== sessionId), anchor: null }
+  }
+  const next = [...selection]
+  if (next.length === 0 && openSessionId && openSessionId !== sessionId) {
+    next.push(openSessionId)
+  }
+  next.push(sessionId)
+  return { selection: next, anchor: sessionId }
+}
+
+export function sidebarSelectionRange(
+  selection: readonly string[],
+  anchor: string | null | undefined,
+  ordered: readonly string[],
+  sessionId: string,
+): string[] {
+  const resolvedAnchor = anchor ?? selection[0]
+  if (!resolvedAnchor || !ordered.includes(resolvedAnchor) || !ordered.includes(sessionId)) {
+    return joinedSelection(selection, sessionId)
+  }
+  const anchorIndex = ordered.indexOf(resolvedAnchor)
+  const targetIndex = ordered.indexOf(sessionId)
+  const next = [...selection]
+  for (const id of ordered.slice(Math.min(anchorIndex, targetIndex), Math.max(anchorIndex, targetIndex) + 1)) {
+    if (!next.includes(id)) next.push(id)
+  }
+  return next
+}
+
+function joinedSelection(selection: readonly string[], sessionId: string): string[] {
+  return selection.includes(sessionId) ? [...selection] : [...selection, sessionId]
+}
+
 export function groupSessions(
   projects: Project[],
   sessions: AgentSession[],

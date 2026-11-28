@@ -466,6 +466,8 @@ common.copy:
   en: Copy
 common.remove:
   en: Remove
+common.remove_n_tasks:
+  en: Remove %{count} tasks
 common.rename:
   en: Rename
 
