@@ -9,6 +9,8 @@ import {
   sessionHasStarted,
   sessionTimeLabel,
   sidebarRows,
+  sidebarSelectionRange,
+  sidebarSelectionToggle,
 } from './sidebar-presentation'
 
 describe('desktop sidebar presentation', () => {
@@ -76,6 +78,48 @@ describe('desktop sidebar presentation', () => {
       'プロジェクトなし',
     )
     expect(groups[0]?.sessions[0]?.projectName).toBe('プロジェクトなし')
+  })
+
+  test('toggle seeds a fresh selection from the open task', () => {
+    // A fresh selection starts from the open task — the row already reads
+    // as selected, so the first modifier click picks it up alongside.
+    let picked = sidebarSelectionToggle([], 'other', 'open')
+    expect(picked.selection).toEqual(['open', 'other'])
+    expect(picked.anchor).toBe('other')
+
+    // Toggling the clicked task again drops it and leaves the seed behind.
+    picked = sidebarSelectionToggle(picked.selection, 'other', 'open')
+    expect(picked.selection).toEqual(['open'])
+    expect(picked.anchor).toBeNull()
+
+    // When the clicked task is the open one the seed is skipped.
+    expect(sidebarSelectionToggle([], 'open', 'open').selection).toEqual(['open'])
+
+    // No open task: the click alone starts the selection.
+    picked = sidebarSelectionToggle([], 'other', undefined)
+    expect(picked.selection).toEqual(['other'])
+    expect(picked.anchor).toBe('other')
+  })
+
+  test('range fill follows drawn-row order from a surviving anchor', () => {
+    const ordered = ['a', 'b', 'c', 'd', 'e', 'f']
+    let selection = ['b', 'd']
+
+    // A shift-click past the anchor fills forward in drawn-row order.
+    selection = sidebarSelectionRange(selection, 'b', ordered, 'e')
+    expect(selection).toEqual(['b', 'd', 'c', 'e'])
+
+    // The anchor survives, so the next shift-click extends the same range
+    // instead of restarting from the last click.
+    selection = sidebarSelectionRange(selection, 'b', ordered, 'a')
+    expect(selection).toEqual(['b', 'd', 'c', 'e', 'a'])
+
+    // No anchor anywhere: a range click behaves like a plain toggle.
+    expect(sidebarSelectionRange([], null, ordered, 'c')).toEqual(['c'])
+
+    // The anchor fell out of the drawn rows (a filter or group change):
+    // the click just joins.
+    expect(sidebarSelectionRange(['gone'], 'gone', ordered, 'f')).toEqual(['gone', 'f'])
   })
 })
 

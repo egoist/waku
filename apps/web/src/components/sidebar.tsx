@@ -14,6 +14,8 @@ import {
   nextSidebarUpdateDelay,
   sessionTimeLabel,
   sidebarRows,
+  sidebarSelectionRange,
+  sidebarSelectionToggle,
   type DateGroup,
   type SessionItem,
 } from '@/lib/sidebar-presentation'
@@ -33,6 +35,7 @@ interface SidebarProps {
   onSelectSession: (sessionId: string) => void
   onRenameSession: (sessionId: string, title: string) => Promise<void>
   onRemoveSession: (sessionId: string) => Promise<void>
+  onRemoveSessions: (sessionIds: string[]) => Promise<string[]>
   onSearch: () => void
   onSettings: () => void
 }
@@ -61,6 +64,7 @@ export function Sidebar({
   onSelectSession,
   onRenameSession,
   onRemoveSession,
+  onRemoveSessions,
   onSearch,
   onSettings,
 }: SidebarProps) {
@@ -68,6 +72,11 @@ export function Sidebar({
   const [collapsed, setCollapsed] = useState<Set<DateGroup>>(new Set())
   const [liveWidth, setLiveWidth] = useState(width)
   const [nowSeconds, setNowSeconds] = useState(() => Math.floor(Date.now() / 1_000))
+  // Multi-selection of tasks in the sidebar (runtime-only, like the desktop's
+  // sidebar_selection): ⌘/Ctrl-click toggles membership, shift-click fills the
+  // range between the anchor and the click in drawn-row order, Escape clears.
+  const [selection, setSelection] = useState<string[]>([])
+  const selectionAnchor = useRef<string | null>(null)
   const groups = groupSessions(
     taskState.projects,
     taskState.sessions,
@@ -76,6 +85,31 @@ export function Sidebar({
     t('project.no_project_name'),
   )
   const rows = sidebarRows(groups, collapsed)
+
+  function toggleSelection(sessionId: string) {
+    const { selection: next, anchor } = sidebarSelectionToggle(selection, sessionId, selectedSessionId)
+    selectionAnchor.current = anchor
+    setSelection(next)
+  }
+
+  function rangeSelection(sessionId: string) {
+    const ordered = rows.flatMap((row) => row.kind === 'session' ? [row.item.session.id] : [])
+    setSelection(sidebarSelectionRange(selection, selectionAnchor.current, ordered, sessionId))
+  }
+
+  function clearSelection() {
+    if (selection.length === 0) return
+    selectionAnchor.current = null
+    setSelection([])
+  }
+
+  function removeSessions(sessionIds: string[]) {
+    return onRemoveSessions(sessionIds).then((removed) => {
+      // Tasks the daemon refused (or that failed) stay picked, mirroring the
+      // desktop's remove_sessions keeping the live ids in the selection.
+      setSelection((current) => current.filter((id) => !removed.includes(id)))
+    })
+  }
 
   useEffect(() => setLiveWidth(width), [width])
   useEffect(() => {
@@ -212,13 +246,19 @@ export function Sidebar({
                     item={row.item}
                     nowSeconds={nowSeconds}
                     selected={selectedSessionId === row.item.session.id}
+                    inSelection={selection.length > 1 && selection.includes(row.item.session.id)}
+                    pickedIds={selection.length > 1 && selection.includes(row.item.session.id) ? selection : null}
                     t={t}
                     onRemove={onRemoveSession}
+                    onRemoveSessions={removeSessions}
                     onRename={onRenameSession}
                     onSelect={(sessionId) => {
                       onSelectSession(sessionId)
                       onMobileOpenChange(false)
                     }}
+                    onToggleSelection={toggleSelection}
+                    onRangeSelection={rangeSelection}
+                    onClearSelection={clearSelection}
                   />
                 </div>
               )
@@ -280,17 +320,29 @@ function SessionRow({
   item,
   nowSeconds,
   selected,
+  inSelection,
+  pickedIds,
   onSelect,
   onRename,
   onRemove,
+  onRemoveSessions,
+  onToggleSelection,
+  onRangeSelection,
+  onClearSelection,
   t,
 }: {
   item: SessionItem
   nowSeconds: number
   selected: boolean
+  inSelection: boolean
+  pickedIds: string[] | null
   onSelect: (sessionId: string) => void
   onRename: (sessionId: string, title: string) => Promise<void>
   onRemove: (sessionId: string) => Promise<void>
+  onRemoveSessions: (sessionIds: string[]) => Promise<void>
+  onToggleSelection: (sessionId: string) => void
+  onRangeSelection: (sessionId: string) => void
+  onClearSelection: () => void
   t: Translator
 }) {
   const [menuOpen, setMenuOpen] = useState(false)
@@ -338,6 +390,7 @@ function SessionRow({
         className={cn(
           'group relative rounded-[7px] hover:bg-sidebar-accent',
           selected && 'bg-sidebar-accent',
+          inSelection && 'bg-sidebar-accent',
         )}
       >
         {renaming ? (
@@ -374,16 +427,36 @@ function SessionRow({
             className="flex h-[51px] w-full min-w-0 flex-col gap-1 rounded-[7px] px-2 py-[7px] text-left outline-none focus-visible:ring-1 focus-visible:ring-ring"
             ref={rowButton}
             type="button"
-            onClick={() => onSelect(item.session.id)}
+            onClick={(event) => {
+              if (event.metaKey || event.ctrlKey) {
+                event.preventDefault()
+                onToggleSelection(item.session.id)
+                return
+              }
+              if (event.shiftKey) {
+                event.preventDefault()
+                onRangeSelection(item.session.id)
+                return
+              }
+              onSelect(item.session.id)
+            }}
             onKeyDown={(event) => {
               if ((event.shiftKey && event.key === 'F10') || event.key === 'ContextMenu') {
                 event.preventDefault()
                 restoreMenuFocus.current = true
                 setMenuOpen(true)
+              } else if (event.shiftKey && event.key === ' ') {
+                event.preventDefault()
+                onToggleSelection(item.session.id)
+              } else if (event.key === 'Escape') {
+                onClearSelection()
               }
             }}
           >
             <span className="flex min-w-0 w-full items-center gap-1.5 leading-[18px]">
+              {inSelection && (
+                <WakuIcon className="size-3 shrink-0 text-primary" name="check" />
+              )}
               <span className="min-w-0 flex-1 truncate text-[13.5px] text-foreground">
                 {currentTitle}
               </span>
@@ -399,29 +472,49 @@ function SessionRow({
             className="waku-menu-surface"
             finalFocus={false}
           >
-            <ContextMenu.Item
-              className="waku-menu-item"
-              onClick={() => {
-                restoreMenuFocus.current = false
-                setMenuOpen(false)
-                skipRenameCommit.current = false
-                setTitle(currentTitle)
-                setRenaming(true)
-              }}
-            >
-              <WakuIcon className="size-3" name="pencil" /> {t('common.rename')}
-            </ContextMenu.Item>
-            <ContextMenu.Separator className="waku-menu-separator" />
-            <ContextMenu.Item
-              className="waku-menu-item text-destructive data-[highlighted]:bg-[var(--danger-soft)]"
-              onClick={() => {
-                restoreMenuFocus.current = false
-                setMenuOpen(false)
-                void onRemove(item.session.id).catch(() => {})
-              }}
-            >
-              <WakuIcon className="size-3" name="trash" /> {t('common.remove')}
-            </ContextMenu.Item>
+            {/* A context menu opened on a selected row acts on the whole picked
+                set; one opened outside the selection acts on that row alone. */}
+            {pickedIds ? (
+              <>
+                <ContextMenu.Separator className="waku-menu-separator" />
+                <ContextMenu.Item
+                  className="waku-menu-item text-destructive data-[highlighted]:bg-[var(--danger-soft)]"
+                  onClick={() => {
+                    restoreMenuFocus.current = false
+                    setMenuOpen(false)
+                    void onRemoveSessions(pickedIds).catch(() => {})
+                  }}
+                >
+                  <WakuIcon className="size-3" name="trash" /> {t('common.remove_n_tasks', { count: pickedIds.length })}
+                </ContextMenu.Item>
+              </>
+            ) : (
+              <>
+                <ContextMenu.Item
+                  className="waku-menu-item"
+                  onClick={() => {
+                    restoreMenuFocus.current = false
+                    setMenuOpen(false)
+                    skipRenameCommit.current = false
+                    setTitle(currentTitle)
+                    setRenaming(true)
+                  }}
+                >
+                  <WakuIcon className="size-3" name="pencil" /> {t('common.rename')}
+                </ContextMenu.Item>
+                <ContextMenu.Separator className="waku-menu-separator" />
+                <ContextMenu.Item
+                  className="waku-menu-item text-destructive data-[highlighted]:bg-[var(--danger-soft)]"
+                  onClick={() => {
+                    restoreMenuFocus.current = false
+                    setMenuOpen(false)
+                    void onRemove(item.session.id).catch(() => {})
+                  }}
+                >
+                  <WakuIcon className="size-3" name="trash" /> {t('common.remove')}
+                </ContextMenu.Item>
+              </>
+            )}
           </ContextMenu.Popup>
         </ContextMenu.Positioner>
       </ContextMenu.Portal>
